@@ -1,0 +1,13 @@
+[package]
+name = "grust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+memory = ["dep:grust-memory"]
+
+[dependencies]
+grust-core = { path = "../grust-core" }
+grust-memory = { path = "../grust-memory", optional = true }
