@@ -42,12 +42,12 @@ impl Default for SurrealConfig {
 #[derive(Clone, Debug)]
 pub struct SurrealHttpGraphStore {
     config: SurrealConfig,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl SurrealHttpGraphStore {
     pub fn connect(config: SurrealConfig) -> Result<Self> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .map_err(|err| {
@@ -56,7 +56,7 @@ impl SurrealHttpGraphStore {
         Ok(Self { config, client })
     }
 
-    fn post(&self, query: &str) -> Result<()> {
+    async fn post(&self, query: &str) -> Result<()> {
         let auth =
             general_purpose::STANDARD.encode(format!("{}:{}", self.config.user, self.config.pass));
         let response = self
@@ -69,16 +69,17 @@ impl SurrealHttpGraphStore {
             .header("Content-Type", "application/surrealql")
             .body(query.to_string())
             .send()
+            .await
             .map_err(|err| {
                 GrustError::Backend(format!(
                     "failed to POST SurrealQL to {}: {err}",
                     self.config.url
                 ))
             })?;
-        check_surreal_http_response(response, "SurrealDB query")
+        check_surreal_http_response(response, "SurrealDB query").await
     }
 
-    fn post_bootstrap(&self, query: &str) -> Result<()> {
+    async fn post_bootstrap(&self, query: &str) -> Result<()> {
         let auth =
             general_purpose::STANDARD.encode(format!("{}:{}", self.config.user, self.config.pass));
         let response = self
@@ -89,20 +90,45 @@ impl SurrealHttpGraphStore {
             .header("Content-Type", "application/surrealql")
             .body(query.to_string())
             .send()
+            .await
             .map_err(|err| {
                 GrustError::Backend(format!(
                     "failed to bootstrap SurrealDB at {}: {err}",
                     self.config.url
                 ))
             })?;
-        check_surreal_http_bootstrap_response(response)
+        check_surreal_http_bootstrap_response(response).await
+    }
+
+    async fn post_clear(&self, query: &str) -> Result<()> {
+        let auth =
+            general_purpose::STANDARD.encode(format!("{}:{}", self.config.user, self.config.pass));
+        let response = self
+            .client
+            .post(&self.config.url)
+            .header("Authorization", format!("Basic {auth}"))
+            .header("Surreal-NS", &self.config.namespace)
+            .header("Surreal-DB", &self.config.database)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/surrealql")
+            .body(query.to_string())
+            .send()
+            .await
+            .map_err(|err| {
+                GrustError::Backend(format!(
+                    "failed to clear SurrealDB tables at {}: {err}",
+                    self.config.url
+                ))
+            })?;
+        check_surreal_http_clear_response(response).await
     }
 }
 
 #[async_trait]
 impl GraphStore for SurrealHttpGraphStore {
     async fn put_node(&self, node: &Node) -> Result<NodeId> {
-        self.post(&surreal_upsert_nodes_query(std::slice::from_ref(node))?)?;
+        self.post(&surreal_upsert_nodes_query(std::slice::from_ref(node))?)
+            .await?;
         Ok(node.id.clone())
     }
 
@@ -111,7 +137,8 @@ impl GraphStore for SurrealHttpGraphStore {
         self.post(&surreal_relate_edges_query(
             std::slice::from_ref(edge),
             &id_tables,
-        )?)?;
+        )?)
+        .await?;
         Ok(edge.id.clone())
     }
 
@@ -119,11 +146,12 @@ impl GraphStore for SurrealHttpGraphStore {
         let id_tables = surreal_id_tables(&graph.nodes)?;
         let mut report = LoadReport::default();
         for chunk in graph.nodes.chunks(self.config.batch_size.max(1)) {
-            self.post(&surreal_upsert_nodes_query(chunk)?)?;
+            self.post(&surreal_upsert_nodes_query(chunk)?).await?;
             report.nodes += chunk.len();
         }
         for chunk in graph.edges.chunks(self.config.batch_size.max(1)) {
-            self.post(&surreal_relate_edges_query(chunk, &id_tables)?)?;
+            self.post(&surreal_relate_edges_query(chunk, &id_tables)?)
+                .await?;
             report.edges += chunk.len();
         }
         Ok(report)
@@ -152,10 +180,12 @@ impl GraphStore for SurrealHttpGraphStore {
 impl GraphAdminStore for SurrealHttpGraphStore {
     async fn bootstrap(&self) -> Result<()> {
         self.post_bootstrap(&surreal_bootstrap_query(&self.config))
+            .await
     }
 
     async fn clear(&self) -> Result<()> {
-        self.post(&surreal_delete_tables_query(&self.config))
+        self.post_clear(&surreal_delete_tables_query(&self.config))
+            .await
     }
 }
 
@@ -285,10 +315,11 @@ impl GraphAdminStore for SurrealSdkGraphStore {
     }
 }
 
-fn check_surreal_http_response(response: reqwest::blocking::Response, context: &str) -> Result<()> {
+async fn check_surreal_http_response(response: reqwest::Response, context: &str) -> Result<()> {
     let status = response.status();
     let body = response
         .text()
+        .await
         .map_err(|err| GrustError::Backend(format!("failed to read SurrealDB response: {err}")))?;
     if !status.is_success() {
         return Err(GrustError::Backend(format!(
@@ -305,10 +336,11 @@ fn check_surreal_http_response(response: reqwest::blocking::Response, context: &
     Ok(())
 }
 
-fn check_surreal_http_bootstrap_response(response: reqwest::blocking::Response) -> Result<()> {
+async fn check_surreal_http_bootstrap_response(response: reqwest::Response) -> Result<()> {
     let status = response.status();
     let body = response
         .text()
+        .await
         .map_err(|err| GrustError::Backend(format!("failed to read SurrealDB response: {err}")))?;
     if !status.is_success() {
         return Err(GrustError::Backend(format!(
@@ -319,6 +351,27 @@ fn check_surreal_http_bootstrap_response(response: reqwest::blocking::Response) 
         if surreal_response_has_non_idempotent_error(&results) {
             return Err(GrustError::Backend(format!(
                 "SurrealDB bootstrap returned an error: {body}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+async fn check_surreal_http_clear_response(response: reqwest::Response) -> Result<()> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| GrustError::Backend(format!("failed to read SurrealDB response: {err}")))?;
+    if !status.is_success() {
+        return Err(GrustError::Backend(format!(
+            "SurrealDB clear failed with status {status}: {body}"
+        )));
+    }
+    if let Ok(results) = serde_json::from_str::<serde_json::Value>(&body) {
+        if surreal_response_has_non_idempotent_clear_error(&results) {
+            return Err(GrustError::Backend(format!(
+                "SurrealDB clear returned an error: {body}"
             )));
         }
     }
@@ -340,6 +393,24 @@ fn surreal_response_has_non_idempotent_error(value: &serde_json::Value) -> bool 
                 && item.get("kind").and_then(|kind| kind.as_str()) != Some("AlreadyExists")
         })
     })
+}
+
+fn surreal_response_has_non_idempotent_clear_error(value: &serde_json::Value) -> bool {
+    value.as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item.get("status").and_then(|status| status.as_str()) == Some("ERR")
+                && !surreal_error_is_missing_table(item)
+        })
+    })
+}
+
+fn surreal_error_is_missing_table(item: &serde_json::Value) -> bool {
+    item.get("kind").and_then(|kind| kind.as_str()) == Some("NotFound")
+        && item
+            .get("details")
+            .and_then(|details| details.get("kind"))
+            .and_then(|kind| kind.as_str())
+            == Some("Table")
 }
 
 fn surreal_bootstrap_query(config: &SurrealConfig) -> String {
@@ -615,5 +686,33 @@ mod tests {
             surreal_ws_address("http://127.0.0.1:8000/sql").unwrap(),
             "127.0.0.1:8000"
         );
+    }
+
+    #[test]
+    fn clear_response_ignores_missing_tables() {
+        let response = serde_json::json!([
+            {
+                "status": "ERR",
+                "kind": "NotFound",
+                "details": {"kind": "Table", "details": {"name": "announcement"}},
+                "result": "The table 'announcement' does not exist"
+            },
+            {"status": "OK", "result": []}
+        ]);
+
+        assert!(!surreal_response_has_non_idempotent_clear_error(&response));
+    }
+
+    #[test]
+    fn clear_response_keeps_non_missing_table_errors() {
+        let response = serde_json::json!([
+            {
+                "status": "ERR",
+                "kind": "Other",
+                "result": "permission denied"
+            }
+        ]);
+
+        assert!(surreal_response_has_non_idempotent_clear_error(&response));
     }
 }

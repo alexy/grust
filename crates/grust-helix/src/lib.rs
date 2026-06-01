@@ -45,12 +45,12 @@ impl Default for HelixSdkConfig {
 #[derive(Clone, Debug)]
 pub struct HelixHttpGraphStore {
     config: HelixHttpConfig,
-    client: reqwest::blocking::Client,
+    client: reqwest::Client,
 }
 
 impl HelixHttpGraphStore {
     pub fn connect(config: HelixHttpConfig) -> Result<Self> {
-        let client = reqwest::blocking::Client::builder()
+        let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
             .map_err(|err| {
@@ -59,12 +59,13 @@ impl HelixHttpGraphStore {
         Ok(Self { config, client })
     }
 
-    fn post(&self, request: &serde_json::Value) -> Result<()> {
+    async fn post(&self, request: &serde_json::Value) -> Result<()> {
         let response = self
             .client
             .post(&self.config.query_url)
             .json(request)
             .send()
+            .await
             .map_err(|err| {
                 GrustError::Backend(format!(
                     "failed to POST Helix query to {}: {err}",
@@ -74,6 +75,7 @@ impl HelixHttpGraphStore {
         let status = response.status();
         let body = response
             .text()
+            .await
             .map_err(|err| GrustError::Backend(format!("failed to read Helix response: {err}")))?;
         if !status.is_success() {
             return Err(GrustError::Backend(format!(
@@ -87,23 +89,25 @@ impl HelixHttpGraphStore {
 #[async_trait]
 impl GraphStore for HelixHttpGraphStore {
     async fn put_node(&self, node: &Node) -> Result<NodeId> {
-        self.post(&helix_add_nodes_request(std::slice::from_ref(node))?)?;
+        self.post(&helix_add_nodes_request(std::slice::from_ref(node))?)
+            .await?;
         Ok(node.id.clone())
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
-        self.post(&helix_add_edges_request(std::slice::from_ref(edge))?)?;
+        self.post(&helix_add_edges_request(std::slice::from_ref(edge))?)
+            .await?;
         Ok(edge.id.clone())
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
         let mut report = LoadReport::default();
         for chunk in graph.nodes.chunks(self.config.batch_size.max(1)) {
-            self.post(&helix_add_nodes_request(chunk)?)?;
+            self.post(&helix_add_nodes_request(chunk)?).await?;
             report.nodes += chunk.len();
         }
         for chunk in graph.edges.chunks(self.config.batch_size.max(1)) {
-            self.post(&helix_add_edges_request(chunk)?)?;
+            self.post(&helix_add_edges_request(chunk)?).await?;
             report.edges += chunk.len();
         }
         Ok(report)
@@ -135,6 +139,7 @@ impl GraphAdminStore for HelixHttpGraphStore {
             return Ok(());
         }
         self.post(&helix_drop_labels_request(&self.config.labels))
+            .await
     }
 }
 
