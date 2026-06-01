@@ -1,0 +1,10 @@
+[package]
+name = "grust-falkor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+grust-core = { path = "../grust-core" }
+redis = { workspace = true }

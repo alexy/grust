@@ -6,8 +6,14 @@ license.workspace = true
 
 [features]
 default = []
+falkor = ["dep:grust-falkor"]
+helix = ["dep:grust-helix"]
 memory = ["dep:grust-memory"]
+surreal = ["dep:grust-surreal"]
 
 [dependencies]
 grust-core = { path = "../grust-core" }
+grust-falkor = { path = "../grust-falkor", optional = true }
+grust-helix = { path = "../grust-helix", optional = true }
 grust-memory = { path = "../grust-memory", optional = true }
+grust-surreal = { path = "../grust-surreal", optional = true }

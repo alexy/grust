@@ -662,11 +662,20 @@ pub trait GraphStore: Send + Sync {
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>>;
 }
 
+#[async_trait]
+pub trait GraphAdminStore: GraphStore {
+    async fn bootstrap(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn clear(&self) -> Result<()>;
+}
+
 pub mod prelude {
     pub use crate::{
         Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, Field, FieldType, Graph,
-        GraphBuilder, GraphSchema, GraphStore, GrustError, Label, LoadReport, Node, NodeId,
-        NodeType, Props, Result, Start, Step, Traversal, Value,
+        GraphAdminStore, GraphBuilder, GraphSchema, GraphStore, GrustError, Label, LoadReport,
+        Node, NodeId, NodeType, Props, Result, Start, Step, Traversal, Value,
     };
 }
 

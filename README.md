@@ -45,16 +45,15 @@ maps today and could use `petgraph` internally later where that helps.
 crates/
   grust/          Public facade crate and prelude
   grust-core/     Core model, builder, schema, traversal IR, GraphStore trait
+  grust-falkor/   FalkorDB writer using Redis GRAPH.QUERY
+  grust-helix/    HelixDB writer using HTTP or the Rust SDK
   grust-memory/   Deterministic in-memory store for tests and local use
+  grust-surreal/  SurrealDB writer using HTTP or the Rust SDK
 ```
 
-Planned backend crates:
-
-```text
-crates/
-  grust-surreal/  SurrealDB backend using relation tables
-  grust-helix/    HelixDB backend using SDK/client queries
-```
+The backend crates currently focus on loading graph data. Read/query support
+will grow behind the same `GraphStore` and traversal APIs instead of leaking
+backend query languages into application code.
 
 ## Core Model
 
@@ -197,6 +196,40 @@ pub trait GraphStore: Send + Sync {
 
 `put_graph` borrows the graph instead of consuming it. That makes retries,
 validation, comparison, and multi-backend loads easier.
+
+Administrative backends can also implement `GraphAdminStore` for setup and
+replacement workflows:
+
+```rust
+#[async_trait::async_trait]
+pub trait GraphAdminStore: GraphStore {
+    async fn bootstrap(&self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn clear(&self) -> Result<()>;
+}
+```
+
+## Backend Stores
+
+Backend crates are optional facade features:
+
+```toml
+[dependencies]
+grust = { path = "path/to/grust/crates/grust", features = ["falkor", "helix", "surreal"] }
+```
+
+`grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
+supports graph replacement with `GRAPH.DELETE`.
+
+`grust-helix` provides both `HelixHttpGraphStore` and `HelixSdkGraphStore`.
+Both batch node and edge writes and use configured labels for replacement.
+
+`grust-surreal` provides both `SurrealHttpGraphStore` and
+`SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and
+relationships to Surreal tables, upserts nodes, and relates edges through
+relation tables.
 
 ## Traversal IR
 

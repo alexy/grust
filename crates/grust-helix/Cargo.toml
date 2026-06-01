@@ -1,0 +1,12 @@
+[package]
+name = "grust-helix"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+grust-core = { path = "../grust-core" }
+helix-db = { workspace = true }
+reqwest = { workspace = true }
+serde_json = { workspace = true }
