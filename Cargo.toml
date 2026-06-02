@@ -4,6 +4,7 @@ members = [
     "crates/grust-core",
     "crates/grust-falkor",
     "crates/grust-helix",
+    "crates/grust-lancedb",
     "crates/grust-memory",
     "crates/grust-pggraph",
     "crates/grust-sail",
@@ -20,6 +21,7 @@ license = "MIT OR Apache-2.0"
 async-trait = "0.1.89"
 base64 = "0.22.1"
 helix-db = "=2.0.0"
+lancedb = "0.30.0"
 redis = "1.2.1"
 reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "http2", "charset", "gzip", "json"] }
 serde = { version = "1.0.228", features = ["derive"] }
@@ -30,3 +32,4 @@ tokio = { version = "1.52.2", features = ["macros", "rt-multi-thread", "sync"] }
 tokio-postgres = { version = "0.7.15", features = ["with-serde_json-1"] }
 url = "2.5.8"
 futures-executor = "0.3.31"
+tempfile = "3.24.0"

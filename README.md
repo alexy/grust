@@ -47,6 +47,7 @@ crates/
   grust-core/     Core model, builder, schema, traversal IR, GraphStore trait
   grust-falkor/   FalkorDB writer using Redis GRAPH.QUERY
   grust-helix/    HelixDB writer using HTTP or the Rust SDK
+  grust-lancedb/  LanceDB store using the Rust SDK
   grust-memory/   Deterministic in-memory store for tests and local use
   grust-pggraph/  PostgreSQL/pgGraph store over universal graph tables
   grust-sail/     Sail SparkConnect backend using Spark DataFrames
@@ -219,7 +220,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { path = "path/to/grust/crates/grust", features = ["falkor", "helix", "pggraph", "sail", "surreal"] }
+grust = { path = "path/to/grust/crates/grust", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
@@ -227,6 +228,11 @@ supports graph replacement with `GRAPH.DELETE`.
 
 `grust-helix` provides both `HelixHttpGraphStore` and `HelixSdkGraphStore`.
 Both batch node and edge writes and use configured labels for replacement.
+
+`grust-lancedb` stores graphs in LanceDB tables using the official Rust SDK,
+upserts nodes and edges with `merge_insert`, supports backend-neutral reads and
+bounded traversal over universal node/edge tables, and is ready for future
+vector-search extensions.
 
 `grust-pggraph` stores Grust graphs in universal PostgreSQL tables, registers
 those tables with the pgGraph extension, supports SQL-backed reads/traversal,
@@ -263,6 +269,7 @@ Surreal:  talk:id->presented_by->person
 Helix:    N<Talk>(id)::Out<PresentedBy>
 pgGraph:  SQL over grust_nodes/grust_edges, optionally graph.build()
 Sail:     Spark SQL joins over grust_nodes/grust_edges
+LanceDB:  SDK table filters over grust_nodes/grust_edges
 Memory:   adjacency-map lookup
 ```
 
@@ -302,6 +309,8 @@ The first backends are expected to use schema differently:
   label-partitioned source tables and typed filter columns.
 - Sail can run with universal DataFrame tables today, while schema can later
   drive typed, label-partitioned DataFrames.
+- LanceDB can run with universal tables today, while schema can later drive
+  typed property columns, vector columns, and index declarations.
 - Memory can ignore schema or use it for validation tests.
 
 ## Backend Mapping
@@ -385,6 +394,27 @@ WHERE  n0.id = 'person:ada'
 `GraphAdminStore::bootstrap()` creates the tables with `USING delta`.
 `clear()` issues `DELETE FROM` on both tables.
 
+### LanceDB
+
+LanceDB maps Grust's graph model to two Lance tables using Arrow batches and
+the Rust SDK:
+
+```text
+Node id / label / props  -> row in grust_nodes
+Edge key / endpoints     -> row in grust_edges
+put_node / put_edge      -> merge_insert upsert
+get_node / get_edges     -> SDK query filters
+traverse                 -> repeated edge/node filters per IR step
+```
+
+`LanceDbGraphStore::connect()` opens a local or remote LanceDB URI,
+`GraphAdminStore::bootstrap()` creates empty universal tables when needed, and
+`clear()` drops and recreates them. Node IDs are the node upsert key. Edges use
+an explicit edge ID when present and otherwise use `(from, label, to)` as a
+stable key. Properties are stored as JSON text for backend-neutral reads today;
+typed property columns and vector indexes can be layered on through schema and
+backend-specific extension traits later.
+
 ## Design Principles
 
 - Keep graph data independent from database query languages.
@@ -410,7 +440,7 @@ Implemented:
 - traversal structs and fluent helpers
 - async `GraphStore` trait
 - in-memory backend
-- FalkorDB, HelixDB, pgGraph, Sail, and SurrealDB backend crates
+- FalkorDB, HelixDB, LanceDB, pgGraph, Sail, and SurrealDB backend crates
 
 Planned:
 
