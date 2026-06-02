@@ -44,6 +44,7 @@ maps today and could use `petgraph` internally later where that helps.
 ```text
 crates/
   grust/          Public facade crate and prelude
+  grust-cocoindex/ CocoIndex-style graph target-state export adapter
   grust-core/     Core model, builder, schema, traversal IR, GraphStore trait
   grust-falkor/   FalkorDB writer using Redis GRAPH.QUERY
   grust-helix/    HelixDB writer using HTTP or the Rust SDK
@@ -57,6 +58,10 @@ crates/
 The backend crates expose reads and traversal as they mature behind the same
 `GraphStore` APIs instead of leaking backend query languages into application
 code.
+
+`grust-cocoindex` is intentionally different: it exports Grust graphs as
+CocoIndex-style node and relationship target state so an incremental indexing
+flow can propagate changes into a downstream graph or table backend.
 
 ## Core Model
 
@@ -228,6 +233,10 @@ supports graph replacement with `GRAPH.DELETE`.
 
 `grust-helix` provides both `HelixHttpGraphStore` and `HelixSdkGraphStore`.
 Both batch node and edge writes and use configured labels for replacement.
+
+`grust-cocoindex` converts `Graph` values into serializable node and
+relationship states with stable keys, endpoint labels, and plain JSON
+properties. It is a sync/export adapter rather than a `GraphStore`.
 
 `grust-lancedb` stores graphs in LanceDB tables using the official Rust SDK,
 upserts nodes and edges with `merge_insert`, supports backend-neutral reads and
@@ -439,6 +448,7 @@ Implemented:
 - schema structs
 - traversal structs and fluent helpers
 - async `GraphStore` trait
+- CocoIndex-style graph export adapter
 - in-memory backend
 - FalkorDB, HelixDB, LanceDB, pgGraph, Sail, and SurrealDB backend crates
 
