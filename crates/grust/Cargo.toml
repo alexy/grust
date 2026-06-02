@@ -8,6 +8,7 @@ license.workspace = true
 default = []
 falkor = ["dep:grust-falkor"]
 helix = ["dep:grust-helix"]
+lancedb = ["dep:grust-lancedb"]
 memory = ["dep:grust-memory"]
 pggraph = ["dep:grust-pggraph"]
 sail = ["dep:grust-sail"]
@@ -17,6 +18,7 @@ surreal = ["dep:grust-surreal"]
 grust-core = { path = "../grust-core" }
 grust-falkor = { path = "../grust-falkor", optional = true }
 grust-helix = { path = "../grust-helix", optional = true }
+grust-lancedb = { path = "../grust-lancedb", optional = true }
 grust-memory = { path = "../grust-memory", optional = true }
 grust-pggraph = { path = "../grust-pggraph", optional = true }
 grust-sail = { path = "../grust-sail", optional = true }

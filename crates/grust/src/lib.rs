@@ -6,6 +6,9 @@ pub use grust_falkor::*;
 #[cfg(feature = "helix")]
 pub use grust_helix::*;
 
+#[cfg(feature = "lancedb")]
+pub use grust_lancedb::*;
+
 #[cfg(feature = "memory")]
 pub use grust_memory::MemoryGraphStore;
 
@@ -26,6 +29,9 @@ pub mod prelude {
 
     #[cfg(feature = "helix")]
     pub use grust_helix::*;
+
+    #[cfg(feature = "lancedb")]
+    pub use grust_lancedb::*;
 
     #[cfg(feature = "memory")]
     pub use grust_memory::MemoryGraphStore;
