@@ -48,12 +48,14 @@ crates/
   grust-falkor/   FalkorDB writer using Redis GRAPH.QUERY
   grust-helix/    HelixDB writer using HTTP or the Rust SDK
   grust-memory/   Deterministic in-memory store for tests and local use
+  grust-pggraph/  PostgreSQL/pgGraph store over universal graph tables
+  grust-sail/     Sail SparkConnect backend using Spark DataFrames
   grust-surreal/  SurrealDB writer using HTTP or the Rust SDK
 ```
 
-The backend crates currently focus on loading graph data. Read/query support
-will grow behind the same `GraphStore` and traversal APIs instead of leaking
-backend query languages into application code.
+The backend crates expose reads and traversal as they mature behind the same
+`GraphStore` APIs instead of leaking backend query languages into application
+code.
 
 ## Core Model
 
@@ -217,7 +219,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { path = "path/to/grust/crates/grust", features = ["falkor", "helix", "surreal"] }
+grust = { path = "path/to/grust/crates/grust", features = ["falkor", "helix", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
@@ -225,6 +227,13 @@ supports graph replacement with `GRAPH.DELETE`.
 
 `grust-helix` provides both `HelixHttpGraphStore` and `HelixSdkGraphStore`.
 Both batch node and edge writes and use configured labels for replacement.
+
+`grust-pggraph` stores Grust graphs in universal PostgreSQL tables, registers
+those tables with the pgGraph extension, supports SQL-backed reads/traversal,
+and can build a pgGraph projection for graph-index experiments.
+
+`grust-sail` stores graphs as Spark DataFrames through Sail's SparkConnect
+server and lowers traversal IR to Spark SQL joins.
 
 `grust-surreal` provides both `SurrealHttpGraphStore` and
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and
@@ -252,6 +261,8 @@ Conceptually:
 Grust:    talk -[PRESENTED_BY]-> Person
 Surreal:  talk:id->presented_by->person
 Helix:    N<Talk>(id)::Out<PresentedBy>
+pgGraph:  SQL over grust_nodes/grust_edges, optionally graph.build()
+Sail:     Spark SQL joins over grust_nodes/grust_edges
 Memory:   adjacency-map lookup
 ```
 
@@ -287,6 +298,10 @@ The first backends are expected to use schema differently:
   tables, and indexes.
 - HelixDB is more schema/query-definition oriented, so schema can drive type
   and query generation.
+- pgGraph can run with universal tables today, while schema can later drive
+  label-partitioned source tables and typed filter columns.
+- Sail can run with universal DataFrame tables today, while schema can later
+  drive typed, label-partitioned DataFrames.
 - Memory can ignore schema or use it for validation tests.
 
 ## Backend Mapping
@@ -326,6 +341,22 @@ Traversal       -> typed Out/In traversal
 The Helix backend should hide generated or named queries behind `GraphStore`
 so application code remains backend-neutral.
 
+### pgGraph
+
+pgGraph keeps PostgreSQL as the source of truth and builds a derived graph
+projection for bounded traversal. The Grust backend starts with universal
+tables:
+
+```text
+grust_nodes(id, label, props)
+grust_edges(id, from_id, to_id, label, props)
+```
+
+`PgGraphStore` implements ordinary reads and Grust traversal with SQL over
+those tables. `GraphAdminStore::bootstrap()` creates the tables, installs the
+`graph` extension, and registers the universal edge table with pgGraph using
+the edge `label` column as the dynamic relationship type.
+
 ## Design Principles
 
 - Keep graph data independent from database query languages.
@@ -351,13 +382,12 @@ Implemented:
 - traversal structs and fluent helpers
 - async `GraphStore` trait
 - in-memory backend
+- FalkorDB, HelixDB, pgGraph, Sail, and SurrealDB backend crates
 
 Planned:
 
 - richer validation in `GraphBuilder`
 - import/export helpers
-- SurrealDB backend
-- HelixDB backend
 - backend-specific schema lowering
 - more traversal result shapes
 - query and index helpers
