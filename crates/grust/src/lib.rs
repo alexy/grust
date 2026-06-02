@@ -9,6 +9,9 @@ pub use grust_helix::*;
 #[cfg(feature = "memory")]
 pub use grust_memory::MemoryGraphStore;
 
+#[cfg(feature = "pggraph")]
+pub use grust_pggraph::*;
+
 #[cfg(feature = "sail")]
 pub use grust_sail::{SailConfig, SailGraphStore};
 
@@ -26,6 +29,9 @@ pub mod prelude {
 
     #[cfg(feature = "memory")]
     pub use grust_memory::MemoryGraphStore;
+
+    #[cfg(feature = "pggraph")]
+    pub use grust_pggraph::*;
 
     #[cfg(feature = "sail")]
     pub use grust_sail::{SailConfig, SailGraphStore};
