@@ -1,0 +1,11 @@
+[package]
+name = "grust-cocoindex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+grust-core = { path = "../grust-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+

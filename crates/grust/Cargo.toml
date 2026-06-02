@@ -6,6 +6,7 @@ license.workspace = true
 
 [features]
 default = []
+cocoindex = ["dep:grust-cocoindex"]
 falkor = ["dep:grust-falkor"]
 helix = ["dep:grust-helix"]
 lancedb = ["dep:grust-lancedb"]
@@ -16,6 +17,7 @@ surreal = ["dep:grust-surreal"]
 
 [dependencies]
 grust-core = { path = "../grust-core" }
+grust-cocoindex = { path = "../grust-cocoindex", optional = true }
 grust-falkor = { path = "../grust-falkor", optional = true }
 grust-helix = { path = "../grust-helix", optional = true }
 grust-lancedb = { path = "../grust-lancedb", optional = true }

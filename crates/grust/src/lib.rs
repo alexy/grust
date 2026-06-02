@@ -1,5 +1,8 @@
 pub use grust_core::*;
 
+#[cfg(feature = "cocoindex")]
+pub use grust_cocoindex::*;
+
 #[cfg(feature = "falkor")]
 pub use grust_falkor::*;
 
@@ -23,6 +26,9 @@ pub use grust_surreal::*;
 
 pub mod prelude {
     pub use grust_core::prelude::*;
+
+    #[cfg(feature = "cocoindex")]
+    pub use grust_cocoindex::*;
 
     #[cfg(feature = "falkor")]
     pub use grust_falkor::*;
