@@ -5,6 +5,7 @@ members = [
     "crates/grust-falkor",
     "crates/grust-helix",
     "crates/grust-memory",
+    "crates/grust-sail",
     "crates/grust-surreal",
 ]
 resolver = "3"

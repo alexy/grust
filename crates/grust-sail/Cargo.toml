@@ -1,0 +1,17 @@
+[package]
+name = "grust-sail"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+grust-core = { path = "../grust-core" }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tonic = { version = "0.14.6" }
+tonic-prost = { version = "0.14.6" }
+prost = { version = "0.14" }
+prost-types = { version = "0.14" }
+arrow = { version = "58.1.0" }
+uuid = { version = "1", features = ["v4"] }
