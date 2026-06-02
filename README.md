@@ -357,6 +357,34 @@ those tables. `GraphAdminStore::bootstrap()` creates the tables, installs the
 `graph` extension, and registers the universal edge table with pgGraph using
 the edge `label` column as the dynamic relationship type.
 
+### Sail / SparkConnect
+
+Sail maps Grust's model to two Delta Lake tables and lowers the traversal IR
+to multi-JOIN Spark SQL:
+
+```text
+Node id / label / props  -> row in grust_nodes
+Edge endpoints / type    -> row in grust_edges (with src_label, dst_label)
+put_node / put_edge      -> MERGE INTO (Delta upsert)
+get_node                 -> SELECT … WHERE id = ? LIMIT 1
+traverse                 -> multi-JOIN Spark SQL, one JOIN pair per step
+```
+
+Example traversal SQL for `.out("PRESENTED_BY").to("Talk")`:
+
+```text
+SELECT n1.id, n1.label, n1.props
+FROM   grust_nodes  n0
+JOIN   grust_edges  e0  ON  e0.src_id = n0.id
+                        AND e0.edge_type = 'PRESENTED_BY'
+JOIN   grust_nodes  n1  ON  n1.id = e0.dst_id
+                        AND n1.label = 'Talk'
+WHERE  n0.id = 'person:ada'
+```
+
+`GraphAdminStore::bootstrap()` creates the tables with `USING delta`.
+`clear()` issues `DELETE FROM` on both tables.
+
 ## Design Principles
 
 - Keep graph data independent from database query languages.
