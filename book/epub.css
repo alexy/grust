@@ -1,0 +1,24 @@
+body {
+  font-family: serif;
+  line-height: 1.45;
+}
+
+code {
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+pre {
+  padding: 0.75em;
+  overflow-x: auto;
+}
+
+figure {
+  text-align: center;
+  margin: 1.2em 0;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+}
