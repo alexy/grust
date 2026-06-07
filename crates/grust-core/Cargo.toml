@@ -11,6 +11,8 @@ categories.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 thiserror.workspace = true

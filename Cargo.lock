@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "grust-cocoindex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "grust-core",
  "serde",
@@ -2793,17 +2793,19 @@ dependencies = [
 
 [[package]]
 name = "grust-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
+ "quick-xml",
  "serde",
  "serde_json",
+ "serde_yaml",
  "thiserror",
 ]
 
 [[package]]
 name = "grust-falkor"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -2812,7 +2814,7 @@ dependencies = [
 
 [[package]]
 name = "grust-graph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "grust-cocoindex",
  "grust-core",
@@ -2827,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "grust-helix"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -2838,7 +2840,7 @@ dependencies = [
 
 [[package]]
 name = "grust-lancedb"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2852,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "grust-memory"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "futures-executor",
@@ -2861,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "grust-pggraph"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -2872,7 +2874,7 @@ dependencies = [
 
 [[package]]
 name = "grust-sail"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2888,7 +2890,7 @@ dependencies = [
 
 [[package]]
 name = "grust-surreal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -5545,6 +5547,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "quick-xml"
+version = "0.40.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2474bd2e5029e7ccb6abb2ba48cf2383a333851dedf495901544281590c7da7f"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "quick_cache"
 version = "0.6.22"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6591,6 +6603,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "serde_yaml"
+version = "0.9.34+deprecated"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a8b1a1a2ebf674015cc02edccce75287f1a0130d394307b36743c2f5d504b47"
+dependencies = [
+ "indexmap 2.14.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]

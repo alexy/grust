@@ -339,8 +339,383 @@ impl Graph {
         Self { nodes, edges }
     }
 
+    pub fn from_yaml(yaml: &str) -> Result<Self> {
+        yaml::graph_from_yaml(yaml)
+    }
+
+    pub fn to_yaml(&self) -> Result<String> {
+        yaml::graph_to_yaml(self)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self> {
+        json::graph_from_json(json)
+    }
+
+    pub fn to_json(&self) -> Result<String> {
+        json::graph_to_json(self)
+    }
+
+    pub fn from_xml(xml: &str) -> Result<Self> {
+        xml::graph_from_xml(xml)
+    }
+
+    pub fn to_xml(&self) -> Result<String> {
+        xml::graph_to_xml(self)
+    }
+
     pub fn builder() -> GraphBuilder {
         GraphBuilder::new()
+    }
+}
+
+mod graph_doc {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use serde::{Deserialize, Serialize};
+
+    use crate::{Edge, EdgeId, Graph, GrustError, Label, Node, NodeId, Props, Value};
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub(super) struct GraphDoc {
+        #[serde(default)]
+        pub(super) nodes: Vec<NodeDoc>,
+        #[serde(default)]
+        pub(super) edges: Vec<EdgeDoc>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub(super) struct NodeDoc {
+        pub(super) id: NodeId,
+        pub(super) label: Label,
+        #[serde(default, deserialize_with = "deserialize_props")]
+        pub(super) props: Props,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub(super) struct NodeDocOut {
+        pub(super) id: NodeId,
+        pub(super) label: Label,
+        #[serde(default)]
+        pub(super) props: Props,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub(super) struct EdgeDoc {
+        #[serde(default)]
+        pub(super) id: Option<EdgeId>,
+        pub(super) label: Label,
+        pub(super) from: NodeId,
+        pub(super) to: NodeId,
+        #[serde(default, deserialize_with = "deserialize_props")]
+        pub(super) props: Props,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub(super) struct EdgeDocOut {
+        #[serde(default)]
+        pub(super) id: Option<EdgeId>,
+        pub(super) label: Label,
+        pub(super) from: NodeId,
+        pub(super) to: NodeId,
+        #[serde(default)]
+        pub(super) props: Props,
+    }
+
+    pub(super) fn graph_from_doc(doc: GraphDoc) -> super::Result<Graph> {
+        let mut ids = BTreeSet::new();
+        for node in &doc.nodes {
+            if !ids.insert(node.id.clone()) {
+                return Err(GrustError::Schema(format!(
+                    "duplicate node id '{}'",
+                    node.id
+                )));
+            }
+        }
+
+        let mut edges = Vec::with_capacity(doc.edges.len());
+        for edge in doc.edges {
+            if !ids.contains(&edge.from) {
+                return Err(GrustError::Schema(format!(
+                    "edge '{}' references unknown from node '{}'",
+                    edge.label, edge.from
+                )));
+            }
+            if !ids.contains(&edge.to) {
+                return Err(GrustError::Schema(format!(
+                    "edge '{}' references unknown to node '{}'",
+                    edge.label, edge.to
+                )));
+            }
+
+            let mut graph_edge = Edge::new(edge.label, edge.from, edge.to, edge.props);
+            graph_edge.id = edge.id;
+            edges.push(graph_edge);
+        }
+
+        let nodes = doc
+            .nodes
+            .into_iter()
+            .map(|node| Node::new(node.label, node.id, node.props))
+            .collect();
+
+        Ok(Graph::new(nodes, edges))
+    }
+
+    pub(super) fn graph_to_doc(graph: &Graph) -> GraphDocOut {
+        GraphDocOut {
+            nodes: graph
+                .nodes
+                .iter()
+                .map(|node| NodeDocOut {
+                    id: node.id.clone(),
+                    label: node.label.clone(),
+                    props: without_generated_id(&node.props, &node.id),
+                })
+                .collect(),
+            edges: graph
+                .edges
+                .iter()
+                .map(|edge| EdgeDocOut {
+                    id: edge.id.clone(),
+                    label: edge.label.clone(),
+                    from: edge.from.clone(),
+                    to: edge.to.clone(),
+                    props: edge.props.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn without_generated_id(props: &Props, id: &NodeId) -> Props {
+        let mut props = props.clone();
+        if props.get("id") == Some(&Value::from(id.as_str())) {
+            props.remove("id");
+        }
+        props
+    }
+
+    fn deserialize_props<'de, D>(deserializer: D) -> std::result::Result<Props, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = BTreeMap::<String, serde_json::Value>::deserialize(deserializer)?;
+        raw.into_iter()
+            .map(|(key, value)| {
+                value_from_json(value)
+                    .map(|value| (key, value))
+                    .map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
+
+    fn value_from_json(value: serde_json::Value) -> std::result::Result<Value, String> {
+        if let serde_json::Value::Object(mapping) = &value
+            && mapping.contains_key("type")
+            && mapping.contains_key("value")
+        {
+            return serde_json::from_value(value)
+                .map_err(|err| format!("invalid tagged Grust value: {err}"));
+        }
+
+        Ok(Value::from(value))
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub(super) struct GraphDocOut {
+        pub(super) nodes: Vec<NodeDocOut>,
+        pub(super) edges: Vec<EdgeDocOut>,
+    }
+}
+
+mod yaml {
+    use crate::{Graph, GrustError};
+
+    pub(super) fn graph_from_yaml(yaml: &str) -> super::Result<Graph> {
+        let doc: super::graph_doc::GraphDoc = serde_yaml::from_str(yaml)
+            .map_err(|err| GrustError::Serialization(format!("YAML parse error: {err}")))?;
+        super::graph_doc::graph_from_doc(doc)
+    }
+
+    pub(super) fn graph_to_yaml(graph: &Graph) -> super::Result<String> {
+        serde_yaml::to_string(&super::graph_doc::graph_to_doc(graph))
+            .map_err(|err| GrustError::Serialization(format!("YAML serialization error: {err}")))
+    }
+}
+
+mod json {
+    use crate::{Graph, GrustError};
+
+    pub(super) fn graph_from_json(json: &str) -> super::Result<Graph> {
+        let doc: super::graph_doc::GraphDoc = serde_json::from_str(json)
+            .map_err(|err| GrustError::Serialization(format!("JSON parse error: {err}")))?;
+        super::graph_doc::graph_from_doc(doc)
+    }
+
+    pub(super) fn graph_to_json(graph: &Graph) -> super::Result<String> {
+        serde_json::to_string_pretty(&super::graph_doc::graph_to_doc(graph))
+            .map_err(|err| GrustError::Serialization(format!("JSON serialization error: {err}")))
+    }
+}
+
+mod xml {
+    use serde::{Deserialize, Serialize};
+
+    use crate::{Edge, EdgeId, Graph, GrustError, Label, Node, NodeId, Props, Value};
+
+    #[derive(Debug, Serialize, Deserialize)]
+    #[serde(rename = "graph")]
+    struct GraphXml {
+        #[serde(default)]
+        nodes: NodesXml,
+        #[serde(default)]
+        edges: EdgesXml,
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    struct NodesXml {
+        #[serde(rename = "node", default)]
+        items: Vec<NodeXml>,
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    struct EdgesXml {
+        #[serde(rename = "edge", default)]
+        items: Vec<EdgeXml>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct NodeXml {
+        id: NodeId,
+        label: Label,
+        #[serde(default)]
+        props: PropsXml,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct EdgeXml {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<EdgeId>,
+        label: Label,
+        from: NodeId,
+        to: NodeId,
+        #[serde(default)]
+        props: PropsXml,
+    }
+
+    #[derive(Debug, Default, Serialize, Deserialize)]
+    struct PropsXml {
+        #[serde(rename = "prop", default)]
+        items: Vec<PropXml>,
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    struct PropXml {
+        key: String,
+        value: Value,
+    }
+
+    pub(super) fn graph_from_xml(xml: &str) -> super::Result<Graph> {
+        let doc: GraphXml = quick_xml::de::from_str(xml)
+            .map_err(|err| GrustError::Serialization(format!("XML parse error: {err}")))?;
+        super::graph_doc::graph_from_doc(doc.into())
+    }
+
+    pub(super) fn graph_to_xml(graph: &Graph) -> super::Result<String> {
+        quick_xml::se::to_string(&GraphXml::from(graph))
+            .map_err(|err| GrustError::Serialization(format!("XML serialization error: {err}")))
+    }
+
+    impl From<GraphXml> for super::graph_doc::GraphDoc {
+        fn from(value: GraphXml) -> Self {
+            Self {
+                nodes: value.nodes.items.into_iter().map(Into::into).collect(),
+                edges: value.edges.items.into_iter().map(Into::into).collect(),
+            }
+        }
+    }
+
+    impl From<NodeXml> for super::graph_doc::NodeDoc {
+        fn from(value: NodeXml) -> Self {
+            Self {
+                id: value.id,
+                label: value.label,
+                props: value.props.into(),
+            }
+        }
+    }
+
+    impl From<EdgeXml> for super::graph_doc::EdgeDoc {
+        fn from(value: EdgeXml) -> Self {
+            Self {
+                id: value.id,
+                label: value.label,
+                from: value.from,
+                to: value.to,
+                props: value.props.into(),
+            }
+        }
+    }
+
+    impl From<PropsXml> for Props {
+        fn from(value: PropsXml) -> Self {
+            value
+                .items
+                .into_iter()
+                .map(|prop| (prop.key, prop.value))
+                .collect()
+        }
+    }
+
+    impl From<&Graph> for GraphXml {
+        fn from(graph: &Graph) -> Self {
+            Self {
+                nodes: NodesXml {
+                    items: graph.nodes.iter().map(NodeXml::from).collect(),
+                },
+                edges: EdgesXml {
+                    items: graph.edges.iter().map(EdgeXml::from).collect(),
+                },
+            }
+        }
+    }
+
+    impl From<&Node> for NodeXml {
+        fn from(node: &Node) -> Self {
+            let props = super::graph_doc::graph_to_doc(&Graph::new(vec![node.clone()], Vec::new()))
+                .nodes
+                .into_iter()
+                .next()
+                .expect("node exists")
+                .props;
+            Self {
+                id: node.id.clone(),
+                label: node.label.clone(),
+                props: props.into(),
+            }
+        }
+    }
+
+    impl From<&Edge> for EdgeXml {
+        fn from(edge: &Edge) -> Self {
+            Self {
+                id: edge.id.clone(),
+                label: edge.label.clone(),
+                from: edge.from.clone(),
+                to: edge.to.clone(),
+                props: edge.props.clone().into(),
+            }
+        }
+    }
+
+    impl From<Props> for PropsXml {
+        fn from(value: Props) -> Self {
+            Self {
+                items: value
+                    .into_iter()
+                    .map(|(key, value)| PropXml { key, value })
+                    .collect(),
+            }
+        }
     }
 }
 
