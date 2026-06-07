@@ -5,8 +5,6 @@ author: "Alexy Khrabrov"
 lang: en-US
 ---
 
-# grust-book
-
 # Preface
 
 Grust is a small Rust property graph API with a large architectural promise:

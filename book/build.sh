@@ -7,23 +7,34 @@ mkdir -p build/dist
 
 node build.mjs
 
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "$tmpdir"' EXIT
+sed '/^```{=typst}$/,/^```$/d' cover.md > "$tmpdir/cover.epub.md"
+
+pandoc --from markdown+smart \
+  --pdf-engine=typst \
+  --output "$tmpdir/cover.pdf" \
+  cover.md
+
 pandoc --from markdown+smart \
   --to typst \
   --metadata-file metadata.yaml \
   --toc --toc-depth=2 \
   --resource-path build \
-  --output build/grust-book.typ \
+  --output build/grust-book-body.typ \
   build/manuscript.rendered.md
 
-typst compile build/grust-book.typ build/dist/grust-book.pdf
+typst compile build/grust-book-body.typ "$tmpdir/body.pdf"
+pdfunite "$tmpdir/cover.pdf" "$tmpdir/body.pdf" build/dist/grust-book.pdf
 
 pandoc --from markdown+smart \
   --metadata-file metadata.yaml \
+  --epub-title-page=false \
   --toc --toc-depth=2 \
   --css epub.css \
   --resource-path build \
   --output build/dist/grust-book.epub \
-  build/manuscript.rendered.md
+  "$tmpdir/cover.epub.md" build/manuscript.rendered.md
 
 EBOOK_CONVERT="${EBOOK_CONVERT:-}"
 if [[ -z "$EBOOK_CONVERT" ]]; then

@@ -5,11 +5,12 @@ artifact pipeline.
 
 Source:
 
+- `cover.md` keeps the PDF/EPUB/MOBI cover page separate from the manuscript.
 - `manuscript.md` keeps Mermaid diagrams inline as fenced `mermaid` blocks.
 - `build.mjs` renders those blocks to SVG and produces
   `build/manuscript.rendered.md` for Pandoc.
-- `build.sh` uses Pandoc and Typst to produce PDF, then Pandoc and Calibre to
-  produce EPUB and MOBI.
+- `build.sh` renders the cover and body separately for PDF, merges them, then
+  builds EPUB and MOBI with the cover before the manuscript.
 
 Build:
 

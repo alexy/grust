@@ -3,6 +3,35 @@ body {
   line-height: 1.45;
 }
 
+.cover-page {
+  margin-top: 35%;
+  text-align: center;
+}
+
+#grust-book > h1.unnumbered {
+  display: none;
+}
+
+.cover-title {
+  font-size: 2.2em;
+  font-weight: bold;
+  margin-bottom: 0.8em;
+}
+
+.cover-subtitle {
+  font-size: 1.25em;
+  margin-bottom: 2.5em;
+}
+
+.cover-author {
+  font-size: 1.05em;
+  margin-bottom: 3em;
+}
+
+.cover-rights {
+  font-size: 0.85em;
+}
+
 code {
   font-family: monospace;
   font-size: 0.9em;
