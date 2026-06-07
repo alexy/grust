@@ -17,8 +17,8 @@ resolver = "3"
 version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/alexy/grust"
-homepage = "https://github.com/alexy/grust"
+repository = "https://github.com/querygraph/grust"
+homepage = "https://github.com/querygraph/grust"
 keywords = ["graph", "property-graph", "database", "rust"]
 categories = ["database", "data-structures"]
 
