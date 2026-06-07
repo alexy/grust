@@ -17,6 +17,10 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+repository = "https://github.com/alexy/grust"
+homepage = "https://github.com/alexy/grust"
+keywords = ["graph", "property-graph", "database", "rust"]
+categories = ["database", "data-structures"]
 
 [workspace.dependencies]
 async-trait = "0.1.89"

@@ -3,10 +3,15 @@ name = "grust-memory"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Deterministic in-memory GraphStore implementation for Grust."
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-grust-core = { path = "../grust-core" }
+grust-core = { version = "0.1.0", path = "../grust-core" }
 
 [dev-dependencies]
 futures-executor.workspace = true

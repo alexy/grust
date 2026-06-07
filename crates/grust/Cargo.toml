@@ -3,6 +3,12 @@ name = "grust"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A backend-neutral property graph facade for Rust."
+keywords.workspace = true
+categories.workspace = true
+readme = "../../README.md"
 
 [features]
 default = []
@@ -16,12 +22,12 @@ sail = ["dep:grust-sail"]
 surreal = ["dep:grust-surreal"]
 
 [dependencies]
-grust-core = { path = "../grust-core" }
-grust-cocoindex = { path = "../grust-cocoindex", optional = true }
-grust-falkor = { path = "../grust-falkor", optional = true }
-grust-helix = { path = "../grust-helix", optional = true }
-grust-lancedb = { path = "../grust-lancedb", optional = true }
-grust-memory = { path = "../grust-memory", optional = true }
-grust-pggraph = { path = "../grust-pggraph", optional = true }
-grust-sail = { path = "../grust-sail", optional = true }
-grust-surreal = { path = "../grust-surreal", optional = true }
+grust-core = { version = "0.1.0", path = "../grust-core" }
+grust-cocoindex = { version = "0.1.0", path = "../grust-cocoindex", optional = true }
+grust-falkor = { version = "0.1.0", path = "../grust-falkor", optional = true }
+grust-helix = { version = "0.1.0", path = "../grust-helix", optional = true }
+grust-lancedb = { version = "0.1.0", path = "../grust-lancedb", optional = true }
+grust-memory = { version = "0.1.0", path = "../grust-memory", optional = true }
+grust-pggraph = { version = "0.1.0", path = "../grust-pggraph", optional = true }
+grust-sail = { version = "0.1.0", path = "../grust-sail", optional = true }
+grust-surreal = { version = "0.1.0", path = "../grust-surreal", optional = true }

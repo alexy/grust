@@ -482,4 +482,9 @@ cargo check --workspace --all-targets
 
 ## License
 
-Grust is intended to be available under either MIT or Apache-2.0.
+Grust is dual-licensed under either of:
+
+- Apache License, Version 2.0
+- MIT license
+
+Choose either license when using, modifying, or distributing Grust.

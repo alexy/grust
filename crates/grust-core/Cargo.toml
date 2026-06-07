@@ -3,6 +3,11 @@ name = "grust-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core graph model, builder, schema, traversal IR, and store traits for Grust."
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 async-trait.workspace = true
