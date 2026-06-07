@@ -163,6 +163,107 @@ This is an example of Grust's overall style: put the common property-graph case
 on the simple path, but leave an explicit escape hatch for graph models with
 different identity rules.
 
+## Loading and Saving Graph Documents
+
+A `Graph` can also move through textual document formats without touching a
+backend. The core crate exposes paired constructors and serializers for YAML,
+JSON, and XML:
+
+```rust
+let graph = Graph::from_yaml(yaml_text)?;
+let yaml_text = graph.to_yaml()?;
+
+let graph = Graph::from_json(json_text)?;
+let json_text = graph.to_json()?;
+
+let graph = Graph::from_xml(xml_text)?;
+let xml_text = graph.to_xml()?;
+```
+
+These methods are useful for fixtures, migration inputs, examples, audits, and
+small graph interchange files. They all feed the same validation path, so a
+document with duplicate node ids or an edge that points at a missing node fails
+before it reaches a store.
+
+YAML and JSON share the same document shape. A property value can be written as
+a plain JSON-like scalar when the type is obvious, or as the tagged Grust
+`Value` representation when the exact variant matters:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "talk:rust-graph-api",
+      "label": "Talk",
+      "props": {
+        "title": "A Modern Graph API for Rust",
+        "year": 2026,
+        "tracks": {
+          "type": "string_array",
+          "value": ["rust", "graphs"]
+        }
+      }
+    },
+    {
+      "id": "person:ada",
+      "label": "Person",
+      "props": {
+        "name": "Ada Example"
+      }
+    }
+  ],
+  "edges": [
+    {
+      "label": "PRESENTED_BY",
+      "from": "talk:rust-graph-api",
+      "to": "person:ada",
+      "props": {
+        "source": "conference-schedule"
+      }
+    }
+  ]
+}
+```
+
+The XML form is more explicit because XML has no native object or array type.
+Properties are represented as repeated `prop` entries with a `key` and a tagged
+`value`:
+
+```xml
+<graph>
+  <nodes>
+    <node>
+      <id>talk:rust-graph-api</id>
+      <label>Talk</label>
+      <props>
+        <prop>
+          <key>title</key>
+          <value>
+            <type>string</type>
+            <value>A Modern Graph API for Rust</value>
+          </value>
+        </prop>
+      </props>
+    </node>
+    <node>
+      <id>person:ada</id>
+      <label>Person</label>
+    </node>
+  </nodes>
+  <edges>
+    <edge>
+      <label>PRESENTED_BY</label>
+      <from>talk:rust-graph-api</from>
+      <to>person:ada</to>
+    </edge>
+  </edges>
+</graph>
+```
+
+Serialization removes the generated `id` property from node property maps when
+it only mirrors the node's `NodeId`. That keeps exported documents readable
+without changing what `Node::new` guarantees after loading.
+
 # 4. Traversal as an Intermediate Representation
 
 Grust traversal is not Cypher, SQL, GQL, SurrealQL, Spark SQL, or a graph
