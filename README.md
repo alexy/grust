@@ -43,7 +43,7 @@ maps today and could use `petgraph` internally later where that helps.
 
 ```text
 crates/
-  grust/          Public facade crate and prelude
+  grust/          Public facade package (`grust-graph`) and prelude
   grust-cocoindex/ CocoIndex-style graph target-state export adapter
   grust-core/     Core model, builder, schema, traversal IR, GraphStore trait
   grust-falkor/   FalkorDB writer using Redis GRAPH.QUERY
@@ -152,7 +152,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { path = "path/to/grust/crates/grust", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.1.0", features = ["memory"] }
 ```
 
 Then load and traverse a graph:
@@ -225,7 +225,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { path = "path/to/grust/crates/grust", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.1.0", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and

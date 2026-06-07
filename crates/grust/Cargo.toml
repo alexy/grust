@@ -1,5 +1,5 @@
 [package]
-name = "grust"
+name = "grust-graph"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -9,6 +9,9 @@ description = "A backend-neutral property graph facade for Rust."
 keywords.workspace = true
 categories.workspace = true
 readme = "../../README.md"
+
+[lib]
+name = "grust"
 
 [features]
 default = []

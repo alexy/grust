@@ -2783,21 +2783,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "grust"
-version = "0.1.0"
-dependencies = [
- "grust-cocoindex",
- "grust-core",
- "grust-falkor",
- "grust-helix",
- "grust-lancedb",
- "grust-memory",
- "grust-pggraph",
- "grust-sail",
- "grust-surreal",
-]
-
-[[package]]
 name = "grust-cocoindex"
 version = "0.1.0"
 dependencies = [
@@ -2823,6 +2808,21 @@ dependencies = [
  "async-trait",
  "grust-core",
  "redis",
+]
+
+[[package]]
+name = "grust-graph"
+version = "0.1.0"
+dependencies = [
+ "grust-cocoindex",
+ "grust-core",
+ "grust-falkor",
+ "grust-helix",
+ "grust-lancedb",
+ "grust-memory",
+ "grust-pggraph",
+ "grust-sail",
+ "grust-surreal",
 ]
 
 [[package]]
