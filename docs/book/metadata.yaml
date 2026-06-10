@@ -2,6 +2,7 @@
 title: "grust-book"
 subtitle: "A Rust Property Graph Architecture"
 author: "Alexy Khrabrov"
+coauthor: "Codex with ChatGPT 5.5"
 lang: en-US
 rights: "MIT OR Apache-2.0"
 toc: true

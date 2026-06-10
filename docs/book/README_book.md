@@ -3,20 +3,25 @@
 ## Separate Cover Page
 
 Use `docs/book/cover.md` as a standalone cover source and keep it separate from
-`docs/book/manuscript.md`. The visible cover text for this book is:
+`docs/book/manuscript.md`. The build renders it to
+`docs/book/build/cover.rendered.md`, filling metadata from `metadata.yaml` and
+the version subtitle from `[workspace.package].version` in the workspace
+`Cargo.toml`. The visible cover text for this book is:
 
 - Title: `grust-book`
+- Version subtitle: `covers grust 0.4.0`
 - Subtitle: `A Rust Property Graph Architecture`
 - Author: `Alexy Khrabrov`
-- Rights: `MIT OR Apache-2.0`
+- Coauthor credit: `&` / `Codex with ChatGPT 5.5`
 
 The cover file contains two raw blocks:
 
 - A Typst block for the PDF cover.
 - An HTML block for the EPUB and MOBI cover.
 
-Keep the visible text synchronized between both blocks. The Typst cover sets
-`numbering: none` so the standalone cover page does not show a page number.
+Keep the template placeholders synchronized between both blocks. The Typst
+cover sets `numbering: none` so the standalone cover page does not show a page
+number.
 
 ## Rendered Manuscript
 
@@ -27,7 +32,8 @@ cd docs/book
 node build.mjs
 ```
 
-This writes `docs/book/build/manuscript.rendered.md` and diagram images under
+This writes `docs/book/build/cover.rendered.md`,
+`docs/book/build/manuscript.rendered.md`, and diagram images under
 `docs/book/build/diagrams/`.
 
 ## PDF Build
@@ -39,7 +45,7 @@ will otherwise add a generated title page before the custom cover.
 pandoc --from markdown+smart \
   --pdf-engine=typst \
   --output "$tmpdir/cover.pdf" \
-  cover.md
+  build/cover.rendered.md
 ```
 
 Render the body separately, with the table of contents:
@@ -72,7 +78,7 @@ this, Pandoc can still use the Typst block while constructing EPUB chapters and
 create an unwanted wrapper heading.
 
 ```sh
-sed '/^```{=typst}$/,/^```$/d' cover.md > "$tmpdir/cover.epub.md"
+sed '/^```{=typst}$/,/^```$/d' build/cover.rendered.md > "$tmpdir/cover.epub.md"
 ```
 
 Pass the filtered cover before the rendered manuscript. Keep
@@ -90,6 +96,18 @@ pandoc --from markdown+smart \
   --output build/dist/grust-book.epub \
   "$tmpdir/cover.epub.md" build/manuscript.rendered.md
 ```
+
+Validate the generated EPUB package before creating Kindle-facing artifacts:
+
+```sh
+asdf exec python check_epub_metadata.py build/dist/grust-book.epub
+```
+
+The checker reads `EPUB/content.opf`, `EPUB/toc.ncx`, and `EPUB/nav.xhtml` from
+the generated EPUB. It fails the build if required metadata is missing, if the
+navigation files do not expose the real book title, if fallback labels such as
+`UNTITLED` or `Unknown` appear, or if Pandoc produced an empty generated title
+page.
 
 Convert the EPUB to MOBI:
 

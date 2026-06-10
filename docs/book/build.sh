@@ -9,12 +9,12 @@ node build.mjs
 
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
-sed '/^```{=typst}$/,/^```$/d' cover.md > "$tmpdir/cover.epub.md"
+sed '/^```{=typst}$/,/^```$/d' build/cover.rendered.md > "$tmpdir/cover.epub.md"
 
 pandoc --from markdown+smart \
   --pdf-engine=typst \
   --output "$tmpdir/cover.pdf" \
-  cover.md
+  build/cover.rendered.md
 
 pandoc --from markdown+smart \
   --to typst \
@@ -27,6 +27,17 @@ pandoc --from markdown+smart \
 typst compile build/grust-book-body.typ "$tmpdir/body.pdf"
 pdfunite "$tmpdir/cover.pdf" "$tmpdir/body.pdf" build/dist/grust-book.pdf
 
+PYTHON_CMD=()
+if [[ -n "${PANDOC_PYTHON:-}" ]]; then
+  PYTHON_CMD=("$PANDOC_PYTHON")
+else
+  if command -v asdf >/dev/null 2>&1; then
+    PYTHON_CMD=(asdf exec python)
+  else
+    PYTHON_CMD=(python3)
+  fi
+fi
+
 pandoc --from markdown+smart \
   --metadata-file metadata.yaml \
   --epub-title-page=false \
@@ -35,6 +46,8 @@ pandoc --from markdown+smart \
   --resource-path build \
   --output build/dist/grust-book.epub \
   "$tmpdir/cover.epub.md" build/manuscript.rendered.md
+
+"${PYTHON_CMD[@]}" check_epub_metadata.py build/dist/grust-book.epub
 
 EBOOK_CONVERT="${EBOOK_CONVERT:-}"
 if [[ -z "$EBOOK_CONVERT" ]]; then

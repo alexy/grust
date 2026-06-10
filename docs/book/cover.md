@@ -4,28 +4,39 @@
 
 #align(center + horizon)[
   #block[
-    #text(size: 32pt, weight: "bold")[grust-book]
+    #text(size: 32pt, weight: "bold", bottom-edge: "bounds")[{{title}}]
+
+    #v(-12pt)
+
+    #text(size: 10pt)[{{versionSubtitle}}]
 
     #v(1em)
 
-    #text(size: 18pt)[A Rust Property Graph Architecture]
+    #text(size: 18pt)[{{subtitle}}]
 
     #v(3em)
 
-    #text(size: 14pt)[Alexy Khrabrov]
+    #text(size: 14pt)[{{author}}]
 
-    #v(4em)
+    #v(0.35em)
 
-    #text(size: 11pt)[MIT OR Apache-2.0]
+    #text(size: 11pt, style: "italic")[&]
+
+    #v(0.35em)
+
+    #text(size: 13pt, style: "italic")[{{coauthor}}]
+
   ]
 ]
 ```
 
 ```{=html}
 <section class="cover-page" epub:type="cover">
-  <div class="cover-title">grust-book</div>
-  <div class="cover-subtitle">A Rust Property Graph Architecture</div>
-  <div class="cover-author">Alexy Khrabrov</div>
-  <div class="cover-rights">MIT OR Apache-2.0</div>
+  <div class="cover-title">{{title}}</div>
+  <div class="cover-version">{{versionSubtitle}}</div>
+  <div class="cover-subtitle">{{subtitle}}</div>
+  <div class="cover-author">{{author}}</div>
+  <div class="cover-credit-mark">&amp;</div>
+  <div class="cover-coauthor">{{coauthor}}</div>
 </section>
 ```
