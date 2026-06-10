@@ -793,11 +793,11 @@ flowchart TB
   grustGraph --> coco["CocoIndex export target state"]
   inproc --> mem["Memory\nBTreeMap scans"]
   graphdb --> falkor["FalkorDB\nGRAPH.QUERY writes"]
-  graphdb --> helix["HelixDB\nHTTP or SDK writes"]
-  graphdb --> surreal["SurrealDB\nSurrealQL writes"]
-  tabular --> lance["LanceDB\nArrow merge_insert"]
-  tabular --> pg["pgGraph\nSQL traversal"]
-  tabular --> sail["Sail\nSpark Connect"]
+  graphdb --> helix["HelixDB\nHTTP or SDK writes\nschema-name validation"]
+  graphdb --> surreal["SurrealDB\nschemafull tables"]
+  tabular --> lance["LanceDB\nuniversal + typed Arrow tables"]
+  tabular --> pg["pgGraph\nSQL traversal + typed views"]
+  tabular --> sail["Sail\nuniversal + typed Delta tables"]
 ```
 
 Some backends are full read/write/traversal stores today. Others currently
@@ -810,6 +810,9 @@ multi-backend project, and the trait makes the maturity boundary explicit.
 `BTreeMap<NodeId, Node>` and edges in a `BTreeMap<(NodeId, Label, NodeId), Edge>`.
 Reads and traversals scan those maps. It is the best backend for tests, examples,
 and local workflows that need no external service.
+When a `GraphSchema` is applied, the memory backend validates writes against it,
+which makes it a useful conformance harness for typed storage behavior before a
+database enters the picture.
 
 ```rust
 use grust::prelude::*;
@@ -841,6 +844,13 @@ This backend is a natural home for later vector-search extensions. The core
 `GraphStore` trait should stay graph-focused; LanceDB-specific nearest-neighbor
 search can live in an extension trait without leaking into every backend.
 
+With `GraphSchema`, LanceDB also creates typed Arrow tables per node and edge
+label. The universal `grust_nodes` and `grust_edges` tables remain the portable
+read/traversal surface, while schema-labeled rows are mirrored into tables such
+as `grust_node_person` or `grust_edge_presents` with typed columns for declared
+fields. That gives analytical consumers and future vector extensions a native
+columnar surface without giving up the backend-neutral graph model.
+
 ## pgGraph
 
 `grust-pggraph` stores the source of truth in ordinary PostgreSQL tables:
@@ -856,6 +866,13 @@ register graph tables, and optionally build the pgGraph projection. Reads use
 SQL against the universal tables. Traversal is lowered to SQL joins over those
 tables, with pgGraph projection support available as the backend matures.
 
+Schema application adds typed label views and expression indexes. For example,
+a `Person` node schema with `name: String` and `age: Int` can produce a
+`grust_node_person` view over the universal node table, with `age` exposed as a
+`bigint` expression. This is a deliberately incremental typed-storage path:
+PostgreSQL keeps the flexible JSONB source of truth while callers that know the
+schema get typed SQL surfaces.
+
 ## Sail
 
 `grust-sail` connects to a Sail Spark Connect server over gRPC. It stores graph
@@ -867,18 +884,29 @@ The implementation has an important practical detail: edge rows carry source
 and destination labels as well as IDs. That allows traversal joins to match node
 labels without an extra lookup during each edge hop.
 
+When a schema is applied, Sail creates typed Delta tables per node and edge
+label and mirrors writes into them with `MERGE INTO`. The universal Spark
+tables keep traversal simple and portable; the typed tables make declared graph
+labels available as ordinary Spark columns.
+
 ## FalkorDB, HelixDB, and SurrealDB
 
 The FalkorDB backend writes through Redis `GRAPH.QUERY` using Cypher-like
 `MERGE` statements. It batches nodes by label path and edges by relationship
-type.
+type. Schema application creates label/property indexes for declared node
+types.
 
 The HelixDB backend has HTTP and SDK stores. Both support batched writes; reads
-and traversal currently report unsupported operations.
+and traversal currently report unsupported operations. The current schema hook
+validates that labels, relationships, and fields can be safely lowered through
+the dynamic-query path; backend-native schema-file generation can build on that
+same `GraphSchema` contract later.
 
 The SurrealDB backend also has HTTP and SDK stores. It can bootstrap, clear,
 upsert nodes, and relate edges. Like Helix today, read and traversal support is
-not yet implemented.
+not yet implemented. Applying a schema lowers node and edge declarations to
+Surreal `DEFINE TABLE` and `DEFINE FIELD` statements so the backend can run in
+schemafull mode where the schema calls for it.
 
 ## CocoIndex
 
@@ -943,6 +971,61 @@ assert_eq!(report.edges, 2);
 # Ok(())
 # }
 ```
+
+The same graph can be loaded through the typed backend path by declaring the
+schema and using `put_typed_graph`:
+
+```rust
+# use grust::prelude::*;
+# async fn typed_load<S: GraphStore>(store: &S, graph: Graph) -> grust::Result<()> {
+let schema = GraphSchema::builder()
+    .node(
+        "Conference",
+        vec![
+            Field::required("name", FieldType::String),
+            Field::required("city", FieldType::String),
+        ],
+    )
+    .node(
+        "Talk",
+        vec![
+            Field::required("title", FieldType::String),
+            Field::required("track", FieldType::String),
+        ],
+    )
+    .node(
+        "Person",
+        vec![
+            Field::required("name", FieldType::String),
+            Field::required("role", FieldType::String),
+        ],
+    )
+    .edge(
+        "HAS_TALK",
+        vec![Label::new("Conference")],
+        vec![Label::new("Talk")],
+        Vec::<Field>::new(),
+    )
+    .edge(
+        "PRESENTED_BY",
+        vec![Label::new("Talk")],
+        vec![Label::new("Person")],
+        vec![Field::required("confirmed", FieldType::Bool)],
+    )
+    .build();
+
+let report = store.put_typed_graph(&schema, &graph).await?;
+assert_eq!(report.nodes, 3);
+assert_eq!(report.edges, 2);
+# Ok(())
+# }
+```
+
+That call checks node labels, edge labels, required fields, field types, and
+edge endpoint labels before writing. Backends then use the same schema in their
+own way: memory validates, LanceDB mirrors into typed Arrow tables, Sail mirrors
+into typed Delta tables, pgGraph exposes typed SQL views and indexes, SurrealDB
+defines schemafull tables and fields, and FalkorDB creates useful indexes.
 
 Traversing from a conference to speakers becomes a backend-neutral expression:
 

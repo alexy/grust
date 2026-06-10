@@ -251,6 +251,7 @@ pub trait GraphStore: Send + Sync {
     async fn put_node(&self, node: &Node) -> Result<NodeId>;
     async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>>;
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport>;
+    async fn put_typed_graph(&self, schema: &GraphSchema, graph: &Graph) -> Result<LoadReport>;
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>>;
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>>;
@@ -260,7 +261,9 @@ pub trait GraphStore: Send + Sync {
 The trait is async because real graph stores often cross a process, network,
 database, or object-store boundary. `put_graph` borrows `&Graph` rather than
 consuming it, which makes retries, audit, comparison, and multi-backend loading
-straightforward.
+straightforward. `put_typed_graph` adds a schema-backed path: validate the graph
+against `GraphSchema`, apply that schema to the backend, and then write the
+graph through the same store contract.
 
 Administrative operations live in `GraphAdminStore`, where `bootstrap` and
 `clear` can support test harnesses, demos, migrations, and replacement
@@ -275,16 +278,16 @@ present the same Rust-facing boundary.
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "18px", "primaryColor": "#f7f8fb", "primaryTextColor": "#172033", "primaryBorderColor": "#4f46e5", "lineColor": "#3b4252", "secondaryColor": "#eef6f0", "tertiaryColor": "#fff6df"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 50, "rankSpacing": 58, "padding": 18}}}%%
 flowchart LR
-  graphObj["grust::Graph"] --> store["GraphStore\nput_graph, get_node,\nget_edges, traverse"]
+  graphObj["grust::Graph"] --> store["GraphStore\nput_graph, put_typed_graph,\nget_node, get_edges, traverse"]
   graphObj --> coco["CocoIndex export\nnot a GraphStore"]
 
   store --> memory["Memory\nBTreeMap scans"]
-  store --> lancedb["LanceDB\nArrow tables and merge_insert"]
-  store --> pggraph["pgGraph\nPostgreSQL tables and SQL joins"]
-  store --> sail["Sail\nSpark Connect and DataFrames"]
-  store --> falkor["FalkorDB\nRedis GRAPH.QUERY writes"]
-  store --> helix["HelixDB\nHTTP or SDK writes"]
-  store --> surreal["SurrealDB\nHTTP or SDK writes"]
+  store --> lancedb["LanceDB\nuniversal + typed Arrow tables"]
+  store --> pggraph["pgGraph\nPostgreSQL tables,\ntyped views, SQL joins"]
+  store --> sail["Sail\nuniversal + typed Delta tables"]
+  store --> falkor["FalkorDB\nRedis GRAPH.QUERY writes\nand property indexes"]
+  store --> helix["HelixDB\nHTTP or SDK writes\nschema-name validation"]
+  store --> surreal["SurrealDB\nHTTP or SDK writes\nschemafull tables"]
 
   lancedb --> universal["Universal layout\ngrust_nodes and grust_edges"]
   pggraph --> universal
@@ -302,12 +305,12 @@ flowchart LR
 Grust has several backend and integration crates:
 
 - `grust-memory` is the deterministic local store for tests, examples, and no-service workflows.
-- `grust-lancedb` stores nodes and edges in LanceDB tables through the Rust SDK and supports backend-neutral reads and bounded traversal.
-- `grust-pggraph` stores universal graph tables in PostgreSQL, registers them with pgGraph, and lowers traversal to SQL joins.
-- `grust-sail` writes graph data through Sail Spark Connect and lowers traversal to Spark SQL joins over DataFrames.
-- `grust-falkor` writes through Redis `GRAPH.QUERY` using FalkorDB's Cypher-like surface.
-- `grust-helix` supports HTTP and SDK stores for HelixDB writes.
-- `grust-surreal` supports HTTP and SDK stores for SurrealDB writes.
+- `grust-lancedb` stores universal nodes and edges in LanceDB tables, supports backend-neutral reads and bounded traversal, and mirrors schema-labeled writes into typed Arrow tables.
+- `grust-pggraph` stores universal graph tables in PostgreSQL, registers them with pgGraph, lowers traversal to SQL joins, and exposes typed label views and expression indexes from `GraphSchema`.
+- `grust-sail` writes graph data through Sail Spark Connect, lowers traversal to Spark SQL joins over DataFrames, and mirrors schema-labeled writes into typed Delta tables.
+- `grust-falkor` writes through Redis `GRAPH.QUERY` using FalkorDB's Cypher-like surface and creates schema-driven label/property indexes.
+- `grust-helix` supports HTTP and SDK stores for HelixDB writes and validates schema names that can be lowered through dynamic queries.
+- `grust-surreal` supports HTTP and SDK stores for SurrealDB writes and lowers `GraphSchema` into schemafull table and field definitions.
 - `grust-cocoindex` is intentionally different: it exports a Grust graph as CocoIndex-style node and relationship target state rather than implementing `GraphStore`.
 
 The important part is not that all of these backends are equally mature. They
@@ -367,28 +370,57 @@ Representation** is the right follow-up, and **Design Tradeoffs** explains why
 Grust starts with a narrow traversal language instead of trying to clone every
 graph query system at once.
 
-## Schema Later, Not Schema Never
+## Typed Backends Through GraphSchema
 
 Grust already has schema types: `GraphSchema`, `NodeType`, `EdgeType`, `Field`,
-`FieldType`, and `EdgeUniqueness`. The default `apply_schema` implementation is
-a no-op, which means schemaless and schema-later backends can work without
-ceremony.
+`FieldType`, and `EdgeUniqueness`. In current Grust, schema is not just a note
+for later. `GraphSchema` validates labels, required fields, field value types,
+and edge endpoint labels before a typed graph is written:
 
-That matters because the right schema story differs by backend. A universal
-`grust_nodes` and `grust_edges` layout is flexible and portable. A
-label-partitioned table layout can be faster and more strongly typed, but it
-needs schema, migrations, and planning. A graph-native database may want type
-definitions, relationship declarations, indexes, or generated queries.
+```rust
+let schema = GraphSchema::builder()
+    .node(
+        "Person",
+        vec![
+            Field::required("name", FieldType::String),
+            Field::optional("age", FieldType::Int),
+        ],
+    )
+    .node("Project", vec![Field::required("name", FieldType::String)])
+    .edge(
+        "WORKS_ON",
+        vec![Label::new("Person")],
+        vec![Label::new("Project")],
+        vec![Field::required("role", FieldType::String)],
+    )
+    .build();
+
+store.put_typed_graph(&schema, &graph).await?;
+```
+
+That call is still backend-neutral application code. The backend decides what
+schema means in its own storage engine.
 
 Typed ingestion is not a replacement for `GraphSchema`. It validates values
 before they become graph data. `GraphSchema` describes graph labels, fields,
 uniqueness, and backend-facing metadata after the graph model is known. They
 reinforce each other without having to be the same abstraction.
 
-The architecture keeps both paths open. Core graph construction does not
-require schema. Backends can use schema when it helps. Read **Schema and
-Validation Direction** for the current direction and **Design Tradeoffs** for
-the storage-layout argument behind that choice.
+The current backend behavior is deliberately pragmatic:
+
+- Memory stores the schema and validates local writes.
+- LanceDB keeps universal graph tables and mirrors typed rows into Arrow tables.
+- pgGraph/PostgreSQL keeps universal JSONB tables and adds typed views and indexes.
+- Sail keeps universal graph DataFrames and mirrors typed rows into Delta tables.
+- FalkorDB creates label/property indexes.
+- Helix validates schema names for the dynamic-query path.
+- SurrealDB defines schemafull tables and typed fields.
+
+That is the trick: Grust does not force every backend into one storage layout.
+A universal `grust_nodes` and `grust_edges` layout is flexible and portable.
+Typed tables, views, fields, and indexes are layered on when a backend can use
+them. Read **Schema and Validation Direction** for the current direction and
+**Design Tradeoffs** for the storage-layout argument behind that choice.
 
 ## Where Grust Is Going
 
@@ -398,15 +430,14 @@ Grust is pre-release, but its direction is already clear:
 - Make IDs explicit and stable.
 - Treat edge properties as first-class data.
 - Prefer typed values over ad hoc JSON strings.
-- Keep schema optional.
+- Keep schema optional but useful for typed backend storage.
 - Keep typed ingestion optional and composable.
 - Keep traversal backend-neutral.
 - Let backend-specific capabilities live as extension traits when they appear.
 
 The next natural work is deeper read and traversal support across the
-write-focused backends, richer import/export helpers, backend-specific schema
-lowering, more traversal result shapes, and mutation APIs for incremental
-updates.
+write-focused backends, richer import/export helpers, more typed read helpers,
+more traversal result shapes, and mutation APIs for incremental updates.
 
 That last point is where the CocoIndex adapter becomes interesting. A property
 graph can be more than a one-time load. It can be target state for an indexing
