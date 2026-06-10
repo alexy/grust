@@ -1,0 +1,17 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "18px", "primaryColor": "#f7f8fb", "primaryTextColor": "#172033", "primaryBorderColor": "#4f46e5", "lineColor": "#3b4252", "secondaryColor": "#eef6f0", "tertiaryColor": "#fff6df"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 55, "rankSpacing": 60, "padding": 18}}}%%
+flowchart TB
+  app["Rust application\nDomain model and loaders"] --> facade["grust facade crate\ncrate package: grust-graph"]
+
+  facade --> core["grust-core\nModel, builder, schema,\ntraversal IR, store traits"]
+  facade --> backends["Feature-gated GraphStore backends"]
+  facade --> export["grust-cocoindex\nTarget-state export adapter"]
+
+  core --> model["Graph = nodes + edges\nNode = id + label + props\nEdge = from + to + label + props"]
+  core --> contract["GraphStore\nGraphAdminStore"]
+  core --> ir["Traversal IR\nbackend-neutral steps"]
+
+  backends --> local["grust-memory\nDeterministic local store"]
+  backends --> graphdb["Graph database writers\nFalkorDB, HelixDB, SurrealDB"]
+  backends --> tables["Table and analytics stores\nLanceDB, pgGraph, Sail"]
+
+  export --> target["Serializable node and relationship\nstate for incremental sync flows"]

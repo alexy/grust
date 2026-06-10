@@ -2820,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "grust-cocoindex"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "grust-core",
  "serde",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "grust-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "garde",
@@ -2838,11 +2838,12 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror",
+ "zod-rs",
 ]
 
 [[package]]
 name = "grust-falkor"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -2851,7 +2852,7 @@ dependencies = [
 
 [[package]]
 name = "grust-graph"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "garde",
  "grust-cocoindex",
@@ -2864,11 +2865,13 @@ dependencies = [
  "grust-sail",
  "grust-surreal",
  "serde",
+ "serde_json",
+ "zod-rs",
 ]
 
 [[package]]
 name = "grust-helix"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -2879,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "grust-lancedb"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2893,7 +2896,7 @@ dependencies = [
 
 [[package]]
 name = "grust-memory"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "futures-executor",
@@ -2902,7 +2905,7 @@ dependencies = [
 
 [[package]]
 name = "grust-pggraph"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -2913,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "grust-sail"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2929,7 +2932,7 @@ dependencies = [
 
 [[package]]
 name = "grust-surreal"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -8888,6 +8891,27 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zod-rs"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e889f31076139dec37e0284a538e12f29678d6f14c53fa2de30e5f220cc05161"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "zod-rs-util",
+]
+
+[[package]]
+name = "zod-rs-util"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df40b4b6ed43a8b7d243def902f6f0092fb62b8a5e6dc1d1404d4d378c99d34b"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "zstd"

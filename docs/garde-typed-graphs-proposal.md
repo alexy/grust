@@ -11,12 +11,18 @@ The important boundary is that typed graph definitions are an ingestion layer. B
 - `TypedGraphBuilder` validates each typed value before adding it to the inner `GraphBuilder`.
 - The default property conversion uses `serde_json::to_value`, so most typed structs only need `Serialize`, `garde::Validate`, and a small `TypedNode` or `TypedEdge` implementation.
 - Existing dynamic graph values can coexist with typed values through `from_graph`, `from_builder`, `add_raw_node`, `add_raw_edge`, and `into_builder`.
+- The optional `typed-zod-rs` feature adds raw JSON ingestion helpers on top of `typed-garde`: `parse_typed_json`, `parse_typed_json_with`, `add_node_from_json`, and `add_edge_from_json`.
 
 ## Extension Model
 
 Typed graphs can grow by adding new Rust types. A project might start with `Person`, `Project`, and `WorksOn`, then later add `Team` and `MemberOf` without changing the original types or the backend contract. Existing untyped graph documents can also be loaded first and then extended with typed additions.
 
-See `crates/grust/examples/typed_graph_garde.rs` for a runnable example of that flow.
+See these runnable examples:
+
+- `crates/grust/examples/typed_graph_garde.rs`: garde-only typed graph construction.
+- `crates/grust/examples/typed_graph_garde_mixed.rs`: garde typed values coexisting with raw Grust nodes and edges.
+- `crates/grust/examples/typed_graph_zod_garde.rs`: zod-rs JSON shape validation followed by serde decode and garde domain validation.
+- `crates/grust/examples/typed_graph_zod_garde_errors.rs`: the boundary between zod-rs shape errors and garde domain errors.
 
 ## Why This Fits Grust
 

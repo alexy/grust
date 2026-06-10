@@ -264,7 +264,402 @@ Serialization removes the generated `id` property from node property maps when
 it only mirrors the node's `NodeId`. That keeps exported documents readable
 without changing what `Node::new` guarantees after loading.
 
-# 4. Traversal as an Intermediate Representation
+# 4. Typed Graph Ingestion with garde and zod-rs
+
+The core `Graph`, `Node`, and `Edge` types are intentionally dynamic. A node has
+a label and a property map; an edge has a label, endpoints, and a property map.
+That dynamic shape is the right interchange format for backends, graph
+documents, audits, and cross-system movement. Application code, however, often
+starts with typed Rust structs: a `Person`, a `Project`, a `WorksOn`
+relationship, or some domain-specific event. Grust's typed ingestion layer
+connects those two worlds.
+
+The typed layer is optional. It is enabled through Cargo features:
+
+```toml
+[dependencies]
+grust = { package = "grust-graph", version = "0.3", features = ["typed-garde"] }
+```
+
+`typed-garde` adds Rust-struct validation and typed lowering. A second feature,
+`typed-zod-rs`, layers raw JSON shape validation on top:
+
+```toml
+[dependencies]
+grust = { package = "grust-graph", version = "0.3", features = ["typed-zod-rs"] }
+```
+
+`typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
+untrusted JSON shape first, Serde turns the JSON into Rust values, and garde
+checks typed domain invariants before Grust lowers the value into a normal
+`Node` or `Edge`.
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "21px", "fontFamily": "Arial", "primaryBorderColor": "#5b4acb", "lineColor": "#333333"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 50, "rankSpacing": 58, "padding": 18}}}%%
+flowchart LR
+  json["Raw JSON\nserde_json::Value"] --> zod["zod-rs schema\nshape validation"]
+  zod --> serde["serde_json\nDeserialize"]
+  serde --> typed["Rust struct\nPerson, Project, WorksOn"]
+  typed --> garde["garde::Validate\ndomain validation"]
+  garde --> lower["TypedNode or TypedEdge\nlabel, id, endpoints, props"]
+  lower --> grustData["Grust Graph\nNode + Edge"]
+  grustData --> store["GraphStore\nany backend"]
+```
+
+The important promise is that typed ingestion does not create a second graph
+model. Once validation succeeds, everything becomes the ordinary Grust graph
+shape. Backends do not need to know whether a node came from `GraphBuilder`, a
+YAML document, a typed Rust struct, or a zod-rs-validated JSON payload.
+
+## garde: Typed Rust Validation
+
+`garde` is a Rust validation library built around a derive macro. You attach
+validation rules to fields, derive `garde::Validate`, and then call
+`validate()` or `validate_with(...)`. The rules live near the Rust type, so they
+travel with the domain model instead of being hidden in a loader function.
+
+Common garde rules include:
+
+- `length(min = 1)` for nonempty strings and collections.
+- `range(min = 1, max = 100)` for numeric bounds.
+- `inner(...)` for validating items inside a collection.
+- `custom(...)` for domain-specific validation functions.
+- `dive` for validating nested values that also implement `Validate`.
+
+In Grust, a typed node implements `TypedNode`. It supplies a graph label and a
+stable node id. The default property conversion serializes the struct through
+Serde and converts the resulting object fields into Grust properties:
+
+```rust
+use grust::prelude::*;
+use grust::typed::garde;
+use serde::Serialize;
+
+#[derive(Debug, Serialize, garde::Validate)]
+#[garde(allow_unvalidated)]
+struct Person {
+    #[garde(length(min = 1))]
+    id: String,
+    #[garde(length(min = 1))]
+    name: String,
+    #[garde(length(min = 1), inner(length(min = 1)))]
+    skills: Vec<String>,
+}
+
+impl TypedNode for Person {
+    const LABEL: &'static str = "Person";
+
+    fn node_id(&self) -> NodeId {
+        format!("person:{}", self.id).into()
+    }
+}
+```
+
+Typed edges implement `TypedEdge`. They provide a label and endpoint ids:
+
+```rust
+#[derive(Debug, Serialize, garde::Validate)]
+#[garde(allow_unvalidated)]
+struct WorksOn {
+    #[garde(length(min = 1))]
+    person_id: String,
+    #[garde(length(min = 1))]
+    project_id: String,
+    #[garde(range(min = 1, max = 100))]
+    allocation_percent: u8,
+}
+
+impl TypedEdge for WorksOn {
+    const LABEL: &'static str = "WORKS_ON";
+
+    fn from_node_id(&self) -> NodeId {
+        format!("person:{}", self.person_id).into()
+    }
+
+    fn to_node_id(&self) -> NodeId {
+        format!("project:{}", self.project_id).into()
+    }
+}
+```
+
+`TypedGraphBuilder` validates and lowers these values:
+
+```rust
+let mut builder = TypedGraphBuilder::new();
+
+builder.add_node(&Person {
+    id: "nia".to_string(),
+    name: "Nia".to_string(),
+    skills: vec!["rust".to_string(), "graphs".to_string()],
+})?;
+
+builder.add_edge(&WorksOn {
+    person_id: "nia".to_string(),
+    project_id: "grust".to_string(),
+    allocation_percent: 80,
+})?;
+
+let graph = builder.build();
+```
+
+Validation fails before graph construction. If `allocation_percent` is `0`, the
+`range(min = 1, max = 100)` rule produces a Grust schema error and the edge is
+not added. This keeps invalid domain facts out of the graph rather than relying
+on a backend to reject them later.
+
+## Typed and Untyped Graphs Coexist
+
+The typed layer is an ingestion layer over the ordinary `GraphBuilder`. It does
+not force an all-or-nothing choice. A graph can start as a document, accept raw
+nodes and edges, and then be extended with typed values:
+
+```rust
+let existing = Graph::new(
+    vec![Node::new("Document", "doc:garde-proposal", Props::new())],
+    Vec::new(),
+);
+
+let mut builder = TypedGraphBuilder::from_graph(existing);
+
+builder.add_node(&Person {
+    id: "nia".to_string(),
+    name: "Nia".to_string(),
+    skills: vec!["rust".to_string(), "graphs".to_string()],
+})?;
+
+builder.add_raw_edge(Edge::new(
+    "AUTHORED",
+    "person:nia",
+    "doc:garde-proposal",
+    Props::new(),
+));
+
+let graph = builder.build();
+```
+
+The coexistence API is explicit:
+
+- `TypedGraphBuilder::from_graph(graph)` starts from an existing `Graph`.
+- `TypedGraphBuilder::from_builder(builder)` starts from an existing
+  `GraphBuilder`.
+- `add_raw_node(node)` and `add_raw_edge(edge)` add ordinary Grust values.
+- `into_builder()` returns the inner `GraphBuilder` when lower-level builder
+  operations are needed.
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"fontSize": "21px", "fontFamily": "Arial", "primaryBorderColor": "#5b4acb", "lineColor": "#333333"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 52, "rankSpacing": 58, "padding": 18}}}%%
+flowchart TB
+  rawDoc["YAML, JSON, XML\nGraph::from_*"] --> existingGraph["Existing Graph"]
+  rawBuilder["Raw GraphBuilder\nnode + edge"] --> inner["GraphBuilder"]
+  existingGraph --> typedBuilder["TypedGraphBuilder"]
+  inner --> typedBuilder
+  typedStruct["Typed Rust values\nTypedNode + TypedEdge"] --> typedBuilder
+  rawValues["Raw Node + Edge"] --> typedBuilder
+  typedBuilder --> finalGraph["One Grust Graph"]
+  finalGraph --> docs["to_yaml, to_json, to_xml"]
+  finalGraph --> stores["GraphStore backends"]
+```
+
+This is useful during migrations. A project can keep loading existing graph
+documents while adding typed definitions for the domain facts that benefit most
+from Rust validation. Over time, more labels can move to typed constructors
+without breaking the storage or document formats.
+
+## What Zod Means Here
+
+Zod is best known from TypeScript. It lets developers define a runtime schema
+and validate untrusted input before treating it as application data. In
+TypeScript, this closes an important gap: static types disappear at runtime, so
+a value received from JSON, an HTTP request, a form, or a message queue still
+needs runtime validation.
+
+Rust has a different type system, but the boundary problem still exists.
+External data arrives as bytes or JSON. Serde can deserialize those bytes into a
+Rust struct, but it is often useful to separate two questions:
+
+1. Does this JSON have the expected shape?
+2. Does the resulting Rust value satisfy my domain rules?
+
+`zod-rs` answers the first question. `garde` answers the second. Grust's
+`typed-zod-rs` feature wires those stages together:
+
+```rust
+use grust::prelude::*;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use zod_rs::prelude::{Schema, number, object, string};
+
+#[derive(Debug, Deserialize, Serialize, garde::Validate)]
+#[garde(allow_unvalidated)]
+struct Person {
+    #[garde(length(min = 1))]
+    id: String,
+    #[garde(length(min = 1))]
+    name: String,
+    #[garde(length(min = 1), inner(length(min = 1)))]
+    skills: Vec<String>,
+}
+
+impl TypedNode for Person {
+    const LABEL: &'static str = "Person";
+
+    fn node_id(&self) -> NodeId {
+        format!("person:{}", self.id).into()
+    }
+}
+
+let person_schema = object()
+    .field("id", string().min(1))
+    .field("name", string().min(1))
+    .field("skills", string().min(1).array())
+    .strict();
+
+let json = json!({
+    "id": "nia",
+    "name": "Nia",
+    "skills": ["rust", "graphs"]
+});
+
+let person: Person = parse_typed_json(&person_schema, &json)?;
+```
+
+The same schema can feed the graph builder directly:
+
+```rust
+let mut builder = TypedGraphBuilder::new();
+builder.add_node_from_json::<Person, _>(&person_schema, &json)?;
+```
+
+For edges, the pattern is the same:
+
+```rust
+#[derive(Debug, Deserialize, Serialize, garde::Validate)]
+#[garde(allow_unvalidated)]
+struct WorksOn {
+    #[garde(length(min = 1))]
+    person_id: String,
+    #[garde(length(min = 1))]
+    project_id: String,
+    #[garde(range(min = 1, max = 100))]
+    allocation_percent: u8,
+}
+
+impl TypedEdge for WorksOn {
+    const LABEL: &'static str = "WORKS_ON";
+
+    fn from_node_id(&self) -> NodeId {
+        format!("person:{}", self.person_id).into()
+    }
+
+    fn to_node_id(&self) -> NodeId {
+        format!("project:{}", self.project_id).into()
+    }
+}
+
+let works_on_schema = object()
+    .field("person_id", string().min(1))
+    .field("project_id", string().min(1))
+    .field("allocation_percent", number().int().min(1.0).max(100.0))
+    .strict();
+
+builder.add_edge_from_json::<WorksOn, _>(
+    &works_on_schema,
+    &json!({
+        "person_id": "nia",
+        "project_id": "grust",
+        "allocation_percent": 80
+    }),
+)?;
+```
+
+The adapter intentionally deserializes the original JSON after zod-rs accepts
+it. This preserves Rust integer types. For example, `zod-rs` validates numbers
+through a floating-point schema, but Serde should still be allowed to decode the
+original JSON integer `80` into a Rust `u8`.
+
+## How the Options Interact
+
+There are four common construction paths:
+
+```text
+Raw GraphBuilder:
+  trusted Rust code -> Node/Edge -> Graph
+
+Graph documents:
+  YAML/JSON/XML -> Graph::from_* validation -> Graph
+
+typed-garde:
+  Rust struct -> garde validation -> TypedNode/TypedEdge lowering -> Graph
+
+typed-zod-rs:
+  raw JSON -> zod-rs shape validation -> Serde -> garde validation -> Graph
+```
+
+Choose `GraphBuilder` when the data is already trusted Rust code and the
+dynamic graph model is enough. Choose graph documents when you need readable
+fixtures, interchange files, or migration inputs. Choose `typed-garde` when the
+domain model lives in Rust structs and should enforce Rust-level invariants.
+Choose `typed-zod-rs` when the input is untrusted JSON and you want a separate
+shape gate before Serde and garde.
+
+These options compose. A single graph can contain nodes loaded from YAML, raw
+edges added by `GraphBuilder`, typed nodes validated by garde, and request
+payloads validated first by zod-rs. The result is still just `Graph`.
+
+The distinction between zod-rs and garde is worth keeping crisp:
+
+- zod-rs sees `serde_json::Value`.
+- Serde converts JSON into Rust types.
+- garde sees Rust fields with Rust types.
+- `TypedNode` and `TypedEdge` convert validated Rust values into Grust labels,
+  ids, endpoints, and properties.
+
+For example, this JSON fails at the zod-rs stage because `skills` is not an
+array:
+
+```json
+{
+  "id": "nia",
+  "name": "Nia",
+  "skills": "rust"
+}
+```
+
+This JSON can pass a loose zod-rs shape check but fail at the garde stage if the
+Rust type requires at least two skills:
+
+```json
+{
+  "id": "nia",
+  "name": "Nia",
+  "skills": ["rust"]
+}
+```
+
+That separation gives application authors precise error boundaries. Shape
+errors usually belong near the API or file-ingest boundary. Domain errors belong
+near the typed model.
+
+## Relationship to GraphSchema
+
+`GraphSchema` and typed ingestion solve different problems. `GraphSchema`
+describes graph labels, fields, uniqueness, and backend-facing metadata. It can
+drive indexes, migrations, table layouts, or validation inside a store. Typed
+ingestion validates values before they become graph data.
+
+In practice they can reinforce each other:
+
+- `TypedNode` and `TypedEdge` keep application construction honest.
+- zod-rs schemas protect JSON ingress points.
+- `GraphSchema` tells storage backends what structure to expect.
+- `GraphStore` remains the common persistence contract.
+
+This layered design keeps Grust from becoming either too loose or too rigid.
+Projects can start with raw graph construction, add typed Rust validation for
+important labels, add zod-rs for JSON ingress, and later add `GraphSchema` for
+backend optimization.
+
+# 5. Traversal as an Intermediate Representation
 
 Grust traversal is not Cypher, SQL, GQL, SurrealQL, Spark SQL, or a graph
 database dialect. It is a small Rust intermediate representation:
@@ -299,7 +694,7 @@ This design also protects application code. A caller asks for a graph-shaped
 operation; the backend decides whether that operation becomes a map scan, a SQL
 join, a DataFrame query, a Redis graph command, or a future native graph query.
 
-# 5. The Store Contract
+# 6. The Store Contract
 
 The central backend trait is `GraphStore`:
 
@@ -344,7 +739,7 @@ This separation keeps ordinary application persistence apart from setup and
 destructive workflows. A production service may receive a `GraphStore`, while a
 test harness or migration tool can require `GraphAdminStore`.
 
-# 6. Rust Concepts Used
+# 7. Rust Concepts Used
 
 Grust is a good example of idiomatic Rust applied to a storage abstraction.
 
@@ -373,7 +768,7 @@ unsupported-feature, and serialization failures. That lets a caller tell the
 difference between "the database rejected this" and "this backend does not yet
 support traversal."
 
-# 7. Backend Architecture
+# 8. Backend Architecture
 
 Backends share the same input model but not the same execution model:
 
@@ -488,7 +883,7 @@ The export uses Grust node IDs as target keys, converts properties to JSON, and
 requires edge endpoints to exist in the graph so relationship source and target
 labels can be emitted.
 
-# 8. Example: A Conference Graph
+# 9. Example: A Conference Graph
 
 Here is a complete graph-building example:
 
@@ -561,7 +956,7 @@ flowchart LR
   presentedBy --> ada["Person\nperson:ada"]
 ```
 
-# 9. Schema and Validation Direction
+# 10. Schema and Validation Direction
 
 Grust already has schema types: `GraphSchema`, `NodeType`, `EdgeType`, `Field`,
 `FieldType`, and `EdgeUniqueness`. The default `GraphStore::apply_schema`
@@ -579,7 +974,7 @@ a replacement for the graph. Application code can begin with plain graph
 construction, add schemas when operational needs demand it, and still speak the
 same store trait.
 
-# 10. Design Tradeoffs
+# 11. Design Tradeoffs
 
 The universal node/edge layout appears in multiple backend plans because it is
 the easiest way to preserve arbitrary property graphs:
@@ -603,7 +998,7 @@ Grust's current architecture keeps both paths open. Core stays universal.
 Backends choose their storage layout. Schema support can become richer without
 forcing every backend to look the same.
 
-# 11. Where Grust Can Grow
+# 12. Where Grust Can Grow
 
 The next natural step is to deepen read and traversal support across the write
 focused backends. FalkorDB, HelixDB, and SurrealDB already have enough write

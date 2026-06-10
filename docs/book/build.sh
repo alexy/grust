@@ -51,6 +51,6 @@ fi
 "$EBOOK_CONVERT" build/dist/grust-book.epub build/dist/grust-book.mobi
 
 echo "Built:"
-echo "  book/build/dist/grust-book.pdf"
-echo "  book/build/dist/grust-book.epub"
-echo "  book/build/dist/grust-book.mobi"
+echo "  docs/book/build/dist/grust-book.pdf"
+echo "  docs/book/build/dist/grust-book.epub"
+echo "  docs/book/build/dist/grust-book.mobi"

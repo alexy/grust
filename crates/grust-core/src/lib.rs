@@ -278,12 +278,16 @@ impl From<serde_json::Value> for Value {
 #[cfg(feature = "typed-garde")]
 pub mod typed {
     use serde::Serialize;
+    #[cfg(feature = "typed-zod-rs")]
+    use serde::de::DeserializeOwned;
 
     use crate::{
         Edge, EdgeId, Graph, GraphBuilder, GrustError, Node, NodeId, Props, Result, Value,
     };
 
     pub use garde;
+    #[cfg(feature = "typed-zod-rs")]
+    pub use zod_rs;
 
     pub trait TypedNode: garde::Validate + Serialize {
         const LABEL: &'static str;
@@ -382,6 +386,66 @@ pub mod typed {
             self.add_validated_edge(edge)
         }
 
+        #[cfg(feature = "typed-zod-rs")]
+        pub fn add_node_from_json<T, S>(
+            &mut self,
+            schema: &S,
+            value: &serde_json::Value,
+        ) -> Result<NodeId>
+        where
+            T: TypedNode + DeserializeOwned,
+            T::Context: Default,
+            S: zod_rs::Schema<serde_json::Value>,
+        {
+            let node = parse_typed_json::<T, S>(schema, value)?;
+            self.add_validated_node(&node)
+        }
+
+        #[cfg(feature = "typed-zod-rs")]
+        pub fn add_node_from_json_with<T, S>(
+            &mut self,
+            schema: &S,
+            value: &serde_json::Value,
+            ctx: &T::Context,
+        ) -> Result<NodeId>
+        where
+            T: TypedNode + DeserializeOwned,
+            S: zod_rs::Schema<serde_json::Value>,
+        {
+            let node = parse_typed_json_with::<T, S>(schema, value, ctx)?;
+            self.add_validated_node(&node)
+        }
+
+        #[cfg(feature = "typed-zod-rs")]
+        pub fn add_edge_from_json<T, S>(
+            &mut self,
+            schema: &S,
+            value: &serde_json::Value,
+        ) -> Result<Option<EdgeId>>
+        where
+            T: TypedEdge + DeserializeOwned,
+            T::Context: Default,
+            S: zod_rs::Schema<serde_json::Value>,
+        {
+            let edge = parse_typed_json::<T, S>(schema, value)?;
+            self.add_validated_edge(&edge)
+        }
+
+        #[cfg(feature = "typed-zod-rs")]
+        pub fn add_edge_from_json_with<T, S>(
+            &mut self,
+            schema: &S,
+            value: &serde_json::Value,
+            ctx: &T::Context,
+        ) -> Result<Option<EdgeId>>
+        where
+            T: TypedEdge + DeserializeOwned,
+            S: zod_rs::Schema<serde_json::Value>,
+        {
+            let edge = parse_typed_json_with::<T, S>(schema, value, ctx)?;
+            self.add_validated_edge(&edge)
+        }
+
         pub fn build(self) -> Graph {
             self.builder.build()
         }
@@ -432,6 +496,38 @@ pub mod typed {
             .into_iter()
             .map(|(key, value)| (key, Value::from(value)))
             .collect())
+    }
+
+    #[cfg(feature = "typed-zod-rs")]
+    pub fn parse_typed_json<T, S>(schema: &S, value: &serde_json::Value) -> Result<T>
+    where
+        T: DeserializeOwned + garde::Validate,
+        T::Context: Default,
+        S: zod_rs::Schema<serde_json::Value>,
+    {
+        let ctx = T::Context::default();
+        parse_typed_json_with(schema, value, &ctx)
+    }
+
+    #[cfg(feature = "typed-zod-rs")]
+    pub fn parse_typed_json_with<T, S>(
+        schema: &S,
+        value: &serde_json::Value,
+        ctx: &T::Context,
+    ) -> Result<T>
+    where
+        T: DeserializeOwned + garde::Validate,
+        S: zod_rs::Schema<serde_json::Value>,
+    {
+        schema
+            .safe_parse(value)
+            .map_err(|err| GrustError::Schema(format!("zod-rs validation failed: {err}")))?;
+        let typed: T = serde_json::from_value(value.clone())
+            .map_err(|err| GrustError::Serialization(format!("typed JSON decode error: {err}")))?;
+        typed
+            .validate_with(ctx)
+            .map_err(|err| GrustError::Schema(format!("typed validation failed: {err}")))?;
+        Ok(typed)
     }
 
     fn validation_error(label: &str, err: garde::Report) -> GrustError {
@@ -1219,6 +1315,9 @@ pub mod prelude {
 
     #[cfg(feature = "typed-garde")]
     pub use crate::typed::{TypedEdge, TypedGraphBuilder, TypedNode, garde, props_from_serialize};
+
+    #[cfg(feature = "typed-zod-rs")]
+    pub use crate::typed::{parse_typed_json, parse_typed_json_with, zod_rs};
 }
 
 #[cfg(test)]

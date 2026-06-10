@@ -1,0 +1,16 @@
+%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "18px", "primaryColor": "#f7f8fb", "primaryTextColor": "#172033", "primaryBorderColor": "#4f46e5", "lineColor": "#3b4252", "secondaryColor": "#eef6f0", "tertiaryColor": "#fff6df"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 45, "rankSpacing": 56, "padding": 18}}}%%
+flowchart TB
+  app["Application code"] --> fluent["Traversal builder\nfrom node, out edge, target label"]
+  fluent --> ir["Traversal IR\nstart + ordered steps + optional limit"]
+
+  ir --> memory["Memory\nadjacency-map lookup"]
+  ir --> lancedb["LanceDB\nrepeated table filters"]
+  ir --> pggraph["pgGraph\nSQL joins over nodes and edges"]
+  ir --> sail["Sail\nSpark SQL joins"]
+  ir --> future["Future backend lowerings\nCypher, SurrealQL, Helix queries"]
+
+  memory --> result["Vec<Node>"]
+  lancedb --> result
+  pggraph --> result
+  sail --> result
+  future --> result

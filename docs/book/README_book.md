@@ -2,8 +2,8 @@
 
 ## Separate Cover Page
 
-Use `book/cover.md` as a standalone cover source and keep it separate from
-`book/manuscript.md`. The visible cover text for this book is:
+Use `docs/book/cover.md` as a standalone cover source and keep it separate from
+`docs/book/manuscript.md`. The visible cover text for this book is:
 
 - Title: `grust-book`
 - Subtitle: `A Rust Property Graph Architecture`
@@ -23,12 +23,12 @@ Keep the visible text synchronized between both blocks. The Typst cover sets
 Run the Mermaid preprocessor before Pandoc:
 
 ```sh
-cd book
+cd docs/book
 node build.mjs
 ```
 
-This writes `book/build/manuscript.rendered.md` and diagram images under
-`book/build/diagrams/`.
+This writes `docs/book/build/manuscript.rendered.md` and diagram images under
+`docs/book/build/diagrams/`.
 
 ## PDF Build
 
@@ -108,12 +108,12 @@ On this machine, Calibre's converter is available at:
 The checked-in build script performs the full flow:
 
 ```sh
-cd book
+cd docs/book
 ./build.sh
 ```
 
 Outputs:
 
-- `book/build/dist/grust-book.pdf`
-- `book/build/dist/grust-book.epub`
-- `book/build/dist/grust-book.mobi`
+- `docs/book/build/dist/grust-book.pdf`
+- `docs/book/build/dist/grust-book.epub`
+- `docs/book/build/dist/grust-book.mobi`

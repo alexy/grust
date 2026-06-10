@@ -262,12 +262,12 @@ fn graph_serializes_to_xml() {
 
 #[cfg(feature = "typed-garde")]
 mod typed_garde_tests {
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
 
     use super::*;
     use crate::typed::{TypedEdge, TypedGraphBuilder, TypedNode, garde};
 
-    #[derive(Debug, Serialize, garde::Validate)]
+    #[derive(Debug, Deserialize, Serialize, garde::Validate)]
     #[garde(allow_unvalidated)]
     struct Person {
         #[garde(length(min = 1))]
@@ -286,7 +286,7 @@ mod typed_garde_tests {
         }
     }
 
-    #[derive(Debug, Serialize, garde::Validate)]
+    #[derive(Debug, Deserialize, Serialize, garde::Validate)]
     #[garde(allow_unvalidated)]
     struct Project {
         #[garde(length(min = 1))]
@@ -303,7 +303,7 @@ mod typed_garde_tests {
         }
     }
 
-    #[derive(Debug, Serialize, garde::Validate)]
+    #[derive(Debug, Deserialize, Serialize, garde::Validate)]
     #[garde(allow_unvalidated)]
     struct WorksOn {
         #[garde(length(min = 1))]
@@ -434,6 +434,101 @@ mod typed_garde_tests {
         assert_eq!(graph.edges.len(), 1);
         assert_eq!(graph.edges[0].from, NodeId::from("person:nia"));
         assert_eq!(graph.edges[0].to, NodeId::from("doc:proposal"));
+    }
+
+    #[cfg(feature = "typed-zod-rs")]
+    #[test]
+    fn zod_rs_schema_can_feed_typed_garde_nodes_and_edges() {
+        use serde_json::json;
+        use zod_rs::prelude::{Schema, number, object, string};
+
+        let person_schema = object()
+            .field("id", string().min(1))
+            .field("name", string().min(1))
+            .field("skills", string().min(1).array())
+            .strict();
+        let project_schema = object()
+            .field("id", string().min(1))
+            .field("title", string().min(1))
+            .strict();
+        let works_on_schema = object()
+            .field("person_id", string().min(1))
+            .field("project_id", string().min(1))
+            .field("allocation", number().int().min(1.0).max(100.0))
+            .strict();
+
+        let mut builder = TypedGraphBuilder::new();
+        builder
+            .add_node_from_json::<Person, _>(
+                &person_schema,
+                &json!({
+                    "id": "nia",
+                    "name": "Nia",
+                    "skills": ["rust", "graphs"]
+                }),
+            )
+            .expect("person JSON is valid");
+        builder
+            .add_node_from_json::<Project, _>(
+                &project_schema,
+                &json!({
+                    "id": "grust",
+                    "title": "Grust"
+                }),
+            )
+            .expect("project JSON is valid");
+        builder
+            .add_edge_from_json::<WorksOn, _>(
+                &works_on_schema,
+                &json!({
+                    "person_id": "nia",
+                    "project_id": "grust",
+                    "allocation": 80
+                }),
+            )
+            .expect("edge JSON is valid");
+
+        let graph = builder.build();
+
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), 1);
+        assert_eq!(graph.edges[0].label, Label::from("WORKS_ON"));
+    }
+
+    #[cfg(feature = "typed-zod-rs")]
+    #[test]
+    fn zod_rs_schema_errors_before_deserialize_and_garde_errors_after() {
+        use serde_json::json;
+        use zod_rs::prelude::{Schema, object, string};
+
+        let loose_person_schema = object()
+            .field("id", string().min(1))
+            .field("name", string().min(1))
+            .field("skills", string().array())
+            .strict();
+        let shape_error = crate::typed::parse_typed_json::<Person, _>(
+            &loose_person_schema,
+            &json!({
+                "id": "nia",
+                "name": "Nia",
+                "skills": "rust"
+            }),
+        )
+        .expect_err("zod-rs should reject a non-array skills field");
+
+        assert!(shape_error.to_string().contains("zod-rs validation failed"));
+
+        let domain_error = crate::typed::parse_typed_json::<Person, _>(
+            &loose_person_schema,
+            &json!({
+                "id": "nia",
+                "name": "Nia",
+                "skills": ["rust"]
+            }),
+        )
+        .expect_err("garde should reject too few skills");
+
+        assert!(domain_error.to_string().contains("typed validation failed"));
     }
 }
 
