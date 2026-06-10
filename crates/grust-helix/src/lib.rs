@@ -88,6 +88,10 @@ impl HelixHttpGraphStore {
 
 #[async_trait]
 impl GraphStore for HelixHttpGraphStore {
+    async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        validate_helix_schema(schema)
+    }
+
     async fn put_node(&self, node: &Node) -> Result<NodeId> {
         self.post(&helix_add_nodes_request(std::slice::from_ref(node))?)
             .await?;
@@ -164,6 +168,10 @@ impl HelixSdkGraphStore {
 
 #[async_trait]
 impl GraphStore for HelixSdkGraphStore {
+    async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        validate_helix_schema(schema)
+    }
+
     async fn put_node(&self, node: &Node) -> Result<NodeId> {
         post_helix_sdk_nodes(&self.client, std::slice::from_ref(node)).await?;
         Ok(node.id.clone())
@@ -448,6 +456,36 @@ fn relationship_type(value: &str) -> String {
         "RELATED_TO".to_string()
     } else {
         relationship
+    }
+}
+
+fn validate_helix_schema(schema: &GraphSchema) -> Result<()> {
+    for node_type in &schema.nodes {
+        validate_helix_name(node_type.label.as_str())?;
+        for field in &node_type.fields {
+            validate_helix_name(&field.name)?;
+        }
+    }
+    for edge_type in &schema.edges {
+        validate_helix_name(&relationship_type(edge_type.label.as_str()))?;
+        for field in &edge_type.fields {
+            validate_helix_name(&field.name)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_helix_name(value: &str) -> Result<()> {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        Ok(())
+    } else {
+        Err(GrustError::Schema(format!(
+            "unsafe Helix schema identifier '{value}'"
+        )))
     }
 }
 

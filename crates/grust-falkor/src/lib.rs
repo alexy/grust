@@ -61,6 +61,14 @@ impl FalkorGraphStore {
 
 #[async_trait]
 impl GraphStore for FalkorGraphStore {
+    async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        let mut connection = self.connection()?;
+        for query in falkor_schema_queries(schema, &self.config)? {
+            self.query(&mut connection, &query)?;
+        }
+        Ok(())
+    }
+
     async fn put_node(&self, node: &Node) -> Result<NodeId> {
         let mut connection = self.connection()?;
         let query = falkor_node_query(node, &self.config)?;
@@ -237,6 +245,29 @@ fn falkor_edges_batch_query(
     ))
 }
 
+fn falkor_schema_queries(schema: &GraphSchema, config: &FalkorConfig) -> Result<Vec<String>> {
+    let mut queries = Vec::new();
+    for node_type in &schema.nodes {
+        let label = schema_identifier(node_type.label.as_str())?;
+        queries.push(format!(
+            "CREATE INDEX ON :{}({})",
+            label, config.id_property
+        ));
+        for field in &node_type.fields {
+            queries.push(format!(
+                "CREATE INDEX ON :{}({})",
+                label,
+                schema_identifier(&field.name)?
+            ));
+        }
+    }
+    for edge_type in &schema.edges {
+        let relationship = relationship_type(edge_type.label.as_str());
+        validate_label(&relationship)?;
+    }
+    Ok(queries)
+}
+
 fn falkor_labels(node: &Node, config: &FalkorConfig) -> Result<String> {
     let labels = node
         .props
@@ -327,6 +358,15 @@ fn validate_label(label: &str) -> Result<()> {
             "unsafe FalkorDB label or relationship: {label}"
         )))
     }
+}
+
+fn schema_identifier(value: &str) -> Result<String> {
+    let identifier = value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect::<String>();
+    validate_label(&identifier)?;
+    Ok(identifier)
 }
 
 #[cfg(test)]

@@ -31,6 +31,56 @@ fn sample_graph() -> Graph {
     b.build()
 }
 
+#[test]
+fn schema_sql_creates_typed_delta_tables() {
+    let schema = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::required("name", FieldType::String),
+                Field::optional("age", FieldType::Int),
+            ],
+        )
+        .edge(
+            "presents",
+            vec![Label::new("Person")],
+            vec![Label::new("Talk")],
+            vec![Field::optional("source", FieldType::String)],
+        )
+        .build();
+
+    let sql = sail_schema_sql(&schema).unwrap();
+
+    assert!(sql.iter().any(|statement| statement.contains(
+        "CREATE TABLE IF NOT EXISTS grust_node_person (id STRING NOT NULL, `name` STRING, `age` BIGINT) USING delta"
+    )));
+    assert!(sql.iter().any(|statement| {
+        statement.contains("CREATE TABLE IF NOT EXISTS grust_edge_presents")
+            && statement.contains("`source` STRING")
+    }));
+}
+
+#[test]
+fn typed_merge_sql_writes_schema_fields_as_columns() {
+    let schema = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::required("name", FieldType::String),
+                Field::optional("age", FieldType::Int),
+            ],
+        )
+        .build();
+    let graph = sample_graph();
+
+    let sql = merge_typed_nodes_sql(Some(&schema), &graph.nodes).unwrap();
+
+    assert_eq!(sql.len(), 1);
+    assert!(sql[0].contains("MERGE INTO grust_node_person"));
+    assert!(sql[0].contains("'Ada Lovelace' AS `name`"));
+    assert!(sql[0].contains("36 AS `age`"));
+}
+
 #[tokio::test]
 async fn test_put_and_get_node() {
     let Some(store) = store().await else { return };

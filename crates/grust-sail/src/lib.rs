@@ -1,4 +1,5 @@
 use std::io::Cursor;
+use std::sync::RwLock;
 
 use arrow::array::{Array as _, StringArray};
 use arrow::ipc::reader::StreamReader;
@@ -43,6 +44,7 @@ impl Default for SailConfig {
 pub struct SailGraphStore {
     config: SailConfig,
     client: Mutex<SparkConnectServiceClient<Channel>>,
+    schema: RwLock<Option<GraphSchema>>,
 }
 
 impl SailGraphStore {
@@ -55,6 +57,7 @@ impl SailGraphStore {
         Ok(Self {
             config,
             client: Mutex::new(client),
+            schema: RwLock::new(None),
         })
     }
 
@@ -181,9 +184,29 @@ impl SailGraphStore {
 
 #[async_trait]
 impl GraphStore for SailGraphStore {
+    async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        self.bootstrap().await?;
+        for statement in sail_schema_sql(schema)? {
+            self.run_command(&statement).await?;
+        }
+        *self.schema.write().expect("Sail schema lock poisoned") = Some(schema.clone());
+        Ok(())
+    }
+
     async fn put_node(&self, node: &Node) -> Result<NodeId> {
+        let schema = self
+            .schema
+            .read()
+            .expect("Sail schema lock poisoned")
+            .clone();
+        if let Some(schema) = schema.as_ref() {
+            schema.validate_node(node)?;
+        }
         let sql = merge_nodes_sql(std::slice::from_ref(node))?;
         self.run_command(&sql).await?;
+        for sql in merge_typed_nodes_sql(schema.as_ref(), std::slice::from_ref(node))? {
+            self.run_command(&sql).await?;
+        }
         Ok(node.id.clone())
     }
 
@@ -194,16 +217,30 @@ impl GraphStore for SailGraphStore {
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        let schema = self
+            .schema
+            .read()
+            .expect("Sail schema lock poisoned")
+            .clone();
+        if let Some(schema) = schema.as_ref() {
+            schema.validate_graph(graph)?;
+        }
         let batch = self.config.batch_size.max(1);
         let mut report = LoadReport::default();
         for chunk in graph.nodes.chunks(batch) {
             let sql = merge_nodes_sql(chunk)?;
             self.run_command(&sql).await?;
+            for sql in merge_typed_nodes_sql(schema.as_ref(), chunk)? {
+                self.run_command(&sql).await?;
+            }
             report.nodes += chunk.len();
         }
         for chunk in graph.edges.chunks(batch) {
             let sql = merge_edges_sql(chunk)?;
             self.run_command(&sql).await?;
+            for sql in merge_typed_edges_sql(schema.as_ref(), chunk)? {
+                self.run_command(&sql).await?;
+            }
             report.edges += chunk.len();
         }
         Ok(report)
@@ -333,6 +370,214 @@ fn merge_edges_sql(edges: &[Edge]) -> Result<String> {
     ))
 }
 
+fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
+    let mut statements = Vec::new();
+    for node_type in &schema.nodes {
+        let fields = node_type
+            .fields
+            .iter()
+            .map(|field| {
+                Ok(format!(
+                    "{} {}",
+                    sql_ident(&field.name)?,
+                    sail_sql_type(&field.ty)
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join(", ");
+        let fields = if fields.is_empty() {
+            String::new()
+        } else {
+            format!(", {fields}")
+        };
+        statements.push(format!(
+            "CREATE TABLE IF NOT EXISTS {} (id STRING NOT NULL{fields}) USING delta",
+            sail_node_table(node_type.label.as_str())?
+        ));
+    }
+    for edge_type in &schema.edges {
+        let fields = edge_type
+            .fields
+            .iter()
+            .map(|field| {
+                Ok(format!(
+                    "{} {}",
+                    sql_ident(&field.name)?,
+                    sail_sql_type(&field.ty)
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join(", ");
+        let fields = if fields.is_empty() {
+            String::new()
+        } else {
+            format!(", {fields}")
+        };
+        statements.push(format!(
+            "CREATE TABLE IF NOT EXISTS {} (edge_key STRING NOT NULL, id STRING, src_id STRING NOT NULL, dst_id STRING NOT NULL{fields}) USING delta",
+            sail_edge_table(edge_type.label.as_str())?
+        ));
+    }
+    Ok(statements)
+}
+
+fn merge_typed_nodes_sql(schema: Option<&GraphSchema>, nodes: &[Node]) -> Result<Vec<String>> {
+    let Some(schema) = schema else {
+        return Ok(Vec::new());
+    };
+    schema
+        .nodes
+        .iter()
+        .filter_map(|node_type| {
+            let typed_nodes = nodes
+                .iter()
+                .filter(|node| node.label == node_type.label)
+                .collect::<Vec<_>>();
+            if typed_nodes.is_empty() {
+                return None;
+            }
+            Some(typed_node_merge_sql(node_type, &typed_nodes))
+        })
+        .collect()
+}
+
+fn typed_node_merge_sql(node_type: &NodeType, nodes: &[&Node]) -> Result<String> {
+    let mut insert_columns = vec!["id".to_string()];
+    insert_columns.extend(
+        node_type
+            .fields
+            .iter()
+            .map(|field| sql_ident(&field.name))
+            .collect::<Result<Vec<_>>>()?,
+    );
+    let rows = nodes
+        .iter()
+        .map(|node| {
+            let mut columns = vec![format!("{} AS id", sql_str(node.id.as_str()))];
+            columns.extend(
+                node_type
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        Ok(format!(
+                            "{} AS {}",
+                            sail_value_sql(node.props.get(&field.name), &field.ty)?,
+                            sql_ident(&field.name)?
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            Ok(format!("SELECT {}", columns.join(", ")))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join(" UNION ALL ");
+    let updates = node_type
+        .fields
+        .iter()
+        .map(|field| Ok(format!("t.{0} = s.{0}", sql_ident(&field.name)?)))
+        .collect::<Result<Vec<_>>>()?
+        .join(", ");
+    let update_clause = if updates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHEN MATCHED THEN UPDATE SET {updates}")
+    };
+    Ok(format!(
+        "MERGE INTO {} AS t USING ({rows}) AS s ON t.id = s.id{update_clause} WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})",
+        sail_node_table(node_type.label.as_str())?,
+        insert_columns.join(", "),
+        insert_columns
+            .iter()
+            .map(|column| format!("s.{column}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
+fn merge_typed_edges_sql(schema: Option<&GraphSchema>, edges: &[Edge]) -> Result<Vec<String>> {
+    let Some(schema) = schema else {
+        return Ok(Vec::new());
+    };
+    schema
+        .edges
+        .iter()
+        .filter_map(|edge_type| {
+            let typed_edges = edges
+                .iter()
+                .filter(|edge| edge.label == edge_type.label)
+                .collect::<Vec<_>>();
+            if typed_edges.is_empty() {
+                return None;
+            }
+            Some(typed_edge_merge_sql(edge_type, &typed_edges))
+        })
+        .collect()
+}
+
+fn typed_edge_merge_sql(edge_type: &EdgeType, edges: &[&Edge]) -> Result<String> {
+    let mut insert_columns = vec![
+        "edge_key".to_string(),
+        "id".to_string(),
+        "src_id".to_string(),
+        "dst_id".to_string(),
+    ];
+    insert_columns.extend(
+        edge_type
+            .fields
+            .iter()
+            .map(|field| sql_ident(&field.name))
+            .collect::<Result<Vec<_>>>()?,
+    );
+    let rows = edges
+        .iter()
+        .map(|edge| {
+            let mut columns = vec![
+                format!("{} AS edge_key", sql_str(&edge_key(edge))),
+                format!(
+                    "{} AS id",
+                    edge.id
+                        .as_ref()
+                        .map(|id| sql_str(id.as_str()))
+                        .unwrap_or_else(|| "NULL".to_string())
+                ),
+                format!("{} AS src_id", sql_str(edge.from.as_str())),
+                format!("{} AS dst_id", sql_str(edge.to.as_str())),
+            ];
+            columns.extend(
+                edge_type
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        Ok(format!(
+                            "{} AS {}",
+                            sail_value_sql(edge.props.get(&field.name), &field.ty)?,
+                            sql_ident(&field.name)?
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            );
+            Ok(format!("SELECT {}", columns.join(", ")))
+        })
+        .collect::<Result<Vec<_>>>()?
+        .join(" UNION ALL ");
+    let updates = insert_columns
+        .iter()
+        .filter(|column| column.as_str() != "edge_key")
+        .map(|column| format!("t.{column} = s.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "MERGE INTO {} AS t USING ({rows}) AS s ON t.edge_key = s.edge_key WHEN MATCHED THEN UPDATE SET {updates} WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})",
+        sail_edge_table(edge_type.label.as_str())?,
+        insert_columns.join(", "),
+        insert_columns
+            .iter()
+            .map(|column| format!("s.{column}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 fn traversal_sql(traversal: &Traversal) -> Result<String> {
     if traversal.steps.is_empty() {
         // Just return the start node(s)
@@ -449,6 +694,89 @@ fn start_clause(start: &Start, alias: &str) -> (String, String) {
             )
         }
     }
+}
+
+fn sail_sql_type(ty: &FieldType) -> &'static str {
+    match ty {
+        FieldType::String | FieldType::DateTime | FieldType::StringArray | FieldType::Json => {
+            "STRING"
+        }
+        FieldType::Int => "BIGINT",
+        FieldType::Float => "DOUBLE",
+        FieldType::Bool => "BOOLEAN",
+    }
+}
+
+fn sail_value_sql(value: Option<&Value>, ty: &FieldType) -> Result<String> {
+    Ok(match (value, ty) {
+        (None, _) | (Some(Value::Null), _) => "NULL".to_string(),
+        (Some(Value::String(value)), FieldType::String | FieldType::DateTime) => sql_str(value),
+        (Some(Value::Int(value)), FieldType::Int) => value.to_string(),
+        (Some(Value::Float(value)), FieldType::Float) => value.to_string(),
+        (Some(Value::Bool(value)), FieldType::Bool) => value.to_string(),
+        (Some(Value::StringArray(_)), FieldType::StringArray)
+        | (Some(Value::Json(_)), FieldType::Json) => sql_str(
+            &serde_json::to_string(value.expect("matched value"))
+                .map_err(|err| GrustError::Serialization(err.to_string()))?,
+        ),
+        (Some(other), _) => {
+            return Err(GrustError::Schema(format!(
+                "cannot store value {other:?} as Sail typed column {ty:?}"
+            )));
+        }
+    })
+}
+
+fn sail_node_table(label: &str) -> Result<String> {
+    Ok(format!("grust_node_{}", schema_identifier(label)?))
+}
+
+fn sail_edge_table(label: &str) -> Result<String> {
+    Ok(format!("grust_edge_{}", schema_identifier(label)?))
+}
+
+fn edge_key(edge: &Edge) -> String {
+    edge.id
+        .as_ref()
+        .map(EdgeId::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "{}\u{1f}{}\u{1f}{}",
+                edge.from.as_str(),
+                edge.label.as_str(),
+                edge.to.as_str()
+            )
+        })
+}
+
+fn schema_identifier(value: &str) -> Result<String> {
+    let identifier = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if identifier.is_empty()
+        || identifier
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return Err(GrustError::Schema(format!(
+            "invalid schema identifier '{value}'"
+        )));
+    }
+    Ok(identifier)
+}
+
+fn sql_ident(value: &str) -> Result<String> {
+    let identifier = schema_identifier(value)?;
+    Ok(format!("`{identifier}`"))
 }
 
 fn limit_clause(limit: Option<u32>) -> String {

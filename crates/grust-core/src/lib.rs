@@ -1135,6 +1135,89 @@ pub struct GraphSchema {
     pub edges: Vec<EdgeType>,
 }
 
+impl GraphSchema {
+    pub fn builder() -> GraphSchemaBuilder {
+        GraphSchemaBuilder::default()
+    }
+
+    pub fn node_type(&self, label: &Label) -> Option<&NodeType> {
+        self.nodes
+            .iter()
+            .find(|node_type| &node_type.label == label)
+    }
+
+    pub fn edge_type(&self, label: &Label) -> Option<&EdgeType> {
+        self.edges
+            .iter()
+            .find(|edge_type| &edge_type.label == label)
+    }
+
+    pub fn validate_graph(&self, graph: &Graph) -> Result<()> {
+        for node in &graph.nodes {
+            self.validate_node(node)?;
+        }
+        for edge in &graph.edges {
+            self.validate_edge(edge, graph)?;
+        }
+        Ok(())
+    }
+
+    pub fn validate_node(&self, node: &Node) -> Result<()> {
+        let node_type = self.node_type(&node.label).ok_or_else(|| {
+            GrustError::Schema(format!("schema has no node type '{}'", node.label.as_str()))
+        })?;
+        validate_props(
+            &node.props,
+            &node_type.fields,
+            &format!("node '{}'", node.id.as_str()),
+        )
+    }
+
+    pub fn validate_edge(&self, edge: &Edge, graph: &Graph) -> Result<()> {
+        let edge_type = self.edge_type(&edge.label).ok_or_else(|| {
+            GrustError::Schema(format!("schema has no edge type '{}'", edge.label.as_str()))
+        })?;
+
+        let from = graph.nodes.iter().find(|node| node.id == edge.from);
+        let to = graph.nodes.iter().find(|node| node.id == edge.to);
+        let from = from.ok_or_else(|| {
+            GrustError::Schema(format!(
+                "edge '{}' references unknown from node '{}'",
+                edge.label.as_str(),
+                edge.from.as_str()
+            ))
+        })?;
+        let to = to.ok_or_else(|| {
+            GrustError::Schema(format!(
+                "edge '{}' references unknown to node '{}'",
+                edge.label.as_str(),
+                edge.to.as_str()
+            ))
+        })?;
+
+        if !edge_type.from.is_empty() && !edge_type.from.iter().any(|label| label == &from.label) {
+            return Err(GrustError::Schema(format!(
+                "edge '{}' cannot start from node label '{}'",
+                edge.label.as_str(),
+                from.label.as_str()
+            )));
+        }
+        if !edge_type.to.is_empty() && !edge_type.to.iter().any(|label| label == &to.label) {
+            return Err(GrustError::Schema(format!(
+                "edge '{}' cannot end at node label '{}'",
+                edge.label.as_str(),
+                to.label.as_str()
+            )));
+        }
+
+        validate_props(
+            &edge.props,
+            &edge_type.fields,
+            &format!("edge '{}'", edge.label.as_str()),
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NodeType {
     pub label: Label,
@@ -1174,6 +1257,111 @@ pub enum EdgeUniqueness {
     None,
     FromTo,
     FromLabelTo,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GraphSchemaBuilder {
+    nodes: Vec<NodeType>,
+    edges: Vec<EdgeType>,
+}
+
+impl GraphSchemaBuilder {
+    pub fn node(mut self, label: impl Into<Label>, fields: impl Into<Vec<Field>>) -> Self {
+        self.nodes.push(NodeType {
+            label: label.into(),
+            fields: fields.into(),
+        });
+        self
+    }
+
+    pub fn edge(
+        mut self,
+        label: impl Into<Label>,
+        from: impl Into<Vec<Label>>,
+        to: impl Into<Vec<Label>>,
+        fields: impl Into<Vec<Field>>,
+    ) -> Self {
+        self.edges.push(EdgeType {
+            label: label.into(),
+            from: from.into(),
+            to: to.into(),
+            fields: fields.into(),
+            directed: true,
+            uniqueness: EdgeUniqueness::FromLabelTo,
+        });
+        self
+    }
+
+    pub fn edge_type(mut self, edge_type: EdgeType) -> Self {
+        self.edges.push(edge_type);
+        self
+    }
+
+    pub fn build(self) -> GraphSchema {
+        GraphSchema {
+            nodes: self.nodes,
+            edges: self.edges,
+        }
+    }
+}
+
+impl Field {
+    pub fn required(name: impl Into<String>, ty: FieldType) -> Self {
+        Self {
+            name: name.into(),
+            ty,
+            required: true,
+        }
+    }
+
+    pub fn optional(name: impl Into<String>, ty: FieldType) -> Self {
+        Self {
+            name: name.into(),
+            ty,
+            required: false,
+        }
+    }
+}
+
+fn validate_props(props: &Props, fields: &[Field], context: &str) -> Result<()> {
+    for field in fields {
+        match props.get(&field.name) {
+            Some(value) => validate_field_value(value, &field.ty, context, &field.name)?,
+            None if field.required => {
+                return Err(GrustError::Schema(format!(
+                    "{context} missing required field '{}'",
+                    field.name
+                )));
+            }
+            None => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_field_value(
+    value: &Value,
+    ty: &FieldType,
+    context: &str,
+    field_name: &str,
+) -> Result<()> {
+    let matches = matches!(
+        (value, ty),
+        (Value::String(_), FieldType::String)
+            | (Value::Int(_), FieldType::Int)
+            | (Value::Float(_), FieldType::Float)
+            | (Value::Bool(_), FieldType::Bool)
+            | (Value::String(_), FieldType::DateTime)
+            | (Value::StringArray(_), FieldType::StringArray)
+            | (_, FieldType::Json)
+    );
+    if matches {
+        Ok(())
+    } else {
+        Err(GrustError::Schema(format!(
+            "{context} field '{field_name}' expected {ty:?}, got {value:?}"
+        )))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1292,6 +1480,12 @@ pub trait GraphStore: Send + Sync {
         Ok(report)
     }
 
+    async fn put_typed_graph(&self, schema: &GraphSchema, graph: &Graph) -> Result<LoadReport> {
+        schema.validate_graph(graph)?;
+        self.apply_schema(schema).await?;
+        self.put_graph(graph).await
+    }
+
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>>;
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>>;
@@ -1309,8 +1503,8 @@ pub trait GraphAdminStore: GraphStore {
 pub mod prelude {
     pub use crate::{
         Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, Field, FieldType, Graph,
-        GraphAdminStore, GraphBuilder, GraphSchema, GraphStore, GrustError, Label, LoadReport,
-        Node, NodeId, NodeType, Props, Result, Start, Step, Traversal, Value,
+        GraphAdminStore, GraphBuilder, GraphSchema, GraphSchemaBuilder, GraphStore, GrustError,
+        Label, LoadReport, Node, NodeId, NodeType, Props, Result, Start, Step, Traversal, Value,
     };
 
     #[cfg(feature = "typed-garde")]

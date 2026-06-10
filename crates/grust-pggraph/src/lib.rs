@@ -127,6 +127,17 @@ impl Drop for PgGraphStore {
 
 #[async_trait]
 impl GraphStore for PgGraphStore {
+    async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        self.bootstrap().await?;
+        self.execute(&pggraph_schema_sql(
+            &self.config,
+            &self.nodes_table(),
+            &self.edges_table(),
+            schema,
+        )?)
+        .await
+    }
+
     async fn put_node(&self, node: &Node) -> Result<NodeId> {
         self.execute(&upsert_nodes_sql(
             &self.nodes_table(),
@@ -274,6 +285,121 @@ fn bootstrap_sql(config: &PgGraphConfig, nodes_table: &str, edges_table: &str) -
             &format!("{}_edges", config.table_prefix)
         )),
     ))
+}
+
+fn pggraph_schema_sql(
+    config: &PgGraphConfig,
+    nodes_table: &str,
+    edges_table: &str,
+    schema: &GraphSchema,
+) -> Result<String> {
+    let mut statements = Vec::new();
+
+    for node_type in &schema.nodes {
+        let view = qualified_table(
+            &config.schema,
+            &format!(
+                "{}_node_{}",
+                config.table_prefix,
+                schema_identifier(node_type.label.as_str())?
+            ),
+        );
+        let columns = node_type
+            .fields
+            .iter()
+            .map(|field| pggraph_typed_column(field))
+            .collect::<Result<Vec<_>>>()?
+            .join(",\n            ");
+        let columns = if columns.is_empty() {
+            String::new()
+        } else {
+            format!(",\n            {columns}")
+        };
+        statements.push(format!(
+            "CREATE OR REPLACE VIEW {view} AS
+             SELECT id{columns}
+             FROM {nodes_table}
+             WHERE label = {};",
+            sql_str(node_type.label.as_str())
+        ));
+
+        for field in &node_type.fields {
+            statements.push(format!(
+                "CREATE INDEX IF NOT EXISTS {} ON {nodes_table} (({})) WHERE label = {};",
+                quote_ident(&format!(
+                    "{}_node_{}_{}_idx",
+                    config.table_prefix,
+                    schema_identifier(node_type.label.as_str())?,
+                    schema_identifier(&field.name)?
+                )),
+                pggraph_prop_expr(field),
+                sql_str(node_type.label.as_str())
+            ));
+        }
+    }
+
+    for edge_type in &schema.edges {
+        let view = qualified_table(
+            &config.schema,
+            &format!(
+                "{}_edge_{}",
+                config.table_prefix,
+                schema_identifier(edge_type.label.as_str())?
+            ),
+        );
+        let columns = edge_type
+            .fields
+            .iter()
+            .map(|field| pggraph_typed_column(field))
+            .collect::<Result<Vec<_>>>()?
+            .join(",\n            ");
+        let columns = if columns.is_empty() {
+            String::new()
+        } else {
+            format!(",\n            {columns}")
+        };
+        statements.push(format!(
+            "CREATE OR REPLACE VIEW {view} AS
+             SELECT id, from_id, to_id{columns}
+             FROM {edges_table}
+             WHERE label = {};",
+            sql_str(edge_type.label.as_str())
+        ));
+
+        for field in &edge_type.fields {
+            statements.push(format!(
+                "CREATE INDEX IF NOT EXISTS {} ON {edges_table} (({})) WHERE label = {};",
+                quote_ident(&format!(
+                    "{}_edge_{}_{}_idx",
+                    config.table_prefix,
+                    schema_identifier(edge_type.label.as_str())?,
+                    schema_identifier(&field.name)?
+                )),
+                pggraph_prop_expr(field),
+                sql_str(edge_type.label.as_str())
+            ));
+        }
+    }
+
+    Ok(statements.join("\n"))
+}
+
+fn pggraph_typed_column(field: &Field) -> Result<String> {
+    Ok(format!(
+        "{} AS {}",
+        pggraph_prop_expr(field),
+        quote_ident(&field.name)
+    ))
+}
+
+fn pggraph_prop_expr(field: &Field) -> String {
+    let value = format!("props #>> ARRAY[{}, 'value']", sql_str(&field.name));
+    match field.ty {
+        FieldType::String | FieldType::DateTime | FieldType::StringArray | FieldType::Json => value,
+        FieldType::Int => format!("({value})::bigint"),
+        FieldType::Float => format!("({value})::double precision"),
+        FieldType::Bool => format!("({value})::boolean"),
+    }
 }
 
 fn upsert_nodes_sql(table: &str, nodes: &[Node]) -> Result<String> {
@@ -513,6 +639,21 @@ fn validate_json_key(value: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn schema_identifier(value: &str) -> Result<String> {
+    let identifier = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    validate_identifier(&identifier)?;
+    Ok(identifier)
 }
 
 #[cfg(test)]

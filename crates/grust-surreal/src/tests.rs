@@ -41,6 +41,33 @@ fn relate_edges_are_idempotent_by_endpoints() {
 }
 
 #[test]
+fn graph_schema_defines_schemafull_tables_and_fields() {
+    let schema = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::required("name", FieldType::String),
+                Field::optional("age", FieldType::Int),
+            ],
+        )
+        .edge(
+            "presents",
+            vec![Label::new("Person")],
+            vec![Label::new("Talk")],
+            vec![Field::optional("source", FieldType::String)],
+        )
+        .build();
+
+    let query = surreal_schema_query(&schema).unwrap();
+
+    assert!(query.contains("DEFINE TABLE person SCHEMAFULL"));
+    assert!(query.contains("DEFINE FIELD name ON TABLE person TYPE string"));
+    assert!(query.contains("DEFINE FIELD age ON TABLE person TYPE int"));
+    assert!(query.contains("DEFINE TABLE presents TYPE RELATION SCHEMAFULL"));
+    assert!(query.contains("DEFINE FIELD source ON TABLE presents TYPE string"));
+}
+
+#[test]
 fn sdk_uses_ws_address_from_http_sql_url() {
     assert_eq!(
         surreal_ws_address("http://127.0.0.1:8000/sql").unwrap(),

@@ -53,3 +53,27 @@ fn strips_v1_query_for_sdk_base_url() {
         "http://127.0.0.1:8080"
     );
 }
+
+#[test]
+fn graph_schema_is_validated_for_dynamic_helix_names() {
+    let schema = GraphSchema::builder()
+        .node("Person", vec![Field::required("name", FieldType::String)])
+        .edge(
+            "presents",
+            vec![Label::new("Person")],
+            vec![Label::new("Talk")],
+            Vec::<Field>::new(),
+        )
+        .build();
+
+    validate_helix_schema(&schema).unwrap();
+
+    let bad = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![Field::required("display-name", FieldType::String)],
+        )
+        .build();
+
+    assert!(validate_helix_schema(&bad).is_err());
+}

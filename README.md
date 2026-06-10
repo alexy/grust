@@ -152,7 +152,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.1.0", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.4.0", features = ["memory"] }
 ```
 
 Then load and traverse a graph:
@@ -195,6 +195,7 @@ pub trait GraphStore: Send + Sync {
     async fn put_node(&self, node: &Node) -> Result<NodeId>;
     async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>>;
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport>;
+    async fn put_typed_graph(&self, schema: &GraphSchema, graph: &Graph) -> Result<LoadReport>;
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>>;
@@ -204,6 +205,8 @@ pub trait GraphStore: Send + Sync {
 
 `put_graph` borrows the graph instead of consuming it. That makes retries,
 validation, comparison, and multi-backend loads easier.
+`put_typed_graph` validates a graph against `GraphSchema`, applies that schema
+to the backend, and then writes the graph.
 
 Administrative backends can also implement `GraphAdminStore` for setup and
 replacement workflows:
@@ -225,7 +228,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.1.0", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.4.0", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
@@ -240,20 +243,23 @@ properties. It is a sync/export adapter rather than a `GraphStore`.
 
 `grust-lancedb` stores graphs in LanceDB tables using the official Rust SDK,
 upserts nodes and edges with `merge_insert`, supports backend-neutral reads and
-bounded traversal over universal node/edge tables, and is ready for future
-vector-search extensions.
+bounded traversal over universal node/edge tables, and can mirror schema-labeled
+nodes and edges into typed Arrow tables.
 
 `grust-pggraph` stores Grust graphs in universal PostgreSQL tables, registers
 those tables with the pgGraph extension, supports SQL-backed reads/traversal,
-and can build a pgGraph projection for graph-index experiments.
+can build a pgGraph projection for graph-index experiments, and lowers
+`GraphSchema` into typed label views and expression indexes.
 
 `grust-sail` stores graphs as Spark DataFrames through Sail's SparkConnect
-server and lowers traversal IR to Spark SQL joins.
+server, lowers traversal IR to Spark SQL joins, and can mirror schema-labeled
+rows into typed Delta tables.
 
 `grust-surreal` provides both `SurrealHttpGraphStore` and
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and
 relationships to Surreal tables, upserts nodes, and relates edges through
-relation tables.
+relation tables. `GraphSchema` lowers to Surreal `DEFINE TABLE` and
+`DEFINE FIELD` statements.
 
 ## Traversal IR
 
@@ -308,19 +314,38 @@ pub struct EdgeType {
 }
 ```
 
-The first backends are expected to use schema differently:
+`GraphSchema::builder()` and `Field::required` / `Field::optional` provide a
+compact way to declare this structure:
+
+```rust
+let schema = GraphSchema::builder()
+    .node(
+        "Person",
+        vec![
+            Field::required("name", FieldType::String),
+            Field::optional("age", FieldType::Int),
+        ],
+    )
+    .edge(
+        "WORKS_ON",
+        vec![Label::new("Person")],
+        vec![Label::new("Project")],
+        vec![Field::required("role", FieldType::String)],
+    )
+    .build();
+```
+
+The current backends use schema differently:
 
 - SurrealDB can run schemaless, but schema can define record tables, relation
-  tables, and indexes.
-- HelixDB is more schema/query-definition oriented, so schema can drive type
-  and query generation.
-- pgGraph can run with universal tables today, while schema can later drive
-  label-partitioned source tables and typed filter columns.
-- Sail can run with universal DataFrame tables today, while schema can later
-  drive typed, label-partitioned DataFrames.
-- LanceDB can run with universal tables today, while schema can later drive
-  typed property columns, vector columns, and index declarations.
-- Memory can ignore schema or use it for validation tests.
+  tables, and typed fields.
+- HelixDB validates schema names through the dynamic-query backend while future
+  schema-file generation remains backend-specific.
+- pgGraph keeps universal tables while exposing typed label views and indexes.
+- Sail keeps universal DataFrames while mirroring rows into typed Delta tables.
+- LanceDB keeps universal tables while mirroring rows into typed Arrow tables.
+- FalkorDB uses schema declarations to create label/property indexes.
+- Memory uses schema for validation tests and local conformance.
 
 ## Backend Mapping
 

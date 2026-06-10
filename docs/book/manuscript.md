@@ -278,7 +278,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.3", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.4", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -286,7 +286,7 @@ grust = { package = "grust-graph", version = "0.3", features = ["typed-garde"] }
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.3", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.4", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -659,6 +659,16 @@ Projects can start with raw graph construction, add typed Rust validation for
 important labels, add zod-rs for JSON ingress, and later add `GraphSchema` for
 backend optimization.
 
+The same schema can also validate and write in one step:
+
+```rust
+let report = store.put_typed_graph(&schema, &graph).await?;
+```
+
+That call validates labels, required fields, field value types, and edge
+endpoint labels before delegating to the backend. Schema-capable stores then use
+`apply_schema` to lower the portable model into their native storage surfaces.
+
 # 5. Traversal as an Intermediate Representation
 
 Grust traversal is not Cypher, SQL, GQL, SurrealQL, Spark SQL, or a graph
@@ -705,6 +715,7 @@ pub trait GraphStore: Send + Sync {
     async fn put_node(&self, node: &Node) -> Result<NodeId>;
     async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>>;
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport>;
+    async fn put_typed_graph(&self, schema: &GraphSchema, graph: &Graph) -> Result<LoadReport>;
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>>;
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>>;
@@ -958,16 +969,30 @@ flowchart LR
 
 # 10. Schema and Validation Direction
 
-Grust already has schema types: `GraphSchema`, `NodeType`, `EdgeType`, `Field`,
-`FieldType`, and `EdgeUniqueness`. The default `GraphStore::apply_schema`
-implementation is a no-op, which lets schemaless or schema-later backends work
-without ceremony.
+Grust has schema types: `GraphSchema`, `NodeType`, `EdgeType`, `Field`,
+`FieldType`, and `EdgeUniqueness`. `GraphSchema` validates labels, required
+fields, field value types, and edge endpoint labels. The default
+`GraphStore::apply_schema` implementation remains a no-op, which lets
+schemaless or schema-later backends work without ceremony.
 
 Schema becomes more important for backends that want typed tables, indexes, or
-label-partitioned layouts. A future schema-first backend could use
-`GraphSchema` to create one table per node label, one table per edge label,
-typed property columns, and targeted indexes. A more flexible backend can keep
-using universal node and edge tables.
+label-partitioned layouts. The current schema-capable backends use it in
+different ways:
+
+- Memory stores the schema and validates local writes.
+- FalkorDB creates label/property indexes for declared node types.
+- Helix validates schema names that can be lowered through dynamic queries.
+- LanceDB creates typed Arrow tables per node and edge label and mirrors writes
+  into them.
+- pgGraph/PostgreSQL exposes typed label views and expression indexes over the
+  universal tables.
+- Sail creates typed Delta tables per node and edge label and mirrors writes
+  into them.
+- SurrealDB lowers schema into `DEFINE TABLE` and `DEFINE FIELD` statements.
+
+A flexible backend can keep universal node and edge tables as the portable
+interchange surface. A typed backend can add native tables, fields, indexes, or
+constraints behind the same `GraphStore` trait.
 
 The key architectural point is that schema is metadata about a Grust graph, not
 a replacement for the graph. Application code can begin with plain graph

@@ -50,6 +50,78 @@ async fn bootstrap_creates_empty_tables() {
 }
 
 #[tokio::test]
+async fn apply_schema_creates_typed_tables_and_mirrors_writes() {
+    let store = store().await;
+    let schema = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                grust_core::Field::required("name", FieldType::String),
+                grust_core::Field::optional("age", FieldType::Int),
+            ],
+        )
+        .node(
+            "Talk",
+            vec![grust_core::Field::required("title", FieldType::String)],
+        )
+        .node(
+            "Room",
+            vec![grust_core::Field::required("name", FieldType::String)],
+        )
+        .edge(
+            "PRESENTS",
+            vec![Label::new("Person")],
+            vec![Label::new("Talk")],
+            vec![grust_core::Field::required("source", FieldType::String)],
+        )
+        .edge(
+            "HOSTED_IN",
+            vec![Label::new("Talk")],
+            vec![Label::new("Room")],
+            Vec::<grust_core::Field>::new(),
+        )
+        .build();
+
+    store.apply_schema(&schema).await.expect("apply_schema");
+    store.put_graph(&sample_graph()).await.expect("put_graph");
+
+    let person_table = store
+        .open_table(&store.typed_node_table_name("Person").unwrap())
+        .await
+        .expect("typed person table");
+    let edge_table = store
+        .open_table(&store.typed_edge_table_name("PRESENTS").unwrap())
+        .await
+        .expect("typed presents table");
+
+    assert_eq!(person_table.count_rows(None).await.expect("person rows"), 1);
+    assert_eq!(edge_table.count_rows(None).await.expect("edge rows"), 1);
+}
+
+#[tokio::test]
+async fn applied_schema_rejects_wrong_typed_property() {
+    let store = store().await;
+    let schema = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![grust_core::Field::required("age", FieldType::Int)],
+        )
+        .build();
+    store.apply_schema(&schema).await.expect("apply_schema");
+
+    let error = store
+        .put_node(&Node::new("Person", "person-1", {
+            let mut props = Props::new();
+            props.insert("age".to_string(), Value::from("old"));
+            props
+        }))
+        .await
+        .expect_err("wrong field type should fail");
+
+    assert!(error.to_string().contains("field 'age' expected Int"));
+}
+
+#[tokio::test]
 async fn put_and_get_node() {
     let store = store().await;
     let node = Node::new("Person", "person-1", {

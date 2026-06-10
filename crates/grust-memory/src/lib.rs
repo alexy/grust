@@ -15,6 +15,7 @@ pub struct MemoryGraphStore {
 struct MemoryGraph {
     nodes: BTreeMap<NodeId, Node>,
     edges: BTreeMap<(NodeId, Label, NodeId), Edge>,
+    schema: Option<GraphSchema>,
 }
 
 impl MemoryGraphStore {
@@ -33,19 +34,56 @@ impl MemoryGraphStore {
 
 #[async_trait]
 impl GraphStore for MemoryGraphStore {
+    async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        inner.schema = Some(schema.clone());
+        Ok(())
+    }
+
     async fn put_node(&self, node: &Node) -> Result<NodeId> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        if let Some(schema) = &inner.schema {
+            schema.validate_node(node)?;
+        }
         inner.nodes.insert(node.id.clone(), node.clone());
         Ok(node.id.clone())
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        if let Some(schema) = &inner.schema {
+            let mut graph = Graph {
+                nodes: inner.nodes.values().cloned().collect(),
+                edges: inner.edges.values().cloned().collect(),
+            };
+            graph.edges.push(edge.clone());
+            schema.validate_edge(edge, &graph)?;
+        }
         inner.edges.insert(
             (edge.from.clone(), edge.label.clone(), edge.to.clone()),
             edge.clone(),
         );
         Ok(edge.id.clone())
+    }
+
+    async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        if let Some(schema) = &inner.schema {
+            schema.validate_graph(graph)?;
+        }
+        let mut report = LoadReport::default();
+        for node in &graph.nodes {
+            inner.nodes.insert(node.id.clone(), node.clone());
+            report.nodes += 1;
+        }
+        for edge in &graph.edges {
+            inner.edges.insert(
+                (edge.from.clone(), edge.label.clone(), edge.to.clone()),
+                edge.clone(),
+            );
+            report.edges += 1;
+        }
+        Ok(report)
     }
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {

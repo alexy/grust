@@ -22,3 +22,25 @@ fn stores_graph_and_traverses_one_step() {
     assert_eq!(speakers.len(), 1);
     assert_eq!(speakers[0].id, NodeId::from("person-1"));
 }
+
+#[test]
+fn applied_schema_validates_memory_graph_writes() {
+    let schema = GraphSchema::builder()
+        .node("Person", vec![Field::required("name", FieldType::String)])
+        .node("Project", vec![Field::required("name", FieldType::String)])
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            Vec::<Field>::new(),
+        )
+        .build();
+    let store = MemoryGraphStore::new();
+    futures_executor::block_on(store.apply_schema(&schema)).unwrap();
+
+    let error =
+        futures_executor::block_on(store.put_node(&Node::new("Person", "person-1", Props::new())))
+            .expect_err("missing required field should fail");
+
+    assert!(error.to_string().contains("missing required field 'name'"));
+}

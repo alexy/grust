@@ -260,6 +260,95 @@ fn graph_serializes_to_xml() {
     assert_eq!(reparsed, graph);
 }
 
+#[test]
+fn graph_schema_validates_labels_fields_and_edge_endpoints() {
+    let schema = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::required("name", FieldType::String),
+                Field::optional("age", FieldType::Int),
+            ],
+        )
+        .node("Project", vec![Field::required("name", FieldType::String)])
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            vec![Field::required("role", FieldType::String)],
+        )
+        .build();
+
+    let mut builder = Graph::builder();
+    builder
+        .node("Person", "person:ada")
+        .prop("name", "Ada")
+        .prop("age", 36i64)
+        .finish();
+    builder
+        .node("Project", "project:grust")
+        .prop("name", "Grust")
+        .finish();
+    builder
+        .edge("WORKS_ON", "person:ada", "project:grust")
+        .prop("role", "maintainer")
+        .finish();
+
+    schema
+        .validate_graph(&builder.build())
+        .expect("graph should match schema");
+}
+
+#[test]
+fn graph_schema_rejects_wrong_field_type() {
+    let schema = GraphSchema::builder()
+        .node("Person", vec![Field::required("age", FieldType::Int)])
+        .build();
+
+    let mut builder = Graph::builder();
+    builder
+        .node("Person", "person:ada")
+        .prop("age", "old")
+        .finish();
+
+    let error = schema
+        .validate_graph(&builder.build())
+        .expect_err("string age should fail int field validation");
+
+    assert!(error.to_string().contains("field 'age' expected Int"));
+}
+
+#[test]
+fn graph_schema_rejects_wrong_edge_endpoint_label() {
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .node("Project", Vec::<Field>::new())
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            Vec::<Field>::new(),
+        )
+        .build();
+
+    let mut builder = Graph::builder();
+    builder.node("Project", "project:source").finish();
+    builder.node("Project", "project:target").finish();
+    builder
+        .edge("WORKS_ON", "project:source", "project:target")
+        .finish();
+
+    let error = schema
+        .validate_graph(&builder.build())
+        .expect_err("wrong from label should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("cannot start from node label 'Project'")
+    );
+}
+
 #[cfg(feature = "typed-garde")]
 mod typed_garde_tests {
     use serde::{Deserialize, Serialize};

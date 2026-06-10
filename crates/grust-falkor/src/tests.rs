@@ -39,3 +39,28 @@ fn batch_queries_use_unwind_and_preserve_properties() {
     let edge_query = falkor_edges_batch_query("PRESENTS", &[&graph.edges[0]], &config).unwrap();
     assert!(edge_query.contains("MERGE (a)-[r:PRESENTS]->(b)"));
 }
+
+#[test]
+fn graph_schema_creates_falkor_indexes() {
+    let schema = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::required("name", FieldType::String),
+                Field::optional("age", FieldType::Int),
+            ],
+        )
+        .edge(
+            "presents",
+            vec![Label::new("Person")],
+            vec![Label::new("Talk")],
+            Vec::<Field>::new(),
+        )
+        .build();
+
+    let queries = falkor_schema_queries(&schema, &FalkorConfig::default()).unwrap();
+
+    assert!(queries.contains(&"CREATE INDEX ON :Person(id)".to_string()));
+    assert!(queries.contains(&"CREATE INDEX ON :Person(name)".to_string()));
+    assert!(queries.contains(&"CREATE INDEX ON :Person(age)".to_string()));
+}

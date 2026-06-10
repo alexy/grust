@@ -38,6 +38,41 @@ fn bootstrap_registers_pggraph_projection() {
 }
 
 #[test]
+fn graph_schema_creates_typed_views_and_indexes() {
+    let config = PgGraphConfig::default();
+    let schema = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::required("name", FieldType::String),
+                Field::optional("age", FieldType::Int),
+            ],
+        )
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            vec![Field::required("since", FieldType::Int)],
+        )
+        .build();
+
+    let sql = pggraph_schema_sql(
+        &config,
+        "\"public\".\"grust_nodes\"",
+        "\"public\".\"grust_edges\"",
+        &schema,
+    )
+    .unwrap();
+
+    assert!(sql.contains("CREATE OR REPLACE VIEW \"public\".\"grust_node_person\""));
+    assert!(sql.contains("props #>> ARRAY['name', 'value'] AS \"name\""));
+    assert!(sql.contains("(props #>> ARRAY['age', 'value'])::bigint AS \"age\""));
+    assert!(sql.contains("CREATE OR REPLACE VIEW \"public\".\"grust_edge_works_on\""));
+    assert!(sql.contains("\"grust_node_person_age_idx\""));
+    assert!(sql.contains("\"grust_edge_works_on_since_idx\""));
+}
+
+#[test]
 fn node_upsert_uses_jsonb_and_conflict_update() {
     let graph = sample_graph();
     let sql = upsert_nodes_sql("\"public\".\"grust_nodes\"", &graph.nodes).unwrap();

@@ -126,6 +126,12 @@ impl SurrealHttpGraphStore {
 
 #[async_trait]
 impl GraphStore for SurrealHttpGraphStore {
+    async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        self.post_bootstrap(&surreal_bootstrap_query(&self.config))
+            .await?;
+        self.post(&surreal_schema_query(schema)?).await
+    }
+
     async fn put_node(&self, node: &Node) -> Result<NodeId> {
         self.post(&surreal_upsert_nodes_query(std::slice::from_ref(node))?)
             .await?;
@@ -238,6 +244,12 @@ impl SurrealSdkGraphStore {
 
 #[async_trait]
 impl GraphStore for SurrealSdkGraphStore {
+    async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        self.bootstrap().await?;
+        self.select_database().await?;
+        self.query(&surreal_schema_query(schema)?).await
+    }
+
     async fn put_node(&self, node: &Node) -> Result<NodeId> {
         self.select_database().await?;
         self.query(&surreal_upsert_nodes_query(std::slice::from_ref(node))?)
@@ -440,6 +452,47 @@ fn surreal_delete_tables_query(config: &SurrealConfig) -> String {
         .map(|table| format!("DELETE {table};"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn surreal_schema_query(schema: &GraphSchema) -> Result<String> {
+    let mut statements = Vec::new();
+    for node_type in &schema.nodes {
+        let table = surreal_table_name(node_type.label.as_str());
+        statements.push(format!("DEFINE TABLE {table} SCHEMAFULL;"));
+        for field in &node_type.fields {
+            statements.push(format!(
+                "DEFINE FIELD {} ON TABLE {table} TYPE {};",
+                surreal_identifier(&field.name),
+                surreal_field_type(&field.ty)
+            ));
+        }
+    }
+    for edge_type in &schema.edges {
+        let table = surreal_table_name(&relationship_type(edge_type.label.as_str()));
+        statements.push(format!("DEFINE TABLE {table} TYPE RELATION SCHEMAFULL;"));
+        statements.push(format!(
+            "DEFINE FIELD relationship ON TABLE {table} TYPE string;"
+        ));
+        for field in &edge_type.fields {
+            statements.push(format!(
+                "DEFINE FIELD {} ON TABLE {table} TYPE {};",
+                surreal_identifier(&field.name),
+                surreal_field_type(&field.ty)
+            ));
+        }
+    }
+    Ok(statements.join("\n"))
+}
+
+fn surreal_field_type(ty: &FieldType) -> &'static str {
+    match ty {
+        FieldType::String | FieldType::DateTime => "string",
+        FieldType::Int => "int",
+        FieldType::Float => "float",
+        FieldType::Bool => "bool",
+        FieldType::StringArray => "array<string>",
+        FieldType::Json => "any",
+    }
 }
 
 fn surreal_upsert_nodes_query(nodes: &[Node]) -> Result<String> {
