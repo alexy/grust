@@ -42,3 +42,19 @@ garde = { workspace = true, features = ["derive"] }
 serde.workspace = true
 serde_json.workspace = true
 zod-rs.workspace = true
+
+[[example]]
+name = "typed_graph_garde"
+required-features = ["typed-garde"]
+
+[[example]]
+name = "typed_graph_garde_mixed"
+required-features = ["typed-garde"]
+
+[[example]]
+name = "typed_graph_zod_garde"
+required-features = ["typed-zod-rs"]
+
+[[example]]
+name = "typed_graph_zod_garde_errors"
+required-features = ["typed-zod-rs"]
