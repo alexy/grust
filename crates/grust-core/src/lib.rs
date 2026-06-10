@@ -275,6 +275,170 @@ impl From<serde_json::Value> for Value {
     }
 }
 
+#[cfg(feature = "typed-garde")]
+pub mod typed {
+    use serde::Serialize;
+
+    use crate::{
+        Edge, EdgeId, Graph, GraphBuilder, GrustError, Node, NodeId, Props, Result, Value,
+    };
+
+    pub use garde;
+
+    pub trait TypedNode: garde::Validate + Serialize {
+        const LABEL: &'static str;
+
+        fn node_id(&self) -> NodeId;
+
+        fn node_props(&self) -> Result<Props> {
+            props_from_serialize(self)
+        }
+    }
+
+    pub trait TypedEdge: garde::Validate + Serialize {
+        const LABEL: &'static str;
+
+        fn from_node_id(&self) -> NodeId;
+
+        fn to_node_id(&self) -> NodeId;
+
+        fn edge_id(&self) -> Option<EdgeId> {
+            None
+        }
+
+        fn edge_props(&self) -> Result<Props> {
+            props_from_serialize(self)
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct TypedGraphBuilder {
+        builder: GraphBuilder,
+    }
+
+    impl TypedGraphBuilder {
+        pub fn new() -> Self {
+            Self::default()
+        }
+
+        pub fn from_builder(builder: GraphBuilder) -> Self {
+            Self { builder }
+        }
+
+        pub fn from_graph(graph: Graph) -> Self {
+            let mut builder = GraphBuilder::new();
+            for node in graph.nodes {
+                builder.add_node(node);
+            }
+            for edge in graph.edges {
+                builder.add_edge(edge);
+            }
+            Self { builder }
+        }
+
+        pub fn add_raw_node(&mut self, node: Node) -> NodeId {
+            self.builder.add_node(node)
+        }
+
+        pub fn add_raw_edge(&mut self, edge: Edge) -> Option<EdgeId> {
+            self.builder.add_edge(edge)
+        }
+
+        pub fn add_node<T>(&mut self, node: &T) -> Result<NodeId>
+        where
+            T: TypedNode,
+            T::Context: Default,
+        {
+            node.validate()
+                .map_err(|err| validation_error(T::LABEL, err))?;
+            self.add_validated_node(node)
+        }
+
+        pub fn add_node_with<T>(&mut self, node: &T, ctx: &T::Context) -> Result<NodeId>
+        where
+            T: TypedNode,
+        {
+            node.validate_with(ctx)
+                .map_err(|err| validation_error(T::LABEL, err))?;
+            self.add_validated_node(node)
+        }
+
+        pub fn add_edge<T>(&mut self, edge: &T) -> Result<Option<EdgeId>>
+        where
+            T: TypedEdge,
+            T::Context: Default,
+        {
+            edge.validate()
+                .map_err(|err| validation_error(T::LABEL, err))?;
+            self.add_validated_edge(edge)
+        }
+
+        pub fn add_edge_with<T>(&mut self, edge: &T, ctx: &T::Context) -> Result<Option<EdgeId>>
+        where
+            T: TypedEdge,
+        {
+            edge.validate_with(ctx)
+                .map_err(|err| validation_error(T::LABEL, err))?;
+            self.add_validated_edge(edge)
+        }
+
+        pub fn build(self) -> Graph {
+            self.builder.build()
+        }
+
+        pub fn into_builder(self) -> GraphBuilder {
+            self.builder
+        }
+
+        fn add_validated_node<T>(&mut self, node: &T) -> Result<NodeId>
+        where
+            T: TypedNode,
+        {
+            let node_id = node.node_id();
+            let mut props = node.node_props()?;
+            props.insert("id".to_string(), Value::from(node_id.as_str()));
+            let graph_node = Node::new(T::LABEL, node_id, props);
+            Ok(self.builder.add_node(graph_node))
+        }
+
+        fn add_validated_edge<T>(&mut self, edge: &T) -> Result<Option<EdgeId>>
+        where
+            T: TypedEdge,
+        {
+            let mut graph_edge = Edge::new(
+                T::LABEL,
+                edge.from_node_id(),
+                edge.to_node_id(),
+                edge.edge_props()?,
+            );
+            graph_edge.id = edge.edge_id();
+            Ok(self.builder.add_edge(graph_edge))
+        }
+    }
+
+    pub fn props_from_serialize<T>(value: &T) -> Result<Props>
+    where
+        T: Serialize + ?Sized,
+    {
+        let serialized = serde_json::to_value(value)
+            .map_err(|err| GrustError::Serialization(format!("typed props error: {err}")))?;
+        let serde_json::Value::Object(fields) = serialized else {
+            return Err(GrustError::Schema(
+                "typed graph values must serialize as JSON objects".to_string(),
+            ));
+        };
+
+        Ok(fields
+            .into_iter()
+            .map(|(key, value)| (key, Value::from(value)))
+            .collect())
+    }
+
+    fn validation_error(label: &str, err: garde::Report) -> GrustError {
+        GrustError::Schema(format!("{label} validation failed: {err}"))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: NodeId,
@@ -1052,6 +1216,9 @@ pub mod prelude {
         GraphAdminStore, GraphBuilder, GraphSchema, GraphStore, GrustError, Label, LoadReport,
         Node, NodeId, NodeType, Props, Result, Start, Step, Traversal, Value,
     };
+
+    #[cfg(feature = "typed-garde")]
+    pub use crate::typed::{TypedEdge, TypedGraphBuilder, TypedNode, garde, props_from_serialize};
 }
 
 #[cfg(test)]
