@@ -1,5 +1,9 @@
 use super::*;
 
+use std::sync::Mutex;
+
+use async_trait::async_trait;
+
 fn sample_graph() -> Graph {
     let mut talk_props = Props::new();
     talk_props.insert("id".to_string(), Value::from("talk-1"));
@@ -22,12 +26,89 @@ fn sample_graph() -> Graph {
     }
 }
 
+#[derive(Default)]
+struct RecordingStore {
+    nodes: Vec<Node>,
+    edges: Vec<Edge>,
+    edge_queries: Mutex<Vec<EdgeQuery>>,
+    node_queries: Mutex<Vec<NodeId>>,
+}
+
+#[async_trait]
+impl GraphStore for RecordingStore {
+    async fn put_node(&self, node: &Node) -> Result<NodeId> {
+        Ok(node.id.clone())
+    }
+
+    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
+        Ok(edge.id.clone())
+    }
+
+    async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
+        self.node_queries.lock().unwrap().push(id.clone());
+        Ok(self.nodes.iter().find(|node| &node.id == id).cloned())
+    }
+
+    async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
+        self.edge_queries.lock().unwrap().push(query.clone());
+        Ok(self
+            .edges
+            .iter()
+            .filter(|edge| {
+                query.from.as_ref().is_none_or(|from| from == &edge.from)
+                    && query.to.as_ref().is_none_or(|to| to == &edge.to)
+                    && query
+                        .label
+                        .as_ref()
+                        .is_none_or(|label| label == &edge.label)
+            })
+            .cloned()
+            .collect())
+    }
+
+    async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
+        traverse_steps_with_store(self, Vec::new(), traversal.steps, traversal.limit).await
+    }
+}
+
 #[test]
 fn upsert_nodes_preserves_arrays() {
     let graph = sample_graph();
     let query = surreal_upsert_nodes_query(&graph.nodes).unwrap();
     assert!(query.contains("UPSERT type::record(\"talk\", \"talk-1\")"));
     assert!(query.contains("tags = [\"rust\",\"graphs\"]"));
+}
+
+#[test]
+fn traverse_steps_follow_edges_and_filter_target_label() {
+    let graph = sample_graph();
+    let store = RecordingStore {
+        nodes: graph.nodes.clone(),
+        edges: graph.edges.clone(),
+        ..RecordingStore::default()
+    };
+
+    let nodes = futures_executor::block_on(traverse_steps_with_store(
+        &store,
+        vec![graph.nodes[1].clone()],
+        vec![Step {
+            direction: Direction::Out,
+            edge: Some(Label::new("presents")),
+            node: Some(Label::new("Talk")),
+        }],
+        Some(1),
+    ))
+    .unwrap();
+
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].id, NodeId::new("talk-1"));
+
+    let edge_queries = store.edge_queries.lock().unwrap();
+    assert_eq!(edge_queries[0].from, Some(NodeId::new("person-1")));
+    assert_eq!(edge_queries[0].label, Some(Label::new("presents")));
+
+    let node_queries = store.node_queries.lock().unwrap();
+    assert_eq!(node_queries[0], NodeId::new("talk-1"));
 }
 
 #[test]

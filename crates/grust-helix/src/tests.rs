@@ -108,6 +108,26 @@ fn helix_get_edges_request_filters_by_grust_metadata() {
 }
 
 #[test]
+fn helix_traversal_request_lowers_to_direction_steps() {
+    let request = helix_traversal_request(
+        &Traversal::from_node("person-1")
+            .out("presents")
+            .to("Talk")
+            .limit(5),
+    )
+    .unwrap();
+    let steps = request["query"]["queries"][0]["Query"]["steps"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(request["request_type"], "read");
+    assert_eq!(steps[0]["NWhere"]["Eq"][0], "id");
+    assert_eq!(steps[0]["NWhere"]["Eq"][1]["String"], "person-1");
+    assert_eq!(steps[1]["Out"], "PRESENTS");
+    assert_eq!(steps[2]["HasLabel"], "Talk");
+}
+
+#[test]
 fn helix_response_parsers_rebuild_grust_values() {
     let response = serde_json::json!({
         "nodes": [{"id": "person-1", "$label": "Person", "name": "Ada Lovelace"}],

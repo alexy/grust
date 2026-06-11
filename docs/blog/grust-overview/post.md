@@ -18,6 +18,12 @@ The project is here:
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
 - Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
+The current `0.5` line is the first version where I think the whole shape is
+visible: the core graph model, document loading, typed ingestion, schema-backed
+store writes, traversal lowering, and backend-specific typed storage hooks are
+all present in the same workspace. Some backend features are still young, but
+the contract is no longer just a sketch.
+
 For the longer treatment, read the Grust book in the repository, especially
 **The Shape of Grust**, **The Core Property Graph**, **Building Graphs**,
 **Loading and Saving Graph Documents**, **Typed Graph Ingestion with garde and
@@ -135,6 +141,11 @@ The second is typed ingestion. The optional `typed-garde` feature lets users
 define Rust structs for domain facts, validate them with `garde`, and lower
 them into ordinary Grust nodes and edges:
 
+```toml
+[dependencies]
+grust = { package = "grust-graph", version = "0.5", features = ["typed-garde"] }
+```
+
 ```rust
 use grust::prelude::*;
 use grust::typed::garde;
@@ -177,6 +188,14 @@ stage. If you have not used Zod before: it is a popular TypeScript validation
 style where a runtime schema checks untrusted data before application code
 treats it as typed. In Grust, `zod-rs` plays that role for
 `serde_json::Value`. The flow is:
+
+```toml
+[dependencies]
+grust = { package = "grust-graph", version = "0.5", features = ["typed-zod-rs"] }
+```
+
+`typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers
+into validated Rust values before those values become graph data.
 
 ```text
 raw JSON -> zod-rs shape validation -> Serde decode -> garde validation -> Grust graph
@@ -424,20 +443,23 @@ them. Read **Schema and Validation Direction** for the current direction and
 
 ## Where Grust Is Going
 
-Grust is pre-release, but its direction is already clear:
+Grust is still early, but its direction is already clear:
 
 - Keep graph data independent from database query languages.
 - Make IDs explicit and stable.
 - Treat edge properties as first-class data.
 - Prefer typed values over ad hoc JSON strings.
-- Keep schema optional but useful for typed backend storage.
+- Keep schema optional but useful for validation, indexes, and typed backend storage.
 - Keep typed ingestion optional and composable.
 - Keep traversal backend-neutral.
 - Let backend-specific capabilities live as extension traits when they appear.
 
 The next natural work is deeper read and traversal support across the
 write-focused backends, richer import/export helpers, more typed read helpers,
-more traversal result shapes, and mutation APIs for incremental updates.
+more traversal result shapes, and mutation APIs for incremental updates. The
+0.5 work matters because those next steps now have stable places to attach:
+typed ingestion for trusted Rust values and untrusted JSON, `GraphSchema` for
+backend-facing structure, and `GraphStore` for portable writes and traversal.
 
 That last point is where the CocoIndex adapter becomes interesting. A property
 graph can be more than a one-time load. It can be target state for an indexing
