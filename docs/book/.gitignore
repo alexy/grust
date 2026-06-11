@@ -1,6 +1,8 @@
 build/*
 !build/dist/
 build/dist/*
-!build/dist/grust-book.pdf
-!build/dist/grust-book.epub
-!build/dist/grust-book.mobi
+!build/dist/grust.pdf
+!build/dist/grust.epub
+!build/dist/grust.epub
+!build/dist/grust.mobi
+!build/dist/VERSION.md

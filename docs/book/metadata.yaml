@@ -1,5 +1,6 @@
 ---
-title: "grust-book"
+title: "Grust"
+title_stem: "grust"
 subtitle: "A Rust Property Graph Architecture"
 author: "Alexy Khrabrov"
 coauthor: "Codex with ChatGPT 5.5"

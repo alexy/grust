@@ -3,11 +3,11 @@
 This book currently uses a generated workspace under `docs/book/build/`.
 Final distributable artifacts live in `docs/book/build/dist/`:
 
-- `grust-book.pdf`
-- `grust-book.epub`
+- `grust.pdf`
+- `grust.epub`
 - `grust.epub`
 - `grust (<version>).epub` ignored symlink to `grust.epub`
-- `grust-book.mobi`
+- `grust.mobi`
 - `VERSION.md`
 
 The sister TypeSec project currently uses `docs/book/dist/` directly for its
@@ -52,7 +52,7 @@ Keep the visible cover text synchronized between the Typst and HTML blocks.
 `build.mjs` fills shared placeholders from `metadata.yaml` and the workspace
 version in `../../Cargo.toml`. The current rendered cover text is:
 
-- Title: `grust-book`
+- Title: `Grust`
 - Version subtitle: `covers grust (<workspace version>)`
 - Subtitle: `A Rust Property Graph Architecture`
 - Author: `Alexy Khrabrov`
@@ -63,7 +63,7 @@ text, not visual spacing. When spacing matters, rasterize the first page:
 
 ```sh
 pdftoppm -f 1 -singlefile -png -r 150 \
-  docs/book/build/dist/grust-book.pdf /tmp/grust-book-cover
+  docs/book/build/dist/grust.pdf /tmp/grust-cover
 ```
 
 For EPUB and MOBI cover spacing, tune `epub.css` and the HTML block together.
@@ -72,7 +72,7 @@ Avoid `display: flex` on the cover because Kindle rendering is fragile there;
 generated wrapper heading around the custom cover:
 
 ```css
-#grust-book > h1.unnumbered {
+#grust > h1.unnumbered {
   display: none;
 }
 ```
@@ -116,11 +116,11 @@ cd docs/book
 
 The script should produce:
 
-- `build/dist/grust-book.pdf`
-- `build/dist/grust-book.epub`
+- `build/dist/grust.pdf`
+- `build/dist/grust.epub`
 - `build/dist/grust.epub`
 - `build/dist/grust (<version>).epub` as an ignored symlink to `grust.epub`
-- `build/dist/grust-book.mobi`
+- `build/dist/grust.mobi`
 - `build/dist/VERSION.md`
 
 ### Full Pipeline
@@ -158,16 +158,16 @@ The full build performs these stages.
      --metadata-file metadata.yaml \
      --toc --toc-depth=2 \
      --resource-path build \
-     --output build/grust-book-body.typ \
+     --output build/grust-body.typ \
      build/manuscript.rendered.md
 
-   typst compile build/grust-book-body.typ "$tmpdir/body.pdf"
+   typst compile build/grust-body.typ "$tmpdir/body.pdf"
    ```
 
 4. Merge cover and body.
 
    ```sh
-   pdfunite "$tmpdir/cover.pdf" "$tmpdir/body.pdf" build/dist/grust-book.pdf
+   pdfunite "$tmpdir/cover.pdf" "$tmpdir/body.pdf" build/dist/grust.pdf
    ```
 
    The merged PDF should start with the custom cover, followed by Preface and
@@ -191,7 +191,7 @@ The full build performs these stages.
      --toc --toc-depth=2 \
      --css epub.css \
      --resource-path build \
-     --output build/dist/grust-book.epub \
+     --output build/dist/grust.epub \
      "$tmpdir/cover.epub.md" build/manuscript.rendered.md
    ```
 
@@ -201,7 +201,7 @@ The full build performs these stages.
 7. Repair Pandoc's EPUB layout.
 
    ```sh
-   ./fix_epub_layout.sh build/dist/grust-book.epub "grust ($version)"
+   ./fix_epub_layout.sh build/dist/grust.epub "grust ($version)" "Grust"
    ```
 
    The fixer moves the custom cover before the nav item in the spine, marks the
@@ -220,7 +220,7 @@ The full build performs these stages.
 9. Validate the generated EPUB package.
 
    ```sh
-   asdf exec python check_epub_metadata.py build/dist/grust-book.epub
+   asdf exec python check_epub_metadata.py build/dist/grust.epub
    ```
 
    The full build runs this after the EPUB is fixed and before MOBI conversion.
@@ -228,7 +228,7 @@ The full build performs these stages.
 10. Convert EPUB to MOBI.
 
     ```sh
-    ebook-convert build/dist/grust-book.epub build/dist/grust-book.mobi
+    ebook-convert build/dist/grust.epub build/dist/grust.mobi
     ```
 
 ### EPUB Invariants
@@ -240,7 +240,7 @@ if any of these are wrong:
   `<title_stem> (<workspace version>)`.
 - title sort metadata matches that Kindle title.
 - `dc:creator`, `dc:language`, `dc:date`, and `dcterms:modified` exist.
-- NCX and nav expose the visible book title `grust-book`.
+- NCX and nav expose the visible book title `Grust`.
 - OPF, NCX, and nav files do not contain fallback labels such as `UNTITLED` or
   `Unknown`.
 - the custom cover is first in the reading spine.
@@ -250,7 +250,7 @@ if any of these are wrong:
 - Pandoc did not leave a generated top-level cover heading.
 - Pandoc did not leave an empty generated `title_page.xhtml`.
 - the cover does not use flexbox.
-- `grust.epub` exists and is byte-identical to `grust-book.epub`.
+- `grust.epub` exists and is byte-identical to `grust.epub`.
 - `grust (<version>).epub` exists as a symlink to `grust.epub`.
 - `VERSION.md` records the Kindle name, EPUB build date, stable EPUB filename,
   and versioned symlink filename.
@@ -263,10 +263,10 @@ CSS, layout fixer, or build script instead.
 After rebuilding, inspect the generated artifacts:
 
 ```sh
-pdftotext build/dist/grust-book.pdf - | head -80
-unzip -p build/dist/grust-book.epub EPUB/content.opf | head -80
-unzip -p build/dist/grust-book.epub EPUB/nav.xhtml | head -80
-cmp -s build/dist/grust-book.epub build/dist/grust.epub
+pdftotext build/dist/grust.pdf - | head -80
+unzip -p build/dist/grust.epub EPUB/content.opf | head -80
+unzip -p build/dist/grust.epub EPUB/nav.xhtml | head -80
+cmp -s build/dist/grust.epub build/dist/grust.epub
 cat build/dist/VERSION.md
 ```
 
@@ -296,7 +296,7 @@ incomplete until `mmdc` succeeds and the diagrams are visibly verified.
 If the PDF has two title pages, check whether `metadata.yaml` was passed to the
 cover-only PDF render.
 
-If the EPUB has duplicate title pages or an extra `grust-book` heading before
+If the EPUB has duplicate title pages or an extra `Grust` heading before
 the cover, check all three layers:
 
 - The Typst raw block must be stripped from the EPUB cover input.
@@ -319,7 +319,7 @@ The shell build then uses those generated inputs:
 - Pandoc reads `build/manuscript.rendered.md`.
 - Pandoc uses `--resource-path build` so the rendered manuscript can refer to
   generated diagram images as `diagrams/diagram-XX.png`.
-- Pandoc writes a Typst body file to `build/grust-book-body.typ`.
+- Pandoc writes a Typst body file to `build/grust-body.typ`.
 - The final PDF, EPUB, and MOBI are written to `build/dist/`.
 
 This has a few advantages:
@@ -329,7 +329,7 @@ This has a few advantages:
 - Authored source files stay separate from rendered Markdown, Typst output, and
   diagram assets.
 - Git can ignore all intermediates while explicitly tracking only
-  `build/dist/grust-book.{pdf,epub,mobi}`.
+  `build/dist/grust.{pdf,epub,mobi}`.
 - The rendered diagram PNGs remain separately available for reuse in blog
   posts, release notes, or other publication workflows.
 
@@ -365,13 +365,13 @@ Grust already implements this shape:
   `EPUB/toc.ncx`, and `EPUB/nav.xhtml` inside the generated EPUB. It reads the
   workspace version with `tomllib`, reads `title_stem` from `metadata.yaml`, and
   expects OPF `dc:title` and title sort metadata to be
-  `grust (<version>)` while NCX/nav/cover titles remain `grust-book`.
+  `grust (<version>)` while NCX/nav/cover titles remain `Grust`.
 - The same checker verifies that `build/dist/VERSION.md` records the
   Kindle/catalog name, EPUB build date, stable EPUB name, and versioned symlink.
   It also checks that `grust.epub` is byte-identical to the canonical EPUB and
   that the version-suffixed Send to Kindle path is a symlink to `grust.epub`.
-- The layout fix and check run immediately after `build/dist/grust-book.epub` is
-  created and before `ebook-convert` creates `build/dist/grust-book.mobi`.
+- The layout fix and check run immediately after `build/dist/grust.epub` is
+  created and before `ebook-convert` creates `build/dist/grust.mobi`.
 - The repository pins asdf Python `3.14.5` in `.tool-versions`, and the build
   prefers `asdf exec python` for the checker.
 
@@ -420,16 +420,16 @@ To make Grust publish final artifacts in `docs/book/dist/` while preserving its
 generated intermediates under `docs/book/build/`:
 
 1. Update `docs/book/build.sh` to create `dist/` instead of `build/dist/`.
-2. Change the PDF output from `build/dist/grust-book.pdf` to
-   `dist/grust-book.pdf`.
-3. Change the EPUB output from `build/dist/grust-book.epub` to
-   `dist/grust-book.epub`.
-4. Change the MOBI conversion from `build/dist/grust-book.mobi` to
-   `dist/grust-book.mobi`.
+2. Change the PDF output from `build/dist/grust.pdf` to
+   `dist/grust.pdf`.
+3. Change the EPUB output from `build/dist/grust.epub` to
+   `dist/grust.epub`.
+4. Change the MOBI conversion from `build/dist/grust.mobi` to
+   `dist/grust.mobi`.
 5. Update the final echo output in `build.sh`.
 6. Update `README.md`, `README_book.md`, and this file to document `dist/`.
 7. Update `.gitignore` to ignore `build/` intermediates while tracking
-   `dist/grust-book.{pdf,epub,mobi}`.
+   `dist/grust.{pdf,epub,mobi}`.
 8. Move the already-built final artifacts from `build/dist/` to `dist/`.
 
 This would give Grust the same visible final-artifact layout as TypeSec while

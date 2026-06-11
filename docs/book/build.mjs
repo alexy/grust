@@ -32,13 +32,15 @@ if (!version) {
 }
 
 const metadataSource = await readFile(metadata, "utf8");
+const titleStem = readYamlString(metadataSource, "title_stem");
 const coverValues = {
   title: readYamlString(metadataSource, "title"),
+  titleStem,
   subtitle: readYamlString(metadataSource, "subtitle"),
   author: readYamlString(metadataSource, "author"),
   coauthor: readYamlString(metadataSource, "coauthor"),
   rights: readYamlString(metadataSource, "rights"),
-  versionSubtitle: `covers grust ${version}`,
+  versionSubtitle: `covers ${titleStem} (${version})`,
 };
 
 const escapeHtml = (value) =>
@@ -93,4 +95,4 @@ const renderedMarkdown = source.replace(
 
 await writeFile(rendered, renderedMarkdown);
 console.log(`Rendered ${diagramIndex} Mermaid diagram(s) to ${rendered}`);
-console.log(`Rendered cover for grust ${version} to ${renderedCover}`);
+console.log(`Rendered cover for ${coverValues.titleStem} (${version}) to ${renderedCover}`);

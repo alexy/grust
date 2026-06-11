@@ -31,7 +31,7 @@
 ```
 
 ```{=html}
-<section class="cover-page" epub:type="cover">
+<section class="cover-page" epub:type="titlepage">
   <div class="cover-title">{{title}}</div>
   <div class="cover-version">{{versionSubtitle}}</div>
   <div class="cover-subtitle">{{subtitle}}</div>

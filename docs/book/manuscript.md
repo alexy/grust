@@ -1,5 +1,5 @@
 ---
-title: "grust-book"
+title: "Grust"
 subtitle: "A Rust Property Graph Architecture"
 author: "Alexy Khrabrov"
 lang: en-US

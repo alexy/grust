@@ -17,13 +17,13 @@ such as Grust, can use the same workflow.
 Use a placeholder in the cover source instead of hardcoding the version:
 
 ```text
-covers typesec {{TYPESEC_VERSION}}
+covers {{KINDLE_NAME}}
 ```
 
-Then have the build script read the version from the project config and render a
-temporary cover before calling Pandoc. For a Rust workspace, read
-`[workspace.package].version` from `Cargo.toml`; for another project, use the
-equivalent single source of truth.
+Then have the build script read the title stem and version from the project
+config and render a temporary cover before calling Pandoc. For a Rust workspace,
+read `title_stem` from `metadata.yaml` and `[workspace.package].version` from
+`Cargo.toml`; for another project, use the equivalent single sources of truth.
 
 ## Typst Cover Spacing
 
@@ -34,7 +34,7 @@ instead of only `em` spacing:
 ```typst
 #text(size: 46pt, weight: "bold", bottom-edge: "bounds")[Grust]
 #v(-24pt)
-#text(size: 12pt)[covers grust {{GRUST_VERSION}}]
+#text(size: 12pt)[covers {{KINDLE_NAME}}]
 ```
 
 Useful tips:
@@ -55,7 +55,7 @@ For EPUB and MOBI, mirror the Typst layout with inline HTML styles:
 
 ```html
 <h1 style="font-size: 3.2em; margin: 0 0 0.05em;">Grust</h1>
-<p style="font-size: 0.85em; margin: 0 0 1.1em;">covers grust {{GRUST_VERSION}}</p>
+<p style="font-size: 0.85em; margin: 0 0 1.1em;">covers {{KINDLE_NAME}}</p>
 ```
 
 Use `&amp;` in HTML when the visible text should be `&`.
