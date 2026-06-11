@@ -4,7 +4,7 @@ body {
 }
 
 .cover-page {
-  margin-top: 35%;
+  padding-top: 8em;
   text-align: center;
 }
 
@@ -13,24 +13,30 @@ body {
 }
 
 .cover-title {
-  font-size: 2.2em;
+  font-size: 3.2em;
   font-weight: bold;
   margin-bottom: 0.05em;
 }
 
 .cover-version {
-  font-size: 0.8em;
+  font-size: 0.85em;
   margin-bottom: 1.1em;
 }
 
 .cover-subtitle {
-  font-size: 1.25em;
-  margin-bottom: 2.5em;
+  font-size: 1.35em;
+  margin-bottom: 4em;
 }
 
 .cover-author {
-  font-size: 1.05em;
-  margin-bottom: 0.35em;
+  font-size: 1.35em;
+  font-weight: 500;
+  margin-bottom: 0.2em;
+}
+
+.cover-author-site {
+  font-size: 0.95em;
+  margin-bottom: 1.5em;
 }
 
 .cover-credit-mark {
@@ -50,9 +56,29 @@ code {
   font-size: 0.9em;
 }
 
+div.sourceCode {
+  margin: 0.75em 0;
+}
+
 pre {
+  margin: 0;
   padding: 0.75em;
   overflow-x: auto;
+  line-height: 1.12;
+}
+
+pre code {
+  line-height: inherit;
+}
+
+pre > code.sourceCode > span {
+  display: inline;
+  line-height: 1.12;
+}
+
+pre > code.sourceCode > span:empty {
+  display: none;
+  height: 0;
 }
 
 figure {

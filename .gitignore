@@ -1,3 +1,12 @@
 /target/
 .DS_Store
 .idea/
+
+docs/book/__pycache__/
+docs/book/build/*
+!docs/book/build/dist/
+docs/book/build/dist/*
+!docs/book/build/dist/grust.pdf
+!docs/book/build/dist/grust.epub
+!docs/book/build/dist/grust.mobi
+!docs/book/build/dist/VERSION.md

@@ -1,32 +1,20 @@
 ```{=typst}
 #set page(margin: 1in, numbering: none)
-#set text(font: "Libertinus Serif", size: 13pt)
-
-#align(center + horizon)[
-  #block[
-    #text(size: 32pt, weight: "bold", bottom-edge: "bounds")[{{title}}]
-
-    #v(-12pt)
-
-    #text(size: 10pt)[{{versionSubtitle}}]
-
-    #v(1em)
-
-    #text(size: 18pt)[{{subtitle}}]
-
-    #v(3em)
-
-    #text(size: 14pt)[{{author}}]
-
-    #v(0.35em)
-
-    #text(size: 11pt, style: "italic")[&]
-
-    #v(0.35em)
-
-    #text(size: 13pt, style: "italic")[{{coauthor}}]
-
-  ]
+#align(center)[
+  #v(28%)
+  #text(size: 46pt, weight: "bold", bottom-edge: "bounds")[{{title}}]
+  #v(-24pt)
+  #text(size: 12pt)[{{versionSubtitle}}]
+  #v(1em)
+  #text(size: 20pt)[{{subtitle}}]
+  #v(5em)
+  #text(size: 20pt, weight: "medium")[{{author}}]
+  #v(0.4em)
+  #text(size: 13pt)[chiefscientist.org]
+  #v(1.6em)
+  #text(size: 11pt, style: "italic")[&]
+  #v(0.35em)
+  #text(size: 13pt, style: "italic")[{{coauthor}}]
 ]
 ```
 
@@ -36,6 +24,7 @@
   <div class="cover-version">{{versionSubtitle}}</div>
   <div class="cover-subtitle">{{subtitle}}</div>
   <div class="cover-author">{{author}}</div>
+  <div class="cover-author-site">chiefscientist.org</div>
   <div class="cover-credit-mark">&amp;</div>
   <div class="cover-coauthor">{{coauthor}}</div>
 </section>

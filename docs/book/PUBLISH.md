@@ -5,7 +5,6 @@ Final distributable artifacts live in `docs/book/build/dist/`:
 
 - `grust.pdf`
 - `grust.epub`
-- `grust.epub`
 - `grust (<version>).epub` ignored symlink to `grust.epub`
 - `grust.mobi`
 - `VERSION.md`
@@ -77,6 +76,14 @@ generated wrapper heading around the custom cover:
 }
 ```
 
+Keep code blocks compact in EPUB and MOBI through `epub.css`. Pandoc's syntax
+highlighting emits one `<span>` per source line and represents intentional blank
+source lines as empty spans; reader defaults can turn those into large gaps.
+The stylesheet overrides `div.sourceCode`, `pre`, `pre code`,
+`pre > code.sourceCode > span`, and `pre > code.sourceCode > span:empty` so
+code uses tight line-height and empty source-line spans do not render as extra
+vertical whitespace.
+
 ### Required Tools
 
 The full pipeline expects:
@@ -87,6 +94,8 @@ The full pipeline expects:
 - `typst`
 - `pdfunite`
 - Python, preferably through `asdf exec python`
+- Python with `pypdf` for PDF page-label repair. `build.sh` uses
+  `PDF_PYTHON` when set, otherwise uses the bundled Codex runtime on this Mac.
 - Calibre `ebook-convert`
 
 The repository pins Python through the root `.tool-versions`. `build.sh` uses
@@ -117,7 +126,6 @@ cd docs/book
 The script should produce:
 
 - `build/dist/grust.pdf`
-- `build/dist/grust.epub`
 - `build/dist/grust.epub`
 - `build/dist/grust (<version>).epub` as an ignored symlink to `grust.epub`
 - `build/dist/grust.mobi`
@@ -161,7 +169,13 @@ The full build performs these stages.
      --output build/grust-body.typ \
      build/manuscript.rendered.md
 
-   typst compile build/grust-body.typ "$tmpdir/body.pdf"
+   {
+     printf '#outline(title: [Contents])\n'
+     printf '#pagebreak()\n\n'
+     cat build/grust-body.typ
+   } > build/grust-body-with-toc.typ
+
+   typst compile build/grust-body-with-toc.typ "$tmpdir/body.pdf"
    ```
 
 4. Merge cover and body.
@@ -206,16 +220,16 @@ The full build performs these stages.
    ./fix_epub_layout.sh build/dist/grust.epub "grust ($version)" "Grust"
    ```
 
-   The fixer moves the custom cover before the nav item in the spine, marks the
-   nav item non-linear, marks the cover XHTML as frontmatter, removes the
-   generated wrapper heading around the cover, and rewrites only
+   The fixer moves the custom cover before the nav item in the spine, keeps the
+   nav item visible as the TOC page, marks the cover XHTML as frontmatter,
+   removes the generated wrapper heading around the cover, and rewrites only
    `EPUB/content.opf` title/title-sort metadata to the versioned Kindle library
    title.
 
 8. Create distribution names.
 
-   `build.sh` copies the canonical EPUB to `build/dist/grust.epub`, removes old
-   `build/dist/grust (*).epub` symlinks, creates
+   `build.sh` writes the canonical EPUB directly to `build/dist/grust.epub`,
+   removes old `build/dist/grust (*).epub` symlinks, creates
    `build/dist/grust (<version>).epub -> grust.epub`, and writes
    `build/dist/VERSION.md`.
 
@@ -252,7 +266,6 @@ if any of these are wrong:
 - Pandoc did not leave a generated top-level cover heading.
 - Pandoc did not leave an empty generated `title_page.xhtml`.
 - the cover does not use flexbox.
-- `grust.epub` exists and is byte-identical to `grust.epub`.
 - `grust (<version>).epub` exists as a symlink to `grust.epub`.
 - `VERSION.md` records the Kindle name, EPUB build date, stable EPUB filename,
   and versioned symlink filename.
@@ -266,9 +279,13 @@ After rebuilding, inspect the generated artifacts:
 
 ```sh
 pdftotext build/dist/grust.pdf - | head -80
+python - <<'PY'
+from pypdf import PdfReader
+print(PdfReader("build/dist/grust.pdf").page_labels[:6])
+PY
 unzip -p build/dist/grust.epub EPUB/content.opf | head -80
 unzip -p build/dist/grust.epub EPUB/nav.xhtml | head -80
-cmp -s build/dist/grust.epub build/dist/grust.epub
+test "$(readlink 'build/dist/grust (0.4.0).epub')" = "grust.epub"
 cat build/dist/VERSION.md
 ```
 
@@ -322,6 +339,8 @@ The shell build then uses those generated inputs:
 - Pandoc uses `--resource-path build` so the rendered manuscript can refer to
   generated diagram images as `diagrams/diagram-XX.png`.
 - Pandoc writes a Typst body file to `build/grust-body.typ`.
+- `build.sh` prepends a Typst `#outline(title: [Contents])` page and page break
+  to create `build/grust-body-with-toc.typ`.
 - The final PDF, EPUB, and MOBI are written to `build/dist/`.
 
 This has a few advantages:
@@ -369,9 +388,9 @@ Grust already implements this shape:
   expects OPF `dc:title` and title sort metadata to be
   `grust (<version>)` while NCX/nav/cover titles remain `Grust`.
 - The same checker verifies that `build/dist/VERSION.md` records the
-  Kindle/catalog name, EPUB build date, stable EPUB name, and versioned symlink.
-  It also checks that `grust.epub` is byte-identical to the canonical EPUB and
-  that the version-suffixed Send to Kindle path is a symlink to `grust.epub`.
+  Kindle/catalog name, EPUB build date, stable EPUB name, and versioned symlink,
+  and that the version-suffixed Send to Kindle path is a symlink to
+  `grust.epub`.
 - The layout fix and check run immediately after `build/dist/grust.epub` is
   created and before `ebook-convert` creates `build/dist/grust.mobi`.
 - The repository pins asdf Python `3.14.5` in `.tool-versions`, and the build
