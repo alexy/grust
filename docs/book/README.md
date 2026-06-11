@@ -11,9 +11,11 @@ Source:
 - `manuscript.md` keeps Mermaid diagrams inline as fenced `mermaid` blocks.
 - `build.mjs` renders the cover template, renders Mermaid blocks to SVG, and
   produces `build/manuscript.rendered.md` for Pandoc.
-- `build.sh` renders the cover and body separately for PDF, merges them, then
-  builds EPUB and MOBI with the cover before the manuscript. It also creates a
-  stable title-stem EPUB and an ignored versioned Send to Kindle symlink.
+- `build.sh` renders the cover and body separately for PDF, merges them, sets
+  PDF page labels so the cover is unnumbered and body numbering starts at 1,
+  then builds EPUB and MOBI with the cover before the manuscript. It also
+  creates a stable title-stem EPUB and an ignored versioned Send to Kindle
+  symlink.
 - `fix_epub_layout.sh` rewrites Pandoc's EPUB defaults so the custom cover is
   first in the reading spine and marked as frontmatter.
 - `check_epub_metadata.py` verifies the generated EPUB package metadata, stable

@@ -168,10 +168,12 @@ The full build performs these stages.
 
    ```sh
    pdfunite "$tmpdir/cover.pdf" "$tmpdir/body.pdf" build/dist/grust.pdf
+   python fix_pdf_page_labels.py build/dist/grust.pdf
    ```
 
-   The merged PDF should start with the custom cover, followed by Preface and
-   the numbered body.
+   The merged PDF should start with the custom cover, followed by Contents,
+   Preface, and the numbered body. The cover page label is blank; the Contents
+   page starts PDF numbering at 1.
 
 5. Prepare the EPUB cover source.
 

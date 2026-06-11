@@ -66,10 +66,12 @@ Merge the cover before the body:
 
 ```sh
 pdfunite "$tmpdir/cover.pdf" "$tmpdir/body.pdf" build/dist/grust.pdf
+python fix_pdf_page_labels.py build/dist/grust.pdf
 ```
 
 This ensures the PDF starts with the full standalone cover page, followed by
-the Preface and numbered body.
+the Contents page, Preface, and numbered body. The cover page label is blank;
+the Contents page starts PDF numbering at 1.
 
 ## EPUB and MOBI Build
 

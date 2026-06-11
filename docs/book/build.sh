@@ -86,6 +86,22 @@ pandoc --from markdown+smart \
 typst compile build/grust-body-with-toc.typ "$tmpdir/body.pdf"
 pdfunite "$tmpdir/cover.pdf" "$tmpdir/body.pdf" build/dist/grust.pdf
 
+PDF_PYTHON_CMD=()
+if [[ -n "${PDF_PYTHON:-}" ]]; then
+  PDF_PYTHON_CMD=("$PDF_PYTHON")
+elif [[ -x /Users/alexy/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3 ]]; then
+  PDF_PYTHON_CMD=(/Users/alexy/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/bin/python3)
+else
+  PDF_PYTHON_CMD=()
+fi
+
+if [[ "${#PDF_PYTHON_CMD[@]}" -eq 0 ]]; then
+  echo "python with pypdf not found; cannot set PDF page labels" >&2
+  exit 1
+fi
+
+"${PDF_PYTHON_CMD[@]}" fix_pdf_page_labels.py build/dist/grust.pdf
+
 PYTHON_CMD=()
 if [[ -n "${PANDOC_PYTHON:-}" ]]; then
   PYTHON_CMD=("$PANDOC_PYTHON")
