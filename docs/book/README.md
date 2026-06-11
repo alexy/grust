@@ -38,7 +38,7 @@ Checks:
   canonical EPUB, the versioned Send to Kindle path is a symlink to it, and
   `VERSION.md` records the Kindle name, build date, stable EPUB, and symlink.
 - The same check also enforces the Kindle-facing layout invariants used by the
-  TypeSec checker: cover-first spine order, non-linear nav placement,
+  TypeSec checker: cover-then-visible-TOC spine order,
   frontmatter cover XHTML, no generated cover heading, and no flexbox on the
   cover.
 

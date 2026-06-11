@@ -254,9 +254,9 @@ def validate(epub_path: Path) -> list[str]:
 
         require_pattern(
             errors,
-            r'<spine toc="ncx">\s*<itemref idref="ch001_xhtml" />\s*<itemref idref="nav" linear="no" />',
+            r'<spine toc="ncx">\s*<itemref idref="ch001_xhtml" />\s*<itemref idref="nav" />\s*<itemref idref="ch002_xhtml" />',
             opf_flat,
-            "EPUB/content.opf cover is not first in the reading spine",
+            "EPUB/content.opf reading spine is not cover, visible TOC, then preface",
         )
         require_pattern(
             errors,

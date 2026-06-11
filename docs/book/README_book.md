@@ -99,7 +99,7 @@ pandoc --from markdown+smart \
 ```
 
 Fix Pandoc's generated EPUB layout before validation. This makes the custom
-cover the first spine item, marks the nav as non-linear, changes the cover XHTML
+cover the first spine item, keeps the nav as a visible TOC page, changes the cover XHTML
 to frontmatter, removes Pandoc's wrapper heading around the cover, and rewrites
 OPF `dc:title` and title sort metadata to the versioned Kindle library title:
 

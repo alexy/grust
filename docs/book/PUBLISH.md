@@ -244,7 +244,7 @@ if any of these are wrong:
 - OPF, NCX, and nav files do not contain fallback labels such as `UNTITLED` or
   `Unknown`.
 - the custom cover is first in the reading spine.
-- the nav item is non-linear.
+- the nav item remains visible after the cover and before the preface.
 - the cover XHTML is marked frontmatter.
 - the cover XHTML starts with the custom titlepage section.
 - Pandoc did not leave a generated top-level cover heading.
@@ -357,7 +357,7 @@ Grust already implements this shape:
 - The EPUB build uses `--epub-title-page=false` because Grust has its own custom
   cover.
 - `docs/book/fix_epub_layout.sh` applies the same post-Pandoc layout repair
-  pattern TypeSec uses: cover first in the spine, nav marked non-linear, and the
+  pattern TypeSec uses: cover first in the spine, nav visible as the TOC page, and the
   cover XHTML marked as frontmatter. It also rewrites only
   `EPUB/content.opf`'s `dc:title` and title sort metadata to the Kindle library
   title.
@@ -379,7 +379,7 @@ The checker fails the build if the EPUB is missing or changes the expected
 versioned Kindle `dc:title`, title sort metadata, `dc:creator`, `dc:language`,
 `dc:date`, or `dcterms:modified`; if the cover is not first in the reading
 spine; if the nav
-is not non-linear; if NCX or nav files do not expose the plain visible book
+is not visible after the cover; if NCX or nav files do not expose the plain visible book
 title; if the cover XHTML is not frontmatter; if the first cover section is not
 the custom titlepage; if Pandoc left a generated cover heading; if the cover uses
 flexbox; if package/navigation files contain fallback labels such as `UNTITLED`

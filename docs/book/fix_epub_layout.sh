@@ -32,7 +32,7 @@ cover_xhtml="$workdir/EPUB/text/ch001.xhtml"
 fixed="$tmpdir/fixed.epub"
 
 perl -0pi -e '
-  s#<spine toc="ncx">\s*<itemref idref="nav" />\s*<itemref idref="ch001_xhtml" />#<spine toc="ncx">\n    <itemref idref="ch001_xhtml" />\n    <itemref idref="nav" linear="no" />#s;
+  s#<spine toc="ncx">\s*<itemref idref="nav" />\s*<itemref idref="ch001_xhtml" />#<spine toc="ncx">\n    <itemref idref="ch001_xhtml" />\n    <itemref idref="nav" />#s;
 ' "$content_opf"
 
 KINDLE_TITLE="$kindle_title" perl -0pi -e '

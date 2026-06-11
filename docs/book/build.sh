@@ -77,7 +77,13 @@ pandoc --from markdown+smart \
   --output build/grust-body.typ \
   build/manuscript.rendered.md
 
-typst compile build/grust-body.typ "$tmpdir/body.pdf"
+{
+  printf '#outline(title: [Contents])\n'
+  printf '#pagebreak()\n\n'
+  cat build/grust-body.typ
+} > build/grust-body-with-toc.typ
+
+typst compile build/grust-body-with-toc.typ "$tmpdir/body.pdf"
 pdfunite "$tmpdir/cover.pdf" "$tmpdir/body.pdf" build/dist/grust.pdf
 
 PYTHON_CMD=()

@@ -139,7 +139,7 @@ match `<title_stem> (<version>)`.
 Grust has two extra protections beyond the metadata file. First,
 `docs/book/fix_epub_layout.sh` applies the same kind of post-Pandoc EPUB layout
 repair that TypeSec uses: the custom cover becomes the first spine item, the nav
-document becomes non-linear, and the cover XHTML is marked as frontmatter instead
+document remains a visible TOC page after the cover, and the cover XHTML is marked as frontmatter instead
 of bodymatter. Second, `docs/book/check_epub_metadata.py` reads the generated
 EPUB package and validates the artifact itself, including the stable
 title-stem EPUB, ignored versioned Send to Kindle symlink, and `VERSION.md`
@@ -180,7 +180,7 @@ TypeSec's `docs/book/check_epub_metadata.sh` is still a good fit for TypeSec's
 simpler pipeline. It uses shell tools to assert exact TypeSec metadata, spine,
 cover, and Kindle-layout invariants after TypeSec's EPUB layout fixer runs.
 Grust now enforces the same categories: exact Grust title/creator/language/date
-metadata, cover-first spine order, non-linear nav placement, NCX/nav titles,
+metadata, cover-then-visible-TOC spine order, NCX/nav titles,
 frontmatter cover XHTML, a first custom titlepage section, stable title-stem
 EPUB output, ignored versioned symlink, `VERSION.md` dist marker, no generated
 cover heading, no flexbox on the cover, no fallback metadata, and no generated
@@ -205,7 +205,7 @@ source Markdown. A good metadata gate should fail the build if:
 - `EPUB/content.opf` is missing `dc:date`
 - `EPUB/content.opf` is missing `dcterms:modified`
 - the first readable spine item is not the custom cover XHTML
-- the navigation document is not marked `linear="no"` after the cover
+- the navigation document is not visible after the cover and before the preface
 - the Kindle-facing OPF title does not match `<title_stem> (<version>)`
 - the OPF title lacks a matching `file-as` refinement
 - the stable title-stem EPUB, such as `grust.epub`, is missing
