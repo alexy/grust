@@ -41,6 +41,57 @@ fn relate_edges_are_idempotent_by_endpoints() {
 }
 
 #[test]
+fn get_node_query_scans_candidate_tables_in_one_statement() {
+    let config = SurrealConfig {
+        labels: vec!["Talk".to_string(), "Person".to_string()],
+        ..SurrealConfig::default()
+    };
+    let query = surreal_get_node_query(&NodeId::new("talk-1"), &config);
+
+    assert!(query.starts_with("SELECT *, meta::tb(id) AS __grust_label FROM "));
+    assert!(query.contains("person, record, talk"));
+    assert!(query.contains("id = type::record(\"talk\", \"talk-1\")"));
+    assert_eq!(query.matches("SELECT").count(), 1);
+}
+
+#[test]
+fn get_edges_query_uses_relationship_tables_in_one_statement() {
+    let config = SurrealConfig {
+        relationships: vec!["presents".to_string(), "member_of".to_string()],
+        ..SurrealConfig::default()
+    };
+    let query = surreal_get_edges_query(&EdgeQuery::default(), &config);
+
+    assert!(query.contains("FROM member_of, presents"));
+    assert_eq!(query.matches("SELECT").count(), 1);
+}
+
+#[test]
+fn surreal_response_parsers_rebuild_grust_values() {
+    let node = surreal_node_from_value(serde_json::json!({
+        "id": "person:person-1",
+        "__grust_label": "person",
+        "name": "Ada Lovelace"
+    }))
+    .unwrap();
+    let edge = surreal_edge_from_value(serde_json::json!({
+        "id": "presents:abc",
+        "__grust_label": "presents",
+        "in": "person:person-1",
+        "out": "talk:talk-1",
+        "relationship": "presents",
+        "source": "schedule"
+    }))
+    .unwrap();
+
+    assert_eq!(node.id, NodeId::new("person-1"));
+    assert_eq!(node.label, Label::new("person"));
+    assert_eq!(edge.from, NodeId::new("person-1"));
+    assert_eq!(edge.to, NodeId::new("talk-1"));
+    assert_eq!(edge.label, Label::new("presents"));
+}
+
+#[test]
 fn graph_schema_defines_schemafull_tables_and_fields() {
     let schema = GraphSchema::builder()
         .node(

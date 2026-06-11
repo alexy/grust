@@ -122,6 +122,45 @@ impl SurrealHttpGraphStore {
             })?;
         check_surreal_http_clear_response(response).await
     }
+
+    async fn read(&self, query: &str) -> Result<Vec<serde_json::Value>> {
+        let auth =
+            general_purpose::STANDARD.encode(format!("{}:{}", self.config.user, self.config.pass));
+        let response = self
+            .client
+            .post(&self.config.url)
+            .header("Authorization", format!("Basic {auth}"))
+            .header("Surreal-NS", &self.config.namespace)
+            .header("Surreal-DB", &self.config.database)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/surrealql")
+            .body(query.to_string())
+            .send()
+            .await
+            .map_err(|err| {
+                GrustError::Backend(format!(
+                    "failed to POST SurrealQL to {}: {err}",
+                    self.config.url
+                ))
+            })?;
+        read_surreal_http_response(response, "SurrealDB read").await
+    }
+
+    async fn read_nodes(&self, query: &str) -> Result<Vec<Node>> {
+        self.read(query)
+            .await?
+            .into_iter()
+            .map(surreal_node_from_value)
+            .collect()
+    }
+
+    async fn read_edges(&self, query: &str) -> Result<Vec<Edge>> {
+        self.read(query)
+            .await?
+            .into_iter()
+            .map(surreal_edge_from_value)
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -163,22 +202,27 @@ impl GraphStore for SurrealHttpGraphStore {
         Ok(report)
     }
 
-    async fn get_node(&self, _id: &NodeId) -> Result<Option<Node>> {
-        Err(GrustError::Unsupported(
-            "SurrealHttpGraphStore does not implement reads yet".to_string(),
-        ))
+    async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
+        Ok(self
+            .read_nodes(&surreal_get_node_query(id, &self.config))
+            .await?
+            .into_iter()
+            .next())
     }
 
-    async fn get_edges(&self, _query: EdgeQuery) -> Result<Vec<Edge>> {
-        Err(GrustError::Unsupported(
-            "SurrealHttpGraphStore does not implement reads yet".to_string(),
-        ))
+    async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
+        let mut edges = self
+            .read_edges(&surreal_get_edges_query(&query, &self.config))
+            .await?;
+        filter_edges(&mut edges, &query);
+        Ok(edges)
     }
 
-    async fn traverse(&self, _traversal: Traversal) -> Result<Vec<Node>> {
-        Err(GrustError::Unsupported(
-            "SurrealHttpGraphStore does not implement traversal yet".to_string(),
-        ))
+    async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
+        let current = self
+            .read_nodes(&surreal_start_nodes_query(&traversal.start, &self.config))
+            .await?;
+        traverse_steps_with_store(self, current, traversal.steps, traversal.limit).await
     }
 }
 
@@ -240,6 +284,34 @@ impl SurrealSdkGraphStore {
             .map(|_| ())
             .map_err(|err| GrustError::Backend(format!("SurrealDB SDK query failed: {err}")))
     }
+
+    async fn read(&self, query: &str) -> Result<Vec<serde_json::Value>> {
+        let mut response = self
+            .db
+            .query(query)
+            .await
+            .map_err(|err| GrustError::Backend(format!("SurrealDB SDK read failed: {err}")))?;
+        let rows: Vec<serde_json::Value> = response
+            .take(0)
+            .map_err(|err| GrustError::Backend(format!("SurrealDB SDK read failed: {err}")))?;
+        Ok(rows)
+    }
+
+    async fn read_nodes(&self, query: &str) -> Result<Vec<Node>> {
+        self.read(query)
+            .await?
+            .into_iter()
+            .map(surreal_node_from_value)
+            .collect()
+    }
+
+    async fn read_edges(&self, query: &str) -> Result<Vec<Edge>> {
+        self.read(query)
+            .await?
+            .into_iter()
+            .map(surreal_edge_from_value)
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -284,22 +356,30 @@ impl GraphStore for SurrealSdkGraphStore {
         Ok(report)
     }
 
-    async fn get_node(&self, _id: &NodeId) -> Result<Option<Node>> {
-        Err(GrustError::Unsupported(
-            "SurrealSdkGraphStore does not implement reads yet".to_string(),
-        ))
+    async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
+        self.select_database().await?;
+        Ok(self
+            .read_nodes(&surreal_get_node_query(id, &self.config))
+            .await?
+            .into_iter()
+            .next())
     }
 
-    async fn get_edges(&self, _query: EdgeQuery) -> Result<Vec<Edge>> {
-        Err(GrustError::Unsupported(
-            "SurrealSdkGraphStore does not implement reads yet".to_string(),
-        ))
+    async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
+        self.select_database().await?;
+        let mut edges = self
+            .read_edges(&surreal_get_edges_query(&query, &self.config))
+            .await?;
+        filter_edges(&mut edges, &query);
+        Ok(edges)
     }
 
-    async fn traverse(&self, _traversal: Traversal) -> Result<Vec<Node>> {
-        Err(GrustError::Unsupported(
-            "SurrealSdkGraphStore does not implement traversal yet".to_string(),
-        ))
+    async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
+        self.select_database().await?;
+        let current = self
+            .read_nodes(&surreal_start_nodes_query(&traversal.start, &self.config))
+            .await?;
+        traverse_steps_with_store(self, current, traversal.steps, traversal.limit).await
     }
 }
 
@@ -346,6 +426,41 @@ async fn check_surreal_http_response(response: reqwest::Response, context: &str)
         }
     }
     Ok(())
+}
+
+async fn read_surreal_http_response(
+    response: reqwest::Response,
+    context: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| GrustError::Backend(format!("failed to read SurrealDB response: {err}")))?;
+    if !status.is_success() {
+        return Err(GrustError::Backend(format!(
+            "{context} failed with status {status}: {body}"
+        )));
+    }
+    let results = serde_json::from_str::<serde_json::Value>(&body)
+        .map_err(|err| GrustError::Serialization(format!("invalid SurrealDB response: {err}")))?;
+    if surreal_response_has_error(&results) {
+        return Err(GrustError::Backend(format!(
+            "{context} returned an error: {body}"
+        )));
+    }
+    Ok(surreal_response_rows(&results))
+}
+
+fn surreal_response_rows(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|item| item.get("result").and_then(|result| result.as_array()))
+        .flatten()
+        .cloned()
+        .collect()
 }
 
 async fn check_surreal_http_bootstrap_response(response: reqwest::Response) -> Result<()> {
@@ -452,6 +567,80 @@ fn surreal_delete_tables_query(config: &SurrealConfig) -> String {
         .map(|table| format!("DELETE {table};"))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn surreal_get_node_query(id: &NodeId, config: &SurrealConfig) -> String {
+    let tables = surreal_node_tables_for_id(id, config);
+    let where_clause = tables
+        .iter()
+        .map(|table| {
+            format!(
+                "id = type::record({}, {})",
+                surreal_string(table),
+                surreal_string(id.as_str())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!(
+        "SELECT *, meta::tb(id) AS __grust_label FROM {} WHERE {where_clause};",
+        tables.join(", ")
+    )
+}
+
+fn surreal_get_edges_query(query: &EdgeQuery, config: &SurrealConfig) -> String {
+    let tables = surreal_edge_tables(query.label.as_ref(), config);
+    if tables.is_empty() {
+        return "RETURN [];".to_string();
+    }
+    format!(
+        "SELECT *, meta::tb(id) AS __grust_label FROM {};",
+        tables.join(", ")
+    )
+}
+
+fn surreal_start_nodes_query(start: &Start, config: &SurrealConfig) -> String {
+    match start {
+        Start::Node(id) => surreal_get_node_query(id, config),
+        Start::NodesByLabel(label) => {
+            let table = surreal_table_name(label.as_str());
+            format!("SELECT *, meta::tb(id) AS __grust_label FROM {table};")
+        }
+        Start::NodesByProperty { label, key, value } => {
+            let table = surreal_table_name(label.as_str());
+            format!(
+                "SELECT *, meta::tb(id) AS __grust_label FROM {table} WHERE {} = {};",
+                surreal_identifier(key),
+                surreal_value(value).unwrap_or_else(|_| "NONE".to_string())
+            )
+        }
+    }
+}
+
+fn surreal_node_tables_for_id(id: &NodeId, config: &SurrealConfig) -> Vec<String> {
+    let mut tables = config
+        .labels
+        .iter()
+        .map(|label| surreal_table_name(label))
+        .collect::<BTreeSet<_>>();
+    tables.insert(node_id_table(id.as_str()));
+    tables.insert("record".to_string());
+    tables.into_iter().collect()
+}
+
+fn surreal_edge_tables(label: Option<&Label>, config: &SurrealConfig) -> Vec<String> {
+    let mut tables = BTreeSet::new();
+    if let Some(label) = label {
+        tables.insert(surreal_table_name(&relationship_type(label.as_str())));
+    } else {
+        tables.extend(
+            config
+                .relationships
+                .iter()
+                .map(|relationship| surreal_table_name(&relationship_type(relationship))),
+        );
+    }
+    tables.into_iter().collect()
 }
 
 fn surreal_schema_query(schema: &GraphSchema) -> Result<String> {
@@ -579,6 +768,182 @@ fn surreal_id_tables(nodes: &[Node]) -> Result<BTreeMap<String, String>> {
             ))
         })
         .collect()
+}
+
+fn surreal_node_from_value(mut value: serde_json::Value) -> Result<Node> {
+    let object = value.as_object_mut().ok_or_else(|| {
+        GrustError::Serialization("SurrealDB node row is not an object".to_string())
+    })?;
+    let label = object
+        .remove("__grust_label")
+        .and_then(|value| value.as_str().map(Label::new))
+        .ok_or_else(|| GrustError::Serialization("SurrealDB node row has no label".to_string()))?;
+    let id =
+        surreal_record_id(object.get("id").ok_or_else(|| {
+            GrustError::Serialization("SurrealDB node row has no id".to_string())
+        })?)?;
+    object.remove("__grust_label");
+    object.remove("id");
+    let props = object
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), value_from_json(value.clone()))))
+        .collect::<Result<Props>>()?;
+    Ok(Node::new(label, id, props))
+}
+
+fn surreal_edge_from_value(mut value: serde_json::Value) -> Result<Edge> {
+    let object = value.as_object_mut().ok_or_else(|| {
+        GrustError::Serialization("SurrealDB edge row is not an object".to_string())
+    })?;
+    let label = object
+        .remove("relationship")
+        .and_then(|value| value.as_str().map(Label::new))
+        .or_else(|| {
+            object
+                .get("__grust_label")
+                .and_then(|value| value.as_str())
+                .map(Label::new)
+        })
+        .ok_or_else(|| GrustError::Serialization("SurrealDB edge row has no label".to_string()))?;
+    let from =
+        surreal_record_id(object.get("in").ok_or_else(|| {
+            GrustError::Serialization("SurrealDB edge row has no in".to_string())
+        })?)?;
+    let to =
+        surreal_record_id(object.get("out").ok_or_else(|| {
+            GrustError::Serialization("SurrealDB edge row has no out".to_string())
+        })?)?;
+    let id = object
+        .get("edge_id")
+        .and_then(|value| value.as_str())
+        .map(EdgeId::new);
+    object.remove("__grust_label");
+    object.remove("id");
+    object.remove("in");
+    object.remove("out");
+    object.remove("edge_id");
+    let props = object
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), value_from_json(value.clone()))))
+        .collect::<Result<Props>>()?;
+    let mut edge = Edge::new(label, from, to, props);
+    edge.id = id;
+    Ok(edge)
+}
+
+fn surreal_record_id(value: &serde_json::Value) -> Result<NodeId> {
+    if let Some(id) = value.as_str() {
+        return Ok(NodeId::new(
+            id.rsplit_once(':').map(|(_, id)| id).unwrap_or(id),
+        ));
+    }
+    if let Some(object) = value.as_object() {
+        if let Some(id) = object.get("id").and_then(surreal_record_id_value) {
+            return Ok(NodeId::new(id));
+        }
+    }
+    Err(GrustError::Serialization(format!(
+        "could not read SurrealDB record id from {value}"
+    )))
+}
+
+fn surreal_record_id_value(value: &serde_json::Value) -> Option<String> {
+    value.as_str().map(ToString::to_string).or_else(|| {
+        value
+            .as_object()
+            .and_then(|object| object.values().find_map(|value| value.as_str()))
+            .map(ToString::to_string)
+    })
+}
+
+fn value_from_json(value: serde_json::Value) -> Value {
+    match value {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(value) => Value::Bool(value),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Value::Int(value)
+            } else {
+                Value::Float(value.as_f64().unwrap_or_default())
+            }
+        }
+        serde_json::Value::String(value) => Value::String(value),
+        serde_json::Value::Array(values) if values.iter().all(|value| value.as_str().is_some()) => {
+            Value::StringArray(
+                values
+                    .into_iter()
+                    .filter_map(|value| match value {
+                        serde_json::Value::String(value) => Some(value),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        }
+        value => Value::Json(value),
+    }
+}
+
+fn filter_edges(edges: &mut Vec<Edge>, query: &EdgeQuery) {
+    edges.retain(|edge| {
+        query.from.as_ref().is_none_or(|from| from == &edge.from)
+            && query.to.as_ref().is_none_or(|to| to == &edge.to)
+            && query
+                .label
+                .as_ref()
+                .is_none_or(|label| label == &edge.label)
+    });
+}
+
+async fn traverse_steps_with_store<S>(
+    store: &S,
+    mut current: Vec<Node>,
+    steps: Vec<Step>,
+    limit: Option<u32>,
+) -> Result<Vec<Node>>
+where
+    S: GraphStore,
+{
+    for step in steps {
+        let mut next = Vec::new();
+        for node in &current {
+            let edge_query = EdgeQuery {
+                from: match step.direction {
+                    Direction::Out => Some(node.id.clone()),
+                    Direction::In | Direction::Both => None,
+                },
+                to: match step.direction {
+                    Direction::In => Some(node.id.clone()),
+                    Direction::Out | Direction::Both => None,
+                },
+                label: step.edge.clone(),
+            };
+            for edge in store.get_edges(edge_query).await? {
+                let out_matches = matches!(step.direction, Direction::Out | Direction::Both)
+                    && edge.from == node.id;
+                let in_matches =
+                    matches!(step.direction, Direction::In | Direction::Both) && edge.to == node.id;
+                if !out_matches && !in_matches {
+                    continue;
+                }
+                let target_id = if out_matches { &edge.to } else { &edge.from };
+                if let Some(target) = store.get_node(target_id).await? {
+                    if step
+                        .node
+                        .as_ref()
+                        .is_none_or(|label| label == &target.label)
+                    {
+                        next.push(target);
+                    }
+                }
+            }
+        }
+        current = next;
+    }
+
+    if let Some(limit) = limit {
+        current.truncate(limit as usize);
+    }
+    Ok(current)
 }
 
 fn edge_id_tables(edge: &Edge) -> BTreeMap<String, String> {

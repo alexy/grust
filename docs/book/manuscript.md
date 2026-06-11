@@ -278,7 +278,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.4", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.5", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -286,7 +286,7 @@ grust = { package = "grust-graph", version = "0.4", features = ["typed-garde"] }
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.4", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.5", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -788,21 +788,21 @@ Backends share the same input model but not the same execution model:
 flowchart TB
   grustGraph["grust::Graph"] --> contract["GraphStore"]
   contract --> inproc["In-process store"]
-  contract --> graphdb["Graph database writers"]
+  contract --> graphdb["Graph database stores"]
   contract --> tabular["Table and analytics stores"]
   grustGraph --> coco["CocoIndex export target state"]
   inproc --> mem["Memory\nBTreeMap scans"]
   graphdb --> falkor["FalkorDB\nGRAPH.QUERY writes"]
-  graphdb --> helix["HelixDB\nHTTP or SDK writes\nschema-name validation"]
-  graphdb --> surreal["SurrealDB\nschemafull tables"]
+  graphdb --> helix["HelixDB\nHTTP or SDK\nreads + traversal"]
+  graphdb --> surreal["SurrealDB\nschemafull tables\nreads + traversal"]
   tabular --> lance["LanceDB\nuniversal + typed Arrow tables"]
   tabular --> pg["pgGraph\nSQL traversal + typed views"]
   tabular --> sail["Sail\nuniversal + typed Delta tables"]
 ```
 
-Some backends are full read/write/traversal stores today. Others currently
-focus on writes and administrative loading. That is normal for an early
-multi-backend project, and the trait makes the maturity boundary explicit.
+Some backends are full read/write/traversal stores today. Others still focus on
+writes and administrative loading. That is normal for an early multi-backend
+project, and the trait makes the maturity boundary explicit.
 
 ## Memory
 
@@ -896,17 +896,22 @@ The FalkorDB backend writes through Redis `GRAPH.QUERY` using Cypher-like
 type. Schema application creates label/property indexes for declared node
 types.
 
-The HelixDB backend has HTTP and SDK stores. Both support batched writes; reads
-and traversal currently report unsupported operations. The current schema hook
-validates that labels, relationships, and fields can be safely lowered through
-the dynamic-query path; backend-native schema-file generation can build on that
-same `GraphSchema` contract later.
+The HelixDB backend has HTTP and SDK stores. Both support batched writes, node
+reads, edge reads, and backend-neutral traversal through Helix dynamic queries.
+Edge writes store Grust relationship metadata (`relationship`, `from_id`,
+`to_id`, and optional `edge_id`) so `EdgeQuery` can reconstruct Grust edges from
+Helix relationship rows. The current schema hook validates that labels,
+relationships, and fields can be safely lowered through the dynamic-query path;
+backend-native schema-file generation can build on that same `GraphSchema`
+contract later.
 
 The SurrealDB backend also has HTTP and SDK stores. It can bootstrap, clear,
-upsert nodes, and relate edges. Like Helix today, read and traversal support is
-not yet implemented. Applying a schema lowers node and edge declarations to
-Surreal `DEFINE TABLE` and `DEFINE FIELD` statements so the backend can run in
-schemafull mode where the schema calls for it.
+upsert nodes, relate edges, read nodes and edges, and execute traversal
+hop-by-hop through the `GraphStore` contract. Applying a schema lowers node and
+edge declarations to Surreal `DEFINE TABLE` and `DEFINE FIELD` statements so
+the backend can run in schemafull mode where the schema calls for it. Reads use
+configured labels and relationships, plus ID-derived table names, to find
+records across Surreal's label-specific tables.
 
 ## CocoIndex
 
@@ -1108,10 +1113,11 @@ forcing every backend to look the same.
 
 # 12. Where Grust Can Grow
 
-The next natural step is to deepen read and traversal support across the write
-focused backends. FalkorDB, HelixDB, and SurrealDB already have enough write
-surface to load graphs; adding reads would make them more symmetric with memory,
-LanceDB, pgGraph, and Sail.
+The next natural step is to deepen graph-native read and traversal support
+across the backends. HelixDB and SurrealDB now satisfy the portable
+`GraphStore` read and traversal surface, while FalkorDB remains primarily a
+write and indexing adapter. Further work can push more traversal work into
+backend-native query forms and add richer result shapes.
 
 Traversal can also grow carefully. Property filters, bounded depth, path
 returns, shortest paths, and aggregation are all tempting. The important rule is

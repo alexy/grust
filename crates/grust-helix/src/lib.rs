@@ -84,6 +84,33 @@ impl HelixHttpGraphStore {
         }
         Ok(())
     }
+
+    async fn read(&self, request: &serde_json::Value) -> Result<serde_json::Value> {
+        let response = self
+            .client
+            .post(&self.config.query_url)
+            .json(request)
+            .send()
+            .await
+            .map_err(|err| {
+                GrustError::Backend(format!(
+                    "failed to POST Helix query to {}: {err}",
+                    self.config.query_url
+                ))
+            })?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|err| GrustError::Backend(format!("failed to read Helix response: {err}")))?;
+        if !status.is_success() {
+            return Err(GrustError::Backend(format!(
+                "Helix query failed with status {status}: {body}"
+            )));
+        }
+        serde_json::from_str(&body)
+            .map_err(|err| GrustError::Serialization(format!("invalid Helix response: {err}")))
+    }
 }
 
 #[async_trait]
@@ -117,22 +144,30 @@ impl GraphStore for HelixHttpGraphStore {
         Ok(report)
     }
 
-    async fn get_node(&self, _id: &NodeId) -> Result<Option<Node>> {
-        Err(GrustError::Unsupported(
-            "HelixHttpGraphStore does not implement reads yet".to_string(),
-        ))
+    async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
+        let request = helix_get_node_request(id);
+        let response = self.read(&request).await?;
+        Ok(helix_nodes_from_response(&response, "nodes")?
+            .into_iter()
+            .next())
     }
 
-    async fn get_edges(&self, _query: EdgeQuery) -> Result<Vec<Edge>> {
-        Err(GrustError::Unsupported(
-            "HelixHttpGraphStore does not implement reads yet".to_string(),
-        ))
+    async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
+        let request = helix_get_edges_request(&query)?;
+        let response = self.read(&request).await?;
+        let mut edges = helix_edges_from_response(&response, "edges")?;
+        helix_filter_edges(&mut edges, &query);
+        Ok(edges)
     }
 
-    async fn traverse(&self, _traversal: Traversal) -> Result<Vec<Node>> {
-        Err(GrustError::Unsupported(
-            "HelixHttpGraphStore does not implement traversal yet".to_string(),
-        ))
+    async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
+        let request = helix_traversal_request(&traversal)?;
+        let response = self.read(&request).await?;
+        let mut nodes = helix_nodes_from_response(&response, "nodes")?;
+        if let Some(limit) = traversal.limit {
+            nodes.truncate(limit as usize);
+        }
+        Ok(nodes)
     }
 }
 
@@ -195,22 +230,28 @@ impl GraphStore for HelixSdkGraphStore {
         Ok(report)
     }
 
-    async fn get_node(&self, _id: &NodeId) -> Result<Option<Node>> {
-        Err(GrustError::Unsupported(
-            "HelixSdkGraphStore does not implement reads yet".to_string(),
-        ))
+    async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
+        let response = send_helix_sdk_read(&self.client, helix_get_node_request(id)).await?;
+        Ok(helix_nodes_from_response(&response, "nodes")?
+            .into_iter()
+            .next())
     }
 
-    async fn get_edges(&self, _query: EdgeQuery) -> Result<Vec<Edge>> {
-        Err(GrustError::Unsupported(
-            "HelixSdkGraphStore does not implement reads yet".to_string(),
-        ))
+    async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
+        let response = send_helix_sdk_read(&self.client, helix_get_edges_request(&query)?).await?;
+        let mut edges = helix_edges_from_response(&response, "edges")?;
+        helix_filter_edges(&mut edges, &query);
+        Ok(edges)
     }
 
-    async fn traverse(&self, _traversal: Traversal) -> Result<Vec<Node>> {
-        Err(GrustError::Unsupported(
-            "HelixSdkGraphStore does not implement traversal yet".to_string(),
-        ))
+    async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
+        let response =
+            send_helix_sdk_read(&self.client, helix_traversal_request(&traversal)?).await?;
+        let mut nodes = helix_nodes_from_response(&response, "nodes")?;
+        if let Some(limit) = traversal.limit {
+            nodes.truncate(limit as usize);
+        }
+        Ok(nodes)
     }
 }
 
@@ -305,13 +346,19 @@ fn helix_add_edges_request(edges: &[Edge]) -> Result<serde_json::Value> {
 }
 
 fn helix_http_edge_properties(edge: &Edge) -> Vec<serde_json::Value> {
-    edge.props
-        .iter()
-        .filter_map(|(key, value)| match value {
-            Value::String(value) => Some(json!([key, {"Value": {"String": value}}])),
-            _ => None,
-        })
-        .collect()
+    let mut properties = vec![
+        json!(["relationship", {"Value": {"String": edge.label.as_str()}}]),
+        json!(["from_id", {"Value": {"String": edge.from.as_str()}}]),
+        json!(["to_id", {"Value": {"String": edge.to.as_str()}}]),
+    ];
+    if let Some(id) = &edge.id {
+        properties.push(json!(["edge_id", {"Value": {"String": id.as_str()}}]));
+    }
+    properties.extend(edge.props.iter().filter_map(|(key, value)| match value {
+        Value::String(value) => Some(json!([key, {"Value": {"String": value}}])),
+        _ => None,
+    }));
+    properties
 }
 
 fn helix_drop_labels_request(labels: &[String]) -> serde_json::Value {
@@ -405,13 +452,262 @@ async fn post_helix_sdk_edges(client: &HelixClient, edges: &[Edge]) -> Result<()
 }
 
 fn helix_sdk_edge_properties(edge: &Edge) -> Vec<(String, String)> {
-    edge.props
-        .iter()
-        .filter_map(|(key, value)| match value {
-            Value::String(value) => Some((key.clone(), value.clone())),
-            _ => None,
-        })
+    let mut properties = vec![
+        ("relationship".to_string(), edge.label.as_str().to_string()),
+        ("from_id".to_string(), edge.from.as_str().to_string()),
+        ("to_id".to_string(), edge.to.as_str().to_string()),
+    ];
+    if let Some(id) = &edge.id {
+        properties.push(("edge_id".to_string(), id.as_str().to_string()));
+    }
+    properties.extend(edge.props.iter().filter_map(|(key, value)| match value {
+        Value::String(value) => Some((key.clone(), value.clone())),
+        _ => None,
+    }));
+    properties
+}
+
+async fn send_helix_sdk_read(
+    client: &HelixClient,
+    request: serde_json::Value,
+) -> Result<serde_json::Value> {
+    let mut sdk_request = request;
+    sdk_request["request_type"] = json!("Read");
+    let sdk_request: DynamicQueryRequest = serde_json::from_value(sdk_request)
+        .map_err(|err| GrustError::Serialization(format!("invalid Helix SDK read: {err}")))?;
+    client
+        .query::<serde_json::Value>()
+        .dynamic_query(sdk_request)
+        .send()
+        .await
+        .map_err(|err| GrustError::Backend(format!("Helix SDK read failed: {err}")))
+}
+
+fn helix_get_node_request(id: &NodeId) -> serde_json::Value {
+    helix_read_request(
+        "nodes",
+        vec![json!({
+            "Query": {
+                "name": "nodes",
+                "steps": [{"NWhere": {"Eq": ["id", {"String": id.as_str()}]}}],
+                "condition": null
+            }
+        })],
+    )
+}
+
+fn helix_get_edges_request(query: &EdgeQuery) -> Result<serde_json::Value> {
+    let mut predicates = Vec::new();
+    if let Some(from) = &query.from {
+        predicates.push(json!({"Eq": ["from_id", {"String": from.as_str()}]}));
+    }
+    if let Some(to) = &query.to {
+        predicates.push(json!({"Eq": ["to_id", {"String": to.as_str()}]}));
+    }
+    if let Some(label) = &query.label {
+        predicates.push(json!({"Eq": ["relationship", {"String": label.as_str()}]}));
+    }
+    Ok(helix_read_request(
+        "edges",
+        vec![json!({
+            "Query": {
+                "name": "edges",
+                "steps": [{"EWhere": helix_and_predicate(predicates)}],
+                "condition": null
+            }
+        })],
+    ))
+}
+
+fn helix_traversal_request(traversal: &Traversal) -> Result<serde_json::Value> {
+    let mut steps = match &traversal.start {
+        Start::Node(id) => vec![json!({"NWhere": {"Eq": ["id", {"String": id.as_str()}]}})],
+        Start::NodesByLabel(label) => {
+            vec![json!({"NWhere": {"Eq": ["$label", {"String": label.as_str()}]}})]
+        }
+        Start::NodesByProperty { label, key, value } => vec![json!({
+            "NWhere": helix_and_predicate(vec![
+                json!({"Eq": ["$label", {"String": label.as_str()}]}),
+                json!({"Eq": [key, helix_grust_value(value)?]}),
+            ])
+        })],
+    };
+    for step in &traversal.steps {
+        let edge = step
+            .edge
+            .as_ref()
+            .map(|label| relationship_type(label.as_str()));
+        match step.direction {
+            Direction::Out => steps.push(json!({"Out": edge})),
+            Direction::In => steps.push(json!({"In": edge})),
+            Direction::Both => steps.push(json!({"Both": edge})),
+        }
+        if let Some(label) = &step.node {
+            steps.push(json!({"HasLabel": label.as_str()}));
+        }
+    }
+    Ok(helix_read_request(
+        "nodes",
+        vec![json!({
+            "Query": {
+                "name": "nodes",
+                "steps": steps,
+                "condition": null
+            }
+        })],
+    ))
+}
+
+fn helix_read_request(return_name: &str, queries: Vec<serde_json::Value>) -> serde_json::Value {
+    json!({
+        "request_type": "read",
+        "query": {"queries": queries, "returns": [return_name]},
+        "parameters": {},
+        "parameter_types": {}
+    })
+}
+
+fn helix_and_predicate(predicates: Vec<serde_json::Value>) -> serde_json::Value {
+    match predicates.as_slice() {
+        [] => json!({"HasKey": "relationship"}),
+        [predicate] => predicate.clone(),
+        _ => json!({"And": predicates}),
+    }
+}
+
+fn helix_grust_value(value: &Value) -> Result<serde_json::Value> {
+    match value {
+        Value::String(value) => Ok(json!({"String": value})),
+        Value::Int(value) => Ok(json!({"I64": value})),
+        Value::Float(value) => Ok(json!({"F64": value})),
+        Value::Bool(value) => Ok(json!({"Boolean": value})),
+        _ => Err(GrustError::Unsupported(
+            "Helix reads support scalar string, int, float, and bool predicates".to_string(),
+        )),
+    }
+}
+
+fn helix_nodes_from_response(response: &serde_json::Value, name: &str) -> Result<Vec<Node>> {
+    helix_response_items(response, name)
+        .into_iter()
+        .map(helix_node_from_value)
         .collect()
+}
+
+fn helix_edges_from_response(response: &serde_json::Value, name: &str) -> Result<Vec<Edge>> {
+    helix_response_items(response, name)
+        .into_iter()
+        .map(helix_edge_from_value)
+        .collect()
+}
+
+fn helix_response_items(response: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
+    if let Some(items) = response.get(name).and_then(|value| value.as_array()) {
+        return items.clone();
+    }
+    if let Some(items) = response
+        .get("results")
+        .and_then(|results| results.get(name))
+        .and_then(|value| value.as_array())
+    {
+        return items.clone();
+    }
+    if let Some(items) = response
+        .get("result")
+        .and_then(|results| results.get(name))
+        .and_then(|value| value.as_array())
+    {
+        return items.clone();
+    }
+    response.as_array().cloned().unwrap_or_default()
+}
+
+fn helix_node_from_value(value: serde_json::Value) -> Result<Node> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| GrustError::Serialization("Helix node row is not an object".to_string()))?;
+    let id = object
+        .get("id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| GrustError::Serialization("Helix node row has no id".to_string()))?;
+    let label = object
+        .get("$label")
+        .or_else(|| object.get("label"))
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| GrustError::Serialization("Helix node row has no label".to_string()))?;
+    let props = object
+        .iter()
+        .filter(|(key, _)| key.as_str() != "$label" && key.as_str() != "label")
+        .map(|(key, value)| (key.clone(), helix_value_from_json(value.clone())))
+        .collect::<Props>();
+    Ok(Node::new(label, id, props))
+}
+
+fn helix_edge_from_value(value: serde_json::Value) -> Result<Edge> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| GrustError::Serialization("Helix edge row is not an object".to_string()))?;
+    let from = object
+        .get("from_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| GrustError::Serialization("Helix edge row has no from_id".to_string()))?;
+    let to = object
+        .get("to_id")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| GrustError::Serialization("Helix edge row has no to_id".to_string()))?;
+    let label = object
+        .get("relationship")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| {
+            GrustError::Serialization("Helix edge row has no relationship".to_string())
+        })?;
+    let mut edge = Edge::new(
+        label,
+        from,
+        to,
+        object
+            .iter()
+            .filter(|(key, _)| {
+                !matches!(
+                    key.as_str(),
+                    "from_id" | "to_id" | "relationship" | "edge_id" | "$label" | "label"
+                )
+            })
+            .map(|(key, value)| (key.clone(), helix_value_from_json(value.clone())))
+            .collect::<Props>(),
+    );
+    edge.id = object
+        .get("edge_id")
+        .and_then(|value| value.as_str())
+        .map(EdgeId::new);
+    Ok(edge)
+}
+
+fn helix_value_from_json(value: serde_json::Value) -> Value {
+    match value {
+        serde_json::Value::Null => Value::Null,
+        serde_json::Value::Bool(value) => Value::Bool(value),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Value::Int(value)
+            } else {
+                Value::Float(value.as_f64().unwrap_or_default())
+            }
+        }
+        serde_json::Value::String(value) => Value::String(value),
+        value => Value::Json(value),
+    }
+}
+
+fn helix_filter_edges(edges: &mut Vec<Edge>, query: &EdgeQuery) {
+    edges.retain(|edge| {
+        query.from.as_ref().is_none_or(|from| from == &edge.from)
+            && query.to.as_ref().is_none_or(|to| to == &edge.to)
+            && query
+                .label
+                .as_ref()
+                .is_none_or(|label| label == &edge.label)
+    });
 }
 
 async fn post_helix_sdk_drop_labels(client: &HelixClient, labels: &[String]) -> Result<()> {

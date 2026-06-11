@@ -63,7 +63,7 @@ visible book title in the checked-in metadata file, then post-process only
 the EPUB:
 
 ```sh
-version="0.4.0"
+version="0.5.0"
 title_stem="grust"
 kindle_title="$title_stem ($version)"
 
@@ -77,8 +77,8 @@ KINDLE_TITLE="$kindle_title" perl -0pi -e '
 For the current Grust release, that means Kindle should see this package title:
 
 ```xml
-<dc:title id="epub-title-1">grust (0.4.0)</dc:title>
-<meta refines="#epub-title-1" property="file-as">grust (0.4.0)</meta>
+<dc:title id="epub-title-1">grust (0.5.0)</dc:title>
+<meta refines="#epub-title-1" property="file-as">grust (0.5.0)</meta>
 ```
 
 while `EPUB/nav.xhtml`, `EPUB/toc.ncx`, and the cover XHTML still display the
@@ -103,7 +103,7 @@ ln -s "$title_stem.epub" "build/dist/$kindle_title.epub"
 
 The repository should track the stable stem file and marker, for example
 `grust.epub` and `VERSION.md`, and ignore version-suffixed artifacts such as
-`grust (0.4.0).epub`.
+`grust (0.5.0).epub`.
 
 For Grust, that means the book-local ignore rules should look like:
 
@@ -210,7 +210,7 @@ source Markdown. A good metadata gate should fail the build if:
 - the OPF title lacks a matching `file-as` refinement
 - the stable title-stem EPUB, such as `grust.epub`, is missing
 - the stable title-stem EPUB is not byte-identical to the canonical EPUB
-- the versioned Send to Kindle path, such as `grust (0.4.0).epub`, is missing
+- the versioned Send to Kindle path, such as `grust (0.5.0).epub`, is missing
 - the versioned Send to Kindle path is not a symlink to the stable title-stem EPUB
 - `VERSION.md` does not include the generated Kindle name
 - `VERSION.md` does not include the dist build date
@@ -246,7 +246,7 @@ Check the stable stem file, ignored versioned symlink, and marker:
 
 ```sh
 cmp -s build/dist/grust.epub build/dist/grust.epub
-readlink "build/dist/grust (0.4.0).epub"
+readlink "build/dist/grust (0.5.0).epub"
 cat build/dist/VERSION.md
 ```
 
