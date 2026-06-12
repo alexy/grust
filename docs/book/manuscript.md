@@ -278,7 +278,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.5", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.1", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -286,7 +286,7 @@ grust = { package = "grust-graph", version = "0.5", features = ["typed-garde"] }
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.5", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.1", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -933,6 +933,27 @@ let export = graph.to_cocoindex_export()?;
 The export uses Grust node IDs as target keys, converts properties to JSON, and
 requires edge endpoints to exist in the graph so relationship source and target
 labels can be emitted.
+
+## Backend Integration Tests
+
+Unit tests stay self-contained, but live backend tests are explicit. They are
+marked ignored in Cargo so a normal workspace test run does not accidentally
+depend on local services. When a live test is requested, however, it must reach
+the backend; it no longer returns early and pretends success when a server is
+missing.
+
+The repository provides a launcher for those checks:
+
+```sh
+scripts/integration-test.sh
+```
+
+The launcher reads `integration/backends.conf`, prefers configured local source
+checkouts such as `~/src/sail`, `~/src/SurrealDB`, and `~/src/FalkorDB`, and
+falls back to Docker Compose for Docker-friendly backends. A single backend can
+be run with `--backend sail`, `--backend surreal`, or `--backend falkor`.
+Helix and pgGraph have slots in the same config so their startup paths can join
+the same contract once their local service startup is pinned down.
 
 # 9. Example: A Conference Graph
 

@@ -305,19 +305,25 @@ so the wildcard `pub use grust_sail::*` from the proposal was not used.
 
 ### 3.7 Tests
 
-Tests in `src/tests.rs` use `TcpStream::connect("127.0.0.1:50051")` to detect
-whether Sail is running and return early if it is not. This is cleaner than
-`#[ignore]` because it produces a "passed" result rather than a skipped count,
-and does not require any Cargo feature or environment variable.
+Live Sail tests in `src/tests.rs` are marked `#[ignore]` and fail if the Sail
+server is missing when those ignored tests are explicitly requested. This keeps
+ordinary unit-test runs self-contained while preventing CI or release checks
+from producing a green result for a backend that was never exercised.
 
 ```rust
-async fn store() -> Option<SailGraphStore> {
-    if !sail_available() { return None; }
-    let store = SailGraphStore::connect(SailConfig::default()).await.ok()?;
-    store.bootstrap().await.ok()?;
-    store.clear().await.ok()?;
-    Some(store)
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_put_and_get_node() {
+    let store = store().await;
+    // ...
 }
+```
+
+The repository-level launcher starts Sail from a configured local checkout when
+needed and then runs the ignored tests:
+
+```sh
+scripts/integration-test.sh --backend sail
 ```
 
 ---

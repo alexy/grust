@@ -64,3 +64,39 @@ fn graph_schema_creates_falkor_indexes() {
     assert!(queries.contains(&"CREATE INDEX ON :Person(name)".to_string()));
     assert!(queries.contains(&"CREATE INDEX ON :Person(age)".to_string()));
 }
+
+#[test]
+#[ignore = "requires a live FalkorDB server on 127.0.0.1:6379"]
+fn live_put_graph_and_schema() {
+    futures_executor::block_on(async {
+        let store = FalkorGraphStore::new(FalkorConfig {
+            graph: "grust_integration".to_string(),
+            ..FalkorConfig::default()
+        });
+        store
+            .clear()
+            .await
+            .expect("clear FalkorDB integration graph");
+        store
+            .apply_schema(
+                &GraphSchema::builder()
+                    .node("Person", vec![Field::required("name", FieldType::String)])
+                    .node("Talk", vec![Field::required("title", FieldType::String)])
+                    .edge(
+                        "presents",
+                        vec![Label::new("Person")],
+                        vec![Label::new("Talk")],
+                        Vec::<Field>::new(),
+                    )
+                    .build(),
+            )
+            .await
+            .expect("apply FalkorDB schema");
+        let report = store
+            .put_graph(&sample_graph())
+            .await
+            .expect("write graph to FalkorDB");
+        assert_eq!(report.nodes, 2);
+        assert_eq!(report.edges, 1);
+    });
+}

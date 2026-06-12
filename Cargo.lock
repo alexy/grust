@@ -2820,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "grust-cocoindex"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "grust-core",
  "serde",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "grust-core"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "garde",
@@ -2843,16 +2843,17 @@ dependencies = [
 
 [[package]]
 name = "grust-falkor"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
+ "futures-executor",
  "grust-core",
  "redis",
 ]
 
 [[package]]
 name = "grust-graph"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "garde",
  "grust-cocoindex",
@@ -2871,7 +2872,7 @@ dependencies = [
 
 [[package]]
 name = "grust-helix"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -2882,7 +2883,7 @@ dependencies = [
 
 [[package]]
 name = "grust-lancedb"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2896,7 +2897,7 @@ dependencies = [
 
 [[package]]
 name = "grust-memory"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "futures-executor",
@@ -2905,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "grust-pggraph"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -2916,7 +2917,7 @@ dependencies = [
 
 [[package]]
 name = "grust-sail"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2932,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "grust-surreal"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -2941,6 +2942,7 @@ dependencies = [
  "reqwest 0.13.4",
  "serde_json",
  "surrealdb",
+ "tokio",
  "url",
 ]
 

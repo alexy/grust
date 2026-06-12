@@ -8,14 +8,17 @@ fn sail_available() -> bool {
     TcpStream::connect("127.0.0.1:50051").is_ok()
 }
 
-async fn store() -> Option<SailGraphStore> {
-    if !sail_available() {
-        return None;
-    }
-    let store = SailGraphStore::connect(SailConfig::default()).await.ok()?;
-    store.bootstrap().await.ok()?;
-    store.clear().await.ok()?;
-    Some(store)
+async fn store() -> SailGraphStore {
+    assert!(
+        sail_available(),
+        "live Sail integration tests require a Sail server on 127.0.0.1:50051; run scripts/integration-test.sh --backend sail"
+    );
+    let store = SailGraphStore::connect(SailConfig::default())
+        .await
+        .expect("connect to Sail");
+    store.bootstrap().await.expect("bootstrap Sail tables");
+    store.clear().await.expect("clear Sail tables");
+    store
 }
 
 fn sample_graph() -> Graph {
@@ -209,10 +212,35 @@ fn sql_str_escapes_backslashes_and_quotes() {
     assert_eq!(sql_str(r"a\'b"), r"'a\\''b'");
 }
 
+#[test]
+fn inline_sql_args_replaces_placeholders_with_escaped_literals() {
+    let sql = inline_sql_args(
+        "SELECT * FROM grust_nodes WHERE id = ? AND label = ? AND props = ?",
+        &[
+            lit_str("person-1"),
+            lit_str("Person"),
+            lit_str(r#"{"name":"Ada's"}"#),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        sql,
+        r#"SELECT * FROM grust_nodes WHERE id = 'person-1' AND label = 'Person' AND props = '{"name":"Ada''s"}'"#
+    );
+    assert!(inline_sql_args("SELECT ?", &[]).is_err());
+    assert!(inline_sql_args("SELECT 1", &[lit_long(1)]).is_err());
+}
+
+#[test]
+fn clear_sql_drops_delta_tables_for_robust_reset() {
+    assert_eq!(DROP_NODES_SQL, "DROP TABLE IF EXISTS grust_nodes");
+    assert_eq!(DROP_EDGES_SQL, "DROP TABLE IF EXISTS grust_edges");
+}
+
 #[tokio::test]
 #[ignore = "requires a live Sail server on 127.0.0.1:50051"]
 async fn test_put_and_get_node() {
-    let Some(store) = store().await else { return };
+    let store = store().await;
 
     let node = Node::new("Person", "person-1", {
         let mut p = Props::new();
@@ -232,7 +260,7 @@ async fn test_put_and_get_node() {
 #[tokio::test]
 #[ignore = "requires a live Sail server on 127.0.0.1:50051"]
 async fn test_put_graph_and_traverse() {
-    let Some(store) = store().await else { return };
+    let store = store().await;
 
     let graph = sample_graph();
     let report = store.put_graph(&graph).await.expect("put_graph");
@@ -253,7 +281,7 @@ async fn test_put_graph_and_traverse() {
 #[tokio::test]
 #[ignore = "requires a live Sail server on 127.0.0.1:50051"]
 async fn test_get_edges() {
-    let Some(store) = store().await else { return };
+    let store = store().await;
 
     let graph = sample_graph();
     store.put_graph(&graph).await.expect("put_graph");
@@ -272,7 +300,7 @@ async fn test_get_edges() {
 #[tokio::test]
 #[ignore = "requires a live Sail server on 127.0.0.1:50051"]
 async fn test_idempotent_put_node() {
-    let Some(store) = store().await else { return };
+    let store = store().await;
 
     let node = Node::new("Person", "person-1", {
         let mut p = Props::new();
@@ -304,7 +332,7 @@ async fn test_idempotent_put_node() {
 #[tokio::test]
 #[ignore = "requires a live Sail server on 127.0.0.1:50051"]
 async fn test_delete_node_and_edge() {
-    let Some(store) = store().await else { return };
+    let store = store().await;
 
     let graph = sample_graph();
     store.put_graph(&graph).await.expect("put_graph");

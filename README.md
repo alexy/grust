@@ -63,6 +63,41 @@ code.
 CocoIndex-style node and relationship target state so an incremental indexing
 flow can propagate changes into a downstream graph or table backend.
 
+## Backend Integration Tests
+
+Fast unit tests stay self-contained:
+
+```sh
+cargo test --workspace --all-features
+```
+
+Backend integration tests are explicit and fail if their service is missing.
+Run them through the launcher:
+
+```sh
+scripts/integration-test.sh
+```
+
+The launcher reads `integration/backends.conf`. It prefers local source
+checkouts when configured, such as `/Users/alexy/src/sail`,
+`/Users/alexy/src/SurrealDB`, `/Users/alexy/src/FalkorDB`, and
+`/Users/alexy/src/HelixDB`, then falls back to Docker Compose for the
+Docker-friendly backends in `docker-compose.integration.yml`.
+
+Run a single backend with:
+
+```sh
+scripts/integration-test.sh --backend sail
+scripts/integration-test.sh --backend surreal
+scripts/integration-test.sh --backend falkor
+```
+
+Use `--no-start` to require an already-running service, and `--keep-running` to
+leave services up for debugging. The currently automated live tests cover Sail,
+SurrealDB, and FalkorDB; Helix and pgGraph have launcher slots so their source
+or container startup can be wired into the same path without changing the test
+contract.
+
 ## Core Model
 
 The core types live in `grust-core` and are re-exported by `grust`.
@@ -152,7 +187,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.4.0", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.6.1", features = ["memory"] }
 ```
 
 Then load and traverse a graph:
@@ -192,8 +227,8 @@ Backends implement `GraphStore`:
 pub trait GraphStore: Send + Sync {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()>;
 
-    async fn put_node(&self, node: &Node) -> Result<NodeId>;
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>>;
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome>;
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome>;
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport>;
     async fn put_typed_graph(&self, schema: &GraphSchema, graph: &Graph) -> Result<LoadReport>;
 
@@ -205,6 +240,8 @@ pub trait GraphStore: Send + Sync {
 
 `put_graph` borrows the graph instead of consuming it. That makes retries,
 validation, comparison, and multi-backend loads easier.
+Single-element writes return `PutOutcome`, which distinguishes inserted,
+updated, backend-opaque upserted, and deduped writes.
 `put_typed_graph` validates a graph against `GraphSchema`, applies that schema
 to the backend, and then writes the graph.
 
@@ -228,7 +265,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.4.0", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.6.1", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and

@@ -27,15 +27,15 @@ typed-garde = ["grust-core/typed-garde"]
 typed-zod-rs = ["typed-garde", "grust-core/typed-zod-rs"]
 
 [dependencies]
-grust-core = { version = "0.6.0", path = "../grust-core" }
-grust-cocoindex = { version = "0.6.0", path = "../grust-cocoindex", optional = true }
-grust-falkor = { version = "0.6.0", path = "../grust-falkor", optional = true }
-grust-helix = { version = "0.6.0", path = "../grust-helix", optional = true }
-grust-lancedb = { version = "0.6.0", path = "../grust-lancedb", optional = true }
-grust-memory = { version = "0.6.0", path = "../grust-memory", optional = true }
-grust-pggraph = { version = "0.6.0", path = "../grust-pggraph", optional = true }
-grust-sail = { version = "0.6.0", path = "../grust-sail", optional = true }
-grust-surreal = { version = "0.6.0", path = "../grust-surreal", optional = true }
+grust-core = { version = "0.6.1", path = "../grust-core" }
+grust-cocoindex = { version = "0.6.1", path = "../grust-cocoindex", optional = true }
+grust-falkor = { version = "0.6.1", path = "../grust-falkor", optional = true }
+grust-helix = { version = "0.6.1", path = "../grust-helix", optional = true }
+grust-lancedb = { version = "0.6.1", path = "../grust-lancedb", optional = true }
+grust-memory = { version = "0.6.1", path = "../grust-memory", optional = true }
+grust-pggraph = { version = "0.6.1", path = "../grust-pggraph", optional = true }
+grust-sail = { version = "0.6.1", path = "../grust-sail", optional = true }
+grust-surreal = { version = "0.6.1", path = "../grust-surreal", optional = true }
 
 [dev-dependencies]
 garde = { workspace = true, features = ["derive"] }

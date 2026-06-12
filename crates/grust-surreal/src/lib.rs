@@ -542,9 +542,10 @@ fn surreal_error_is_missing_table(item: &serde_json::Value) -> bool {
 
 fn surreal_bootstrap_query(config: &SurrealConfig) -> String {
     format!(
-        "DEFINE NAMESPACE {}; USE NS {}; DEFINE DATABASE {};",
+        "DEFINE NAMESPACE {}; USE NS {}; DEFINE DATABASE {}; USE DB {}; DEFINE TABLE IF NOT EXISTS record;",
         surreal_identifier(&config.namespace),
         surreal_identifier(&config.namespace),
+        surreal_identifier(&config.database),
         surreal_identifier(&config.database)
     )
 }
@@ -715,7 +716,18 @@ fn surreal_relate_edges_query(
     edges: &[Edge],
     id_tables: &BTreeMap<String, String>,
 ) -> Result<String> {
-    edges
+    let mut relation_tables = BTreeSet::new();
+    let mut statements = Vec::new();
+    for edge in edges {
+        relation_tables.insert(surreal_table_name(&relationship_type(edge.label.as_str())));
+    }
+    statements.extend(
+        relation_tables
+            .into_iter()
+            .map(|table| format!("DEFINE TABLE IF NOT EXISTS {table} TYPE RELATION;")),
+    );
+    statements.extend(
+        edges
         .iter()
         .map(|edge| {
             let from_table = id_tables
@@ -742,8 +754,9 @@ fn surreal_relate_edges_query(
                 surreal_edge_props(edge)?
             ))
         })
-        .collect::<Result<Vec<_>>>()
-        .map(|statements| statements.join("\n"))
+        .collect::<Result<Vec<_>>>()?,
+    );
+    Ok(statements.join("\n"))
 }
 
 fn surreal_edge_props(edge: &Edge) -> Result<String> {
@@ -835,18 +848,25 @@ fn surreal_edge_from_value(mut value: serde_json::Value) -> Result<Edge> {
 
 fn surreal_record_id(value: &serde_json::Value) -> Result<NodeId> {
     if let Some(id) = value.as_str() {
-        return Ok(NodeId::new(
+        return Ok(NodeId::new(surreal_record_key(
             id.rsplit_once(':').map(|(_, id)| id).unwrap_or(id),
-        ));
+        )));
     }
     if let Some(object) = value.as_object()
         && let Some(id) = object.get("id").and_then(surreal_record_id_value)
     {
-        return Ok(NodeId::new(id));
+        return Ok(NodeId::new(surreal_record_key(&id)));
     }
     Err(GrustError::Serialization(format!(
         "could not read SurrealDB record id from {value}"
     )))
+}
+
+fn surreal_record_key(value: &str) -> &str {
+    value
+        .strip_prefix('`')
+        .and_then(|value| value.strip_suffix('`'))
+        .unwrap_or(value)
 }
 
 fn surreal_record_id_value(value: &serde_json::Value) -> Option<String> {

@@ -47,6 +47,8 @@ impl Default for SailConfig {
 /// Session-scoped temp views used to stage Arrow batches before MERGE.
 const NODE_STAGE_VIEW: &str = "grust_stage_nodes";
 const EDGE_STAGE_VIEW: &str = "grust_stage_edges";
+const DROP_NODES_SQL: &str = "DROP TABLE IF EXISTS grust_nodes";
+const DROP_EDGES_SQL: &str = "DROP TABLE IF EXISTS grust_edges";
 
 pub struct SailGraphStore {
     config: SailConfig,
@@ -182,13 +184,15 @@ impl SailGraphStore {
     }
 
     async fn run_command(&self, sql: &str, args: Vec<expression::Literal>) -> Result<()> {
-        self.run_plan(self.command_request(sql, args), |_| Ok(()))
+        let sql = inline_sql_args(sql, &args)?;
+        self.run_plan(self.command_request(sql, vec![]), |_| Ok(()))
             .await
     }
 
     async fn run_query(&self, sql: &str, args: Vec<expression::Literal>) -> Result<Vec<Node>> {
         let mut nodes = Vec::new();
-        self.run_plan(self.query_request(sql, args), |data| {
+        let sql = inline_sql_args(sql, &args)?;
+        self.run_plan(self.query_request(sql, vec![]), |data| {
             nodes.extend(parse_nodes_from_arrow(data)?);
             Ok(())
         })
@@ -198,7 +202,8 @@ impl SailGraphStore {
 
     async fn run_edge_query(&self, sql: &str, args: Vec<expression::Literal>) -> Result<Vec<Edge>> {
         let mut edges = Vec::new();
-        self.run_plan(self.query_request(sql, args), |data| {
+        let sql = inline_sql_args(sql, &args)?;
+        self.run_plan(self.query_request(sql, vec![]), |data| {
             edges.extend(parse_edges_from_arrow(data)?);
             Ok(())
         })
@@ -376,23 +381,23 @@ impl GraphStore for SailGraphStore {
 impl GraphAdminStore for SailGraphStore {
     async fn bootstrap(&self) -> Result<()> {
         self.run_command(
-            "CREATE TABLE IF NOT EXISTS grust_nodes (\
-                id STRING NOT NULL, \
-                label STRING NOT NULL, \
-                props STRING\
-            ) USING delta",
+            "CREATE TABLE IF NOT EXISTS grust_nodes USING delta AS \
+             SELECT CAST(NULL AS STRING) AS id, \
+                    CAST(NULL AS STRING) AS label, \
+                    CAST(NULL AS STRING) AS props \
+             WHERE FALSE",
             vec![],
         )
         .await?;
         self.run_command(
-            "CREATE TABLE IF NOT EXISTS grust_edges (\
-                src_id STRING NOT NULL, \
-                src_label STRING NOT NULL, \
-                dst_id STRING NOT NULL, \
-                dst_label STRING NOT NULL, \
-                edge_type STRING NOT NULL, \
-                props STRING\
-            ) USING delta",
+            "CREATE TABLE IF NOT EXISTS grust_edges USING delta AS \
+             SELECT CAST(NULL AS STRING) AS src_id, \
+                    CAST(NULL AS STRING) AS src_label, \
+                    CAST(NULL AS STRING) AS dst_id, \
+                    CAST(NULL AS STRING) AS dst_label, \
+                    CAST(NULL AS STRING) AS edge_type, \
+                    CAST(NULL AS STRING) AS props \
+             WHERE FALSE",
             vec![],
         )
         .await?;
@@ -400,9 +405,31 @@ impl GraphAdminStore for SailGraphStore {
     }
 
     async fn clear(&self) -> Result<()> {
-        self.run_command("DELETE FROM grust_nodes", vec![]).await?;
-        self.run_command("DELETE FROM grust_edges", vec![]).await?;
-        Ok(())
+        if let Some(schema) = self.current_schema() {
+            for edge_type in &schema.edges {
+                self.run_command(
+                    &format!(
+                        "DROP TABLE IF EXISTS {}",
+                        sail_edge_table(edge_type.label.as_str())?
+                    ),
+                    vec![],
+                )
+                .await?;
+            }
+            for node_type in &schema.nodes {
+                self.run_command(
+                    &format!(
+                        "DROP TABLE IF EXISTS {}",
+                        sail_node_table(node_type.label.as_str())?
+                    ),
+                    vec![],
+                )
+                .await?;
+            }
+        }
+        self.run_command(DROP_EDGES_SQL, vec![]).await?;
+        self.run_command(DROP_NODES_SQL, vec![]).await?;
+        self.bootstrap().await
     }
 }
 
@@ -885,6 +912,52 @@ fn lit_bool(value: bool) -> expression::Literal {
     expression::Literal {
         literal_type: Some(expression::literal::LiteralType::Boolean(value)),
         ..Default::default()
+    }
+}
+
+fn inline_sql_args(sql: &str, args: &[expression::Literal]) -> Result<String> {
+    let mut out = String::with_capacity(sql.len() + args.len() * 16);
+    let mut parts = sql.split('?');
+    let Some(first) = parts.next() else {
+        return Ok(sql.to_string());
+    };
+    out.push_str(first);
+    let mut used = 0;
+    for part in parts {
+        let arg = args.get(used).ok_or_else(|| {
+            GrustError::Backend(format!("missing SQL argument {used} for query: {sql}"))
+        })?;
+        out.push_str(&literal_sql(arg)?);
+        out.push_str(part);
+        used += 1;
+    }
+    if used != args.len() {
+        return Err(GrustError::Backend(format!(
+            "unused SQL arguments: query used {used}, got {}",
+            args.len()
+        )));
+    }
+    Ok(out)
+}
+
+fn literal_sql(literal: &expression::Literal) -> Result<String> {
+    match literal.literal_type.as_ref() {
+        Some(expression::literal::LiteralType::String(value)) => Ok(sql_str(value)),
+        Some(expression::literal::LiteralType::Long(value)) => Ok(value.to_string()),
+        Some(expression::literal::LiteralType::Double(value)) if value.is_finite() => {
+            Ok(value.to_string())
+        }
+        Some(expression::literal::LiteralType::Double(value)) => Err(GrustError::Schema(format!(
+            "non-finite float cannot be inlined into SQL: {value}"
+        ))),
+        Some(expression::literal::LiteralType::Boolean(value)) => Ok(if *value {
+            "TRUE".to_string()
+        } else {
+            "FALSE".to_string()
+        }),
+        other => Err(GrustError::Backend(format!(
+            "unsupported SQL literal argument: {other:?}"
+        ))),
     }
 }
 

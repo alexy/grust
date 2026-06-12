@@ -150,7 +150,7 @@ fn get_edges_query_uses_relationship_tables_in_one_statement() {
 #[test]
 fn surreal_response_parsers_rebuild_grust_values() {
     let node = surreal_node_from_value(serde_json::json!({
-        "id": "person:person-1",
+        "id": "person:`person-1`",
         "__grust_label": "person",
         "name": "Ada Lovelace"
     }))
@@ -158,8 +158,8 @@ fn surreal_response_parsers_rebuild_grust_values() {
     let edge = surreal_edge_from_value(serde_json::json!({
         "id": "presents:abc",
         "__grust_label": "presents",
-        "in": "person:person-1",
-        "out": "talk:talk-1",
+        "in": "person:`person-1`",
+        "out": "talk:`talk-1`",
         "relationship": "presents",
         "source": "schedule"
     }))
@@ -233,4 +233,37 @@ fn clear_response_keeps_non_missing_table_errors() {
     ]);
 
     assert!(surreal_response_has_non_idempotent_clear_error(&response));
+}
+
+#[tokio::test]
+#[ignore = "requires a live SurrealDB server on 127.0.0.1:8000"]
+async fn live_http_put_read_and_traverse() {
+    let store = SurrealHttpGraphStore::connect(SurrealConfig {
+        labels: vec!["Talk".to_string(), "Person".to_string()],
+        relationships: vec!["presents".to_string()],
+        ..SurrealConfig::default()
+    })
+    .expect("connect SurrealDB HTTP store");
+    store.bootstrap().await.expect("bootstrap SurrealDB");
+    store.clear().await.expect("clear SurrealDB");
+
+    let graph = sample_graph();
+    let report = store.put_graph(&graph).await.expect("write graph");
+    assert_eq!(report.nodes, 2);
+    assert_eq!(report.edges, 1);
+
+    let fetched = store
+        .get_node(&NodeId::new("talk-1"))
+        .await
+        .expect("read node")
+        .expect("talk node missing");
+    assert_eq!(fetched.label, Label::new("talk"));
+    assert_eq!(fetched.id, NodeId::new("talk-1"));
+
+    let result = store
+        .traverse(Traversal::from_node("person-1").out("presents").to("talk"))
+        .await
+        .expect("traverse");
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].id, NodeId::new("talk-1"));
 }
