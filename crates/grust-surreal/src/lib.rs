@@ -171,20 +171,20 @@ impl GraphStore for SurrealHttpGraphStore {
         self.post(&surreal_schema_query(schema)?).await
     }
 
-    async fn put_node(&self, node: &Node) -> Result<NodeId> {
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         self.post(&surreal_upsert_nodes_query(std::slice::from_ref(node))?)
             .await?;
-        Ok(node.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
         let id_tables = edge_id_tables(edge);
         self.post(&surreal_relate_edges_query(
             std::slice::from_ref(edge),
             &id_tables,
         )?)
         .await?;
-        Ok(edge.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
@@ -322,14 +322,14 @@ impl GraphStore for SurrealSdkGraphStore {
         self.query(&surreal_schema_query(schema)?).await
     }
 
-    async fn put_node(&self, node: &Node) -> Result<NodeId> {
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         self.select_database().await?;
         self.query(&surreal_upsert_nodes_query(std::slice::from_ref(node))?)
             .await?;
-        Ok(node.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
         self.select_database().await?;
         let id_tables = edge_id_tables(edge);
         self.query(&surreal_relate_edges_query(
@@ -337,7 +337,7 @@ impl GraphStore for SurrealSdkGraphStore {
             &id_tables,
         )?)
         .await?;
-        Ok(edge.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
@@ -418,12 +418,12 @@ async fn check_surreal_http_response(response: reqwest::Response, context: &str)
             "{context} failed with status {status}: {body}"
         )));
     }
-    if let Ok(results) = serde_json::from_str::<serde_json::Value>(&body) {
-        if surreal_response_has_error(&results) {
-            return Err(GrustError::Backend(format!(
-                "{context} returned an error: {body}"
-            )));
-        }
+    if let Ok(results) = serde_json::from_str::<serde_json::Value>(&body)
+        && surreal_response_has_error(&results)
+    {
+        return Err(GrustError::Backend(format!(
+            "{context} returned an error: {body}"
+        )));
     }
     Ok(())
 }
@@ -474,12 +474,12 @@ async fn check_surreal_http_bootstrap_response(response: reqwest::Response) -> R
             "SurrealDB bootstrap failed with status {status}: {body}"
         )));
     }
-    if let Ok(results) = serde_json::from_str::<serde_json::Value>(&body) {
-        if surreal_response_has_non_idempotent_error(&results) {
-            return Err(GrustError::Backend(format!(
-                "SurrealDB bootstrap returned an error: {body}"
-            )));
-        }
+    if let Ok(results) = serde_json::from_str::<serde_json::Value>(&body)
+        && surreal_response_has_non_idempotent_error(&results)
+    {
+        return Err(GrustError::Backend(format!(
+            "SurrealDB bootstrap returned an error: {body}"
+        )));
     }
     Ok(())
 }
@@ -495,12 +495,12 @@ async fn check_surreal_http_clear_response(response: reqwest::Response) -> Resul
             "SurrealDB clear failed with status {status}: {body}"
         )));
     }
-    if let Ok(results) = serde_json::from_str::<serde_json::Value>(&body) {
-        if surreal_response_has_non_idempotent_clear_error(&results) {
-            return Err(GrustError::Backend(format!(
-                "SurrealDB clear returned an error: {body}"
-            )));
-        }
+    if let Ok(results) = serde_json::from_str::<serde_json::Value>(&body)
+        && surreal_response_has_non_idempotent_clear_error(&results)
+    {
+        return Err(GrustError::Backend(format!(
+            "SurrealDB clear returned an error: {body}"
+        )));
     }
     Ok(())
 }
@@ -680,6 +680,8 @@ fn surreal_field_type(ty: &FieldType) -> &'static str {
         FieldType::Float => "float",
         FieldType::Bool => "bool",
         FieldType::StringArray => "array<string>",
+        FieldType::IntArray => "array<int>",
+        FieldType::FloatArray => "array<float>",
         FieldType::Json => "any",
     }
 }
@@ -837,10 +839,10 @@ fn surreal_record_id(value: &serde_json::Value) -> Result<NodeId> {
             id.rsplit_once(':').map(|(_, id)| id).unwrap_or(id),
         ));
     }
-    if let Some(object) = value.as_object() {
-        if let Some(id) = object.get("id").and_then(surreal_record_id_value) {
-            return Ok(NodeId::new(id));
-        }
+    if let Some(object) = value.as_object()
+        && let Some(id) = object.get("id").and_then(surreal_record_id_value)
+    {
+        return Ok(NodeId::new(id));
     }
     Err(GrustError::Serialization(format!(
         "could not read SurrealDB record id from {value}"
@@ -926,14 +928,13 @@ where
                     continue;
                 }
                 let target_id = if out_matches { &edge.to } else { &edge.from };
-                if let Some(target) = store.get_node(target_id).await? {
-                    if step
+                if let Some(target) = store.get_node(target_id).await?
+                    && step
                         .node
                         .as_ref()
                         .is_none_or(|label| label == &target.label)
-                    {
-                        next.push(target);
-                    }
+                {
+                    next.push(target);
                 }
             }
         }
@@ -971,7 +972,13 @@ fn surreal_value(value: &Value) -> Result<String> {
         Value::Bool(value) => Ok(value.to_string()),
         Value::Int(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
-        Value::String(value) => Ok(surreal_string(value)),
+        Value::String(value) | Value::DateTime(value) => Ok(surreal_string(value)),
+        Value::IntArray(values) => {
+            serde_json::to_string(values).map_err(|err| GrustError::Serialization(err.to_string()))
+        }
+        Value::FloatArray(values) => {
+            serde_json::to_string(values).map_err(|err| GrustError::Serialization(err.to_string()))
+        }
         Value::StringArray(values) => {
             serde_json::to_string(values).map_err(|err| GrustError::Serialization(err.to_string()))
         }

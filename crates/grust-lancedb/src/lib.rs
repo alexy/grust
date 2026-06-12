@@ -191,7 +191,7 @@ impl GraphStore for LanceDbGraphStore {
         Ok(())
     }
 
-    async fn put_node(&self, node: &Node) -> Result<NodeId> {
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         if let Some(schema) = self
             .schema
             .read()
@@ -203,14 +203,14 @@ impl GraphStore for LanceDbGraphStore {
         self.put_nodes_batch(std::slice::from_ref(node)).await?;
         self.put_typed_nodes_batch(std::slice::from_ref(node))
             .await?;
-        Ok(node.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
         self.put_edges_batch(std::slice::from_ref(edge)).await?;
         self.put_typed_edges_batch(std::slice::from_ref(edge))
             .await?;
-        Ok(edge.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
@@ -281,10 +281,10 @@ impl GraphStore for LanceDbGraphStore {
 
             let mut next = Vec::new();
             for id in next_ids {
-                if let Some(node) = self.get_node(&id).await? {
-                    if step.node.as_ref().is_none_or(|label| label == &node.label) {
-                        next.push(node);
-                    }
+                if let Some(node) = self.get_node(&id).await?
+                    && step.node.as_ref().is_none_or(|label| label == &node.label)
+                {
+                    next.push(node);
                 }
             }
             if let Some(limit) = traversal.limit {
@@ -475,9 +475,12 @@ fn arrow_field(field: &grust_core::Field) -> Field {
     Field::new(
         &field.name,
         match field.ty {
-            FieldType::String | FieldType::DateTime | FieldType::StringArray | FieldType::Json => {
-                DataType::Utf8
-            }
+            FieldType::String
+            | FieldType::DateTime
+            | FieldType::StringArray
+            | FieldType::IntArray
+            | FieldType::FloatArray
+            | FieldType::Json => DataType::Utf8,
             FieldType::Int => DataType::Int64,
             FieldType::Float => DataType::Float64,
             FieldType::Bool => DataType::Boolean,
@@ -627,7 +630,12 @@ fn typed_prop_array<'a>(
         FieldType::String | FieldType::DateTime => Arc::new(StringArray::from(
             values
                 .iter()
-                .map(|value| value.and_then(Value::as_str))
+                .map(|value| match value {
+                    Some(Value::String(value)) | Some(Value::DateTime(value)) => {
+                        Some(value.as_str())
+                    }
+                    _ => None,
+                })
                 .collect::<Vec<_>>(),
         )),
         FieldType::Int => Arc::new(Int64Array::from(
@@ -657,17 +665,19 @@ fn typed_prop_array<'a>(
                 })
                 .collect::<Vec<_>>(),
         )),
-        FieldType::StringArray | FieldType::Json => Arc::new(StringArray::from(
-            values
-                .iter()
-                .map(|value| {
-                    value
-                        .map(serde_json::to_string)
-                        .transpose()
-                        .map_err(|err| GrustError::Serialization(err.to_string()))
-                })
-                .collect::<Result<Vec<_>>>()?,
-        )),
+        FieldType::StringArray | FieldType::IntArray | FieldType::FloatArray | FieldType::Json => {
+            Arc::new(StringArray::from(
+                values
+                    .iter()
+                    .map(|value| {
+                        value
+                            .map(serde_json::to_string)
+                            .transpose()
+                            .map_err(|err| GrustError::Serialization(err.to_string()))
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            ))
+        }
     })
 }
 

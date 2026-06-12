@@ -53,11 +53,11 @@ struct WorksOn {
 impl TypedEdge for WorksOn {
     const LABEL: &'static str = "WORKS_ON";
 
-    fn from_node_id(&self) -> NodeId {
+    fn source_node_id(&self) -> NodeId {
         format!("person:{}", self.person_id).into()
     }
 
-    fn to_node_id(&self) -> NodeId {
+    fn target_node_id(&self) -> NodeId {
         format!("project:{}", self.project_id).into()
     }
 }

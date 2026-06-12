@@ -285,7 +285,7 @@ print(PdfReader("build/dist/grust.pdf").page_labels[:6])
 PY
 unzip -p build/dist/grust.epub EPUB/content.opf | head -80
 unzip -p build/dist/grust.epub EPUB/nav.xhtml | head -80
-test "$(readlink 'build/dist/grust (0.5.0).epub')" = "grust.epub"
+test "$(readlink 'build/dist/grust (0.6.0).epub')" = "grust.epub"
 cat build/dist/VERSION.md
 ```
 
@@ -374,7 +374,7 @@ Grust already implements this shape:
   surfaces.
 - `docs/book/build.sh` reads `[workspace.package].version` from `Cargo.toml` and
   derives the Kindle library title as `<title_stem> (<version>)`, currently
-  `grust (0.5.0)`.
+  `grust (0.6.0)`.
 - The EPUB build uses `--epub-title-page=false` because Grust has its own custom
   cover.
 - `docs/book/fix_epub_layout.sh` applies the same post-Pandoc layout repair

@@ -406,11 +406,11 @@ mod typed_garde_tests {
     impl TypedEdge for WorksOn {
         const LABEL: &'static str = "WORKS_ON";
 
-        fn from_node_id(&self) -> NodeId {
+        fn source_node_id(&self) -> NodeId {
             format!("person:{}", self.person_id).into()
         }
 
-        fn to_node_id(&self) -> NodeId {
+        fn target_node_id(&self) -> NodeId {
             format!("project:{}", self.project_id).into()
         }
     }
@@ -638,4 +638,316 @@ fn graph_serializes_to_yaml() {
     assert!(yaml.contains("employee:nia"));
     assert!(yaml.contains("REPORTS_TO"));
     assert!(!yaml.contains("value: employee:nia"));
+}
+
+#[test]
+fn graph_builder_label_conflict_replaces_node() {
+    let mut builder = GraphBuilder::new();
+    builder
+        .node("Person", "entity:1")
+        .prop("name", "Ada")
+        .finish();
+    builder
+        .node("Robot", "entity:1")
+        .prop("model", "Mark I")
+        .finish();
+
+    let graph = builder.build();
+
+    assert_eq!(graph.nodes.len(), 1);
+    let node = &graph.nodes[0];
+    assert_eq!(node.label, Label::from("Robot"));
+    assert!(node.props.contains_key("model"));
+    assert!(
+        !node.props.contains_key("name"),
+        "label conflict should replace the node, not merge props"
+    );
+}
+
+#[test]
+fn graph_builder_same_label_merges_props() {
+    let mut builder = GraphBuilder::new();
+    builder
+        .node("Person", "person:ada")
+        .prop("name", "Ada")
+        .finish();
+    builder
+        .node("Person", "person:ada")
+        .prop("age", 36i64)
+        .finish();
+
+    let graph = builder.build();
+
+    assert_eq!(graph.nodes.len(), 1);
+    let node = &graph.nodes[0];
+    assert_eq!(node.props.get("name"), Some(&Value::from("Ada")));
+    assert_eq!(node.props.get("age"), Some(&Value::from(36i64)));
+}
+
+#[test]
+#[should_panic(expected = "Traversal::to() must follow")]
+fn traversal_to_without_step_panics() {
+    let _ = Traversal::from_node("person:ada").to("Person");
+}
+
+#[test]
+fn validate_edge_with_uses_label_lookup() {
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .node("Project", Vec::<Field>::new())
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            Vec::<Field>::new(),
+        )
+        .build();
+
+    let person = Label::new("Person");
+    let project = Label::new("Project");
+    let lookup = |id: &NodeId| match id.as_str() {
+        "person:ada" => Some(&person),
+        "project:grust" => Some(&project),
+        _ => None,
+    };
+
+    let edge = Edge::new("WORKS_ON", "person:ada", "project:grust", Props::new());
+    schema
+        .validate_edge_with(&edge, lookup)
+        .expect("edge should validate via lookup");
+
+    let dangling = Edge::new("WORKS_ON", "person:ada", "project:missing", Props::new());
+    let error = schema
+        .validate_edge_with(&dangling, lookup)
+        .expect_err("dangling edge should fail");
+    assert!(error.to_string().contains("unknown to node"));
+
+    let wrong = Edge::new("WORKS_ON", "project:grust", "project:grust", Props::new());
+    let error = schema
+        .validate_edge_with(&wrong, lookup)
+        .expect_err("wrong from label should fail");
+    assert!(error.to_string().contains("cannot start from node label"));
+}
+
+#[test]
+fn validate_edge_props_checks_label_and_fields_only() {
+    let schema = GraphSchema::builder()
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            vec![Field::required("role", FieldType::String)],
+        )
+        .build();
+
+    // Endpoints are not checked, but required fields are.
+    let edge = Edge::new("WORKS_ON", "anyone", "anything", Props::new());
+    let error = schema
+        .validate_edge_props(&edge)
+        .expect_err("missing required field should fail");
+    assert!(error.to_string().contains("missing required field 'role'"));
+
+    let mut props = Props::new();
+    props.insert("role".to_string(), Value::from("maintainer"));
+    let edge = Edge::new("WORKS_ON", "anyone", "anything", props);
+    schema
+        .validate_edge_props(&edge)
+        .expect("props-only validation should pass");
+
+    let unknown = Edge::new("UNKNOWN", "a", "b", Props::new());
+    let error = schema
+        .validate_edge_props(&unknown)
+        .expect_err("unknown edge label should fail");
+    assert!(error.to_string().contains("schema has no edge type"));
+}
+
+#[test]
+fn datetime_value_validates_rfc3339() {
+    assert!(Value::datetime("2026-06-12T09:30:00Z").is_ok());
+    assert!(Value::datetime("2026-06-12T09:30:00.123+02:00").is_ok());
+    assert!(Value::datetime("2026-02-29T09:30:00Z").is_err());
+    assert!(Value::datetime("2024-02-29T09:30:00Z").is_ok());
+    assert!(Value::datetime("2026-06-12 09:30:00Z").is_err());
+    assert!(Value::datetime("2026-06-12T09:30:00z").is_err());
+    assert!(Value::datetime("not a date").is_err());
+    assert!(Value::datetime("2026-06-12").is_err());
+    assert!(Value::datetime("2026-13-12T09:30:00Z").is_err());
+    assert!(Value::datetime("2026-04-31T09:30:00Z").is_err());
+    assert!(Value::datetime("2026-06-12T25:30:00Z").is_err());
+    assert!(Value::datetime("2026-06-12T09:30:00").is_err());
+    assert!(Value::datetime("2026-06-12T09:30:00.Z").is_err());
+}
+
+#[test]
+fn schema_validates_datetime_and_array_fields() {
+    let schema = GraphSchema::builder()
+        .node(
+            "Event",
+            vec![
+                Field::required("when", FieldType::DateTime),
+                Field::optional("counts", FieldType::IntArray),
+                Field::optional("scores", FieldType::FloatArray),
+            ],
+        )
+        .build();
+
+    let mut builder = Graph::builder();
+    builder
+        .node("Event", "event:1")
+        .prop("when", Value::datetime("2026-06-12T09:30:00Z").unwrap())
+        .prop("counts", vec![1i64, 2, 3])
+        .prop("scores", vec![0.5f64, 0.9])
+        .finish();
+    schema
+        .validate_graph(&builder.build())
+        .expect("typed values should validate");
+
+    // Plain strings stay valid for DateTime fields, but must parse.
+    let mut builder = Graph::builder();
+    builder
+        .node("Event", "event:2")
+        .prop("when", "2026-06-12T09:30:00Z")
+        .finish();
+    schema
+        .validate_graph(&builder.build())
+        .expect("RFC 3339 string should validate as DateTime");
+
+    let mut builder = Graph::builder();
+    builder
+        .node("Event", "event:3")
+        .prop("when", "soon")
+        .finish();
+    let error = schema
+        .validate_graph(&builder.build())
+        .expect_err("non-RFC 3339 string should fail DateTime field");
+    assert!(error.to_string().contains("expected DateTime"));
+}
+
+#[test]
+fn value_json_round_trips_plain_and_tagged() {
+    assert_eq!(
+        Value::from(vec![1i64, 2]).to_json(),
+        serde_json::json!([1, 2])
+    );
+    assert_eq!(
+        Value::from_json(serde_json::json!([1, 2])),
+        Value::IntArray(vec![1, 2])
+    );
+    assert_eq!(
+        Value::from_json(serde_json::json!([1.5, 2.0])),
+        Value::FloatArray(vec![1.5, 2.0])
+    );
+    assert_eq!(
+        Value::from_json(serde_json::json!(["a", "b"])),
+        Value::StringArray(vec!["a".to_string(), "b".to_string()])
+    );
+    // DateTime flattens to a string in plain JSON.
+    let dt = Value::datetime("2026-06-12T09:30:00Z").unwrap();
+    assert_eq!(dt.to_json(), serde_json::json!("2026-06-12T09:30:00Z"));
+    // Tagged form round-trips exactly.
+    let tagged = serde_json::to_value(&dt).unwrap();
+    assert_eq!(Value::from_json(tagged), dt);
+}
+
+#[test]
+fn builder_add_edge_reports_outcome() {
+    let mut builder = GraphBuilder::new();
+    builder.node("Person", "a").finish();
+    builder.node("Person", "b").finish();
+
+    let first = builder.edge("KNOWS", "a", "b").finish();
+    let second = builder.edge("KNOWS", "a", "b").finish();
+
+    assert_eq!(first, PutOutcome::Inserted);
+    assert_eq!(second, PutOutcome::Deduped);
+}
+
+#[test]
+fn schema_enforces_edge_uniqueness() {
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .edge(
+            "KNOWS",
+            vec![Label::new("Person")],
+            vec![Label::new("Person")],
+            Vec::<Field>::new(),
+        )
+        .build();
+
+    let mut builder = GraphBuilder::new().edge_policy(EdgePolicy::AllowDuplicates);
+    builder.node("Person", "a").finish();
+    builder.node("Person", "b").finish();
+    builder.edge("KNOWS", "a", "b").finish();
+    builder.edge("KNOWS", "a", "b").finish();
+
+    let error = schema
+        .validate_graph(&builder.build())
+        .expect_err("duplicate edge should violate uniqueness");
+    assert!(error.to_string().contains("violates"));
+}
+
+#[test]
+fn undirected_edge_type_accepts_reversed_endpoints_and_unordered_uniqueness() {
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .node("Project", Vec::<Field>::new())
+        .edge_type(EdgeType {
+            label: Label::new("LINKED"),
+            from: vec![Label::new("Person")],
+            to: vec![Label::new("Project")],
+            fields: Vec::new(),
+            directed: false,
+            uniqueness: EdgeUniqueness::FromLabelTo,
+        })
+        .build();
+
+    // Reversed orientation is accepted for undirected edges.
+    let mut builder = GraphBuilder::new();
+    builder.node("Person", "person:ada").finish();
+    builder.node("Project", "project:grust").finish();
+    builder
+        .edge("LINKED", "project:grust", "person:ada")
+        .finish();
+    schema
+        .validate_graph(&builder.build())
+        .expect("reversed undirected edge should validate");
+
+    // The same pair in both orientations violates unordered uniqueness.
+    let mut builder = GraphBuilder::new().edge_policy(EdgePolicy::AllowDuplicates);
+    builder.node("Person", "person:ada").finish();
+    builder.node("Project", "project:grust").finish();
+    builder
+        .edge("LINKED", "person:ada", "project:grust")
+        .finish();
+    builder
+        .edge("LINKED", "project:grust", "person:ada")
+        .finish();
+    let error = schema
+        .validate_graph(&builder.build())
+        .expect_err("reversed duplicate should violate uniqueness");
+    assert!(error.to_string().contains("violates"));
+
+    // A directed type accepts the same pair in both orientations.
+    let directed = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .node("Project", Vec::<Field>::new())
+        .edge(
+            "LINKED",
+            vec![Label::new("Person"), Label::new("Project")],
+            vec![Label::new("Person"), Label::new("Project")],
+            Vec::<Field>::new(),
+        )
+        .build();
+    let mut builder = GraphBuilder::new().edge_policy(EdgePolicy::AllowDuplicates);
+    builder.node("Person", "person:ada").finish();
+    builder.node("Project", "project:grust").finish();
+    builder
+        .edge("LINKED", "person:ada", "project:grust")
+        .finish();
+    builder
+        .edge("LINKED", "project:grust", "person:ada")
+        .finish();
+    directed
+        .validate_graph(&builder.build())
+        .expect("opposite directed edges are distinct");
 }

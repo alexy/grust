@@ -147,7 +147,26 @@ fn value_to_json(value: &Value) -> Result<JsonValue> {
                     "cannot export non-finite float property value {value}"
                 ))
             })?,
-        Value::String(value) => JsonValue::String(value.clone()),
+        Value::String(value) | Value::DateTime(value) => JsonValue::String(value.clone()),
+        Value::IntArray(values) => JsonValue::Array(
+            values
+                .iter()
+                .map(|value| JsonValue::Number((*value).into()))
+                .collect(),
+        ),
+        Value::FloatArray(values) => values
+            .iter()
+            .map(|value| {
+                serde_json::Number::from_f64(*value)
+                    .map(JsonValue::Number)
+                    .ok_or_else(|| {
+                        GrustError::Serialization(format!(
+                            "cannot export non-finite float property value {value}"
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>>>()
+            .map(JsonValue::Array)?,
         Value::StringArray(values) => JsonValue::Array(
             values
                 .iter()

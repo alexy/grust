@@ -119,16 +119,16 @@ impl GraphStore for HelixHttpGraphStore {
         validate_helix_schema(schema)
     }
 
-    async fn put_node(&self, node: &Node) -> Result<NodeId> {
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         self.post(&helix_add_nodes_request(std::slice::from_ref(node))?)
             .await?;
-        Ok(node.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
         self.post(&helix_add_edges_request(std::slice::from_ref(edge))?)
             .await?;
-        Ok(edge.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
@@ -207,14 +207,14 @@ impl GraphStore for HelixSdkGraphStore {
         validate_helix_schema(schema)
     }
 
-    async fn put_node(&self, node: &Node) -> Result<NodeId> {
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         post_helix_sdk_nodes(&self.client, std::slice::from_ref(node)).await?;
-        Ok(node.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
         post_helix_sdk_edges(&self.client, std::slice::from_ref(edge)).await?;
-        Ok(edge.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {

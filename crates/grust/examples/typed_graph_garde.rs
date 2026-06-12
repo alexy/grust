@@ -52,11 +52,11 @@ struct WorksOn {
 impl TypedEdge for WorksOn {
     const LABEL: &'static str = "WORKS_ON";
 
-    fn from_node_id(&self) -> NodeId {
+    fn source_node_id(&self) -> NodeId {
         format!("person:{}", self.person_id).into()
     }
 
-    fn to_node_id(&self) -> NodeId {
+    fn target_node_id(&self) -> NodeId {
         format!("project:{}", self.project_id).into()
     }
 }
@@ -90,11 +90,11 @@ struct MemberOf {
 impl TypedEdge for MemberOf {
     const LABEL: &'static str = "MEMBER_OF";
 
-    fn from_node_id(&self) -> NodeId {
+    fn source_node_id(&self) -> NodeId {
         format!("person:{}", self.person_id).into()
     }
 
-    fn to_node_id(&self) -> NodeId {
+    fn target_node_id(&self) -> NodeId {
         format!("team:{}", self.team_id).into()
     }
 }

@@ -138,7 +138,7 @@ impl GraphStore for PgGraphStore {
         .await
     }
 
-    async fn put_node(&self, node: &Node) -> Result<NodeId> {
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         self.execute(&upsert_nodes_sql(
             &self.nodes_table(),
             std::slice::from_ref(node),
@@ -147,10 +147,10 @@ impl GraphStore for PgGraphStore {
         if self.config.auto_build {
             self.build_projection().await?;
         }
-        Ok(node.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
         self.execute(&upsert_edges_sql(
             &self.edges_table(),
             std::slice::from_ref(edge),
@@ -159,7 +159,7 @@ impl GraphStore for PgGraphStore {
         if self.config.auto_build {
             self.build_projection().await?;
         }
-        Ok(edge.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
@@ -307,7 +307,7 @@ fn pggraph_schema_sql(
         let columns = node_type
             .fields
             .iter()
-            .map(|field| pggraph_typed_column(field))
+            .map(pggraph_typed_column)
             .collect::<Result<Vec<_>>>()?
             .join(",\n            ");
         let columns = if columns.is_empty() {
@@ -350,7 +350,7 @@ fn pggraph_schema_sql(
         let columns = edge_type
             .fields
             .iter()
-            .map(|field| pggraph_typed_column(field))
+            .map(pggraph_typed_column)
             .collect::<Result<Vec<_>>>()?
             .join(",\n            ");
         let columns = if columns.is_empty() {
@@ -395,7 +395,12 @@ fn pggraph_typed_column(field: &Field) -> Result<String> {
 fn pggraph_prop_expr(field: &Field) -> String {
     let value = format!("props #>> ARRAY[{}, 'value']", sql_str(&field.name));
     match field.ty {
-        FieldType::String | FieldType::DateTime | FieldType::StringArray | FieldType::Json => value,
+        FieldType::String
+        | FieldType::DateTime
+        | FieldType::StringArray
+        | FieldType::IntArray
+        | FieldType::FloatArray
+        | FieldType::Json => value,
         FieldType::Int => format!("({value})::bigint"),
         FieldType::Float => format!("({value})::double precision"),
         FieldType::Bool => format!("({value})::boolean"),

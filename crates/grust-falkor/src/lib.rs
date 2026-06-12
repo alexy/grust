@@ -69,18 +69,18 @@ impl GraphStore for FalkorGraphStore {
         Ok(())
     }
 
-    async fn put_node(&self, node: &Node) -> Result<NodeId> {
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         let mut connection = self.connection()?;
         let query = falkor_node_query(node, &self.config)?;
         self.query(&mut connection, &query)?;
-        Ok(node.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
         let mut connection = self.connection()?;
         let query = falkor_edge_query(edge, &self.config)?;
         self.query(&mut connection, &query)?;
-        Ok(edge.id.clone())
+        Ok(PutOutcome::Upserted)
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
@@ -288,7 +288,25 @@ fn cypher_map(props: &Props, config: &FalkorConfig) -> String {
             Value::Bool(value) => format!("{key}:{value}"),
             Value::Int(value) => format!("{key}:{value}"),
             Value::Float(value) => format!("{key}:{value}"),
-            Value::String(value) => format!("{key}:{}", cypher_string(value)),
+            Value::String(value) | Value::DateTime(value) => {
+                format!("{key}:{}", cypher_string(value))
+            }
+            Value::IntArray(values) => format!(
+                "{key}:[{}]",
+                values
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Value::FloatArray(values) => format!(
+                "{key}:[{}]",
+                values
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
             Value::StringArray(values) => format!(
                 "{key}:[{}]",
                 values

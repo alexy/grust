@@ -21,146 +21,70 @@ pub enum GrustError {
     Serialization(String),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-pub struct NodeId(String);
+macro_rules! string_newtype {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+        pub struct $name(String);
 
-impl NodeId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
 
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
 
-    pub fn into_string(self) -> String {
-        self.0
-    }
+            pub fn into_string(self) -> String {
+                self.0
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+
+        impl From<String> for $name {
+            fn from(value: String) -> Self {
+                Self::new(value)
+            }
+        }
+
+        impl From<&str> for $name {
+            fn from(value: &str) -> Self {
+                Self::new(value)
+            }
+        }
+
+        impl From<&String> for $name {
+            fn from(value: &String) -> Self {
+                Self::new(value.clone())
+            }
+        }
+
+        impl From<&$name> for $name {
+            fn from(value: &$name) -> Self {
+                value.clone()
+            }
+        }
+    };
 }
 
-impl fmt::Display for NodeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<String> for NodeId {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&str> for NodeId {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&String> for NodeId {
-    fn from(value: &String) -> Self {
-        Self::new(value.clone())
-    }
-}
-
-impl From<&NodeId> for NodeId {
-    fn from(value: &NodeId) -> Self {
-        value.clone()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-pub struct EdgeId(String);
-
-impl EdgeId {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-impl fmt::Display for EdgeId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<String> for EdgeId {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&str> for EdgeId {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&String> for EdgeId {
-    fn from(value: &String) -> Self {
-        Self::new(value.clone())
-    }
-}
-
-impl From<&EdgeId> for EdgeId {
-    fn from(value: &EdgeId) -> Self {
-        value.clone()
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-pub struct Label(String);
-
-impl Label {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-impl fmt::Display for Label {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl From<String> for Label {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&str> for Label {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<&String> for Label {
-    fn from(value: &String) -> Self {
-        Self::new(value.clone())
-    }
-}
-
-impl From<&Label> for Label {
-    fn from(value: &Label) -> Self {
-        value.clone()
-    }
-}
+string_newtype!(
+    /// Stable application-level node identifier.
+    NodeId
+);
+string_newtype!(
+    /// Optional application-level edge identifier.
+    EdgeId
+);
+string_newtype!(
+    /// Node or edge label.
+    Label
+);
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
@@ -170,14 +94,40 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
+    /// An RFC 3339 date-time, e.g. `2026-06-12T09:30:00Z`. Construct with
+    /// [`Value::datetime`] to get format validation.
+    DateTime(String),
     StringArray(Vec<String>),
+    IntArray(Vec<i64>),
+    FloatArray(Vec<f64>),
     Json(serde_json::Value),
 }
 
 impl Value {
+    /// Creates a `Value::DateTime`, validating that the input is an RFC 3339
+    /// date-time such as `2026-06-12T09:30:00Z` or
+    /// `2026-06-12T09:30:00.123+02:00`.
+    pub fn datetime(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if is_rfc3339_datetime(&value) {
+            Ok(Self::DateTime(value))
+        } else {
+            Err(GrustError::Schema(format!(
+                "'{value}' is not an RFC 3339 date-time"
+            )))
+        }
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         match self {
             Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_datetime(&self) -> Option<&str> {
+        match self {
+            Self::DateTime(value) => Some(value),
             _ => None,
         }
     }
@@ -187,6 +137,116 @@ impl Value {
             Self::StringArray(values) => Some(values),
             _ => None,
         }
+    }
+
+    pub fn as_int_array(&self) -> Option<&[i64]> {
+        match self {
+            Self::IntArray(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    pub fn as_float_array(&self) -> Option<&[f64]> {
+        match self {
+            Self::FloatArray(values) => Some(values),
+            _ => None,
+        }
+    }
+
+    /// Converts to a plain (untagged) JSON value. `DateTime` becomes a JSON
+    /// string, so a `to_json`/`from_json` round trip yields `Value::String`.
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Null => serde_json::Value::Null,
+            Self::Bool(value) => serde_json::Value::Bool(*value),
+            Self::Int(value) => serde_json::Value::from(*value),
+            Self::Float(value) => serde_json::Value::from(*value),
+            Self::String(value) | Self::DateTime(value) => serde_json::Value::String(value.clone()),
+            Self::StringArray(values) => serde_json::Value::from(values.clone()),
+            Self::IntArray(values) => serde_json::Value::from(values.clone()),
+            Self::FloatArray(values) => serde_json::Value::from(values.clone()),
+            Self::Json(value) => value.clone(),
+        }
+    }
+
+    /// Converts from JSON, accepting both plain values and the tagged
+    /// `{"type": ..., "value": ...}` form that `Value`'s serde representation
+    /// produces.
+    pub fn from_json(value: serde_json::Value) -> Self {
+        if let serde_json::Value::Object(mapping) = &value
+            && mapping.contains_key("type")
+            && mapping.contains_key("value")
+            && let Ok(tagged) = serde_json::from_value(value.clone())
+        {
+            return tagged;
+        }
+        Self::from(value)
+    }
+}
+
+/// Validates the RFC 3339 date-time shape `YYYY-MM-DDTHH:MM:SS[.frac](Z|±HH:MM)`.
+fn is_rfc3339_datetime(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20 {
+        return false;
+    }
+    let digit = |i: usize| bytes[i].is_ascii_digit();
+    let all_digits = |range: std::ops::Range<usize>| range.clone().all(digit);
+    let pair = |i: usize| (bytes[i] - b'0') * 10 + (bytes[i + 1] - b'0');
+
+    if !(all_digits(0..4)
+        && bytes[4] == b'-'
+        && all_digits(5..7)
+        && bytes[7] == b'-'
+        && all_digits(8..10)
+        && bytes[10] == b'T'
+        && all_digits(11..13)
+        && bytes[13] == b':'
+        && all_digits(14..16)
+        && bytes[16] == b':'
+        && all_digits(17..19))
+    {
+        return false;
+    }
+    let year = bytes[0..4]
+        .iter()
+        .fold(0u16, |acc, digit| acc * 10 + u16::from(digit - b'0'));
+    let month = pair(5);
+    let day = pair(8);
+    let leap_year = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap_year => 29,
+        2 => 28,
+        _ => return false,
+    };
+    if !(day >= 1 && day <= max_day && pair(11) < 24 && pair(14) < 60 && pair(17) <= 60) {
+        return false;
+    }
+
+    let mut i = 19;
+    if bytes[i] == b'.' {
+        let start = i + 1;
+        i = start;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == start {
+            return false;
+        }
+    }
+    match bytes.get(i) {
+        Some(b'Z') => i + 1 == bytes.len(),
+        Some(b'+' | b'-') => {
+            i + 6 == bytes.len()
+                && all_digits(i + 1..i + 3)
+                && bytes[i + 3] == b':'
+                && all_digits(i + 4..i + 6)
+                && pair(i + 1) < 24
+                && pair(i + 4) < 60
+        }
+        _ => false,
     }
 }
 
@@ -211,6 +271,18 @@ impl From<&String> for Value {
 impl From<Vec<String>> for Value {
     fn from(value: Vec<String>) -> Self {
         Self::StringArray(value)
+    }
+}
+
+impl From<Vec<i64>> for Value {
+    fn from(value: Vec<i64>) -> Self {
+        Self::IntArray(value)
+    }
+}
+
+impl From<Vec<f64>> for Value {
+    fn from(value: Vec<f64>) -> Self {
+        Self::FloatArray(value)
     }
 }
 
@@ -260,6 +332,20 @@ impl From<serde_json::Value> for Value {
             }
             serde_json::Value::String(value) => Self::String(value),
             serde_json::Value::Array(values) => {
+                let ints = values
+                    .iter()
+                    .filter_map(serde_json::Value::as_i64)
+                    .collect::<Vec<_>>();
+                if !values.is_empty() && ints.len() == values.len() {
+                    return Self::IntArray(ints);
+                }
+                let floats = values
+                    .iter()
+                    .filter_map(serde_json::Value::as_f64)
+                    .collect::<Vec<_>>();
+                if !values.is_empty() && floats.len() == values.len() {
+                    return Self::FloatArray(floats);
+                }
                 let strings = values
                     .iter()
                     .filter_map(|value| value.as_str().map(ToString::to_string))
@@ -282,7 +368,8 @@ pub mod typed {
     use serde::de::DeserializeOwned;
 
     use crate::{
-        Edge, EdgeId, Graph, GraphBuilder, GrustError, Node, NodeId, Props, Result, Value,
+        Edge, EdgeId, Graph, GraphBuilder, GrustError, Node, NodeId, Props, PutOutcome, Result,
+        Value,
     };
 
     pub use garde;
@@ -302,9 +389,9 @@ pub mod typed {
     pub trait TypedEdge: garde::Validate + Serialize {
         const LABEL: &'static str;
 
-        fn from_node_id(&self) -> NodeId;
+        fn source_node_id(&self) -> NodeId;
 
-        fn to_node_id(&self) -> NodeId;
+        fn target_node_id(&self) -> NodeId;
 
         fn edge_id(&self) -> Option<EdgeId> {
             None
@@ -344,7 +431,7 @@ pub mod typed {
             self.builder.add_node(node)
         }
 
-        pub fn add_raw_edge(&mut self, edge: Edge) -> Option<EdgeId> {
+        pub fn add_raw_edge(&mut self, edge: Edge) -> PutOutcome {
             self.builder.add_edge(edge)
         }
 
@@ -367,7 +454,7 @@ pub mod typed {
             self.add_validated_node(node)
         }
 
-        pub fn add_edge<T>(&mut self, edge: &T) -> Result<Option<EdgeId>>
+        pub fn add_edge<T>(&mut self, edge: &T) -> Result<PutOutcome>
         where
             T: TypedEdge,
             T::Context: Default,
@@ -377,7 +464,7 @@ pub mod typed {
             self.add_validated_edge(edge)
         }
 
-        pub fn add_edge_with<T>(&mut self, edge: &T, ctx: &T::Context) -> Result<Option<EdgeId>>
+        pub fn add_edge_with<T>(&mut self, edge: &T, ctx: &T::Context) -> Result<PutOutcome>
         where
             T: TypedEdge,
         {
@@ -421,7 +508,7 @@ pub mod typed {
             &mut self,
             schema: &S,
             value: &serde_json::Value,
-        ) -> Result<Option<EdgeId>>
+        ) -> Result<PutOutcome>
         where
             T: TypedEdge + DeserializeOwned,
             T::Context: Default,
@@ -437,7 +524,7 @@ pub mod typed {
             schema: &S,
             value: &serde_json::Value,
             ctx: &T::Context,
-        ) -> Result<Option<EdgeId>>
+        ) -> Result<PutOutcome>
         where
             T: TypedEdge + DeserializeOwned,
             S: zod_rs::Schema<serde_json::Value>,
@@ -465,14 +552,14 @@ pub mod typed {
             Ok(self.builder.add_node(graph_node))
         }
 
-        fn add_validated_edge<T>(&mut self, edge: &T) -> Result<Option<EdgeId>>
+        fn add_validated_edge<T>(&mut self, edge: &T) -> Result<PutOutcome>
         where
             T: TypedEdge,
         {
             let mut graph_edge = Edge::new(
                 T::LABEL,
-                edge.from_node_id(),
-                edge.to_node_id(),
+                edge.source_node_id(),
+                edge.target_node_id(),
                 edge.edge_props()?,
             );
             graph_edge.id = edge.edge_id();
@@ -777,7 +864,7 @@ mod graph_doc {
                 .map_err(|err| format!("invalid tagged Grust value: {err}"));
         }
 
-        Ok(Value::from(value))
+        Ok(Value::from_json(value))
     }
 
     #[derive(Debug, Serialize, Deserialize)]
@@ -979,16 +1066,11 @@ mod xml {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub enum EdgePolicy {
     AllowDuplicates,
+    #[default]
     DedupeByFromLabelTo,
-}
-
-impl Default for EdgePolicy {
-    fn default() -> Self {
-        Self::DedupeByFromLabelTo
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1038,6 +1120,12 @@ impl GraphBuilder {
         }
     }
 
+    /// Adds a node, merging with any existing node that has the same id.
+    ///
+    /// If a node with the same id and the same label already exists, the new
+    /// props are merged in (new values win). If a node with the same id but a
+    /// different label exists, the new node replaces it entirely (last write
+    /// wins, matching `GraphStore::put_node` overwrite semantics).
     pub fn add_node(&mut self, node: Node) -> NodeId {
         let id = node.id.clone();
         self.nodes
@@ -1045,24 +1133,32 @@ impl GraphBuilder {
             .and_modify(|existing| {
                 if existing.label == node.label {
                     existing.props.extend(node.props.clone());
+                } else {
+                    *existing = node.clone();
                 }
             })
             .or_insert(node);
         id
     }
 
-    pub fn add_edge(&mut self, edge: Edge) -> Option<EdgeId> {
-        let id = edge.id.clone();
+    /// Adds an edge, reporting whether it was stored or dropped by the
+    /// builder's [`EdgePolicy`].
+    pub fn add_edge(&mut self, edge: Edge) -> PutOutcome {
         match self.edge_policy {
-            EdgePolicy::AllowDuplicates => self.edges.push(edge),
+            EdgePolicy::AllowDuplicates => {
+                self.edges.push(edge);
+                PutOutcome::Inserted
+            }
             EdgePolicy::DedupeByFromLabelTo => {
                 let key = (edge.from.clone(), edge.label.clone(), edge.to.clone());
                 if self.edge_keys.insert(key) {
                     self.edges.push(edge);
+                    PutOutcome::Inserted
+                } else {
+                    PutOutcome::Deduped
                 }
             }
         }
-        id
     }
 
     pub fn build(self) -> Graph {
@@ -1122,7 +1218,7 @@ impl<'a> EdgeBuilder<'a> {
         self
     }
 
-    pub fn finish(self) -> Option<EdgeId> {
+    pub fn finish(self) -> PutOutcome {
         let mut edge = Edge::new(self.label, self.from, self.to, self.props);
         edge.id = self.id;
         self.builder.add_edge(edge)
@@ -1156,8 +1252,42 @@ impl GraphSchema {
         for node in &graph.nodes {
             self.validate_node(node)?;
         }
+        let labels: BTreeMap<&NodeId, &Label> = graph
+            .nodes
+            .iter()
+            .map(|node| (&node.id, &node.label))
+            .collect();
         for edge in &graph.edges {
-            self.validate_edge(edge, graph)?;
+            self.validate_edge_with(edge, |id| labels.get(id).copied())?;
+        }
+        self.validate_edge_uniqueness(graph)
+    }
+
+    /// Enforces each edge type's [`EdgeUniqueness`]: at most one edge of the
+    /// type between a given endpoint pair (unordered for undirected types).
+    fn validate_edge_uniqueness(&self, graph: &Graph) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        for edge in &graph.edges {
+            let Some(edge_type) = self.edge_type(&edge.label) else {
+                continue;
+            };
+            if edge_type.uniqueness == EdgeUniqueness::None {
+                continue;
+            }
+            let (a, b) = if edge_type.directed || edge.from <= edge.to {
+                (&edge.from, &edge.to)
+            } else {
+                (&edge.to, &edge.from)
+            };
+            if !seen.insert((edge.label.clone(), a.clone(), b.clone())) {
+                return Err(GrustError::Schema(format!(
+                    "duplicate edge '{}' between '{}' and '{}' violates {:?} uniqueness",
+                    edge.label.as_str(),
+                    a.as_str(),
+                    b.as_str(),
+                    edge_type.uniqueness
+                )));
+            }
         }
         Ok(())
     }
@@ -1174,20 +1304,34 @@ impl GraphSchema {
     }
 
     pub fn validate_edge(&self, edge: &Edge, graph: &Graph) -> Result<()> {
+        self.validate_edge_with(edge, |id| {
+            graph
+                .nodes
+                .iter()
+                .find(|node| &node.id == id)
+                .map(|node| &node.label)
+        })
+    }
+
+    /// Validates an edge using a label lookup instead of a full `Graph`, so
+    /// stores can validate against their own node index without cloning.
+    pub fn validate_edge_with<'a>(
+        &self,
+        edge: &Edge,
+        lookup: impl Fn(&NodeId) -> Option<&'a Label>,
+    ) -> Result<()> {
         let edge_type = self.edge_type(&edge.label).ok_or_else(|| {
             GrustError::Schema(format!("schema has no edge type '{}'", edge.label.as_str()))
         })?;
 
-        let from = graph.nodes.iter().find(|node| node.id == edge.from);
-        let to = graph.nodes.iter().find(|node| node.id == edge.to);
-        let from = from.ok_or_else(|| {
+        let from_label = lookup(&edge.from).ok_or_else(|| {
             GrustError::Schema(format!(
                 "edge '{}' references unknown from node '{}'",
                 edge.label.as_str(),
                 edge.from.as_str()
             ))
         })?;
-        let to = to.ok_or_else(|| {
+        let to_label = lookup(&edge.to).ok_or_else(|| {
             GrustError::Schema(format!(
                 "edge '{}' references unknown to node '{}'",
                 edge.label.as_str(),
@@ -1195,21 +1339,42 @@ impl GraphSchema {
             ))
         })?;
 
-        if !edge_type.from.is_empty() && !edge_type.from.iter().any(|label| label == &from.label) {
-            return Err(GrustError::Schema(format!(
-                "edge '{}' cannot start from node label '{}'",
-                edge.label.as_str(),
-                from.label.as_str()
-            )));
-        }
-        if !edge_type.to.is_empty() && !edge_type.to.iter().any(|label| label == &to.label) {
+        let from_matches =
+            |label: &Label| edge_type.from.is_empty() || edge_type.from.contains(label);
+        let to_matches = |label: &Label| edge_type.to.is_empty() || edge_type.to.contains(label);
+        // Undirected edge types accept their endpoint labels in either
+        // orientation.
+        let endpoints_ok = (from_matches(from_label) && to_matches(to_label))
+            || (!edge_type.directed && from_matches(to_label) && to_matches(from_label));
+        if !endpoints_ok {
+            if !from_matches(from_label) {
+                return Err(GrustError::Schema(format!(
+                    "edge '{}' cannot start from node label '{}'",
+                    edge.label.as_str(),
+                    from_label.as_str()
+                )));
+            }
             return Err(GrustError::Schema(format!(
                 "edge '{}' cannot end at node label '{}'",
                 edge.label.as_str(),
-                to.label.as_str()
+                to_label.as_str()
             )));
         }
 
+        validate_props(
+            &edge.props,
+            &edge_type.fields,
+            &format!("edge '{}'", edge.label.as_str()),
+        )
+    }
+
+    /// Validates an edge's label and props against the schema without
+    /// checking endpoint nodes, for stores that persist a single edge and
+    /// cannot cheaply resolve its endpoints.
+    pub fn validate_edge_props(&self, edge: &Edge) -> Result<()> {
+        let edge_type = self.edge_type(&edge.label).ok_or_else(|| {
+            GrustError::Schema(format!("schema has no edge type '{}'", edge.label.as_str()))
+        })?;
         validate_props(
             &edge.props,
             &edge_type.fields,
@@ -1249,9 +1414,18 @@ pub enum FieldType {
     Bool,
     DateTime,
     StringArray,
+    IntArray,
+    FloatArray,
     Json,
 }
 
+/// How many edges of one type may exist between a pair of nodes.
+///
+/// `validate_graph` enforces `FromTo` and `FromLabelTo` identically — at most
+/// one edge of the type between a given endpoint pair (unordered when the
+/// type is undirected). The distinction is a storage-key hint for backends
+/// that keep all edge labels in one table: `FromLabelTo` keys include the
+/// label, `FromTo` keys do not.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EdgeUniqueness {
     None,
@@ -1345,16 +1519,21 @@ fn validate_field_value(
     context: &str,
     field_name: &str,
 ) -> Result<()> {
-    let matches = matches!(
-        (value, ty),
+    let matches = match (value, ty) {
         (Value::String(_), FieldType::String)
-            | (Value::Int(_), FieldType::Int)
-            | (Value::Float(_), FieldType::Float)
-            | (Value::Bool(_), FieldType::Bool)
-            | (Value::String(_), FieldType::DateTime)
-            | (Value::StringArray(_), FieldType::StringArray)
-            | (_, FieldType::Json)
-    );
+        | (Value::Int(_), FieldType::Int)
+        | (Value::Float(_), FieldType::Float)
+        | (Value::Bool(_), FieldType::Bool)
+        | (Value::DateTime(_), FieldType::DateTime)
+        | (Value::StringArray(_), FieldType::StringArray)
+        | (Value::IntArray(_), FieldType::IntArray)
+        | (Value::FloatArray(_), FieldType::FloatArray)
+        | (_, FieldType::Json) => true,
+        // Plain strings remain valid date-times for backward compatibility,
+        // but must still parse as RFC 3339.
+        (Value::String(value), FieldType::DateTime) => is_rfc3339_datetime(value),
+        _ => false,
+    };
     if matches {
         Ok(())
     } else {
@@ -1407,10 +1586,18 @@ impl Traversal {
         self
     }
 
+    /// Constrains the target node label of the most recent step.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called before any step has been added with `out`, `in_`, or
+    /// `both`, since there is no step for the label to apply to.
     pub fn to(mut self, node: impl Into<Label>) -> Self {
-        if let Some(step) = self.steps.last_mut() {
-            step.node = Some(node.into());
-        }
+        let step = self
+            .steps
+            .last_mut()
+            .expect("Traversal::to() must follow out(), in_(), or both()");
+        step.node = Some(node.into());
         self
     }
 
@@ -1452,6 +1639,30 @@ pub struct EdgeQuery {
     pub label: Option<Label>,
 }
 
+/// Outcome of writing a single node or edge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum PutOutcome {
+    /// The element did not exist before and was created.
+    Inserted,
+    /// An element with the same identity existed and was overwritten or
+    /// merged.
+    Updated,
+    /// The element was written by an upsert and the backend cannot tell
+    /// whether it was an insert or an update.
+    Upserted,
+    /// The element was dropped by a dedupe policy and nothing was written.
+    Deduped,
+}
+
+impl PutOutcome {
+    /// True unless the element was deduped away.
+    pub fn written(self) -> bool {
+        !matches!(self, Self::Deduped)
+    }
+}
+
+/// Counts of nodes and edges written by a bulk load. Each count reflects an
+/// upsert applied to the backend, not distinct newly created elements.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LoadReport {
     pub nodes: usize,
@@ -1464,18 +1675,20 @@ pub trait GraphStore: Send + Sync {
         Ok(())
     }
 
-    async fn put_node(&self, node: &Node) -> Result<NodeId>;
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>>;
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome>;
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome>;
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
         let mut report = LoadReport::default();
         for node in &graph.nodes {
-            self.put_node(node).await?;
-            report.nodes += 1;
+            if self.put_node(node).await?.written() {
+                report.nodes += 1;
+            }
         }
         for edge in &graph.edges {
-            self.put_edge(edge).await?;
-            report.edges += 1;
+            if self.put_edge(edge).await?.written() {
+                report.edges += 1;
+            }
         }
         Ok(report)
     }
@@ -1500,11 +1713,58 @@ pub trait GraphAdminStore: GraphStore {
     async fn clear(&self) -> Result<()>;
 }
 
+/// A single incremental change to a graph, for delta-oriented pipelines.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum GraphMutation {
+    UpsertNode(Node),
+    DeleteNode(NodeId),
+    UpsertEdge(Edge),
+    DeleteEdge {
+        id: Option<EdgeId>,
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+    },
+}
+
+/// Incremental mutation support for stores that can delete elements.
+///
+/// Deletes are idempotent: removing an element that does not exist is not an
+/// error.
+#[async_trait]
+pub trait GraphMutationStore: GraphStore {
+    /// Deletes a node and all edges incident to it.
+    async fn delete_node(&self, id: &NodeId) -> Result<()>;
+
+    /// Deletes the edge(s) matching `(from, label, to)`.
+    async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()>;
+
+    /// Applies mutations in order, stopping at the first error.
+    async fn apply_mutations(&self, mutations: &[GraphMutation]) -> Result<()> {
+        for mutation in mutations {
+            match mutation {
+                GraphMutation::UpsertNode(node) => {
+                    self.put_node(node).await?;
+                }
+                GraphMutation::DeleteNode(id) => self.delete_node(id).await?,
+                GraphMutation::UpsertEdge(edge) => {
+                    self.put_edge(edge).await?;
+                }
+                GraphMutation::DeleteEdge {
+                    from, label, to, ..
+                } => self.delete_edge(from, label, to).await?,
+            }
+        }
+        Ok(())
+    }
+}
+
 pub mod prelude {
     pub use crate::{
-        Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, Field, FieldType, Graph,
-        GraphAdminStore, GraphBuilder, GraphSchema, GraphSchemaBuilder, GraphStore, GrustError,
-        Label, LoadReport, Node, NodeId, NodeType, Props, Result, Start, Step, Traversal, Value,
+        Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, EdgeUniqueness, Field, FieldType,
+        Graph, GraphAdminStore, GraphBuilder, GraphMutation, GraphMutationStore, GraphSchema,
+        GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType,
+        Props, PutOutcome, Result, Start, Step, Traversal, Value,
     };
 
     #[cfg(feature = "typed-garde")]

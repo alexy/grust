@@ -267,8 +267,8 @@ The central abstraction is `GraphStore`:
 #[async_trait::async_trait]
 pub trait GraphStore: Send + Sync {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()>;
-    async fn put_node(&self, node: &Node) -> Result<NodeId>;
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>>;
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome>;
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome>;
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport>;
     async fn put_typed_graph(&self, schema: &GraphSchema, graph: &Graph) -> Result<LoadReport>;
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
@@ -283,6 +283,10 @@ consuming it, which makes retries, audit, comparison, and multi-backend loading
 straightforward. `put_typed_graph` adds a schema-backed path: validate the graph
 against `GraphSchema`, apply that schema to the backend, and then write the
 graph through the same store contract.
+
+Single-element writes return `PutOutcome`, so callers can tell the difference
+between inserted, updated, backend-opaque upserted, and deduped writes when a
+backend can expose that distinction.
 
 Administrative operations live in `GraphAdminStore`, where `bootstrap` and
 `clear` can support test harnesses, demos, migrations, and replacement
@@ -326,7 +330,7 @@ Grust has several backend and integration crates:
 - `grust-memory` is the deterministic local store for tests, examples, and no-service workflows.
 - `grust-lancedb` stores universal nodes and edges in LanceDB tables, supports backend-neutral reads and bounded traversal, and mirrors schema-labeled writes into typed Arrow tables.
 - `grust-pggraph` stores universal graph tables in PostgreSQL, registers them with pgGraph, lowers traversal to SQL joins, and exposes typed label views and expression indexes from `GraphSchema`.
-- `grust-sail` writes graph data through Sail Spark Connect, lowers traversal to Spark SQL joins over DataFrames, and mirrors schema-labeled writes into typed Delta tables.
+- `grust-sail` stages bulk writes as Arrow `LocalRelation` temp views through Sail Spark Connect, lowers traversal to Spark SQL joins over DataFrames, and mirrors schema-labeled writes into typed Delta tables.
 - `grust-falkor` writes through Redis `GRAPH.QUERY` using FalkorDB's Cypher-like surface and creates schema-driven label/property indexes.
 - `grust-helix` supports HTTP and SDK stores for HelixDB writes and validates schema names that can be lowered through dynamic queries.
 - `grust-surreal` supports HTTP and SDK stores for SurrealDB writes and lowers `GraphSchema` into schemafull table and field definitions.
@@ -456,10 +460,12 @@ Grust is still early, but its direction is already clear:
 
 The next natural work is deeper read and traversal support across the
 write-focused backends, richer import/export helpers, more typed read helpers,
-more traversal result shapes, and mutation APIs for incremental updates. The
-0.5 work matters because those next steps now have stable places to attach:
-typed ingestion for trusted Rust values and untrusted JSON, `GraphSchema` for
-backend-facing structure, and `GraphStore` for portable writes and traversal.
+more traversal result shapes, and broader backend coverage for incremental
+mutation. The 0.6 work matters because those next steps now have stable places
+to attach: typed ingestion for trusted Rust values and untrusted JSON,
+`GraphSchema` for backend-facing structure, `GraphMutationStore` for deletes
+where a backend supports them, and `GraphStore` for portable writes and
+traversal.
 
 That last point is where the CocoIndex adapter becomes interesting. A property
 graph can be more than a one-time load. It can be target state for an indexing

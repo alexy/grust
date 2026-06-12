@@ -130,8 +130,8 @@ async fn put_and_get_node() {
         props
     });
 
-    let id = store.put_node(&node).await.expect("put_node");
-    assert_eq!(id.as_str(), "person-1");
+    let outcome = store.put_node(&node).await.expect("put_node");
+    assert!(outcome.written());
 
     let fetched = store
         .get_node(&NodeId::new("person-1"))

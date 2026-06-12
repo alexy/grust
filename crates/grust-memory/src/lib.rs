@@ -40,30 +40,31 @@ impl GraphStore for MemoryGraphStore {
         Ok(())
     }
 
-    async fn put_node(&self, node: &Node) -> Result<NodeId> {
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
         if let Some(schema) = &inner.schema {
             schema.validate_node(node)?;
         }
-        inner.nodes.insert(node.id.clone(), node.clone());
-        Ok(node.id.clone())
+        let previous = inner.nodes.insert(node.id.clone(), node.clone());
+        Ok(match previous {
+            Some(_) => PutOutcome::Updated,
+            None => PutOutcome::Inserted,
+        })
     }
 
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
         if let Some(schema) = &inner.schema {
-            let mut graph = Graph {
-                nodes: inner.nodes.values().cloned().collect(),
-                edges: inner.edges.values().cloned().collect(),
-            };
-            graph.edges.push(edge.clone());
-            schema.validate_edge(edge, &graph)?;
+            schema.validate_edge_with(edge, |id| inner.nodes.get(id).map(|node| &node.label))?;
         }
-        inner.edges.insert(
+        let previous = inner.edges.insert(
             (edge.from.clone(), edge.label.clone(), edge.to.clone()),
             edge.clone(),
         );
-        Ok(edge.id.clone())
+        Ok(match previous {
+            Some(_) => PutOutcome::Updated,
+            None => PutOutcome::Inserted,
+        })
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
@@ -146,14 +147,13 @@ impl GraphStore for MemoryGraphStore {
                     }
 
                     let target_id = if out_matches { &edge.to } else { &edge.from };
-                    if let Some(target) = inner.nodes.get(target_id) {
-                        if step
+                    if let Some(target) = inner.nodes.get(target_id)
+                        && step
                             .node
                             .as_ref()
                             .is_none_or(|label| label == &target.label)
-                        {
-                            next.push(target.clone());
-                        }
+                    {
+                        next.push(target.clone());
                     }
                 }
             }
@@ -164,6 +164,26 @@ impl GraphStore for MemoryGraphStore {
             current.truncate(limit as usize);
         }
         Ok(current)
+    }
+}
+
+#[async_trait]
+impl GraphMutationStore for MemoryGraphStore {
+    async fn delete_node(&self, id: &NodeId) -> Result<()> {
+        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        inner.nodes.remove(id);
+        inner
+            .edges
+            .retain(|(from, _, to), _| from != id && to != id);
+        Ok(())
+    }
+
+    async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
+        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        inner
+            .edges
+            .remove(&(from.clone(), label.clone(), to.clone()));
+        Ok(())
     }
 }
 

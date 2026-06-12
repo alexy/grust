@@ -1,4 +1,4 @@
-kindle_name: grust (0.5.0)
-built_at: 2026-06-11
+kindle_name: grust (0.6.0)
+built_at: 2026-06-12
 epub_file: grust.epub
-kindle_link: grust (0.5.0).epub
+kindle_link: grust (0.6.0).epub

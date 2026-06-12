@@ -36,12 +36,12 @@ struct RecordingStore {
 
 #[async_trait]
 impl GraphStore for RecordingStore {
-    async fn put_node(&self, node: &Node) -> Result<NodeId> {
-        Ok(node.id.clone())
+    async fn put_node(&self, _node: &Node) -> Result<PutOutcome> {
+        Ok(PutOutcome::Upserted)
     }
 
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>> {
-        Ok(edge.id.clone())
+    async fn put_edge(&self, _edge: &Edge) -> Result<PutOutcome> {
+        Ok(PutOutcome::Upserted)
     }
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {

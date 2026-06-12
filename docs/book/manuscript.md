@@ -372,11 +372,11 @@ struct WorksOn {
 impl TypedEdge for WorksOn {
     const LABEL: &'static str = "WORKS_ON";
 
-    fn from_node_id(&self) -> NodeId {
+    fn source_node_id(&self) -> NodeId {
         format!("person:{}", self.person_id).into()
     }
 
-    fn to_node_id(&self) -> NodeId {
+    fn target_node_id(&self) -> NodeId {
         format!("project:{}", self.project_id).into()
     }
 }
@@ -547,11 +547,11 @@ struct WorksOn {
 impl TypedEdge for WorksOn {
     const LABEL: &'static str = "WORKS_ON";
 
-    fn from_node_id(&self) -> NodeId {
+    fn source_node_id(&self) -> NodeId {
         format!("person:{}", self.person_id).into()
     }
 
-    fn to_node_id(&self) -> NodeId {
+    fn target_node_id(&self) -> NodeId {
         format!("project:{}", self.project_id).into()
     }
 }
@@ -712,8 +712,8 @@ The central backend trait is `GraphStore`:
 #[async_trait::async_trait]
 pub trait GraphStore: Send + Sync {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()>;
-    async fn put_node(&self, node: &Node) -> Result<NodeId>;
-    async fn put_edge(&self, edge: &Edge) -> Result<Option<EdgeId>>;
+    async fn put_node(&self, node: &Node) -> Result<PutOutcome>;
+    async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome>;
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport>;
     async fn put_typed_graph(&self, schema: &GraphSchema, graph: &Graph) -> Result<LoadReport>;
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
@@ -735,6 +735,10 @@ let report = store.put_graph(&graph).await?;
 backup_store.put_graph(&graph).await?;
 println!("loaded {} nodes and {} edges", report.nodes, report.edges);
 ```
+
+Single-element writes return `PutOutcome`, which distinguishes inserted,
+updated, backend-opaque upserted, and deduped writes. `LoadReport` counts
+elements that were written or upserted, not necessarily newly created rows.
 
 Administrative operations are split into `GraphAdminStore`:
 
@@ -880,9 +884,12 @@ data in Spark DataFrames backed by Delta tables. Commands such as table creation
 and `MERGE INTO` are sent as Spark Connect command plans; reads are sent as SQL
 relation plans and decoded from Arrow IPC streams.
 
-The implementation has an important practical detail: edge rows carry source
-and destination labels as well as IDs. That allows traversal joins to match node
-labels without an extra lookup during each edge hop.
+Bulk writes stage Arrow IPC batches as Spark Connect `LocalRelation` temp views
+and then merge from those views. That avoids building one giant SQL literal per
+row, keeps user values out of SQL text, and gives long-running requests an
+operation id with reattachment enabled. Traversal joins use globally unique
+node ids; source and destination label columns may be empty for single-edge
+writes where the full graph is not in scope.
 
 When a schema is applied, Sail creates typed Delta tables per node and edge
 label and mirrors writes into them with `MERGE INTO`. The universal Spark
@@ -1059,7 +1066,9 @@ flowchart LR
 
 Grust has schema types: `GraphSchema`, `NodeType`, `EdgeType`, `Field`,
 `FieldType`, and `EdgeUniqueness`. `GraphSchema` validates labels, required
-fields, field value types, and edge endpoint labels. The default
+fields, field value types, edge endpoint labels, edge direction, and declared
+edge uniqueness. `FieldType` includes scalar strings, integers, floats,
+booleans, RFC 3339 date-times, string/int/float arrays, and JSON. The default
 `GraphStore::apply_schema` implementation remains a no-op, which lets
 schemaless or schema-later backends work without ceremony.
 
@@ -1124,8 +1133,8 @@ returns, shortest paths, and aggregation are all tempting. The important rule is
 to extend the IR only when several backends can implement the concept without
 smuggling database-specific query strings through the abstraction.
 
-Incremental mutation is another likely addition. A dedicated mutation trait
-could express upsert and delete operations directly:
+Incremental mutation now has a small extension trait for backends that can
+delete elements:
 
 ```rust
 pub enum GraphMutation {
@@ -1141,7 +1150,7 @@ pub enum GraphMutation {
 }
 ```
 
-That would serve CocoIndex-style target-state systems, streaming pipelines, and
+That serves CocoIndex-style target-state systems, streaming pipelines, and
 ordinary applications that need to apply deltas instead of replacing whole
 graphs.
 
