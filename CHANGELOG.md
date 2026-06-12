@@ -4,6 +4,28 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
+## 2026-06-12 - 0.6.2
+
+- Expanded the backend integration launcher to run the full backend family by
+  default: Sail, SurrealDB, FalkorDB, HelixDB, LanceDB, CocoIndex, and pgGraph.
+- Added pgGraph Docker coverage with the official
+  `ghcr.io/evokoa/pggraph:0.1.7` image on host port `55432`, so the pgGraph
+  integration test no longer depends on a manually installed local PostgreSQL
+  extension.
+- Added HelixDB live integration coverage through a disposable local Helix
+  project started from the configured `~/src/HelixDB` checkout.
+- Added explicit LanceDB and CocoIndex integration checks to the shared
+  launcher, covering local LanceDB persistence/traversal and CocoIndex public
+  export shape.
+- Fixed HelixDB live read hydration for current Helix responses by reading
+  nested `properties` payloads, `$id` node identifiers, and `$from`/`$to` edge
+  endpoints.
+- Fixed pgGraph table registration against the current extension API by passing
+  node and edge tables as `regclass` values instead of plain text names.
+- Updated README, the Grust book, and the overview blog so backend integration
+  instructions describe the full real-test matrix instead of the earlier
+  three-backend subset.
+
 ## 2026-06-12 - 0.6.1
 
 - Added an explicit backend integration-test launcher:

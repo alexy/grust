@@ -489,7 +489,10 @@ fn helix_get_node_request(id: &NodeId) -> serde_json::Value {
         vec![json!({
             "Query": {
                 "name": "nodes",
-                "steps": [{"NWhere": {"Eq": ["id", {"String": id.as_str()}]}}],
+                "steps": [
+                    {"NWhere": {"Eq": ["id", {"String": id.as_str()}]}},
+                    {"ValueMap": null}
+                ],
                 "condition": null
             }
         })],
@@ -512,7 +515,10 @@ fn helix_get_edges_request(query: &EdgeQuery) -> Result<serde_json::Value> {
         vec![json!({
             "Query": {
                 "name": "edges",
-                "steps": [{"EWhere": helix_and_predicate(predicates)}],
+                "steps": [
+                    {"EWhere": helix_and_predicate(predicates)},
+                    "EdgeProperties"
+                ],
                 "condition": null
             }
         })],
@@ -546,6 +552,7 @@ fn helix_traversal_request(traversal: &Traversal) -> Result<serde_json::Value> {
             steps.push(json!({"HasLabel": label.as_str()}));
         }
     }
+    steps.push(json!({"ValueMap": null}));
     Ok(helix_read_request(
         "nodes",
         vec![json!({
@@ -602,12 +609,20 @@ fn helix_edges_from_response(response: &serde_json::Value, name: &str) -> Result
 }
 
 fn helix_response_items(response: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
+    if let Some(items) = response
+        .get(name)
+        .and_then(|value| value.get("properties"))
+        .and_then(|value| value.as_array())
+    {
+        return items.clone();
+    }
     if let Some(items) = response.get(name).and_then(|value| value.as_array()) {
         return items.clone();
     }
     if let Some(items) = response
         .get("results")
         .and_then(|results| results.get(name))
+        .and_then(|value| value.get("properties").or(Some(value)))
         .and_then(|value| value.as_array())
     {
         return items.clone();
@@ -615,6 +630,7 @@ fn helix_response_items(response: &serde_json::Value, name: &str) -> Vec<serde_j
     if let Some(items) = response
         .get("result")
         .and_then(|results| results.get(name))
+        .and_then(|value| value.get("properties").or(Some(value)))
         .and_then(|value| value.as_array())
     {
         return items.clone();
@@ -628,6 +644,7 @@ fn helix_node_from_value(value: serde_json::Value) -> Result<Node> {
         .ok_or_else(|| GrustError::Serialization("Helix node row is not an object".to_string()))?;
     let id = object
         .get("id")
+        .or_else(|| object.get("$id"))
         .and_then(|value| value.as_str())
         .ok_or_else(|| GrustError::Serialization("Helix node row has no id".to_string()))?;
     let label = object
@@ -637,7 +654,7 @@ fn helix_node_from_value(value: serde_json::Value) -> Result<Node> {
         .ok_or_else(|| GrustError::Serialization("Helix node row has no label".to_string()))?;
     let props = object
         .iter()
-        .filter(|(key, _)| key.as_str() != "$label" && key.as_str() != "label")
+        .filter(|(key, _)| !matches!(key.as_str(), "$id" | "id" | "$label" | "label"))
         .map(|(key, value)| (key.clone(), helix_value_from_json(value.clone())))
         .collect::<Props>();
     Ok(Node::new(label, id, props))
@@ -649,10 +666,12 @@ fn helix_edge_from_value(value: serde_json::Value) -> Result<Edge> {
         .ok_or_else(|| GrustError::Serialization("Helix edge row is not an object".to_string()))?;
     let from = object
         .get("from_id")
+        .or_else(|| object.get("$from"))
         .and_then(|value| value.as_str())
         .ok_or_else(|| GrustError::Serialization("Helix edge row has no from_id".to_string()))?;
     let to = object
         .get("to_id")
+        .or_else(|| object.get("$to"))
         .and_then(|value| value.as_str())
         .ok_or_else(|| GrustError::Serialization("Helix edge row has no to_id".to_string()))?;
     let label = object
@@ -670,7 +689,15 @@ fn helix_edge_from_value(value: serde_json::Value) -> Result<Edge> {
             .filter(|(key, _)| {
                 !matches!(
                     key.as_str(),
-                    "from_id" | "to_id" | "relationship" | "edge_id" | "$label" | "label"
+                    "from_id"
+                        | "to_id"
+                        | "$from"
+                        | "$to"
+                        | "relationship"
+                        | "edge_id"
+                        | "$id"
+                        | "$label"
+                        | "label"
                 )
             })
             .map(|(key, value)| (key.clone(), helix_value_from_json(value.clone())))

@@ -278,7 +278,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.1", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.2", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -286,7 +286,7 @@ grust = { package = "grust-graph", version = "0.6.1", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.1", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.2", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -949,11 +949,16 @@ scripts/integration-test.sh
 ```
 
 The launcher reads `integration/backends.conf`, prefers configured local source
-checkouts such as `~/src/sail`, `~/src/SurrealDB`, and `~/src/FalkorDB`, and
-falls back to Docker Compose for Docker-friendly backends. A single backend can
-be run with `--backend sail`, `--backend surreal`, or `--backend falkor`.
-Helix and pgGraph have slots in the same config so their startup paths can join
-the same contract once their local service startup is pinned down.
+checkouts such as `~/src/sail`, `~/src/SurrealDB`, `~/src/FalkorDB`, and
+`~/src/HelixDB`, and falls back to Docker Compose for Docker-friendly backends.
+A single backend can be run with `--backend sail`, `--backend surreal`,
+`--backend falkor`, `--backend helix`, `--backend lancedb`, `--backend
+cocoindex`, or `--backend pggraph`.
+
+The default run covers Sail, SurrealDB, FalkorDB, HelixDB, LanceDB, CocoIndex,
+and pgGraph. pgGraph uses the official Docker image on host port `55432` by
+default. LanceDB and CocoIndex are still real integration checks, but they run
+against local storage/export code rather than a daemon.
 
 # 9. Example: A Conference Graph
 

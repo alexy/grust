@@ -90,13 +90,18 @@ Run a single backend with:
 scripts/integration-test.sh --backend sail
 scripts/integration-test.sh --backend surreal
 scripts/integration-test.sh --backend falkor
+scripts/integration-test.sh --backend helix
+scripts/integration-test.sh --backend lancedb
+scripts/integration-test.sh --backend cocoindex
+scripts/integration-test.sh --backend pggraph
 ```
 
 Use `--no-start` to require an already-running service, and `--keep-running` to
-leave services up for debugging. The currently automated live tests cover Sail,
-SurrealDB, and FalkorDB; Helix and pgGraph have launcher slots so their source
-or container startup can be wired into the same path without changing the test
-contract.
+leave services up for debugging. The default run covers Sail, SurrealDB,
+FalkorDB, HelixDB, LanceDB, CocoIndex, and pgGraph. Sail, SurrealDB, FalkorDB,
+and HelixDB use configured source checkouts when present; pgGraph runs through
+the official Docker image on host port `55432` by default. LanceDB and
+CocoIndex run as local integration checks without a daemon.
 
 ## Core Model
 
@@ -187,7 +192,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.1", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.6.2", features = ["memory"] }
 ```
 
 Then load and traverse a graph:
@@ -265,7 +270,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.1", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.6.2", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and

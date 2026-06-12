@@ -21,7 +21,7 @@ Starts configured local backend services when needed, then runs live backend
 tests. A live test fails if its backend is absent; no successful run is produced
 by silently skipping an unavailable service.
 
-Backends: sail, surreal, falkor, helix, pggraph
+Backends: sail, surreal, falkor, helix, lancedb, cocoindex, pggraph
 
 Config: integration/backends.conf
 USAGE
@@ -55,7 +55,7 @@ done
 
 if [[ ${#BACKENDS[@]} -eq 0 ]]; then
   # shellcheck disable=SC2206
-  BACKENDS=(${GRUST_INTEGRATION_BACKENDS:-sail surreal falkor})
+  BACKENDS=(${GRUST_INTEGRATION_BACKENDS:-sail surreal falkor helix lancedb cocoindex pggraph})
 fi
 
 STATE_DIR="${TMPDIR:-/tmp}/grust-integration"
@@ -92,6 +92,17 @@ wait_port() {
   until port_open "$host" "$port"; do
     if (( SECONDS >= deadline )); then
       echo "timed out waiting for $name on $host:$port" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+wait_pggraph() {
+  local deadline=$((SECONDS + 120))
+  until pg_isready -h "$PGGRAPH_HOST" -p "$PGGRAPH_PORT" -U "${PGGRAPH_USER:-postgres}" -d "${PGGRAPH_DB:-graph}" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      echo "timed out waiting for pggraph PostgreSQL readiness on $PGGRAPH_HOST:$PGGRAPH_PORT" >&2
       return 1
     fi
     sleep 1
@@ -169,10 +180,19 @@ start_helix() {
   fi
   [[ "$NO_START" -eq 0 ]] || return
   if [[ -n "${HELIX_SOURCE:-}" && -d "$HELIX_SOURCE" ]]; then
+    local project_dir="${HELIX_PROJECT_DIR:-$STATE_DIR/helix-project}"
     if [[ -x "$HELIX_SOURCE/target/release/helix" ]]; then
-      start_process helix "$HELIX_SOURCE" "$HELIX_SOURCE/target/release/helix" run dev --foreground
+      mkdir -p "$project_dir"
+      if [[ ! -f "$project_dir/helix.toml" ]]; then
+        "$HELIX_SOURCE/target/release/helix" init --path "$project_dir" --quiet local >"$STATE_DIR/helix-init.log" 2>&1
+      fi
+      start_process helix "$project_dir" "$HELIX_SOURCE/target/release/helix" run dev --foreground --port "$HELIX_PORT"
     elif command -v helix >/dev/null 2>&1; then
-      start_process helix "$HELIX_SOURCE" helix run dev --foreground
+      mkdir -p "$project_dir"
+      if [[ ! -f "$project_dir/helix.toml" ]]; then
+        helix init --path "$project_dir" --quiet local >"$STATE_DIR/helix-init.log" 2>&1
+      fi
+      start_process helix "$project_dir" helix run dev --foreground --port "$HELIX_PORT"
     else
       echo "no Helix launcher found; build / install Helix or start it manually" >&2
     fi
@@ -185,7 +205,11 @@ start_pggraph() {
     return
   fi
   [[ "$NO_START" -eq 0 ]] || return
-  echo "pggraph startup is not configured yet; start PostgreSQL with the graph extension manually or set PGGRAPH_SOURCE and extend this script" >&2
+  if [[ -n "${PGGRAPH_IMAGE:-}" ]] && command -v docker >/dev/null 2>&1; then
+    start_compose pggraph
+  else
+    echo "pggraph startup is not configured yet; start PostgreSQL with the graph extension manually or set PGGRAPH_IMAGE" >&2
+  fi
 }
 
 run_backend() {
@@ -209,11 +233,19 @@ run_backend() {
     helix)
       start_helix
       wait_port helix "$HELIX_HOST" "$HELIX_PORT"
-      cargo test -p grust-helix
+      cargo test -p grust-helix -- --ignored --test-threads=1
+      ;;
+    lancedb)
+      cargo test -p grust-lancedb -- --ignored --test-threads=1
+      ;;
+    cocoindex)
+      cargo test -p grust-cocoindex --test public_export
       ;;
     pggraph)
       start_pggraph
       wait_port pggraph "$PGGRAPH_HOST" "$PGGRAPH_PORT"
+      wait_pggraph
+      export PGGRAPH_TEST_CONNECTION_STRING="$PGGRAPH_CONNECTION_STRING"
       cargo test -p grust-pggraph -- --ignored --test-threads=1
       ;;
     *)

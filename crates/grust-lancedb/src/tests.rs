@@ -277,3 +277,69 @@ fn edge_key_prefers_explicit_id() {
     let edge = Edge::new("KNOWS", "a", "b", Props::new());
     assert_eq!(edge_key(&edge), "a\u{1f}KNOWS\u{1f}b");
 }
+
+#[tokio::test]
+#[ignore = "explicit LanceDB integration test; run through scripts/integration-test.sh --backend lancedb"]
+async fn live_local_lancedb_put_read_traverse_and_schema() {
+    let store = store().await;
+    let schema = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                grust_core::Field::required("name", FieldType::String),
+                grust_core::Field::optional("age", FieldType::Int),
+            ],
+        )
+        .node(
+            "Talk",
+            vec![grust_core::Field::required("title", FieldType::String)],
+        )
+        .node(
+            "Room",
+            vec![grust_core::Field::required("name", FieldType::String)],
+        )
+        .edge(
+            "PRESENTS",
+            vec![Label::new("Person")],
+            vec![Label::new("Talk")],
+            vec![grust_core::Field::required("source", FieldType::String)],
+        )
+        .edge(
+            "HOSTED_IN",
+            vec![Label::new("Talk")],
+            vec![Label::new("Room")],
+            Vec::<grust_core::Field>::new(),
+        )
+        .build();
+
+    store.apply_schema(&schema).await.expect("apply schema");
+    let report = store.put_graph(&sample_graph()).await.expect("put graph");
+    assert_eq!(report.nodes, 3);
+    assert_eq!(report.edges, 2);
+
+    let fetched = store
+        .get_node(&NodeId::new("person-1"))
+        .await
+        .expect("read node")
+        .expect("person node");
+    assert_eq!(fetched.label, Label::new("Person"));
+
+    let rooms = store
+        .traverse(
+            Traversal::from_node("person-1")
+                .out("PRESENTS")
+                .to("Talk")
+                .out("HOSTED_IN")
+                .to("Room"),
+        )
+        .await
+        .expect("traverse");
+    assert_eq!(rooms.len(), 1);
+    assert_eq!(rooms[0].id, NodeId::new("room-1"));
+
+    let person_table = store
+        .open_table(&store.typed_node_table_name("Person").unwrap())
+        .await
+        .expect("typed person table");
+    assert_eq!(person_table.count_rows(None).await.expect("person rows"), 1);
+}

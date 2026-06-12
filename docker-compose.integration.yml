@@ -19,3 +19,11 @@ services:
     ports:
       - "8000:8000"
 
+  pggraph:
+    image: ${PGGRAPH_IMAGE:-ghcr.io/evokoa/pggraph:0.1.7}
+    environment:
+      POSTGRES_USER: ${PGGRAPH_USER:-postgres}
+      POSTGRES_PASSWORD: ${PGGRAPH_PASSWORD:-postgres}
+      POSTGRES_DB: ${PGGRAPH_DB:-graph}
+    ports:
+      - "${PGGRAPH_PORT:-55432}:5432"

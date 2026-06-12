@@ -180,3 +180,59 @@ fn graph_schema_is_validated_for_dynamic_helix_names() {
 
     assert!(validate_helix_schema(&bad).is_err());
 }
+
+#[tokio::test]
+#[ignore = "requires a live HelixDB server on 127.0.0.1:8080"]
+async fn live_http_put_read_and_traverse() {
+    let store = HelixHttpGraphStore::connect(HelixHttpConfig {
+        labels: vec!["Person".to_string(), "Talk".to_string()],
+        batch_size: 2,
+        ..HelixHttpConfig::default()
+    })
+    .expect("connect Helix HTTP store");
+    store.clear().await.expect("clear Helix labels");
+    store
+        .apply_schema(
+            &GraphSchema::builder()
+                .node("Person", vec![Field::required("name", FieldType::String)])
+                .node("Talk", vec![Field::required("title", FieldType::String)])
+                .edge(
+                    "presents",
+                    vec![Label::new("Person")],
+                    vec![Label::new("Talk")],
+                    Vec::<Field>::new(),
+                )
+                .build(),
+        )
+        .await
+        .expect("apply Helix schema");
+
+    let graph = sample_graph();
+    let report = store.put_graph(&graph).await.expect("write graph");
+    assert_eq!(report.nodes, 2);
+    assert_eq!(report.edges, 1);
+
+    let fetched = store
+        .get_node(&NodeId::new("talk-1"))
+        .await
+        .expect("read node")
+        .expect("talk node missing");
+    assert_eq!(fetched.label, Label::new("Talk"));
+
+    let edges = store
+        .get_edges(EdgeQuery {
+            from: Some(NodeId::new("person-1")),
+            to: Some(NodeId::new("talk-1")),
+            label: Some(Label::new("presents")),
+        })
+        .await
+        .expect("read edges");
+    assert_eq!(edges.len(), 1);
+
+    let result = store
+        .traverse(Traversal::from_node("person-1").out("presents").to("Talk"))
+        .await
+        .expect("traverse");
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].id, NodeId::new("talk-1"));
+}

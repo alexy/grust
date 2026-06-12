@@ -262,11 +262,11 @@ fn bootstrap_sql(config: &PgGraphConfig, nodes_table: &str, edges_table: &str) -
          CREATE INDEX IF NOT EXISTS {edge_from_idx} ON {edges_table}(from_id);
          CREATE INDEX IF NOT EXISTS {edge_to_idx} ON {edges_table}(to_id);
          CREATE INDEX IF NOT EXISTS {node_label_idx} ON {nodes_table}(label);
-         SELECT graph.add_table({nodes_regclass}, 'id', ARRAY['label', 'props']);
+         SELECT graph.add_table({nodes_regclass}::regclass, 'id', ARRAY['label', 'props']);
          SELECT graph.add_edge(
-            {edges_regclass},
+            {edges_regclass}::regclass,
             'from_id',
-            {nodes_regclass},
+            {nodes_regclass}::regclass,
             'to_id',
             'grust_edge',
             false,

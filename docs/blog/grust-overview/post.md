@@ -18,12 +18,13 @@ The project is here:
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
 - Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
-The current `0.6.1` line is the first version where I think the whole shape is
+The current `0.6.2` line is the first version where I think the whole shape is
 visible and release-tested against live backends: the core graph model,
 document loading, typed ingestion, schema-backed store writes, traversal
 lowering, backend-specific typed storage hooks, and explicit Sail, SurrealDB,
-and FalkorDB integration checks are all present in the same workspace. Some
-backend features are still young, but the contract is no longer just a sketch.
+FalkorDB, HelixDB, LanceDB, CocoIndex, and pgGraph integration checks are all
+present in the same workspace. Some backend features are still young, but the
+contract is no longer just a sketch.
 
 For the longer treatment, read the Grust book in the repository, especially
 **The Shape of Grust**, **The Core Property Graph**, **Building Graphs**,
@@ -144,7 +145,7 @@ them into ordinary Grust nodes and edges:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.1", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.2", features = ["typed-garde"] }
 ```
 
 ```rust
@@ -192,7 +193,7 @@ treats it as typed. In Grust, `zod-rs` plays that role for
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.1", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.2", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers
