@@ -1,12 +1,12 @@
 services:
   falkor:
-    image: ${FALKOR_IMAGE:-falkordb/falkordb:latest}
+    image: ${FALKOR_IMAGE:-falkordb/falkordb:v4.18.10}
     ports:
       - "6379:6379"
       - "3000:3000"
 
   surreal:
-    image: ${SURREAL_IMAGE:-surrealdb/surrealdb:latest}
+    image: ${SURREAL_IMAGE:-surrealdb/surrealdb:v3.1}
     command:
       - start
       - --log

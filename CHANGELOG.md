@@ -4,6 +4,30 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
+## 2026-06-12 - Unreleased
+
+- Added `docs/INTEGRATION.md` as the contributor-facing guide for backend
+  integration tests, including Docker, source-checkout, quick, full, and CI
+  workflows.
+- Added integration-test launcher profiles:
+  - `quick` for local LanceDB and CocoIndex checks;
+  - `docker` for Docker-backed contributor runs;
+  - `all` for the full maintainer matrix.
+- Added launcher modes:
+  - `auto` to prefer already-running services, then source checkouts, then
+    Docker where available;
+  - `docker` to avoid source checkouts and use Compose-backed services;
+  - `source` to avoid Docker and use local backend checkouts.
+- Added `scripts/integration-test.sh doctor` to report selected backends,
+  startup mode, Docker availability, source checkout state, ports, and Docker
+  image choices before a long integration run.
+- Pinned contributor Docker images for reproducible integration runs while
+  keeping `GRUST_INTEGRATION_IMAGE_CHANNEL=latest` as an explicit compatibility
+  lane.
+- Hardened pgGraph startup so an occupied PostgreSQL-compatible port is only
+  reused if the `graph` extension is available; otherwise Docker-capable modes
+  automatically start Grust's pgGraph container on a free fallback port.
+
 ## 2026-06-12 - 0.6.2
 
 - Expanded the backend integration launcher to run the full backend family by

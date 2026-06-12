@@ -72,17 +72,27 @@ cargo test --workspace --all-features
 ```
 
 Backend integration tests are explicit and fail if their service is missing.
-Run them through the launcher:
+Run them through the launcher. For a first contributor run, use the Docker
+profile:
 
 ```sh
-scripts/integration-test.sh
+scripts/integration-test.sh doctor --profile docker --mode docker
+scripts/integration-test.sh --profile docker --mode docker
 ```
 
-The launcher reads `integration/backends.conf`. It prefers local source
-checkouts when configured, such as `/Users/alexy/src/sail`,
-`/Users/alexy/src/SurrealDB`, `/Users/alexy/src/FalkorDB`, and
-`/Users/alexy/src/HelixDB`, then falls back to Docker Compose for the
-Docker-friendly backends in `docker-compose.integration.yml`.
+The Docker profile starts the Docker-backed services in
+`docker-compose.integration.yml` and runs the local LanceDB and CocoIndex
+integration checks. The full maintainer matrix is:
+
+```sh
+scripts/integration-test.sh --profile all
+```
+
+The launcher reads `integration/backends.conf`. In `auto` mode it prefers
+already-running services, then configured local source checkouts such as
+`/Users/alexy/src/sail`, `/Users/alexy/src/SurrealDB`,
+`/Users/alexy/src/FalkorDB`, and `/Users/alexy/src/HelixDB`, then Docker
+Compose where a service is available.
 
 Run a single backend with:
 
@@ -97,11 +107,9 @@ scripts/integration-test.sh --backend pggraph
 ```
 
 Use `--no-start` to require an already-running service, and `--keep-running` to
-leave services up for debugging. The default run covers Sail, SurrealDB,
-FalkorDB, HelixDB, LanceDB, CocoIndex, and pgGraph. Sail, SurrealDB, FalkorDB,
-and HelixDB use configured source checkouts when present; pgGraph runs through
-the official Docker image on host port `55432` by default. LanceDB and
-CocoIndex run as local integration checks without a daemon.
+leave services up for debugging. See [docs/INTEGRATION.md](docs/INTEGRATION.md)
+for profiles, modes, Docker image pins, source-checkout configuration, and the
+CI strategy.
 
 ## Core Model
 

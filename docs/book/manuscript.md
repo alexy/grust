@@ -945,20 +945,24 @@ missing.
 The repository provides a launcher for those checks:
 
 ```sh
-scripts/integration-test.sh
+scripts/integration-test.sh doctor --profile docker --mode docker
+scripts/integration-test.sh --profile docker --mode docker
 ```
 
-The launcher reads `integration/backends.conf`, prefers configured local source
-checkouts such as `~/src/sail`, `~/src/SurrealDB`, `~/src/FalkorDB`, and
-`~/src/HelixDB`, and falls back to Docker Compose for Docker-friendly backends.
-A single backend can be run with `--backend sail`, `--backend surreal`,
-`--backend falkor`, `--backend helix`, `--backend lancedb`, `--backend
-cocoindex`, or `--backend pggraph`.
+The Docker profile is the contributor path: it starts the Docker-backed
+services and runs local LanceDB and CocoIndex checks. The full maintainer
+profile is still available:
 
-The default run covers Sail, SurrealDB, FalkorDB, HelixDB, LanceDB, CocoIndex,
-and pgGraph. pgGraph uses the official Docker image on host port `55432` by
-default. LanceDB and CocoIndex are still real integration checks, but they run
-against local storage/export code rather than a daemon.
+```sh
+scripts/integration-test.sh --profile all
+```
+
+The launcher reads `integration/backends.conf`. In `auto` mode it prefers
+already-running services, then configured local source checkouts such as
+`~/src/sail`, `~/src/SurrealDB`, `~/src/FalkorDB`, and `~/src/HelixDB`, then
+Docker Compose where a service is available. The repository-level
+`docs/INTEGRATION.md` guide covers profiles, modes, Docker image pins,
+source-checkout configuration, and CI strategy.
 
 # 9. Example: A Conference Graph
 
