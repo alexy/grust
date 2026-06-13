@@ -17,6 +17,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Documented the portable `PutOutcome` and `GraphSchema::apply_schema`
   contracts so backend-specific upsert and schema-enforcement behavior is
   explicit.
+- Replaced per-operation FalkorDB Redis connection creation with a reusable
+  connection pool.
 - Expanded SurrealDB response-parser unit coverage across string, object,
   typed-object, and backtick-quoted record ID shapes.
 

@@ -66,6 +66,16 @@ fn graph_schema_creates_falkor_indexes() {
 }
 
 #[test]
+fn store_uses_configured_connection_pool_size() {
+    let store = FalkorGraphStore::new(FalkorConfig {
+        pool_size: 3,
+        ..FalkorConfig::default()
+    });
+
+    assert_eq!(store.pool.max_size(), 3);
+}
+
+#[test]
 #[ignore = "requires a live FalkorDB server on 127.0.0.1:6379"]
 fn live_put_graph_and_schema() {
     futures_executor::block_on(async {

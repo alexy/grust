@@ -28,6 +28,7 @@ base64 = "0.22.1"
 helix-db = "=2.0.0"
 lancedb = "0.30.0"
 redis = "1.2.1"
+r2d2 = "0.8.10"
 reqwest = { version = "0.13.3", default-features = false, features = ["rustls", "http2", "charset", "gzip", "json"] }
 quick-xml = { version = "0.40.1", features = ["serialize"] }
 serde = { version = "1.0.228", features = ["derive"] }

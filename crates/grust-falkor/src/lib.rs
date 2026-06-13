@@ -2,13 +2,15 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use grust_core::prelude::*;
-use redis::{Client as RedisClient, Value as RedisValue};
+use r2d2::{ManageConnection, Pool, PooledConnection};
+use redis::{Client as RedisClient, ConnectionLike, Value as RedisValue};
 
 #[derive(Clone, Debug)]
 pub struct FalkorConfig {
     pub redis_url: String,
     pub graph: String,
     pub batch_size: usize,
+    pub pool_size: u32,
     pub id_property: String,
     pub labels_property: String,
 }
@@ -19,6 +21,7 @@ impl Default for FalkorConfig {
             redis_url: "redis://127.0.0.1:6379".to_string(),
             graph: "grust".to_string(),
             batch_size: 100,
+            pool_size: 16,
             id_property: "id".to_string(),
             labels_property: "labels".to_string(),
         }
@@ -28,34 +31,60 @@ impl Default for FalkorConfig {
 #[derive(Clone, Debug)]
 pub struct FalkorGraphStore {
     config: FalkorConfig,
+    pool: Pool<RedisConnectionManager>,
 }
 
 impl FalkorGraphStore {
     pub fn new(config: FalkorConfig) -> Self {
-        Self { config }
+        let manager = RedisConnectionManager {
+            redis_url: config.redis_url.clone(),
+        };
+        let pool = Pool::builder()
+            .max_size(config.pool_size.max(1))
+            .build_unchecked(manager);
+        Self { config, pool }
     }
 
-    fn connection(&self) -> Result<redis::Connection> {
-        let client = RedisClient::open(self.config.redis_url.as_str()).map_err(|err| {
+    fn connection(&self) -> Result<PooledConnection<RedisConnectionManager>> {
+        self.pool.get().map_err(|err| {
             GrustError::Backend(format!(
-                "invalid Redis/FalkorDB URL {}: {err}",
-                self.config.redis_url
-            ))
-        })?;
-        client.get_connection().map_err(|err| {
-            GrustError::Backend(format!(
-                "failed to connect to {}: {err}",
+                "failed to acquire FalkorDB Redis connection from pool for {}: {err}",
                 self.config.redis_url
             ))
         })
     }
 
-    fn query(&self, connection: &mut redis::Connection, query: &str) -> Result<RedisValue> {
+    fn query<C>(&self, connection: &mut C, query: &str) -> Result<RedisValue>
+    where
+        C: ConnectionLike,
+    {
         redis::cmd("GRAPH.QUERY")
             .arg(&self.config.graph)
             .arg(query)
             .query::<RedisValue>(connection)
             .map_err(|err| GrustError::Backend(format!("FalkorDB query failed: {query}: {err}")))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RedisConnectionManager {
+    redis_url: String,
+}
+
+impl ManageConnection for RedisConnectionManager {
+    type Connection = redis::Connection;
+    type Error = redis::RedisError;
+
+    fn connect(&self) -> std::result::Result<Self::Connection, Self::Error> {
+        RedisClient::open(self.redis_url.as_str())?.get_connection()
+    }
+
+    fn is_valid(&self, connection: &mut Self::Connection) -> std::result::Result<(), Self::Error> {
+        redis::cmd("PING").query::<String>(connection).map(|_| ())
+    }
+
+    fn has_broken(&self, connection: &mut Self::Connection) -> bool {
+        !connection.is_open()
     }
 }
 
