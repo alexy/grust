@@ -298,14 +298,15 @@ fn falkor_schema_queries(schema: &GraphSchema, config: &FalkorConfig) -> Result<
 }
 
 fn falkor_labels(node: &Node, config: &FalkorConfig) -> Result<String> {
-    let labels = node
-        .props
+    node.props
         .get(&config.labels_property)
         .and_then(Value::as_string_array)
+        .map(|labels| labels.iter().map(String::as_str).collect::<Vec<_>>())
+        .unwrap_or_else(|| vec![node.label.as_str()])
+        .into_iter()
+        .map(schema_identifier)
+        .collect::<Result<Vec<_>>>()
         .map(|labels| labels.join(":"))
-        .unwrap_or_else(|| node.label.as_str().to_string());
-    validate_label_path(&labels)?;
-    Ok(labels)
 }
 
 fn cypher_map(props: &Props, config: &FalkorConfig) -> String {
@@ -386,15 +387,6 @@ fn validate_label(label: &str) -> Result<()> {
             "unsafe FalkorDB label or relationship: {label}"
         )))
     }
-}
-
-fn schema_identifier(value: &str) -> Result<String> {
-    let identifier = value
-        .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-        .collect::<String>();
-    validate_label(&identifier)?;
-    Ok(identifier)
 }
 
 #[cfg(test)]

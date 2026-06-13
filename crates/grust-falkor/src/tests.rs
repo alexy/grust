@@ -31,9 +31,10 @@ fn cypher_string_escapes_special_characters() {
 fn batch_queries_use_unwind_and_preserve_properties() {
     let graph = sample_graph();
     let config = FalkorConfig::default();
-    let query = falkor_nodes_batch_query("Talk", &[&graph.nodes[0]], &config).unwrap();
+    let labels = falkor_labels(&graph.nodes[0], &config).unwrap();
+    let query = falkor_nodes_batch_query(&labels, &[&graph.nodes[0]], &config).unwrap();
     assert!(query.starts_with("UNWIND ["));
-    assert!(query.contains("MERGE (n:Talk {id: row.id})"));
+    assert!(query.contains("MERGE (n:talk {id: row.id})"));
     assert!(query.contains("tags:['rust','graphs']"));
 
     let edge_query = falkor_edges_batch_query("PRESENTS", &[&graph.edges[0]], &config).unwrap();
@@ -60,9 +61,9 @@ fn graph_schema_creates_falkor_indexes() {
 
     let queries = falkor_schema_queries(&schema, &FalkorConfig::default()).unwrap();
 
-    assert!(queries.contains(&"CREATE INDEX ON :Person(id)".to_string()));
-    assert!(queries.contains(&"CREATE INDEX ON :Person(name)".to_string()));
-    assert!(queries.contains(&"CREATE INDEX ON :Person(age)".to_string()));
+    assert!(queries.contains(&"CREATE INDEX ON :person(id)".to_string()));
+    assert!(queries.contains(&"CREATE INDEX ON :person(name)".to_string()));
+    assert!(queries.contains(&"CREATE INDEX ON :person(age)".to_string()));
 }
 
 #[test]

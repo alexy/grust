@@ -26,6 +26,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Changed Sail read filters to pass Spark Connect named arguments instead of
   inlining literals into SQL text, and changed Sail deletes to stage values in
   Arrow temp views before running argument-free SQL commands.
+- Changed FalkorDB schema and write paths to share the canonical lower_snake
+  schema identifier normalizer for node labels.
 - Expanded SurrealDB response-parser unit coverage across string, object,
   typed-object, and backtick-quoted record ID shapes.
 
