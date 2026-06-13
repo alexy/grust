@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.4", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.5", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.6.4", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.4", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.5", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -932,9 +932,12 @@ hop-by-hop through the `GraphStore` contract. Applying a schema lowers node and
 edge declarations to Surreal `DEFINE TABLE` and `DEFINE FIELD` statements so
 the backend can run in schemafull mode where the schema calls for it. Reads use
 configured labels and relationships, plus ID-derived table names, to find
-records across Surreal's label-specific tables. Traversal batches target-node
-reads per step through `get_nodes`, avoiding a serial node lookup for every
-edge in a fan-out.
+records across Surreal's label-specific tables. Generic edge reads require
+`SurrealConfig.relationships`; when that list is empty, the backend returns a
+configuration error instead of silently scanning no relation tables. Explicit
+edge-label reads can still target a known relation table directly. Traversal
+batches target-node reads per step through `get_nodes`, avoiding a serial node
+lookup for every edge in a fan-out.
 
 ## CocoIndex
 

@@ -18,7 +18,7 @@ The project is here:
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
 - Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
-The current `0.6.4` line is the first version where I think the whole shape is
+The current `0.6.5` line is the first version where I think the whole shape is
 visible and release-tested against live backends: the core graph model,
 document loading, typed ingestion, schema-backed store writes, traversal
 lowering, backend-specific typed storage hooks, and explicit Sail, SurrealDB,
@@ -145,7 +145,7 @@ them into ordinary Grust nodes and edges:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.4", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.5", features = ["typed-garde"] }
 ```
 
 ```rust
@@ -193,7 +193,7 @@ treats it as typed. In Grust, `zod-rs` plays that role for
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.4", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.5", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers
@@ -336,7 +336,7 @@ Grust has several backend and integration crates:
 - `grust-sail` stages bulk writes as Arrow `LocalRelation` temp views through Sail Spark Connect, lowers traversal to Spark SQL joins over DataFrames, and mirrors schema-labeled writes into typed Delta tables.
 - `grust-falkor` writes through Redis `GRAPH.QUERY` using FalkorDB's Cypher-like surface and creates schema-driven label/property indexes.
 - `grust-helix` supports HTTP and SDK stores for HelixDB writes, reads, and traversal; supported scalar and array properties are preserved on write, while unsupported JSON object properties fail explicitly.
-- `grust-surreal` supports HTTP and SDK stores for SurrealDB writes, reads, traversal, and schemafull table and field definitions.
+- `grust-surreal` supports HTTP and SDK stores for SurrealDB writes, reads, traversal, and schemafull table and field definitions. Generic edge reads now fail clearly when `SurrealConfig.relationships` is empty instead of silently scanning no relation tables.
 - `grust-cocoindex` is intentionally different: it exports a Grust graph as CocoIndex-style node and relationship target state rather than implementing `GraphStore`.
 
 The important part is not that all of these backends are equally mature. They

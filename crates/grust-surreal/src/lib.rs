@@ -208,7 +208,7 @@ impl GraphStore for SurrealHttpGraphStore {
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
         let mut edges = self
-            .read_edges(&surreal_get_edges_query(&query, &self.config))
+            .read_edges(&surreal_get_edges_query(&query, &self.config)?)
             .await?;
         filter_edges(&mut edges, &query);
         Ok(edges)
@@ -359,7 +359,7 @@ impl GraphStore for SurrealSdkGraphStore {
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
         let mut edges = self
-            .read_edges(&surreal_get_edges_query(&query, &self.config))
+            .read_edges(&surreal_get_edges_query(&query, &self.config)?)
             .await?;
         filter_edges(&mut edges, &query);
         Ok(edges)
@@ -603,15 +603,17 @@ fn surreal_get_nodes_query(ids: &[NodeId], config: &SurrealConfig) -> String {
     )
 }
 
-fn surreal_get_edges_query(query: &EdgeQuery, config: &SurrealConfig) -> String {
+fn surreal_get_edges_query(query: &EdgeQuery, config: &SurrealConfig) -> Result<String> {
     let tables = surreal_edge_tables(query.label.as_ref(), config);
     if tables.is_empty() {
-        return "RETURN [];".to_string();
+        return Err(GrustError::Backend(
+            "SurrealConfig.relationships is empty; generic edge reads need configured relationship labels or an EdgeQuery label".to_string(),
+        ));
     }
-    format!(
+    Ok(format!(
         "SELECT *, meta::tb(id) AS __grust_label FROM {};",
         tables.join(", ")
-    )
+    ))
 }
 
 fn surreal_start_nodes_query(start: &Start, config: &SurrealConfig) -> String {

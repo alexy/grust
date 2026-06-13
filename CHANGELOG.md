@@ -4,6 +4,15 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
+## 2026-06-13 - 0.6.5
+
+- Changed SurrealDB generic edge reads to return a clear configuration error
+  when `SurrealConfig.relationships` is empty, instead of silently returning no
+  edges from an empty table scan.
+- Preserved explicit SurrealDB edge-label reads without requiring
+  `SurrealConfig.relationships`, so callers can still query a known relation
+  table directly.
+
 ## 2026-06-12 - 0.6.4
 
 - Added `GraphStore::get_nodes` as an additive batch-read API with a default

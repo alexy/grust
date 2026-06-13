@@ -171,10 +171,35 @@ fn get_edges_query_uses_relationship_tables_in_one_statement() {
         relationships: vec!["presents".to_string(), "member_of".to_string()],
         ..SurrealConfig::default()
     };
-    let query = surreal_get_edges_query(&EdgeQuery::default(), &config);
+    let query = surreal_get_edges_query(&EdgeQuery::default(), &config).unwrap();
 
     assert!(query.contains("FROM member_of, presents"));
     assert_eq!(query.matches("SELECT").count(), 1);
+}
+
+#[test]
+fn get_edges_query_requires_relationship_config_for_generic_scan() {
+    let err = surreal_get_edges_query(&EdgeQuery::default(), &SurrealConfig::default())
+        .expect_err("generic Surreal edge reads require configured relationships");
+
+    assert!(
+        err.to_string()
+            .contains("SurrealConfig.relationships is empty")
+    );
+}
+
+#[test]
+fn get_edges_query_accepts_explicit_label_without_relationship_config() {
+    let query = surreal_get_edges_query(
+        &EdgeQuery {
+            label: Some(Label::new("presents")),
+            ..EdgeQuery::default()
+        },
+        &SurrealConfig::default(),
+    )
+    .unwrap();
+
+    assert!(query.contains("FROM presents"));
 }
 
 #[test]

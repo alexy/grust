@@ -205,7 +205,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.4", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.6.5", features = ["memory"] }
 ```
 
 Then load and traverse a graph:
@@ -284,7 +284,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.4", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.6.5", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
@@ -317,6 +317,10 @@ rows into typed Delta tables.
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and
 relationships to Surreal tables, upserts nodes, and relates edges through
 relation tables. Reads and traversal batch target-node lookups where possible.
+Generic edge reads need `SurrealConfig.relationships`; if that list is empty,
+the backend returns a configuration error instead of silently scanning no
+relation tables. Explicit edge-label reads can still address a known relation
+table directly.
 `GraphSchema` lowers to Surreal `DEFINE TABLE` and `DEFINE FIELD` statements.
 
 ## Traversal IR
