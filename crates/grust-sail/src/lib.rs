@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Cursor;
 use std::sync::{Arc, RwLock};
 
@@ -17,7 +17,7 @@ use spark_connect as sc;
 use sc::spark_connect_service_client::SparkConnectServiceClient;
 use sc::{
     Command, CreateDataFrameViewCommand, ExecutePlanRequest, Expression, LocalRelation, Plan,
-    ReattachOptions, Relation, Sql, SqlCommand, UserContext, command, execute_plan_request,
+    ReattachOptions, Relation, Sql, UserContext, command, execute_plan_request,
     execute_plan_response, expression, plan, relation,
 };
 
@@ -47,6 +47,8 @@ impl Default for SailConfig {
 /// Session-scoped temp views used to stage Arrow batches before MERGE.
 const NODE_STAGE_VIEW: &str = "grust_stage_nodes";
 const EDGE_STAGE_VIEW: &str = "grust_stage_edges";
+const DELETE_NODE_STAGE_VIEW: &str = "grust_delete_node_ids";
+const DELETE_EDGE_STAGE_VIEW: &str = "grust_delete_edges";
 const DROP_NODES_SQL: &str = "DROP TABLE IF EXISTS grust_nodes";
 const DROP_EDGES_SQL: &str = "DROP TABLE IF EXISTS grust_edges";
 
@@ -98,38 +100,31 @@ impl SailGraphStore {
         }
     }
 
-    #[allow(deprecated)]
-    fn command_request(
-        &self,
-        sql: impl Into<String>,
-        args: Vec<expression::Literal>,
-    ) -> ExecutePlanRequest {
-        self.request_with_plan(Plan {
-            op_type: Some(plan::OpType::Command(Command {
-                command_type: Some(command::CommandType::SqlCommand(SqlCommand {
-                    sql: sql.into(),
-                    pos_args: args,
-                    ..Default::default()
-                })),
-            })),
-        })
-    }
-
     fn query_request(
         &self,
         sql: impl Into<String>,
         args: Vec<expression::Literal>,
-    ) -> ExecutePlanRequest {
-        self.request_with_plan(Plan {
+    ) -> Result<ExecutePlanRequest> {
+        let sql = sql.into();
+        let (query, named_arguments) = bind_sql_arguments(&sql, args)?;
+        Ok(self.request_with_plan(Plan {
             op_type: Some(plan::OpType::Root(Relation {
                 common: None,
                 rel_type: Some(relation::RelType::Sql(Sql {
-                    query: sql.into(),
-                    pos_arguments: args.into_iter().map(lit_expr).collect(),
+                    query,
+                    named_arguments,
                     ..Default::default()
                 })),
             })),
-        })
+        }))
+    }
+
+    async fn stage_record_batch(&self, name: &str, batch: RecordBatch) -> Result<()> {
+        self.run_plan(
+            self.stage_view_request(name, ipc_bytes(&batch)?),
+            |_| Ok(()),
+        )
+        .await
     }
 
     /// Stages an Arrow record batch as a replaceable session temp view by
@@ -184,15 +179,18 @@ impl SailGraphStore {
     }
 
     async fn run_command(&self, sql: &str, args: Vec<expression::Literal>) -> Result<()> {
-        let sql = inline_sql_args(sql, &args)?;
-        self.run_plan(self.command_request(sql, vec![]), |_| Ok(()))
+        if !args.is_empty() {
+            return Err(GrustError::Backend(
+                "Sail SQL commands do not support Spark Connect arguments yet".to_string(),
+            ));
+        }
+        self.run_plan(self.query_request(sql, args)?, |_| Ok(()))
             .await
     }
 
     async fn run_query(&self, sql: &str, args: Vec<expression::Literal>) -> Result<Vec<Node>> {
         let mut nodes = Vec::new();
-        let sql = inline_sql_args(sql, &args)?;
-        self.run_plan(self.query_request(sql, vec![]), |data| {
+        self.run_plan(self.query_request(sql, args)?, |data| {
             nodes.extend(parse_nodes_from_arrow(data)?);
             Ok(())
         })
@@ -202,8 +200,7 @@ impl SailGraphStore {
 
     async fn run_edge_query(&self, sql: &str, args: Vec<expression::Literal>) -> Result<Vec<Edge>> {
         let mut edges = Vec::new();
-        let sql = inline_sql_args(sql, &args)?;
-        self.run_plan(self.query_request(sql, vec![]), |data| {
+        self.run_plan(self.query_request(sql, args)?, |data| {
             edges.extend(parse_edges_from_arrow(data)?);
             Ok(())
         })
@@ -224,11 +221,7 @@ impl SailGraphStore {
             return Ok(());
         }
         let batch = nodes_record_batch(nodes)?;
-        self.run_plan(
-            self.stage_view_request(NODE_STAGE_VIEW, ipc_bytes(&batch)?),
-            |_| Ok(()),
-        )
-        .await?;
+        self.stage_record_batch(NODE_STAGE_VIEW, batch).await?;
         self.run_command(&merge_nodes_from_view_sql(), vec![])
             .await?;
         if let Some(schema) = schema {
@@ -253,11 +246,7 @@ impl SailGraphStore {
             return Ok(());
         }
         let batch = edges_record_batch(edges, node_labels)?;
-        self.run_plan(
-            self.stage_view_request(EDGE_STAGE_VIEW, ipc_bytes(&batch)?),
-            |_| Ok(()),
-        )
-        .await?;
+        self.stage_record_batch(EDGE_STAGE_VIEW, batch).await?;
         self.run_command(&merge_edges_from_view_sql(), vec![])
             .await?;
         if let Some(schema) = schema {
@@ -438,34 +427,24 @@ impl GraphAdminStore for SailGraphStore {
 #[async_trait]
 impl GraphMutationStore for SailGraphStore {
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
-        self.run_command(
-            "DELETE FROM grust_nodes WHERE id = ?",
-            vec![lit_str(id.as_str())],
-        )
-        .await?;
-        self.run_command(
-            "DELETE FROM grust_edges WHERE src_id = ? OR dst_id = ?",
-            vec![lit_str(id.as_str()), lit_str(id.as_str())],
-        )
-        .await?;
+        self.stage_record_batch(DELETE_NODE_STAGE_VIEW, node_ids_record_batch(&[id])?)
+            .await?;
+        self.run_command(&delete_nodes_from_view_sql("grust_nodes")?, vec![])
+            .await?;
+        self.run_command(&delete_node_edges_from_view_sql("grust_edges")?, vec![])
+            .await?;
         if let Some(schema) = self.current_schema() {
             for node_type in &schema.nodes {
                 self.run_command(
-                    &format!(
-                        "DELETE FROM {} WHERE id = ?",
-                        sail_node_table(node_type.label.as_str())?
-                    ),
-                    vec![lit_str(id.as_str())],
+                    &delete_nodes_from_view_sql(&sail_node_table(node_type.label.as_str())?)?,
+                    vec![],
                 )
                 .await?;
             }
             for edge_type in &schema.edges {
                 self.run_command(
-                    &format!(
-                        "DELETE FROM {} WHERE src_id = ? OR dst_id = ?",
-                        sail_edge_table(edge_type.label.as_str())?
-                    ),
-                    vec![lit_str(id.as_str()), lit_str(id.as_str())],
+                    &delete_node_edges_from_view_sql(&sail_edge_table(edge_type.label.as_str())?)?,
+                    vec![],
                 )
                 .await?;
             }
@@ -474,25 +453,20 @@ impl GraphMutationStore for SailGraphStore {
     }
 
     async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
-        self.run_command(
-            "DELETE FROM grust_edges WHERE src_id = ? AND dst_id = ? AND edge_type = ?",
-            vec![
-                lit_str(from.as_str()),
-                lit_str(to.as_str()),
-                lit_str(label.as_str()),
-            ],
+        self.stage_record_batch(
+            DELETE_EDGE_STAGE_VIEW,
+            delete_edges_record_batch(&[(from, label, to)])?,
         )
         .await?;
+        self.run_command(&delete_edges_from_view_sql("grust_edges", true)?, vec![])
+            .await?;
         let typed_table = self
             .current_schema()
             .and_then(|schema| schema.edge_type(label).cloned());
         if let Some(edge_type) = typed_table {
             self.run_command(
-                &format!(
-                    "DELETE FROM {} WHERE src_id = ? AND dst_id = ?",
-                    sail_edge_table(edge_type.label.as_str())?
-                ),
-                vec![lit_str(from.as_str()), lit_str(to.as_str())],
+                &delete_edges_from_view_sql(&sail_edge_table(edge_type.label.as_str())?, false)?,
+                vec![],
             )
             .await?;
         }
@@ -586,6 +560,44 @@ fn edges_record_batch(
     .map_err(|e| GrustError::Backend(format!("Arrow edge batch build failed: {e}")))
 }
 
+fn node_ids_record_batch(ids: &[&NodeId]) -> Result<RecordBatch> {
+    let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+        "id",
+        DataType::Utf8,
+        false,
+    )]));
+    RecordBatch::try_new(
+        schema,
+        vec![Arc::new(StringArray::from_iter_values(
+            ids.iter().map(|id| id.as_str()),
+        ))],
+    )
+    .map_err(|e| GrustError::Backend(format!("Arrow node delete batch build failed: {e}")))
+}
+
+fn delete_edges_record_batch(edges: &[(&NodeId, &Label, &NodeId)]) -> Result<RecordBatch> {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("src_id", DataType::Utf8, false),
+        ArrowField::new("dst_id", DataType::Utf8, false),
+        ArrowField::new("edge_type", DataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                edges.iter().map(|(from, _, _)| from.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                edges.iter().map(|(_, _, to)| to.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                edges.iter().map(|(_, label, _)| label.as_str()),
+            )),
+        ],
+    )
+    .map_err(|e| GrustError::Backend(format!("Arrow edge delete batch build failed: {e}")))
+}
+
 fn ipc_bytes(batch: &RecordBatch) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     {
@@ -622,6 +634,36 @@ fn merge_edges_from_view_sql() -> String {
          WHEN NOT MATCHED THEN INSERT (src_id, src_label, dst_id, dst_label, edge_type, props) \
            VALUES (s.src_id, s.src_label, s.dst_id, s.dst_label, s.edge_type, s.props)"
     )
+}
+
+fn delete_nodes_from_view_sql(table: &str) -> Result<String> {
+    Ok(format!(
+        "MERGE INTO {} AS t USING {DELETE_NODE_STAGE_VIEW} AS s \
+         ON t.id = s.id WHEN MATCHED THEN DELETE",
+        sql_table_ref(table)?
+    ))
+}
+
+fn delete_node_edges_from_view_sql(table: &str) -> Result<String> {
+    Ok(format!(
+        "MERGE INTO {} AS t USING {DELETE_NODE_STAGE_VIEW} AS s \
+         ON t.src_id = s.id OR t.dst_id = s.id WHEN MATCHED THEN DELETE",
+        sql_table_ref(table)?
+    ))
+}
+
+fn delete_edges_from_view_sql(table: &str, include_label: bool) -> Result<String> {
+    let label_match = if include_label {
+        " AND t.edge_type = s.edge_type"
+    } else {
+        ""
+    };
+    Ok(format!(
+        "MERGE INTO {} AS t USING {DELETE_EDGE_STAGE_VIEW} AS s \
+         ON t.src_id = s.src_id AND t.dst_id = s.dst_id{label_match} \
+         WHEN MATCHED THEN DELETE",
+        sql_table_ref(table)?
+    ))
 }
 
 fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
@@ -774,8 +816,8 @@ fn typed_edge_merge_from_view_sql(edge_type: &EdgeType) -> Result<String> {
 // Joins match nodes to edges by id only: node ids are globally unique (the
 // MERGE key in grust_nodes), and grust_edges rows written without the full
 // graph in scope carry empty src_label/dst_label, so label equality must not
-// be part of the join. All user-supplied values bind as positional `?`
-// arguments.
+// be part of the join. The generated `?` slots are bound as Spark Connect
+// named arguments before execution.
 fn traversal_sql(traversal: &Traversal) -> Result<(String, Vec<expression::Literal>)> {
     if traversal.steps.is_empty() {
         // Just return the start node(s)
@@ -915,20 +957,30 @@ fn lit_bool(value: bool) -> expression::Literal {
     }
 }
 
-fn inline_sql_args(sql: &str, args: &[expression::Literal]) -> Result<String> {
-    let mut out = String::with_capacity(sql.len() + args.len() * 16);
+fn bind_sql_arguments(
+    sql: &str,
+    args: Vec<expression::Literal>,
+) -> Result<(String, HashMap<String, Expression>)> {
+    let mut query = String::with_capacity(sql.len() + args.len() * 3);
     let mut parts = sql.split('?');
     let Some(first) = parts.next() else {
-        return Ok(sql.to_string());
+        return Ok((sql.to_string(), HashMap::new()));
     };
-    out.push_str(first);
+    query.push_str(first);
+
+    let mut named_arguments = HashMap::with_capacity(args.len());
     let mut used = 0;
     for part in parts {
-        let arg = args.get(used).ok_or_else(|| {
-            GrustError::Backend(format!("missing SQL argument {used} for query: {sql}"))
-        })?;
-        out.push_str(&literal_sql(arg)?);
-        out.push_str(part);
+        let Some(arg) = args.get(used) else {
+            return Err(GrustError::Backend(format!(
+                "missing SQL argument {used} for query: {sql}"
+            )));
+        };
+        let name = format!("p{}", used + 1);
+        query.push(':');
+        query.push_str(&name);
+        named_arguments.insert(name, lit_expr(arg.clone()));
+        query.push_str(part);
         used += 1;
     }
     if used != args.len() {
@@ -937,28 +989,7 @@ fn inline_sql_args(sql: &str, args: &[expression::Literal]) -> Result<String> {
             args.len()
         )));
     }
-    Ok(out)
-}
-
-fn literal_sql(literal: &expression::Literal) -> Result<String> {
-    match literal.literal_type.as_ref() {
-        Some(expression::literal::LiteralType::String(value)) => Ok(sql_str(value)),
-        Some(expression::literal::LiteralType::Long(value)) => Ok(value.to_string()),
-        Some(expression::literal::LiteralType::Double(value)) if value.is_finite() => {
-            Ok(value.to_string())
-        }
-        Some(expression::literal::LiteralType::Double(value)) => Err(GrustError::Schema(format!(
-            "non-finite float cannot be inlined into SQL: {value}"
-        ))),
-        Some(expression::literal::LiteralType::Boolean(value)) => Ok(if *value {
-            "TRUE".to_string()
-        } else {
-            "FALSE".to_string()
-        }),
-        other => Err(GrustError::Backend(format!(
-            "unsupported SQL literal argument: {other:?}"
-        ))),
-    }
+    Ok((query, named_arguments))
 }
 
 fn lit_expr(literal: expression::Literal) -> Expression {
@@ -993,6 +1024,10 @@ fn sail_edge_table(label: &str) -> Result<String> {
 fn sql_ident(value: &str) -> Result<String> {
     let identifier = schema_identifier(value)?;
     Ok(format!("`{identifier}`"))
+}
+
+fn sql_table_ref(value: &str) -> Result<String> {
+    sql_ident(value)
 }
 
 fn limit_clause(limit: Option<u32>) -> String {

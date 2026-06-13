@@ -325,7 +325,9 @@ batches are wrapped in PostgreSQL transactions.
 
 `grust-sail` stores graphs as Spark DataFrames through Sail's SparkConnect
 server, lowers traversal IR to Spark SQL joins, and can mirror schema-labeled
-rows into typed Delta tables.
+rows into typed Delta tables. SQL filters bind user values through Spark
+Connect named arguments; delete mutations stage their values as Arrow temp views
+before running argument-free SQL commands.
 
 `grust-surreal` provides both `SurrealHttpGraphStore` and
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and

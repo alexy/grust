@@ -1,6 +1,8 @@
 use std::net::TcpStream;
+use std::sync::RwLock;
 
 use grust_core::prelude::*;
+use tonic::transport::Channel;
 
 use super::*;
 
@@ -19,6 +21,16 @@ async fn store() -> SailGraphStore {
     store.bootstrap().await.expect("bootstrap Sail tables");
     store.clear().await.expect("clear Sail tables");
     store
+}
+
+fn request_store() -> SailGraphStore {
+    SailGraphStore {
+        config: SailConfig::default(),
+        client: SparkConnectServiceClient::new(
+            Channel::from_static("http://127.0.0.1:50051").connect_lazy(),
+        ),
+        schema: RwLock::new(None),
+    }
 }
 
 fn sample_graph() -> Graph {
@@ -214,23 +226,76 @@ fn sql_str_escapes_backslashes_and_quotes() {
     assert_eq!(sql_str(r"a\'b"), r"'a\\''b'");
 }
 
-#[test]
-fn inline_sql_args_replaces_placeholders_with_escaped_literals() {
-    let sql = inline_sql_args(
-        "SELECT * FROM grust_nodes WHERE id = ? AND label = ? AND props = ?",
-        &[
-            lit_str("person-1"),
-            lit_str("Person"),
-            lit_str(r#"{"name":"Ada's"}"#),
-        ],
-    )
-    .unwrap();
+#[tokio::test]
+async fn query_request_sends_named_arguments_without_inlining() {
+    let request = request_store()
+        .query_request(
+            "SELECT * FROM grust_nodes WHERE id = ? AND label = ?",
+            vec![lit_str("person-1"), lit_str("Person")],
+        )
+        .unwrap();
+    let Some(Plan {
+        op_type:
+            Some(plan::OpType::Root(Relation {
+                rel_type: Some(relation::RelType::Sql(sql)),
+                ..
+            })),
+        ..
+    }) = request.plan
+    else {
+        panic!("expected SQL relation plan");
+    };
+
     assert_eq!(
-        sql,
-        r#"SELECT * FROM grust_nodes WHERE id = 'person-1' AND label = 'Person' AND props = '{"name":"Ada''s"}'"#
+        sql.query,
+        "SELECT * FROM grust_nodes WHERE id = :p1 AND label = :p2"
     );
-    assert!(inline_sql_args("SELECT ?", &[]).is_err());
-    assert!(inline_sql_args("SELECT 1", &[lit_long(1)]).is_err());
+    assert!(sql.args.is_empty());
+    assert!(sql.pos_arguments.is_empty());
+    assert_eq!(sql.named_arguments.len(), 2);
+    assert!(matches!(
+        sql.named_arguments["p1"].expr_type,
+        Some(expression::ExprType::Literal(_))
+    ));
+}
+
+#[tokio::test]
+async fn query_request_rejects_placeholder_argument_mismatches() {
+    assert!(
+        request_store()
+            .query_request("SELECT * FROM grust_nodes WHERE id = ?", vec![])
+            .is_err()
+    );
+    assert!(
+        request_store()
+            .query_request("SELECT * FROM grust_nodes", vec![lit_str("person-1")])
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn sql_arguments_are_named_for_sail_parser() {
+    let request = request_store()
+        .query_request(
+            "SELECT * FROM grust_edges WHERE from_id = ?",
+            vec![lit_str("person-1")],
+        )
+        .unwrap();
+    let Some(Plan {
+        op_type:
+            Some(plan::OpType::Root(Relation {
+                rel_type: Some(relation::RelType::Sql(sql)),
+                ..
+            })),
+        ..
+    }) = request.plan
+    else {
+        panic!("expected SQL relation plan");
+    };
+
+    assert_eq!(sql.query, "SELECT * FROM grust_edges WHERE from_id = :p1");
+    assert!(sql.pos_arguments.is_empty());
+    assert_eq!(sql.named_arguments.len(), 1);
 }
 
 #[test]

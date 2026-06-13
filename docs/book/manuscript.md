@@ -916,16 +916,20 @@ schema get typed SQL surfaces.
 ## Sail
 
 `grust-sail` connects to a Sail Spark Connect server over gRPC. It stores graph
-data in Spark DataFrames backed by Delta tables. Commands such as table creation
-and `MERGE INTO` are sent as Spark Connect command plans; reads are sent as SQL
-relation plans and decoded from Arrow IPC streams.
+data in Spark DataFrames backed by Delta tables. SQL commands and reads are
+sent as Spark Connect SQL relation plans, and read results are decoded from
+Arrow IPC streams.
 
 Bulk writes stage Arrow IPC batches as Spark Connect `LocalRelation` temp views
 and then merge from those views. That avoids building one giant SQL literal per
 row, keeps user values out of SQL text, and gives long-running requests an
-operation id with reattachment enabled. Traversal joins use globally unique
-node ids; source and destination label columns may be empty for single-edge
-writes where the full graph is not in scope.
+operation id with reattachment enabled. Query filters bind user values through
+Spark Connect named arguments. Delete mutations stage their values as Arrow
+temp views before running argument-free SQL commands, which avoids string
+substitution while matching Sail's current command-parameter behavior.
+Traversal joins use globally unique node ids; source and destination label
+columns may be empty for single-edge writes where the full graph is not in
+scope.
 
 When a schema is applied, Sail creates typed Delta tables per node and edge
 label and mirrors writes into them with `MERGE INTO`. The universal Spark

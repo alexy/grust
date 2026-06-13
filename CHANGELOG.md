@@ -23,6 +23,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   are represented by `(from, label, to)`.
 - Replaced per-operation FalkorDB Redis connection creation with a reusable
   connection pool.
+- Changed Sail read filters to pass Spark Connect named arguments instead of
+  inlining literals into SQL text, and changed Sail deletes to stage values in
+  Arrow temp views before running argument-free SQL commands.
 - Expanded SurrealDB response-parser unit coverage across string, object,
   typed-object, and backtick-quoted record ID shapes.
 
