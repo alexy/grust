@@ -205,7 +205,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.8", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.7.0", features = ["memory"] }
 ```
 
 The facade re-exports the full `grust-memory` crate surface when the feature is
@@ -295,7 +295,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.8", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.7.0", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and

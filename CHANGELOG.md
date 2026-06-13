@@ -6,6 +6,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 2026-06-13 - 0.7.0
+
 - Added `#[must_use]` diagnostics to graph builder completion methods so
   accidentally discarded builder results warn at compile time.
 - Added `cocoindex_export_to_graph` so CocoIndex target-state JSON can be

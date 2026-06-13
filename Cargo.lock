@@ -2820,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "grust-cocoindex"
-version = "0.6.8"
+version = "0.7.0"
 dependencies = [
  "grust-core",
  "serde",
@@ -2829,7 +2829,7 @@ dependencies = [
 
 [[package]]
 name = "grust-core"
-version = "0.6.8"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "garde",
@@ -2843,7 +2843,7 @@ dependencies = [
 
 [[package]]
 name = "grust-falkor"
-version = "0.6.8"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "futures-executor",
@@ -2854,7 +2854,7 @@ dependencies = [
 
 [[package]]
 name = "grust-graph"
-version = "0.6.8"
+version = "0.7.0"
 dependencies = [
  "garde",
  "grust-cocoindex",
@@ -2873,7 +2873,7 @@ dependencies = [
 
 [[package]]
 name = "grust-helix"
-version = "0.6.8"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -2885,7 +2885,7 @@ dependencies = [
 
 [[package]]
 name = "grust-lancedb"
-version = "0.6.8"
+version = "0.7.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "grust-memory"
-version = "0.6.8"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "futures-executor",
@@ -2910,7 +2910,7 @@ dependencies = [
 
 [[package]]
 name = "grust-pggraph"
-version = "0.6.8"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -2921,7 +2921,7 @@ dependencies = [
 
 [[package]]
 name = "grust-sail"
-version = "0.6.8"
+version = "0.7.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -2937,7 +2937,7 @@ dependencies = [
 
 [[package]]
 name = "grust-surreal"
-version = "0.6.8"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "futures-executor",
