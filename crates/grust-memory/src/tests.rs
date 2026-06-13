@@ -166,7 +166,6 @@ fn apply_mutations_upserts_and_deletes() {
         GraphMutation::UpsertNode(Node::new("Person", "b", Props::new())),
         GraphMutation::UpsertEdge(Edge::new("KNOWS", "a", "b", Props::new())),
         GraphMutation::DeleteEdge {
-            id: None,
             from: NodeId::new("a"),
             label: Label::new("KNOWS"),
             to: NodeId::new("b"),

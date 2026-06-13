@@ -1231,7 +1231,6 @@ pub enum GraphMutation {
     DeleteNode(NodeId),
     UpsertEdge(Edge),
     DeleteEdge {
-        id: Option<EdgeId>,
         from: NodeId,
         label: Label,
         to: NodeId,

@@ -1994,7 +1994,6 @@ pub enum GraphMutation {
     DeleteNode(NodeId),
     UpsertEdge(Edge),
     DeleteEdge {
-        id: Option<EdgeId>,
         from: NodeId,
         label: Label,
         to: NodeId,
@@ -2029,9 +2028,9 @@ pub trait GraphMutationStore: GraphStore {
                 GraphMutation::UpsertEdge(edge) => {
                     self.put_edge(edge).await?;
                 }
-                GraphMutation::DeleteEdge {
-                    from, label, to, ..
-                } => self.delete_edge(from, label, to).await?,
+                GraphMutation::DeleteEdge { from, label, to } => {
+                    self.delete_edge(from, label, to).await?
+                }
             }
         }
         Ok(())

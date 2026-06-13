@@ -104,7 +104,6 @@ fn mutation_batch_sql_wraps_ordered_mutations_in_transaction() {
         GraphMutation::UpsertNode(Node::new("Talk", "talk-1", Props::new())),
         GraphMutation::UpsertEdge(Edge::new("PRESENTS", "person-1", "talk-1", Props::new())),
         GraphMutation::DeleteEdge {
-            id: None,
             from: NodeId::new("person-1"),
             label: Label::new("PRESENTS"),
             to: NodeId::new("talk-1"),

@@ -537,9 +537,9 @@ fn mutation_sql(nodes_table: &str, edges_table: &str, mutation: &GraphMutation) 
         GraphMutation::UpsertEdge(edge) => {
             upsert_edges_sql(edges_table, std::slice::from_ref(edge))?
         }
-        GraphMutation::DeleteEdge {
-            from, label, to, ..
-        } => delete_edge_sql(edges_table, from, label, to),
+        GraphMutation::DeleteEdge { from, label, to } => {
+            delete_edge_sql(edges_table, from, label, to)
+        }
     })
 }
 

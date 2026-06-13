@@ -19,6 +19,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   explicit.
 - Changed `Value::DateTime` to store an opaque validated `RfcDate`, including
   validating serde deserialization for tagged date-time values.
+- Removed the unused `id` field from `GraphMutation::DeleteEdge`; edge deletes
+  are represented by `(from, label, to)`.
 - Replaced per-operation FalkorDB Redis connection creation with a reusable
   connection pool.
 - Expanded SurrealDB response-parser unit coverage across string, object,
