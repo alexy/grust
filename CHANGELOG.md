@@ -4,6 +4,13 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
+## Unreleased
+
+- Added `#[must_use]` diagnostics to graph builder completion methods so
+  accidentally discarded builder results warn at compile time.
+- Expanded SurrealDB response-parser unit coverage across string, object,
+  typed-object, and backtick-quoted record ID shapes.
+
 ## 2026-06-13 - 0.6.8
 
 - Added typed readback helpers: `TypedNode::from_node`,

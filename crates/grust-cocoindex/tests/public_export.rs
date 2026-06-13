@@ -5,16 +5,16 @@ use serde_json::json;
 #[test]
 fn public_api_exports_cocoindex_target_state() {
     let mut builder = Graph::builder();
-    builder
+    let _ = builder
         .node("Group", "meetup:rust-sf")
         .prop("name", "Rust SF")
         .finish();
-    builder
+    let _ = builder
         .node("Event", "event:123")
         .prop("title", "Async Rust Night")
         .prop("capacity", 80i64)
         .finish();
-    builder
+    let _ = builder
         .edge("HOSTED", "meetup:rust-sf", "event:123")
         .prop("source", "calendar")
         .finish();

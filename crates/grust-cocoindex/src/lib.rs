@@ -168,23 +168,23 @@ mod tests {
 
     fn meetup_graph() -> Graph {
         let mut builder = Graph::builder();
-        builder
+        let _ = builder
             .node("Group", "meetup:rust-sf")
             .prop("name", "Rust SF")
             .finish();
-        builder
+        let _ = builder
             .node("Event", "event:123")
             .prop("title", "Async Rust Night")
             .prop("capacity", 80i64)
             .finish();
-        builder
+        let _ = builder
             .node("Person", "person:ada")
             .prop("name", "Ada")
             .finish();
-        builder
+        let _ = builder
             .edge("HOSTED", "meetup:rust-sf", "event:123")
             .finish();
-        builder
+        let _ = builder
             .edge("RSVPED", "person:ada", "event:123")
             .prop("status", "yes")
             .finish();

@@ -2,15 +2,15 @@ use super::*;
 
 fn sample_graph() -> Graph {
     let mut builder = Graph::builder();
-    builder
+    let _ = builder
         .node("Person", "person-1")
         .prop("name", "Ada")
         .finish();
-    builder
+    let _ = builder
         .node("Talk", "talk-1")
         .prop("title", "Analytical Engine")
         .finish();
-    builder
+    let _ = builder
         .edge("PRESENTS", "person-1", "talk-1")
         .prop("source", "schedule")
         .finish();

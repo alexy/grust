@@ -23,14 +23,16 @@ async fn store() -> SailGraphStore {
 
 fn sample_graph() -> Graph {
     let mut b = Graph::builder();
-    b.node("Person", "person-1")
+    let _ = b
+        .node("Person", "person-1")
         .prop("name", "Ada Lovelace")
         .prop("age", 36i64)
         .finish();
-    b.node("Talk", "talk-1")
+    let _ = b
+        .node("Talk", "talk-1")
         .prop("title", "Analytical Engine")
         .finish();
-    b.edge("presents", "person-1", "talk-1").finish();
+    let _ = b.edge("presents", "person-1", "talk-1").finish();
     b.build()
 }
 

@@ -626,6 +626,7 @@ pub mod typed {
             self.add_validated_edge(&edge)
         }
 
+        #[must_use = "discarding this means the typed graph was not built"]
         pub fn build(self) -> Graph {
             self.builder.build()
         }
@@ -1335,6 +1336,7 @@ impl GraphBuilder {
         }
     }
 
+    #[must_use = "discarding this means the graph was not built"]
     pub fn build(self) -> Graph {
         Graph {
             nodes: self.nodes.into_values().collect(),
@@ -1361,6 +1363,7 @@ impl<'a> NodeBuilder<'a> {
         self
     }
 
+    #[must_use = "discarding this means the node was not added to the builder"]
     pub fn finish(self) -> NodeId {
         let node = Node::new(self.label, self.id, self.props);
         self.builder.add_node(node)
@@ -1392,6 +1395,7 @@ impl<'a> EdgeBuilder<'a> {
         self
     }
 
+    #[must_use = "discarding this means the edge was not added to the builder"]
     pub fn finish(self) -> PutOutcome {
         let mut edge = Edge::new(self.label, self.from, self.to, self.props);
         edge.id = self.id;

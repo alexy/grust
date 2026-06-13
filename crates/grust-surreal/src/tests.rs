@@ -268,27 +268,54 @@ fn get_edges_query_accepts_explicit_label_without_relationship_config() {
 
 #[test]
 fn surreal_response_parsers_rebuild_grust_values() {
-    let node = surreal_node_from_value(serde_json::json!({
+    let string_id_node = surreal_node_from_value(serde_json::json!({
         "id": "person:`person-1`",
         "__grust_label": "person",
         "name": "Ada Lovelace"
     }))
     .unwrap();
+    let typed_id_node = surreal_node_from_value(serde_json::json!({
+        "id": {"id": {"String": "person-2"}},
+        "__grust_label": "person",
+        "score": 42,
+        "active": true
+    }))
+    .unwrap();
+    let sdk_string_id_node = surreal_node_from_value(serde_json::json!({
+        "id": {"id": "`person-3`"},
+        "__grust_label": "person",
+        "name": "Grace Hopper"
+    }))
+    .unwrap();
     let edge = surreal_edge_from_value(serde_json::json!({
         "id": "presents:abc",
         "__grust_label": "presents",
-        "in": "person:`person-1`",
-        "out": "talk:`talk-1`",
+        "in": {"id": {"String": "person-1"}},
+        "out": {"id": "`talk-1`"},
         "relationship": "presents",
+        "edge_id": "edge-1",
         "source": "schedule"
     }))
     .unwrap();
 
-    assert_eq!(node.id, NodeId::new("person-1"));
-    assert_eq!(node.label, Label::new("person"));
+    assert_eq!(string_id_node.id, NodeId::new("person-1"));
+    assert_eq!(string_id_node.label, Label::new("person"));
+    assert_eq!(
+        string_id_node.props.get("name"),
+        Some(&Value::String("Ada Lovelace".to_string()))
+    );
+    assert_eq!(typed_id_node.id, NodeId::new("person-2"));
+    assert_eq!(typed_id_node.props.get("score"), Some(&Value::Int(42)));
+    assert_eq!(typed_id_node.props.get("active"), Some(&Value::Bool(true)));
+    assert_eq!(sdk_string_id_node.id, NodeId::new("person-3"));
     assert_eq!(edge.from, NodeId::new("person-1"));
     assert_eq!(edge.to, NodeId::new("talk-1"));
     assert_eq!(edge.label, Label::new("presents"));
+    assert_eq!(edge.id, Some(EdgeId::new("edge-1")));
+    assert_eq!(
+        edge.props.get("source"),
+        Some(&Value::String("schedule".to_string()))
+    );
 }
 
 #[test]

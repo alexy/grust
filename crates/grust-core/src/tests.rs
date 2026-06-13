@@ -8,12 +8,12 @@ fn builder_dedupes_nodes_and_edges() {
         .prop("title", "A Talk")
         .finish();
     let person = builder.node("Person", "person-1").finish();
-    builder
+    let _ = builder
         .node("Talk", "talk-1")
         .prop("description", "Updated")
         .finish();
-    builder.edge("PRESENTS", &person, &talk).finish();
-    builder.edge("PRESENTS", &person, &talk).finish();
+    let _ = builder.edge("PRESENTS", &person, &talk).finish();
+    let _ = builder.edge("PRESENTS", &person, &talk).finish();
 
     let graph = builder.build();
 
@@ -173,12 +173,12 @@ fn graph_json_rejects_edges_with_unknown_nodes() {
 #[test]
 fn graph_serializes_to_json() {
     let mut builder = GraphBuilder::new();
-    builder
+    let _ = builder
         .node("Employee", "employee:nia")
         .prop("level", "IC4")
         .finish();
-    builder.node("Employee", "employee:marco").finish();
-    builder
+    let _ = builder.node("Employee", "employee:marco").finish();
+    let _ = builder
         .edge("REPORTS_TO", "employee:nia", "employee:marco")
         .finish();
 
@@ -267,12 +267,12 @@ fn graph_xml_rejects_edges_with_unknown_nodes() {
 #[test]
 fn graph_serializes_to_xml() {
     let mut builder = GraphBuilder::new();
-    builder
+    let _ = builder
         .node("Employee", "employee:nia")
         .prop("level", "IC4")
         .finish();
-    builder.node("Employee", "employee:marco").finish();
-    builder
+    let _ = builder.node("Employee", "employee:marco").finish();
+    let _ = builder
         .edge("REPORTS_TO", "employee:nia", "employee:marco")
         .finish();
 
@@ -305,16 +305,16 @@ fn graph_schema_validates_labels_fields_and_edge_endpoints() {
         .build();
 
     let mut builder = Graph::builder();
-    builder
+    let _ = builder
         .node("Person", "person:ada")
         .prop("name", "Ada")
         .prop("age", 36i64)
         .finish();
-    builder
+    let _ = builder
         .node("Project", "project:grust")
         .prop("name", "Grust")
         .finish();
-    builder
+    let _ = builder
         .edge("WORKS_ON", "person:ada", "project:grust")
         .prop("role", "maintainer")
         .finish();
@@ -331,7 +331,7 @@ fn graph_schema_rejects_wrong_field_type() {
         .build();
 
     let mut builder = Graph::builder();
-    builder
+    let _ = builder
         .node("Person", "person:ada")
         .prop("age", "old")
         .finish();
@@ -357,9 +357,9 @@ fn graph_schema_rejects_wrong_edge_endpoint_label() {
         .build();
 
     let mut builder = Graph::builder();
-    builder.node("Project", "project:source").finish();
-    builder.node("Project", "project:target").finish();
-    builder
+    let _ = builder.node("Project", "project:source").finish();
+    let _ = builder.node("Project", "project:target").finish();
+    let _ = builder
         .edge("WORKS_ON", "project:source", "project:target")
         .finish();
 
@@ -601,7 +601,7 @@ mod typed_garde_tests {
             .expect("person is valid");
 
         let mut builder = builder.into_builder();
-        builder
+        let _ = builder
             .edge("AUTHORED", "person:nia", "doc:proposal")
             .finish();
         let graph = TypedGraphBuilder::from_builder(builder).build();
@@ -711,12 +711,12 @@ mod typed_garde_tests {
 #[test]
 fn graph_serializes_to_yaml() {
     let mut builder = GraphBuilder::new();
-    builder
+    let _ = builder
         .node("Employee", "employee:nia")
         .prop("level", "IC4")
         .finish();
-    builder.node("Employee", "employee:marco").finish();
-    builder
+    let _ = builder.node("Employee", "employee:marco").finish();
+    let _ = builder
         .edge("REPORTS_TO", "employee:nia", "employee:marco")
         .finish();
 
@@ -730,11 +730,11 @@ fn graph_serializes_to_yaml() {
 #[test]
 fn graph_builder_label_conflict_replaces_node() {
     let mut builder = GraphBuilder::new();
-    builder
+    let _ = builder
         .node("Person", "entity:1")
         .prop("name", "Ada")
         .finish();
-    builder
+    let _ = builder
         .node("Robot", "entity:1")
         .prop("model", "Mark I")
         .finish();
@@ -754,11 +754,11 @@ fn graph_builder_label_conflict_replaces_node() {
 #[test]
 fn graph_builder_same_label_merges_props() {
     let mut builder = GraphBuilder::new();
-    builder
+    let _ = builder
         .node("Person", "person:ada")
         .prop("name", "Ada")
         .finish();
-    builder
+    let _ = builder
         .node("Person", "person:ada")
         .prop("age", 36i64)
         .finish();
@@ -879,7 +879,7 @@ fn schema_validates_datetime_and_array_fields() {
         .build();
 
     let mut builder = Graph::builder();
-    builder
+    let _ = builder
         .node("Event", "event:1")
         .prop("when", Value::datetime("2026-06-12T09:30:00Z").unwrap())
         .prop("counts", vec![1i64, 2, 3])
@@ -891,7 +891,7 @@ fn schema_validates_datetime_and_array_fields() {
 
     // Plain strings stay valid for DateTime fields, but must parse.
     let mut builder = Graph::builder();
-    builder
+    let _ = builder
         .node("Event", "event:2")
         .prop("when", "2026-06-12T09:30:00Z")
         .finish();
@@ -900,7 +900,7 @@ fn schema_validates_datetime_and_array_fields() {
         .expect("RFC 3339 string should validate as DateTime");
 
     let mut builder = Graph::builder();
-    builder
+    let _ = builder
         .node("Event", "event:3")
         .prop("when", "soon")
         .finish();
@@ -939,8 +939,8 @@ fn value_json_round_trips_plain_and_tagged() {
 #[test]
 fn builder_add_edge_reports_outcome() {
     let mut builder = GraphBuilder::new();
-    builder.node("Person", "a").finish();
-    builder.node("Person", "b").finish();
+    let _ = builder.node("Person", "a").finish();
+    let _ = builder.node("Person", "b").finish();
 
     let first = builder.edge("KNOWS", "a", "b").finish();
     let second = builder.edge("KNOWS", "a", "b").finish();
@@ -962,10 +962,10 @@ fn schema_enforces_edge_uniqueness() {
         .build();
 
     let mut builder = GraphBuilder::new().edge_policy(EdgePolicy::AllowDuplicates);
-    builder.node("Person", "a").finish();
-    builder.node("Person", "b").finish();
-    builder.edge("KNOWS", "a", "b").finish();
-    builder.edge("KNOWS", "a", "b").finish();
+    let _ = builder.node("Person", "a").finish();
+    let _ = builder.node("Person", "b").finish();
+    let _ = builder.edge("KNOWS", "a", "b").finish();
+    let _ = builder.edge("KNOWS", "a", "b").finish();
 
     let error = schema
         .validate_graph(&builder.build())
@@ -990,9 +990,9 @@ fn undirected_edge_type_accepts_reversed_endpoints_and_unordered_uniqueness() {
 
     // Reversed orientation is accepted for undirected edges.
     let mut builder = GraphBuilder::new();
-    builder.node("Person", "person:ada").finish();
-    builder.node("Project", "project:grust").finish();
-    builder
+    let _ = builder.node("Person", "person:ada").finish();
+    let _ = builder.node("Project", "project:grust").finish();
+    let _ = builder
         .edge("LINKED", "project:grust", "person:ada")
         .finish();
     schema
@@ -1001,12 +1001,12 @@ fn undirected_edge_type_accepts_reversed_endpoints_and_unordered_uniqueness() {
 
     // The same pair in both orientations violates unordered uniqueness.
     let mut builder = GraphBuilder::new().edge_policy(EdgePolicy::AllowDuplicates);
-    builder.node("Person", "person:ada").finish();
-    builder.node("Project", "project:grust").finish();
-    builder
+    let _ = builder.node("Person", "person:ada").finish();
+    let _ = builder.node("Project", "project:grust").finish();
+    let _ = builder
         .edge("LINKED", "person:ada", "project:grust")
         .finish();
-    builder
+    let _ = builder
         .edge("LINKED", "project:grust", "person:ada")
         .finish();
     let error = schema
@@ -1026,12 +1026,12 @@ fn undirected_edge_type_accepts_reversed_endpoints_and_unordered_uniqueness() {
         )
         .build();
     let mut builder = GraphBuilder::new().edge_policy(EdgePolicy::AllowDuplicates);
-    builder.node("Person", "person:ada").finish();
-    builder.node("Project", "project:grust").finish();
-    builder
+    let _ = builder.node("Person", "person:ada").finish();
+    let _ = builder.node("Project", "project:grust").finish();
+    let _ = builder
         .edge("LINKED", "person:ada", "project:grust")
         .finish();
-    builder
+    let _ = builder
         .edge("LINKED", "project:grust", "person:ada")
         .finish();
     directed

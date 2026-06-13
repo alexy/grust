@@ -20,21 +20,21 @@ async fn store() -> LanceDbGraphStore {
 
 fn sample_graph() -> Graph {
     let mut builder = Graph::builder();
-    builder
+    let _ = builder
         .node("Person", "person-1")
         .prop("name", "Ada")
         .prop("age", 36i64)
         .finish();
-    builder
+    let _ = builder
         .node("Talk", "talk-1")
         .prop("title", "Analytical Engine")
         .finish();
-    builder.node("Room", "room-1").prop("name", "Main").finish();
-    builder
+    let _ = builder.node("Room", "room-1").prop("name", "Main").finish();
+    let _ = builder
         .edge("PRESENTS", "person-1", "talk-1")
         .prop("source", "schedule")
         .finish();
-    builder.edge("HOSTED_IN", "talk-1", "room-1").finish();
+    let _ = builder.edge("HOSTED_IN", "talk-1", "room-1").finish();
     builder.build()
 }
 
@@ -260,20 +260,20 @@ async fn starts_by_label_and_property() {
 async fn property_start_matches_exact_property_value_only() {
     let store = store().await;
     let mut builder = Graph::builder();
-    builder
+    let _ = builder
         .node("Person", "person-1")
         .prop("name", "Ada")
         .prop("nickname", "Ada")
         .finish();
-    builder
+    let _ = builder
         .node("Person", "person-2")
         .prop("name", "Ada Lovelace")
         .finish();
-    builder
+    let _ = builder
         .node("Person", "person-3")
         .prop("nickname", "Ada")
         .finish();
-    builder
+    let _ = builder
         .node("Person", "person-4")
         .prop(
             "metadata",

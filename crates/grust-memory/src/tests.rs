@@ -27,7 +27,7 @@ fn stores_graph_and_traverses_one_step() {
     let mut builder = GraphBuilder::new();
     let talk = builder.node("Talk", "talk-1").finish();
     let person = builder.node("Person", "person-1").finish();
-    builder.edge("PRESENTED_BY", &talk, &person).finish();
+    let _ = builder.edge("PRESENTED_BY", &talk, &person).finish();
     let graph = builder.build();
 
     let store = MemoryGraphStore::new();
@@ -136,9 +136,9 @@ fn get_nodes_reads_multiple_ids() {
 fn delete_node_cascades_to_incident_edges() {
     let store = MemoryGraphStore::new();
     let mut builder = Graph::builder();
-    builder.node("Person", "a").finish();
-    builder.node("Person", "b").finish();
-    builder.edge("KNOWS", "a", "b").finish();
+    let _ = builder.node("Person", "a").finish();
+    let _ = builder.node("Person", "b").finish();
+    let _ = builder.edge("KNOWS", "a", "b").finish();
     futures_executor::block_on(store.put_graph(&builder.build())).unwrap();
 
     futures_executor::block_on(store.delete_node(&NodeId::new("a"))).unwrap();
