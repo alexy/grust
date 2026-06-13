@@ -262,9 +262,14 @@ impl GraphStore for LanceDbGraphStore {
     }
 
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
+        let start_limit = match &traversal.start {
+            Start::NodesByProperty { .. } => None,
+            _ => traversal.limit,
+        };
         let mut current = self
-            .query_nodes(Some(start_filter(&traversal.start)?), traversal.limit)
+            .query_nodes(Some(start_filter(&traversal.start)?), start_limit)
             .await?;
+        filter_start_nodes(&mut current, &traversal.start);
 
         for step in traversal.steps {
             let mut next_ids = BTreeSet::new();
@@ -763,14 +768,13 @@ fn start_filter(start: &Start) -> Result<String> {
     match start {
         Start::Node(id) => Ok(format!("id = {}", sql_str(id.as_str()))),
         Start::NodesByLabel(label) => Ok(format!("label = {}", sql_str(label.as_str()))),
-        Start::NodesByProperty { label, key, value } => {
-            let encoded = props_to_json(&Props::from([(key.clone(), value.clone())]))?;
-            Ok(format!(
-                "label = {} AND props LIKE {}",
-                sql_str(label.as_str()),
-                sql_str(&format!("%{}%", json_property_fragment(key, &encoded)?))
-            ))
-        }
+        Start::NodesByProperty { label, .. } => Ok(format!("label = {}", sql_str(label.as_str()))),
+    }
+}
+
+fn filter_start_nodes(nodes: &mut Vec<Node>, start: &Start) {
+    if let Start::NodesByProperty { key, value, .. } = start {
+        nodes.retain(|node| node.props.get(key) == Some(value));
     }
 }
 
@@ -789,16 +793,6 @@ fn step_edge_filter(node_id: &str, step: &Step) -> String {
     } else {
         endpoint
     }
-}
-
-fn json_property_fragment(key: &str, encoded_single_prop: &str) -> Result<String> {
-    let value = serde_json::from_str::<serde_json::Value>(encoded_single_prop)
-        .map_err(|err| GrustError::Serialization(err.to_string()))?;
-    let value = value
-        .as_object()
-        .and_then(|object| object.get(key))
-        .ok_or_else(|| GrustError::Serialization("encoded property missing key".to_string()))?;
-    Ok(format!("{}:{}", serde_json::to_string(key).unwrap(), value))
 }
 
 fn props_to_json(props: &Props) -> Result<String> {

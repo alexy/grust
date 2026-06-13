@@ -4,6 +4,12 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
+## 2026-06-13 - 0.6.6
+
+- Replaced LanceDB `Start::NodesByProperty` JSON substring matching with exact
+  property comparison after reading label-filtered rows, avoiding false
+  positives from nested JSON or serialized property fragments.
+
 ## 2026-06-13 - 0.6.5
 
 - Changed SurrealDB generic edge reads to return a clear configuration error

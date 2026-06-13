@@ -257,6 +257,54 @@ async fn starts_by_label_and_property() {
 }
 
 #[tokio::test]
+async fn property_start_matches_exact_property_value_only() {
+    let store = store().await;
+    let mut builder = Graph::builder();
+    builder
+        .node("Person", "person-1")
+        .prop("name", "Ada")
+        .prop("nickname", "Ada")
+        .finish();
+    builder
+        .node("Person", "person-2")
+        .prop("name", "Ada Lovelace")
+        .finish();
+    builder
+        .node("Person", "person-3")
+        .prop("nickname", "Ada")
+        .finish();
+    builder
+        .node("Person", "person-4")
+        .prop(
+            "metadata",
+            serde_json::json!({
+                "name": {
+                    "type": "string",
+                    "value": "Ada"
+                }
+            }),
+        )
+        .finish();
+    store.put_graph(&builder.build()).await.expect("put_graph");
+
+    let ada = store
+        .traverse(Traversal {
+            start: Start::NodesByProperty {
+                label: Label::new("Person"),
+                key: "name".to_string(),
+                value: Value::from("Ada"),
+            },
+            steps: Vec::new(),
+            limit: None,
+        })
+        .await
+        .expect("property start");
+
+    assert_eq!(ada.len(), 1);
+    assert_eq!(ada[0].id.as_str(), "person-1");
+}
+
+#[tokio::test]
 async fn clear_removes_graph() {
     let store = store().await;
     store.put_graph(&sample_graph()).await.expect("put_graph");

@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.5", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.6", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.6.5", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.5", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.6", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -854,7 +854,9 @@ tabular/export backends through `grust-core::edge_key`, so structural edge
 identity does not drift across implementations. Writes use LanceDB
 `merge_insert`, and traversal performs hop-by-hop table queries. When a hop fans
 out to multiple target nodes, the backend reads those target nodes with
-`get_nodes` instead of issuing one node query per edge.
+`get_nodes` instead of issuing one node query per edge. Property-start
+traversal filters by label in LanceDB, then compares decoded Grust properties
+exactly so nested JSON or serialized fragments cannot produce false positives.
 
 This backend is a natural home for later vector-search extensions. The core
 `GraphStore` trait should stay graph-focused; LanceDB-specific nearest-neighbor

@@ -205,7 +205,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.5", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.6.6", features = ["memory"] }
 ```
 
 Then load and traverse a graph:
@@ -284,7 +284,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.5", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.6.6", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
@@ -301,7 +301,8 @@ properties. It is a sync/export adapter rather than a `GraphStore`.
 `grust-lancedb` stores graphs in LanceDB tables using the official Rust SDK,
 upserts nodes and edges with `merge_insert`, supports backend-neutral reads and
 bounded traversal over universal node/edge tables, batches target-node reads
-during traversal, and can mirror schema-labeled nodes and edges into typed Arrow
+during traversal, performs exact property-start matching over decoded Grust
+properties, and can mirror schema-labeled nodes and edges into typed Arrow
 tables.
 
 `grust-pggraph` stores Grust graphs in universal PostgreSQL tables, registers
@@ -505,6 +506,8 @@ traverse                 -> edge filters plus batched target-node reads per step
 
 `LanceDbGraphStore::connect()` opens a local or remote LanceDB URI,
 `GraphAdminStore::bootstrap()` creates empty universal tables when needed, and
+property-start traversal compares decoded Grust properties exactly after the
+label-filtered read instead of matching serialized JSON fragments.
 `clear()` drops and recreates them. Node IDs are the node upsert key. Edges use
 an explicit edge ID when present and otherwise use `(from, label, to)` as a
 stable key. Properties are stored as JSON text for backend-neutral reads today;

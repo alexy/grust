@@ -18,7 +18,7 @@ The project is here:
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
 - Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
-The current `0.6.5` line is the first version where I think the whole shape is
+The current `0.6.6` line is the first version where I think the whole shape is
 visible and release-tested against live backends: the core graph model,
 document loading, typed ingestion, schema-backed store writes, traversal
 lowering, backend-specific typed storage hooks, and explicit Sail, SurrealDB,
@@ -145,7 +145,7 @@ them into ordinary Grust nodes and edges:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.5", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.6", features = ["typed-garde"] }
 ```
 
 ```rust
@@ -193,7 +193,7 @@ treats it as typed. In Grust, `zod-rs` plays that role for
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.5", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.6", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers
@@ -331,7 +331,7 @@ flowchart LR
 Grust has several backend and integration crates:
 
 - `grust-memory` is the deterministic local store for tests, examples, and no-service workflows.
-- `grust-lancedb` stores universal nodes and edges in LanceDB tables, supports backend-neutral reads and bounded traversal, batches traversal target-node reads, and mirrors schema-labeled writes into typed Arrow tables.
+- `grust-lancedb` stores universal nodes and edges in LanceDB tables, supports backend-neutral reads and bounded traversal, batches traversal target-node reads, matches property starts exactly after decoding Grust props, and mirrors schema-labeled writes into typed Arrow tables.
 - `grust-pggraph` stores universal graph tables in PostgreSQL, registers them with pgGraph, lowers traversal to SQL joins, and exposes typed label views and expression indexes from `GraphSchema`.
 - `grust-sail` stages bulk writes as Arrow `LocalRelation` temp views through Sail Spark Connect, lowers traversal to Spark SQL joins over DataFrames, and mirrors schema-labeled writes into typed Delta tables.
 - `grust-falkor` writes through Redis `GRAPH.QUERY` using FalkorDB's Cypher-like surface and creates schema-driven label/property indexes.
