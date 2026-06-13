@@ -9,7 +9,7 @@ the version subtitle from `title_stem` plus `[workspace.package].version` in the
 workspace `Cargo.toml`. The visible cover text for this book is:
 
 - Title: `Grust`
-- Version subtitle: `covers grust (0.6.2)`
+- Version subtitle: `covers grust (0.6.3)`
 - Subtitle: `A Rust Property Graph Architecture`
 - Author: `Alexy Khrabrov`
 - Coauthor credit: `&` / `Codex with ChatGPT 5.5`
@@ -154,6 +154,6 @@ Outputs:
 - `docs/book/build/dist/grust.pdf`
 - `docs/book/build/dist/grust.epub`
 - `docs/book/build/dist/grust.epub`
-- `docs/book/build/dist/grust (0.6.2).epub` ignored symlink to `grust.epub`
+- `docs/book/build/dist/grust (0.6.3).epub` ignored symlink to `grust.epub`
 - `docs/book/build/dist/grust.mobi`
 - `docs/book/build/dist/VERSION.md`

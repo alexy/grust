@@ -59,6 +59,11 @@ The backend crates expose reads and traversal as they mature behind the same
 `GraphStore` APIs instead of leaking backend query languages into application
 code.
 
+Shared backend-lowering helpers such as `relationship_type`,
+`schema_identifier`, and `edge_key` live in `grust-core` so database adapters do
+not drift on relationship names, typed table identifiers, or structural edge
+keys.
+
 `grust-cocoindex` is intentionally different: it exports Grust graphs as
 CocoIndex-style node and relationship target state so an incremental indexing
 flow can propagate changes into a downstream graph or table backend.
@@ -200,7 +205,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.2", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.6.3", features = ["memory"] }
 ```
 
 Then load and traverse a graph:
@@ -278,14 +283,15 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.2", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.6.3", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
 supports graph replacement with `GRAPH.DELETE`.
 
 `grust-helix` provides both `HelixHttpGraphStore` and `HelixSdkGraphStore`.
-Both batch node and edge writes and use configured labels for replacement.
+Both batch node and edge writes, preserve supported scalar and array properties,
+and use configured labels for replacement.
 
 `grust-cocoindex` converts `Graph` values into serializable node and
 relationship states with stable keys, endpoint labels, and plain JSON

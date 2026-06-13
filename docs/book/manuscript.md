@@ -58,6 +58,13 @@ labels, property values, graph builders, schemas, traversals, error types, load
 reports, and backend traits. The `grust` crate re-exports those pieces and gates
 backend crates behind Cargo features.
 
+Core also owns the small lowering helpers that have to mean the same thing
+everywhere. `relationship_type` normalizes edge labels for backends that need
+database-safe relationship names. `schema_identifier` normalizes schema labels
+and fields for SQL-like typed surfaces. `edge_key` gives table and export
+backends the same structural fallback key for an edge when the caller has not
+provided an explicit `EdgeId`.
+
 That split is important. Core model code stays light, deterministic, and mostly
 dependency-free. Backends are allowed to depend on Redis, SurrealDB, LanceDB,
 PostgreSQL, Spark Connect, HTTP clients, gRPC clients, or SDKs without dragging
@@ -278,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.2", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.3", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -286,7 +293,7 @@ grust = { package = "grust-graph", version = "0.6.2", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.2", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.3", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -841,8 +848,10 @@ let people = store
 `grust-lancedb` treats LanceDB first as a durable Arrow-native table store. It
 uses two tables, one for nodes and one for edges. Nodes are keyed by `id`. Edges
 are keyed by an explicit edge id when present, or by a deterministic
-`from + label + to` key otherwise. Writes use LanceDB `merge_insert`, and
-traversal performs hop-by-hop table queries.
+`from + label + to` key otherwise. That fallback key is shared with other
+tabular/export backends through `grust-core::edge_key`, so structural edge
+identity does not drift across implementations. Writes use LanceDB
+`merge_insert`, and traversal performs hop-by-hop table queries.
 
 This backend is a natural home for later vector-search extensions. The core
 `GraphStore` trait should stay graph-focused; LanceDB-specific nearest-neighbor
@@ -907,10 +916,12 @@ The HelixDB backend has HTTP and SDK stores. Both support batched writes, node
 reads, edge reads, and backend-neutral traversal through Helix dynamic queries.
 Edge writes store Grust relationship metadata (`relationship`, `from_id`,
 `to_id`, and optional `edge_id`) so `EdgeQuery` can reconstruct Grust edges from
-Helix relationship rows. The current schema hook validates that labels,
-relationships, and fields can be safely lowered through the dynamic-query path;
-backend-native schema-file generation can build on that same `GraphSchema`
-contract later.
+Helix relationship rows. Helix writes preserve supported scalar and array
+properties instead of silently dropping non-string values; unsupported JSON
+object properties return an explicit error. The current schema hook validates
+that labels, relationships, and fields can be safely lowered through the
+dynamic-query path; backend-native schema-file generation can build on that same
+`GraphSchema` contract later.
 
 The SurrealDB backend also has HTTP and SDK stores. It can bootstrap, clear,
 upsert nodes, relate edges, read nodes and edges, and execute traversal
