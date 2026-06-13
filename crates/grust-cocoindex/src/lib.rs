@@ -314,6 +314,34 @@ mod tests {
     }
 
     #[test]
+    fn export_preserves_explicit_edge_id_as_relationship_key() {
+        let graph = Graph::new(
+            vec![
+                Node::new("Person", "person:ada", Props::new()),
+                Node::new("Event", "event:123", Props::new()),
+            ],
+            vec![Edge::new("RSVPED", "person:ada", "event:123", Props::new()).with_id("rsvp:1")],
+        );
+
+        let export = graph.to_cocoindex_export().expect("export");
+
+        assert_eq!(export.relationships[0].key, id_key("rsvp:1"));
+    }
+
+    #[test]
+    fn export_allows_graph_with_zero_edges() {
+        let graph = Graph::new(
+            vec![Node::new("Person", "person:ada", Props::new())],
+            Vec::new(),
+        );
+
+        let export = graph.to_cocoindex_export().expect("export");
+
+        assert_eq!(export.nodes.len(), 1);
+        assert!(export.relationships.is_empty());
+    }
+
+    #[test]
     fn imports_exported_graph_state() {
         let imported =
             cocoindex_export_to_graph(meetup_graph().to_cocoindex_export().expect("export"))
@@ -429,6 +457,49 @@ mod tests {
 
         let err = graph.to_cocoindex_export().expect_err("missing target");
         assert!(err.to_string().contains("missing target node"));
+    }
+
+    #[test]
+    fn missing_source_node_is_an_error() {
+        let graph = Graph::new(
+            vec![Node::new("Event", "event:123", Props::new())],
+            vec![Edge::new(
+                "RSVPED",
+                "person:missing",
+                "event:123",
+                Props::new(),
+            )],
+        );
+
+        let err = graph.to_cocoindex_export().expect_err("missing source");
+
+        assert!(err.to_string().contains("missing source node"));
+    }
+
+    #[test]
+    fn non_finite_float_properties_are_export_errors() {
+        let mut props = Props::new();
+        props.insert("score".to_string(), Value::Float(f64::NAN));
+        let graph = Graph::new(vec![Node::new("Person", "person:ada", props)], Vec::new());
+
+        let err = graph
+            .to_cocoindex_export()
+            .expect_err("NaN should not serialize to JSON");
+
+        assert!(err.to_string().contains("non-finite float"));
+    }
+
+    #[test]
+    fn non_finite_float_array_properties_are_export_errors() {
+        let mut props = Props::new();
+        props.insert("scores".to_string(), Value::FloatArray(vec![1.0, f64::NAN]));
+        let graph = Graph::new(vec![Node::new("Person", "person:ada", props)], Vec::new());
+
+        let err = graph
+            .to_cocoindex_export()
+            .expect_err("NaN should not serialize to JSON");
+
+        assert!(err.to_string().contains("non-finite float"));
     }
 
     #[test]

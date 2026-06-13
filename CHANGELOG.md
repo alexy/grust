@@ -12,6 +12,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   loaded back into Grust graphs.
 - Changed the `grust-graph` memory facade and prelude exports to re-export the
   full `grust-memory` crate surface, matching other backend feature exports.
+- Expanded CocoIndex adapter coverage for zero-edge exports, missing source
+  nodes, explicit edge IDs, and non-finite float export errors.
 - Expanded SurrealDB response-parser unit coverage across string, object,
   typed-object, and backtick-quoted record ID shapes.
 
