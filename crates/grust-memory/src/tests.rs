@@ -61,6 +61,32 @@ fn put_reports_insert_vs_update() {
 }
 
 #[test]
+fn get_nodes_reads_multiple_ids() {
+    let store = MemoryGraphStore::new();
+    let nodes = vec![
+        Node::new("Person", "a", Props::new()),
+        Node::new("Person", "b", Props::new()),
+    ];
+    futures_executor::block_on(store.put_node(&nodes[0])).unwrap();
+    futures_executor::block_on(store.put_node(&nodes[1])).unwrap();
+
+    let fetched = futures_executor::block_on(store.get_nodes(&[
+        NodeId::new("b"),
+        NodeId::new("missing"),
+        NodeId::new("a"),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        fetched
+            .iter()
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>(),
+        vec![NodeId::new("b"), NodeId::new("a")]
+    );
+}
+
+#[test]
 fn delete_node_cascades_to_incident_edges() {
     let store = MemoryGraphStore::new();
     let mut builder = Graph::builder();

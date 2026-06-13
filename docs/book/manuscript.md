@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.3", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.4", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.6.3", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.3", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.4", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -724,6 +724,7 @@ pub trait GraphStore: Send + Sync {
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport>;
     async fn put_typed_graph(&self, schema: &GraphSchema, graph: &Graph) -> Result<LoadReport>;
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>>;
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>>;
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>>;
 }
@@ -851,7 +852,9 @@ are keyed by an explicit edge id when present, or by a deterministic
 `from + label + to` key otherwise. That fallback key is shared with other
 tabular/export backends through `grust-core::edge_key`, so structural edge
 identity does not drift across implementations. Writes use LanceDB
-`merge_insert`, and traversal performs hop-by-hop table queries.
+`merge_insert`, and traversal performs hop-by-hop table queries. When a hop fans
+out to multiple target nodes, the backend reads those target nodes with
+`get_nodes` instead of issuing one node query per edge.
 
 This backend is a natural home for later vector-search extensions. The core
 `GraphStore` trait should stay graph-focused; LanceDB-specific nearest-neighbor
@@ -929,7 +932,9 @@ hop-by-hop through the `GraphStore` contract. Applying a schema lowers node and
 edge declarations to Surreal `DEFINE TABLE` and `DEFINE FIELD` statements so
 the backend can run in schemafull mode where the schema calls for it. Reads use
 configured labels and relationships, plus ID-derived table names, to find
-records across Surreal's label-specific tables.
+records across Surreal's label-specific tables. Traversal batches target-node
+reads per step through `get_nodes`, avoiding a serial node lookup for every
+edge in a fan-out.
 
 ## CocoIndex
 

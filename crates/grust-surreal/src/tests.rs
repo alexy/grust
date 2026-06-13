@@ -32,6 +32,7 @@ struct RecordingStore {
     edges: Vec<Edge>,
     edge_queries: Mutex<Vec<EdgeQuery>>,
     node_queries: Mutex<Vec<NodeId>>,
+    node_batch_queries: Mutex<Vec<Vec<NodeId>>>,
 }
 
 #[async_trait]
@@ -47,6 +48,14 @@ impl GraphStore for RecordingStore {
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
         self.node_queries.lock().unwrap().push(id.clone());
         Ok(self.nodes.iter().find(|node| &node.id == id).cloned())
+    }
+
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
+        self.node_batch_queries.lock().unwrap().push(ids.to_vec());
+        Ok(ids
+            .iter()
+            .filter_map(|id| self.nodes.iter().find(|node| &node.id == id).cloned())
+            .collect())
     }
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
@@ -108,7 +117,13 @@ fn traverse_steps_follow_edges_and_filter_target_label() {
     assert_eq!(edge_queries[0].label, Some(Label::new("presents")));
 
     let node_queries = store.node_queries.lock().unwrap();
-    assert_eq!(node_queries[0], NodeId::new("talk-1"));
+    assert!(
+        node_queries.is_empty(),
+        "traversal should batch target node reads"
+    );
+
+    let node_batch_queries = store.node_batch_queries.lock().unwrap();
+    assert_eq!(node_batch_queries[0], vec![NodeId::new("talk-1")]);
 }
 
 #[test]
@@ -131,6 +146,21 @@ fn get_node_query_scans_candidate_tables_in_one_statement() {
 
     assert!(query.starts_with("SELECT *, meta::tb(id) AS __grust_label FROM "));
     assert!(query.contains("person, record, talk"));
+    assert!(query.contains("id = type::record(\"talk\", \"talk-1\")"));
+    assert_eq!(query.matches("SELECT").count(), 1);
+}
+
+#[test]
+fn get_nodes_query_batches_candidate_records_in_one_statement() {
+    let config = SurrealConfig {
+        labels: vec!["Talk".to_string(), "Person".to_string()],
+        ..SurrealConfig::default()
+    };
+    let query = surreal_get_nodes_query(&[NodeId::new("person-1"), NodeId::new("talk-1")], &config);
+
+    assert!(query.starts_with("SELECT *, meta::tb(id) AS __grust_label FROM "));
+    assert!(query.contains("person, record, talk"));
+    assert!(query.contains("id = type::record(\"person\", \"person-1\")"));
     assert!(query.contains("id = type::record(\"talk\", \"talk-1\")"));
     assert_eq!(query.matches("SELECT").count(), 1);
 }

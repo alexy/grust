@@ -1,6 +1,6 @@
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "18px", "primaryColor": "#f7f8fb", "primaryTextColor": "#172033", "primaryBorderColor": "#4f46e5", "lineColor": "#3b4252", "secondaryColor": "#eef6f0", "tertiaryColor": "#fff6df"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 50, "rankSpacing": 58, "padding": 18}}}%%
 flowchart LR
-  graphObj["grust::Graph"] --> store["GraphStore\nput_graph, put_typed_graph,\nget_node, get_edges, traverse"]
+  graphObj["grust::Graph"] --> store["GraphStore\nput_graph, put_typed_graph\nget_node(s), get_edges, traverse"]
   graphObj --> coco["CocoIndex export\nnot a GraphStore"]
 
   store --> memory["Memory\nBTreeMap scans"]

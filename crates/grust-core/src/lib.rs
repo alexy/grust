@@ -1770,6 +1770,23 @@ pub trait GraphStore: Send + Sync {
     }
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
+
+    /// Reads multiple nodes by ID.
+    ///
+    /// The default implementation preserves the input order and calls
+    /// [`GraphStore::get_node`] once per ID. Backends with a native batch-read
+    /// path should override this to avoid per-node round trips during traversal
+    /// and other fan-out reads.
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
+        let mut nodes = Vec::new();
+        for id in ids {
+            if let Some(node) = self.get_node(id).await? {
+                nodes.push(node);
+            }
+        }
+        Ok(nodes)
+    }
+
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>>;
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>>;
 }

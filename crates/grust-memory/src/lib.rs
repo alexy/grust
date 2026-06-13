@@ -92,6 +92,14 @@ impl GraphStore for MemoryGraphStore {
         Ok(inner.nodes.get(id).cloned())
     }
 
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
+        let inner = self.inner.read().expect("memory graph lock poisoned");
+        Ok(ids
+            .iter()
+            .filter_map(|id| inner.nodes.get(id).cloned())
+            .collect())
+    }
+
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
         let inner = self.inner.read().expect("memory graph lock poisoned");
         Ok(inner

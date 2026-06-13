@@ -245,6 +245,18 @@ impl GraphStore for LanceDbGraphStore {
             .next())
     }
 
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = ids
+            .iter()
+            .map(|id| sql_str(id.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.query_nodes(Some(format!("id IN ({ids})")), None).await
+    }
+
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
         self.query_edges(edge_query_filter(query)).await
     }
@@ -279,14 +291,9 @@ impl GraphStore for LanceDbGraphStore {
                 }
             }
 
-            let mut next = Vec::new();
-            for id in next_ids {
-                if let Some(node) = self.get_node(&id).await?
-                    && step.node.as_ref().is_none_or(|label| label == &node.label)
-                {
-                    next.push(node);
-                }
-            }
+            let next_ids = next_ids.into_iter().collect::<Vec<_>>();
+            let mut next = self.get_nodes(&next_ids).await?;
+            next.retain(|node| step.node.as_ref().is_none_or(|label| label == &node.label));
             if let Some(limit) = traversal.limit {
                 next.truncate(limit as usize);
             }

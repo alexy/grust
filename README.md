@@ -205,7 +205,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.3", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.6.4", features = ["memory"] }
 ```
 
 Then load and traverse a graph:
@@ -251,6 +251,7 @@ pub trait GraphStore: Send + Sync {
     async fn put_typed_graph(&self, schema: &GraphSchema, graph: &Graph) -> Result<LoadReport>;
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>>;
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>>;
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>>;
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>>;
 }
@@ -283,7 +284,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.3", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.6.4", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
@@ -299,8 +300,9 @@ properties. It is a sync/export adapter rather than a `GraphStore`.
 
 `grust-lancedb` stores graphs in LanceDB tables using the official Rust SDK,
 upserts nodes and edges with `merge_insert`, supports backend-neutral reads and
-bounded traversal over universal node/edge tables, and can mirror schema-labeled
-nodes and edges into typed Arrow tables.
+bounded traversal over universal node/edge tables, batches target-node reads
+during traversal, and can mirror schema-labeled nodes and edges into typed Arrow
+tables.
 
 `grust-pggraph` stores Grust graphs in universal PostgreSQL tables, registers
 those tables with the pgGraph extension, supports SQL-backed reads/traversal,
@@ -314,8 +316,8 @@ rows into typed Delta tables.
 `grust-surreal` provides both `SurrealHttpGraphStore` and
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and
 relationships to Surreal tables, upserts nodes, and relates edges through
-relation tables. `GraphSchema` lowers to Surreal `DEFINE TABLE` and
-`DEFINE FIELD` statements.
+relation tables. Reads and traversal batch target-node lookups where possible.
+`GraphSchema` lowers to Surreal `DEFINE TABLE` and `DEFINE FIELD` statements.
 
 ## Traversal IR
 
@@ -494,7 +496,7 @@ Node id / label / props  -> row in grust_nodes
 Edge key / endpoints     -> row in grust_edges
 put_node / put_edge      -> merge_insert upsert
 get_node / get_edges     -> SDK query filters
-traverse                 -> repeated edge/node filters per IR step
+traverse                 -> edge filters plus batched target-node reads per step
 ```
 
 `LanceDbGraphStore::connect()` opens a local or remote LanceDB URI,

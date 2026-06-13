@@ -4,6 +4,15 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
+## 2026-06-12 - 0.6.4
+
+- Added `GraphStore::get_nodes` as an additive batch-read API with a default
+  repeated-`get_node` implementation.
+- Added native `get_nodes` overrides for memory, LanceDB, pgGraph, and
+  SurrealDB stores.
+- Updated LanceDB and SurrealDB traversal paths to batch target-node reads per
+  traversal step instead of issuing one node read per traversed edge.
+
 ## 2026-06-12 - 0.6.3
 
 - Preserved supported non-string properties in Helix node and edge writes

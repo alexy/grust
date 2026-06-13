@@ -201,6 +201,11 @@ impl GraphStore for SurrealHttpGraphStore {
             .next())
     }
 
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
+        self.read_nodes(&surreal_get_nodes_query(ids, &self.config))
+            .await
+    }
+
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
         let mut edges = self
             .read_edges(&surreal_get_edges_query(&query, &self.config))
@@ -345,6 +350,11 @@ impl GraphStore for SurrealSdkGraphStore {
             .await?
             .into_iter()
             .next())
+    }
+
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
+        self.read_nodes(&surreal_get_nodes_query(ids, &self.config))
+            .await
     }
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
@@ -553,6 +563,37 @@ fn surreal_get_node_query(id: &NodeId, config: &SurrealConfig) -> String {
                 surreal_string(table),
                 surreal_string(id.as_str())
             )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!(
+        "SELECT *, meta::tb(id) AS __grust_label FROM {} WHERE {where_clause};",
+        tables.join(", ")
+    )
+}
+
+fn surreal_get_nodes_query(ids: &[NodeId], config: &SurrealConfig) -> String {
+    if ids.is_empty() {
+        return "RETURN [];".to_string();
+    }
+    let tables = ids
+        .iter()
+        .flat_map(|id| surreal_node_tables_for_id(id, config))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let where_clause = ids
+        .iter()
+        .flat_map(|id| {
+            surreal_node_tables_for_id(id, config)
+                .into_iter()
+                .map(move |table| {
+                    format!(
+                        "id = type::record({}, {})",
+                        surreal_string(&table),
+                        surreal_string(id.as_str())
+                    )
+                })
         })
         .collect::<Vec<_>>()
         .join(" OR ");
@@ -899,7 +940,7 @@ where
     S: GraphStore,
 {
     for step in steps {
-        let mut next = Vec::new();
+        let mut target_ids = BTreeSet::new();
         for node in &current {
             let edge_query = EdgeQuery {
                 from: match step.direction {
@@ -921,16 +962,12 @@ where
                     continue;
                 }
                 let target_id = if out_matches { &edge.to } else { &edge.from };
-                if let Some(target) = store.get_node(target_id).await?
-                    && step
-                        .node
-                        .as_ref()
-                        .is_none_or(|label| label == &target.label)
-                {
-                    next.push(target);
-                }
+                target_ids.insert(target_id.clone());
             }
         }
+        let target_ids = target_ids.into_iter().collect::<Vec<_>>();
+        let mut next = store.get_nodes(&target_ids).await?;
+        next.retain(|node| step.node.as_ref().is_none_or(|label| label == &node.label));
         current = next;
     }
 

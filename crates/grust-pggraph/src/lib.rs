@@ -190,6 +190,22 @@ impl GraphStore for PgGraphStore {
         Ok(self.query_nodes(&sql).await?.into_iter().next())
     }
 
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids = ids
+            .iter()
+            .map(|id| sql_str(id.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, label, props::text AS props FROM {} WHERE id IN ({ids})",
+            self.nodes_table()
+        );
+        self.query_nodes(&sql).await
+    }
+
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
         let mut conditions = Vec::new();
         if let Some(from) = query.from {
