@@ -363,9 +363,7 @@ impl From<serde_json::Value> for Value {
 
 #[cfg(feature = "typed-garde")]
 pub mod typed {
-    use serde::Serialize;
-    #[cfg(feature = "typed-zod-rs")]
-    use serde::de::DeserializeOwned;
+    use serde::{Serialize, de::DeserializeOwned};
 
     use crate::{
         Edge, EdgeId, Graph, GraphBuilder, GrustError, Node, NodeId, Props, PutOutcome, Result,
@@ -384,6 +382,46 @@ pub mod typed {
         fn node_props(&self) -> Result<Props> {
             props_from_serialize(self)
         }
+
+        fn from_node(node: &Node) -> Result<Self>
+        where
+            Self: Sized + DeserializeOwned,
+            Self::Context: Default,
+        {
+            let ctx = Self::Context::default();
+            Self::from_node_with(node, &ctx)
+        }
+
+        fn from_node_with(node: &Node, ctx: &Self::Context) -> Result<Self>
+        where
+            Self: Sized + DeserializeOwned,
+        {
+            if node.label.as_str() != Self::LABEL {
+                return Err(GrustError::Schema(format!(
+                    "node '{}' has label '{}', expected '{}'",
+                    node.id.as_str(),
+                    node.label.as_str(),
+                    Self::LABEL
+                )));
+            }
+            let typed: Self =
+                serde_json::from_value(props_to_plain_json(&node.props)).map_err(|err| {
+                    GrustError::Serialization(format!("typed node decode error: {err}"))
+                })?;
+            typed
+                .validate_with(ctx)
+                .map_err(|err| validation_error(Self::LABEL, err))?;
+            let typed_id = typed.node_id();
+            if typed_id != node.id {
+                return Err(GrustError::Schema(format!(
+                    "typed node '{}' decoded id '{}', expected '{}'",
+                    Self::LABEL,
+                    typed_id.as_str(),
+                    node.id.as_str()
+                )));
+            }
+            Ok(typed)
+        }
     }
 
     pub trait TypedEdge: garde::Validate + Serialize {
@@ -399,6 +437,61 @@ pub mod typed {
 
         fn edge_props(&self) -> Result<Props> {
             props_from_serialize(self)
+        }
+
+        fn from_edge(edge: &Edge) -> Result<Self>
+        where
+            Self: Sized + DeserializeOwned,
+            Self::Context: Default,
+        {
+            let ctx = Self::Context::default();
+            Self::from_edge_with(edge, &ctx)
+        }
+
+        fn from_edge_with(edge: &Edge, ctx: &Self::Context) -> Result<Self>
+        where
+            Self: Sized + DeserializeOwned,
+        {
+            if edge.label.as_str() != Self::LABEL {
+                return Err(GrustError::Schema(format!(
+                    "edge from '{}' to '{}' has label '{}', expected '{}'",
+                    edge.from.as_str(),
+                    edge.to.as_str(),
+                    edge.label.as_str(),
+                    Self::LABEL
+                )));
+            }
+            let typed: Self =
+                serde_json::from_value(props_to_plain_json(&edge.props)).map_err(|err| {
+                    GrustError::Serialization(format!("typed edge decode error: {err}"))
+                })?;
+            typed
+                .validate_with(ctx)
+                .map_err(|err| validation_error(Self::LABEL, err))?;
+            if typed.source_node_id() != edge.from || typed.target_node_id() != edge.to {
+                return Err(GrustError::Schema(format!(
+                    "typed edge '{}' decoded endpoints '{}' -> '{}', expected '{}' -> '{}'",
+                    Self::LABEL,
+                    typed.source_node_id().as_str(),
+                    typed.target_node_id().as_str(),
+                    edge.from.as_str(),
+                    edge.to.as_str()
+                )));
+            }
+            if let Some(decoded_id) = typed.edge_id()
+                && edge
+                    .id
+                    .as_ref()
+                    .is_some_and(|edge_id| edge_id != &decoded_id)
+            {
+                return Err(GrustError::Schema(format!(
+                    "typed edge '{}' decoded id '{}', expected '{}'",
+                    Self::LABEL,
+                    decoded_id.as_str(),
+                    edge.id.as_ref().expect("edge id checked").as_str()
+                )));
+            }
+            Ok(typed)
         }
     }
 
@@ -547,7 +640,9 @@ pub mod typed {
         {
             let node_id = node.node_id();
             let mut props = node.node_props()?;
-            props.insert("id".to_string(), Value::from(node_id.as_str()));
+            props
+                .entry("id".to_string())
+                .or_insert_with(|| Value::from(node_id.as_str()));
             let graph_node = Node::new(T::LABEL, node_id, props);
             Ok(self.builder.add_node(graph_node))
         }
@@ -583,6 +678,15 @@ pub mod typed {
             .into_iter()
             .map(|(key, value)| (key, Value::from(value)))
             .collect())
+    }
+
+    fn props_to_plain_json(props: &Props) -> serde_json::Value {
+        serde_json::Value::Object(
+            props
+                .iter()
+                .map(|(key, value)| (key.clone(), value.to_json()))
+                .collect(),
+        )
     }
 
     #[cfg(feature = "typed-zod-rs")]

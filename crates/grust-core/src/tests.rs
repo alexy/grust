@@ -479,6 +479,68 @@ mod typed_garde_tests {
     }
 
     #[test]
+    fn typed_node_and_edge_read_back_from_graph_values() {
+        let mut builder = TypedGraphBuilder::new();
+        builder
+            .add_node(&Person {
+                id: "nia".to_string(),
+                name: "Nia".to_string(),
+                skills: vec!["rust".to_string(), "graphs".to_string()],
+            })
+            .expect("person is valid");
+        builder
+            .add_node(&Project {
+                id: "grust".to_string(),
+                title: "Grust".to_string(),
+            })
+            .expect("project is valid");
+        builder
+            .add_edge(&WorksOn {
+                person_id: "nia".to_string(),
+                project_id: "grust".to_string(),
+                allocation: 80,
+            })
+            .expect("edge is valid");
+        let graph = builder.build();
+
+        let person = Person::from_node(
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.label == Label::new("Person"))
+                .expect("person node"),
+        )
+        .expect("typed person should decode");
+        let works_on = WorksOn::from_edge(&graph.edges[0]).expect("typed edge should decode");
+
+        assert_eq!(person.id, "nia");
+        assert_eq!(
+            person.skills,
+            vec!["rust".to_string(), "graphs".to_string()]
+        );
+        assert_eq!(works_on.person_id, "nia");
+        assert_eq!(works_on.project_id, "grust");
+        assert_eq!(works_on.allocation, 80);
+    }
+
+    #[test]
+    fn typed_readback_rejects_label_and_identity_mismatches() {
+        let mut props = Props::new();
+        props.insert("id".to_string(), Value::from("nia"));
+        props.insert("name".to_string(), Value::from("Nia"));
+        props.insert(
+            "skills".to_string(),
+            Value::StringArray(vec!["rust".to_string(), "graphs".to_string()]),
+        );
+
+        let wrong_label = Node::new("Project", "person:nia", props.clone());
+        let wrong_id = Node::new("Person", "person:other", props);
+
+        assert!(Person::from_node(&wrong_label).is_err());
+        assert!(Person::from_node(&wrong_id).is_err());
+    }
+
+    #[test]
     fn typed_builder_rejects_invalid_values_before_building_graph() {
         let mut builder = TypedGraphBuilder::new();
         let error = builder

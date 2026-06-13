@@ -205,7 +205,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.7", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.6.8", features = ["memory"] }
 ```
 
 Then load and traverse a graph:
@@ -263,6 +263,9 @@ Single-element writes return `PutOutcome`, which distinguishes inserted,
 updated, backend-opaque upserted, and deduped writes.
 `put_typed_graph` validates a graph against `GraphSchema`, applies that schema
 to the backend, and then writes the graph.
+With the optional `typed-garde` feature, `TypedNode::from_node` and
+`TypedEdge::from_edge` decode stored graph values back into validated Rust
+domain types.
 
 Administrative backends can also implement `GraphAdminStore` for setup and
 replacement workflows:
@@ -284,7 +287,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.7", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.6.8", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and

@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.7", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.8", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.6.7", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.7", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.8", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -413,6 +413,23 @@ Validation fails before graph construction. If `allocation_percent` is `0`, the
 `range(min = 1, max = 100)` rule produces a Grust schema error and the edge is
 not added. This keeps invalid domain facts out of the graph rather than relying
 on a backend to reject them later.
+
+Typed values can also be reconstructed from ordinary Grust reads. The read path
+decodes node or edge properties back through serde, runs garde validation, and
+checks that the typed identity still matches the graph value:
+
+```rust
+let stored = store
+    .get_node(&NodeId::new("person:nia"))
+    .await?
+    .expect("person exists");
+
+let person = Person::from_node(&stored)?;
+assert_eq!(person.id, "nia");
+```
+
+Edges follow the same pattern with `WorksOn::from_edge(&edge)?`. For validation
+contexts, use `from_node_with` or `from_edge_with`.
 
 ## Typed and Untyped Graphs Coexist
 

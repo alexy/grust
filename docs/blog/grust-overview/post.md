@@ -18,7 +18,7 @@ The project is here:
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
 - Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
-The current `0.6.7` line is the first version where I think the whole shape is
+The current `0.6.8` line is the first version where I think the whole shape is
 visible and release-tested against live backends: the core graph model,
 document loading, typed ingestion, schema-backed store writes, traversal
 lowering, backend-specific typed storage hooks, and explicit Sail, SurrealDB,
@@ -145,7 +145,7 @@ them into ordinary Grust nodes and edges:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.7", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.8", features = ["typed-garde"] }
 ```
 
 ```rust
@@ -185,6 +185,11 @@ That means a project can keep loading existing graph documents while gradually
 adding typed constructors for labels and relationships where Rust validation is
 valuable.
 
+Typed readback goes through the same plain graph model. After a backend returns
+a `Node` or `Edge`, `Person::from_node(&node)?` or `WorksOn::from_edge(&edge)?`
+deserializes the stored props, runs garde validation, and checks that the typed
+identity still matches the graph value.
+
 For raw JSON boundaries, the optional `typed-zod-rs` feature adds another
 stage. If you have not used Zod before: it is a popular TypeScript validation
 style where a runtime schema checks untrusted data before application code
@@ -193,7 +198,7 @@ treats it as typed. In Grust, `zod-rs` plays that role for
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.7", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.8", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers

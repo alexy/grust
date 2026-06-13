@@ -4,6 +4,15 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
+## 2026-06-13 - 0.6.8
+
+- Added typed readback helpers: `TypedNode::from_node`,
+  `TypedNode::from_node_with`, `TypedEdge::from_edge`, and
+  `TypedEdge::from_edge_with`.
+- Preserved existing typed `id` properties during `TypedGraphBuilder` lowering
+  so domain IDs can round-trip through stored Grust nodes.
+- Added typed round-trip tests through `MemoryGraphStore`.
+
 ## 2026-06-13 - 0.6.7
 
 - Documented that the default `GraphMutationStore::apply_mutations`

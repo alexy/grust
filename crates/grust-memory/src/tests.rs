@@ -1,5 +1,27 @@
 use super::*;
 
+use grust_core::typed::{TypedGraphBuilder, TypedNode, garde};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Deserialize, Serialize, garde::Validate)]
+#[garde(allow_unvalidated)]
+struct Person {
+    #[garde(length(min = 1))]
+    id: String,
+    #[garde(length(min = 1))]
+    name: String,
+    #[garde(length(min = 1))]
+    skill: String,
+}
+
+impl TypedNode for Person {
+    const LABEL: &'static str = "Person";
+
+    fn node_id(&self) -> NodeId {
+        format!("person:{}", self.id).into()
+    }
+}
+
 #[test]
 fn stores_graph_and_traverses_one_step() {
     let mut builder = GraphBuilder::new();
@@ -21,6 +43,30 @@ fn stores_graph_and_traverses_one_step() {
 
     assert_eq!(speakers.len(), 1);
     assert_eq!(speakers[0].id, NodeId::from("person-1"));
+}
+
+#[test]
+fn typed_graph_round_trips_through_memory_store() {
+    let mut builder = TypedGraphBuilder::new();
+    builder
+        .add_node(&Person {
+            id: "ada".to_string(),
+            name: "Ada".to_string(),
+            skill: "math".to_string(),
+        })
+        .expect("typed person is valid");
+    let graph = builder.build();
+    let store = MemoryGraphStore::new();
+
+    futures_executor::block_on(store.put_graph(&graph)).unwrap();
+    let fetched = futures_executor::block_on(store.get_node(&NodeId::new("person:ada")))
+        .unwrap()
+        .expect("person node exists");
+    let person = Person::from_node(&fetched).expect("typed person decodes");
+
+    assert_eq!(person.id, "ada");
+    assert_eq!(person.name, "Ada");
+    assert_eq!(person.skill, "math");
 }
 
 #[test]
