@@ -8,10 +8,13 @@ fn sample_graph() -> Graph {
         "tags".to_string(),
         Value::StringArray(vec!["rust".to_string(), "graphs".to_string()]),
     );
+    talk_props.insert("capacity".to_string(), Value::Int(80));
+    talk_props.insert("recorded".to_string(), Value::Bool(true));
 
     let mut person_props = Props::new();
     person_props.insert("id".to_string(), Value::from("person-1"));
     person_props.insert("name".to_string(), Value::from("Ada Lovelace"));
+    person_props.insert("scores".to_string(), Value::FloatArray(vec![1.0, 2.5]));
 
     Graph {
         nodes: vec![
@@ -23,17 +26,40 @@ fn sample_graph() -> Graph {
 }
 
 #[test]
-fn helix_http_node_batch_omits_arrays() {
+fn helix_http_node_batch_preserves_supported_values() {
     let graph = sample_graph();
     let request = helix_add_nodes_request(std::slice::from_ref(&graph.nodes[0])).unwrap();
     let properties = &request["query"]["queries"][0]["Query"]["steps"][0]["AddN"]["properties"];
+    let properties = properties.as_array().unwrap();
     assert!(
-        !properties
-            .as_array()
-            .unwrap()
+        properties
             .iter()
-            .any(|prop| prop[0] == "tags")
+            .any(|prop| { prop[0] == "tags" && prop[1]["Value"]["StringArray"][0] == "rust" })
     );
+    assert!(
+        properties
+            .iter()
+            .any(|prop| { prop[0] == "capacity" && prop[1]["Value"]["I64"] == 80 })
+    );
+    assert!(
+        properties
+            .iter()
+            .any(|prop| { prop[0] == "recorded" && prop[1]["Value"]["Boolean"] == true })
+    );
+}
+
+#[test]
+fn helix_http_node_batch_rejects_json_properties() {
+    let mut props = Props::new();
+    props.insert(
+        "payload".to_string(),
+        Value::Json(serde_json::json!({"nested": true})),
+    );
+    let node = Node::new("Event", "event-1", props);
+
+    let error = helix_add_nodes_request(std::slice::from_ref(&node)).expect_err("json rejected");
+
+    assert!(error.to_string().contains("does not support JSON object"));
 }
 
 #[test]

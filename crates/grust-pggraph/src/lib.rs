@@ -638,27 +638,8 @@ fn validate_identifier(value: &str) -> Result<()> {
 }
 
 fn validate_json_key(value: &str) -> Result<()> {
-    if value.contains('\0') || value.is_empty() {
-        return Err(GrustError::Schema(format!(
-            "invalid JSON property key '{value}'"
-        )));
-    }
-    Ok(())
-}
-
-fn schema_identifier(value: &str) -> Result<String> {
-    let identifier = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    validate_identifier(&identifier)?;
-    Ok(identifier)
+    validate_identifier(value)
+        .map_err(|_| GrustError::Schema(format!("invalid JSON property key '{value}'")))
 }
 
 #[cfg(test)]

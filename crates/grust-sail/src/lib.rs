@@ -990,45 +990,6 @@ fn sail_edge_table(label: &str) -> Result<String> {
     Ok(format!("grust_edge_{}", schema_identifier(label)?))
 }
 
-fn edge_key(edge: &Edge) -> String {
-    edge.id
-        .as_ref()
-        .map(EdgeId::as_str)
-        .map(ToString::to_string)
-        .unwrap_or_else(|| {
-            format!(
-                "{}\u{1f}{}\u{1f}{}",
-                edge.from.as_str(),
-                edge.label.as_str(),
-                edge.to.as_str()
-            )
-        })
-}
-
-fn schema_identifier(value: &str) -> Result<String> {
-    let identifier = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if identifier.is_empty()
-        || identifier
-            .chars()
-            .next()
-            .is_some_and(|ch| ch.is_ascii_digit())
-    {
-        return Err(GrustError::Schema(format!(
-            "invalid schema identifier '{value}'"
-        )));
-    }
-    Ok(identifier)
-}
-
 fn sql_ident(value: &str) -> Result<String> {
     let identifier = schema_identifier(value)?;
     Ok(format!("`{identifier}`"))

@@ -784,21 +784,6 @@ fn step_edge_filter(node_id: &str, step: &Step) -> String {
     }
 }
 
-fn edge_key(edge: &Edge) -> String {
-    edge.id
-        .as_ref()
-        .map(EdgeId::as_str)
-        .map(ToString::to_string)
-        .unwrap_or_else(|| {
-            format!(
-                "{}\u{1f}{}\u{1f}{}",
-                edge.from.as_str(),
-                edge.label.as_str(),
-                edge.to.as_str()
-            )
-        })
-}
-
 fn json_property_fragment(key: &str, encoded_single_prop: &str) -> Result<String> {
     let value = serde_json::from_str::<serde_json::Value>(encoded_single_prop)
         .map_err(|err| GrustError::Serialization(err.to_string()))?;
@@ -834,21 +819,6 @@ fn validate_table_prefix(prefix: &str) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-fn schema_identifier(value: &str) -> Result<String> {
-    let identifier = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    validate_table_prefix(&identifier)?;
-    Ok(identifier)
 }
 
 #[cfg(test)]

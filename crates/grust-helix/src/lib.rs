@@ -4,7 +4,10 @@ use async_trait::async_trait;
 use grust_core::prelude::*;
 use helix_db::{
     Client as HelixClient, DynamicQueryRequest,
-    dsl::prelude::{NodeRef, PropertyInput, SourcePredicate, g, write_batch},
+    dsl::prelude::{
+        DateTime as HelixDateTime, NodeRef, PropertyInput, PropertyValue, SourcePredicate, g,
+        write_batch,
+    },
 };
 use serde_json::json;
 
@@ -266,24 +269,21 @@ impl GraphAdminStore for HelixSdkGraphStore {
 }
 
 fn helix_add_nodes_request(nodes: &[Node]) -> Result<serde_json::Value> {
-    let queries = nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| {
-            json!({
+    let mut queries = Vec::with_capacity(nodes.len());
+    for (index, node) in nodes.iter().enumerate() {
+        queries.push(json!({
                 "Query": {
                     "name": format!("created_{index}"),
                     "steps": [{
                         "AddN": {
                             "label": node.label.as_str(),
-                            "properties": helix_http_properties(node)
+                            "properties": helix_http_properties(node)?
                         }
                     }],
                     "condition": null
                 }
-            })
-        })
-        .collect::<Vec<_>>();
+        }));
+    }
     let returns = (0..nodes.len())
         .map(|index| format!("created_{index}"))
         .collect::<Vec<_>>();
@@ -295,13 +295,15 @@ fn helix_add_nodes_request(nodes: &[Node]) -> Result<serde_json::Value> {
     }))
 }
 
-fn helix_http_properties(node: &Node) -> Vec<serde_json::Value> {
+fn helix_http_properties(node: &Node) -> Result<Vec<serde_json::Value>> {
     node.props
         .iter()
-        .filter_map(|(key, value)| match (key.as_str(), value) {
-            ("labels", _) => None,
-            (_, Value::String(value)) => Some(json!([key, {"Value": {"String": value}}])),
-            (_, _) => None,
+        .filter_map(|(key, value)| {
+            if key == "labels" {
+                None
+            } else {
+                Some(helix_http_property(key, value))
+            }
         })
         .collect()
 }
@@ -328,7 +330,7 @@ fn helix_add_edges_request(edges: &[Edge]) -> Result<serde_json::Value> {
                         "AddE": {
                             "label": relationship_type(edge.label.as_str()),
                             "to": {"Var": target_name},
-                            "properties": helix_http_edge_properties(edge)
+                            "properties": helix_http_edge_properties(edge)?
                         }
                     }
                 ],
@@ -345,7 +347,7 @@ fn helix_add_edges_request(edges: &[Edge]) -> Result<serde_json::Value> {
     }))
 }
 
-fn helix_http_edge_properties(edge: &Edge) -> Vec<serde_json::Value> {
+fn helix_http_edge_properties(edge: &Edge) -> Result<Vec<serde_json::Value>> {
     let mut properties = vec![
         json!(["relationship", {"Value": {"String": edge.label.as_str()}}]),
         json!(["from_id", {"Value": {"String": edge.from.as_str()}}]),
@@ -354,11 +356,36 @@ fn helix_http_edge_properties(edge: &Edge) -> Vec<serde_json::Value> {
     if let Some(id) = &edge.id {
         properties.push(json!(["edge_id", {"Value": {"String": id.as_str()}}]));
     }
-    properties.extend(edge.props.iter().filter_map(|(key, value)| match value {
-        Value::String(value) => Some(json!([key, {"Value": {"String": value}}])),
-        _ => None,
-    }));
-    properties
+    for (key, value) in &edge.props {
+        properties.push(helix_http_property(key, value)?);
+    }
+    Ok(properties)
+}
+
+fn helix_http_property(key: &str, value: &Value) -> Result<serde_json::Value> {
+    Ok(json!([key, {"Value": helix_property_json(value)?}]))
+}
+
+fn helix_property_json(value: &Value) -> Result<serde_json::Value> {
+    match value {
+        Value::Null => Ok(json!({"Null": null})),
+        Value::Bool(value) => Ok(json!({"Boolean": value})),
+        Value::Int(value) => Ok(json!({"I64": value})),
+        Value::Float(value) => Ok(json!({"F64": value})),
+        Value::String(value) => Ok(json!({"String": value})),
+        Value::DateTime(value) => {
+            let datetime = HelixDateTime::parse_rfc3339(value).map_err(|err| {
+                GrustError::Serialization(format!("invalid Helix datetime '{value}': {err}"))
+            })?;
+            Ok(json!({"DateTime": datetime.millis()}))
+        }
+        Value::StringArray(values) => Ok(json!({"StringArray": values})),
+        Value::IntArray(values) => Ok(json!({"I64Array": values})),
+        Value::FloatArray(values) => Ok(json!({"F64Array": values})),
+        Value::Json(_) => Err(GrustError::Unsupported(
+            "Helix backend does not support JSON object properties".to_string(),
+        )),
+    }
 }
 
 fn helix_drop_labels_request(labels: &[String]) -> serde_json::Value {
@@ -390,7 +417,7 @@ async fn post_helix_sdk_nodes(client: &HelixClient, nodes: &[Node]) -> Result<()
         let name = format!("created_{index}");
         batch = batch.var_as(
             &name,
-            g().add_n(node.label.as_str().to_string(), helix_sdk_properties(node)),
+            g().add_n(node.label.as_str().to_string(), helix_sdk_properties(node)?),
         );
         returns.push(name);
     }
@@ -404,16 +431,14 @@ async fn post_helix_sdk_nodes(client: &HelixClient, nodes: &[Node]) -> Result<()
     Ok(())
 }
 
-fn helix_sdk_properties(node: &Node) -> Vec<(String, PropertyInput)> {
+fn helix_sdk_properties(node: &Node) -> Result<Vec<(String, PropertyInput)>> {
     node.props
         .iter()
         .filter_map(|(key, value)| {
             if key == "labels" {
-                return None;
-            }
-            match value {
-                Value::String(value) => Some((key.clone(), PropertyInput::from(value.clone()))),
-                _ => None,
+                None
+            } else {
+                Some(helix_property_input(value).map(|value| (key.clone(), value)))
             }
         })
         .collect()
@@ -436,7 +461,7 @@ async fn post_helix_sdk_edges(client: &HelixClient, edges: &[Edge]) -> Result<()
                     .add_e(
                         relationship_type(edge.label.as_str()),
                         NodeRef::var(&target_name),
-                        helix_sdk_edge_properties(edge),
+                        helix_sdk_edge_properties(edge)?,
                     ),
             );
         returns.push(linked_name);
@@ -451,20 +476,56 @@ async fn post_helix_sdk_edges(client: &HelixClient, edges: &[Edge]) -> Result<()
     Ok(())
 }
 
-fn helix_sdk_edge_properties(edge: &Edge) -> Vec<(String, String)> {
+fn helix_sdk_edge_properties(edge: &Edge) -> Result<Vec<(String, PropertyInput)>> {
     let mut properties = vec![
-        ("relationship".to_string(), edge.label.as_str().to_string()),
-        ("from_id".to_string(), edge.from.as_str().to_string()),
-        ("to_id".to_string(), edge.to.as_str().to_string()),
+        (
+            "relationship".to_string(),
+            PropertyInput::from(edge.label.as_str().to_string()),
+        ),
+        (
+            "from_id".to_string(),
+            PropertyInput::from(edge.from.as_str().to_string()),
+        ),
+        (
+            "to_id".to_string(),
+            PropertyInput::from(edge.to.as_str().to_string()),
+        ),
     ];
     if let Some(id) = &edge.id {
-        properties.push(("edge_id".to_string(), id.as_str().to_string()));
+        properties.push((
+            "edge_id".to_string(),
+            PropertyInput::from(id.as_str().to_string()),
+        ));
     }
-    properties.extend(edge.props.iter().filter_map(|(key, value)| match value {
-        Value::String(value) => Some((key.clone(), value.clone())),
-        _ => None,
-    }));
-    properties
+    for (key, value) in &edge.props {
+        properties.push((key.clone(), helix_property_input(value)?));
+    }
+    Ok(properties)
+}
+
+fn helix_property_input(value: &Value) -> Result<PropertyInput> {
+    let value = match value {
+        Value::Null => PropertyValue::Null,
+        Value::Bool(value) => PropertyValue::Bool(*value),
+        Value::Int(value) => PropertyValue::I64(*value),
+        Value::Float(value) => PropertyValue::F64(*value),
+        Value::String(value) => PropertyValue::String(value.clone()),
+        Value::DateTime(value) => {
+            let datetime = HelixDateTime::parse_rfc3339(value).map_err(|err| {
+                GrustError::Serialization(format!("invalid Helix datetime '{value}': {err}"))
+            })?;
+            PropertyValue::DateTime(datetime.millis())
+        }
+        Value::StringArray(values) => PropertyValue::StringArray(values.clone()),
+        Value::IntArray(values) => PropertyValue::I64Array(values.clone()),
+        Value::FloatArray(values) => PropertyValue::F64Array(values.clone()),
+        Value::Json(_) => {
+            return Err(GrustError::Unsupported(
+                "Helix backend does not support JSON object properties".to_string(),
+            ));
+        }
+    };
+    Ok(PropertyInput::from(value))
 }
 
 async fn send_helix_sdk_read(
@@ -762,24 +823,6 @@ fn helix_base_url(helix_url: &str) -> String {
         .unwrap_or(helix_url)
         .trim_end_matches('/')
         .to_string()
-}
-
-fn relationship_type(value: &str) -> String {
-    let relationship = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if relationship.is_empty() {
-        "RELATED_TO".to_string()
-    } else {
-        relationship
-    }
 }
 
 fn validate_helix_schema(schema: &GraphSchema) -> Result<()> {

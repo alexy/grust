@@ -4,7 +4,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use base64::{Engine as _, engine::general_purpose};
 use grust_core::prelude::*;
 use surrealdb::{
     Surreal,
@@ -57,12 +56,10 @@ impl SurrealHttpGraphStore {
     }
 
     async fn post(&self, query: &str) -> Result<()> {
-        let auth =
-            general_purpose::STANDARD.encode(format!("{}:{}", self.config.user, self.config.pass));
         let response = self
             .client
             .post(&self.config.url)
-            .header("Authorization", format!("Basic {auth}"))
+            .basic_auth(&self.config.user, Some(&self.config.pass))
             .header("Surreal-NS", &self.config.namespace)
             .header("Surreal-DB", &self.config.database)
             .header("Accept", "application/json")
@@ -80,12 +77,10 @@ impl SurrealHttpGraphStore {
     }
 
     async fn post_bootstrap(&self, query: &str) -> Result<()> {
-        let auth =
-            general_purpose::STANDARD.encode(format!("{}:{}", self.config.user, self.config.pass));
         let response = self
             .client
             .post(&self.config.url)
-            .header("Authorization", format!("Basic {auth}"))
+            .basic_auth(&self.config.user, Some(&self.config.pass))
             .header("Accept", "application/json")
             .header("Content-Type", "application/surrealql")
             .body(query.to_string())
@@ -101,12 +96,10 @@ impl SurrealHttpGraphStore {
     }
 
     async fn post_clear(&self, query: &str) -> Result<()> {
-        let auth =
-            general_purpose::STANDARD.encode(format!("{}:{}", self.config.user, self.config.pass));
         let response = self
             .client
             .post(&self.config.url)
-            .header("Authorization", format!("Basic {auth}"))
+            .basic_auth(&self.config.user, Some(&self.config.pass))
             .header("Surreal-NS", &self.config.namespace)
             .header("Surreal-DB", &self.config.database)
             .header("Accept", "application/json")
@@ -124,12 +117,10 @@ impl SurrealHttpGraphStore {
     }
 
     async fn read(&self, query: &str) -> Result<Vec<serde_json::Value>> {
-        let auth =
-            general_purpose::STANDARD.encode(format!("{}:{}", self.config.user, self.config.pass));
         let response = self
             .client
             .post(&self.config.url)
-            .header("Authorization", format!("Basic {auth}"))
+            .basic_auth(&self.config.user, Some(&self.config.pass))
             .header("Surreal-NS", &self.config.namespace)
             .header("Surreal-DB", &self.config.database)
             .header("Accept", "application/json")
@@ -261,20 +252,16 @@ impl SurrealSdkGraphStore {
         .map_err(|err| {
             GrustError::Backend(format!("failed to authenticate with SurrealDB: {err}"))
         })?;
-        Ok(Self { config, db })
-    }
-
-    async fn select_database(&self) -> Result<()> {
-        self.db
-            .use_ns(&self.config.namespace)
-            .use_db(&self.config.database)
+        db.use_ns(&config.namespace)
+            .use_db(&config.database)
             .await
             .map(|_| ())
             .map_err(|err| {
                 GrustError::Backend(format!(
                     "failed to select SurrealDB namespace/database: {err}"
                 ))
-            })
+            })?;
+        Ok(Self { config, db })
     }
 
     async fn query(&self, query: &str) -> Result<()> {
@@ -318,19 +305,16 @@ impl SurrealSdkGraphStore {
 impl GraphStore for SurrealSdkGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
         self.bootstrap().await?;
-        self.select_database().await?;
         self.query(&surreal_schema_query(schema)?).await
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
-        self.select_database().await?;
         self.query(&surreal_upsert_nodes_query(std::slice::from_ref(node))?)
             .await?;
         Ok(PutOutcome::Upserted)
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
-        self.select_database().await?;
         let id_tables = edge_id_tables(edge);
         self.query(&surreal_relate_edges_query(
             std::slice::from_ref(edge),
@@ -341,7 +325,6 @@ impl GraphStore for SurrealSdkGraphStore {
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
-        self.select_database().await?;
         let id_tables = surreal_id_tables(&graph.nodes)?;
         let mut report = LoadReport::default();
         for chunk in graph.nodes.chunks(self.config.batch_size.max(1)) {
@@ -357,7 +340,6 @@ impl GraphStore for SurrealSdkGraphStore {
     }
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
-        self.select_database().await?;
         Ok(self
             .read_nodes(&surreal_get_node_query(id, &self.config))
             .await?
@@ -366,7 +348,6 @@ impl GraphStore for SurrealSdkGraphStore {
     }
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
-        self.select_database().await?;
         let mut edges = self
             .read_edges(&surreal_get_edges_query(&query, &self.config))
             .await?;
@@ -375,7 +356,6 @@ impl GraphStore for SurrealSdkGraphStore {
     }
 
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
-        self.select_database().await?;
         let current = self
             .read_nodes(&surreal_start_nodes_query(&traversal.start, &self.config))
             .await?;
@@ -387,14 +367,8 @@ impl GraphStore for SurrealSdkGraphStore {
 impl GraphAdminStore for SurrealSdkGraphStore {
     async fn bootstrap(&self) -> Result<()> {
         match self.db.query(surreal_bootstrap_query(&self.config)).await {
-            Ok(_) => {
-                self.select_database().await?;
-                Ok(())
-            }
-            Err(err) if err.to_string().contains("already exists") => {
-                self.select_database().await?;
-                Ok(())
-            }
+            Ok(_) => Ok(()),
+            Err(err) if err.to_string().contains("already exists") => Ok(()),
             Err(err) => Err(GrustError::Backend(format!(
                 "SurrealDB SDK bootstrap failed: {err}"
             ))),
@@ -402,7 +376,6 @@ impl GraphAdminStore for SurrealSdkGraphStore {
     }
 
     async fn clear(&self) -> Result<()> {
-        self.select_database().await?;
         self.query(&surreal_delete_tables_query(&self.config)).await
     }
 }
@@ -1005,24 +978,6 @@ fn surreal_value(value: &Value) -> Result<String> {
         Value::Json(value) => {
             serde_json::to_string(value).map_err(|err| GrustError::Serialization(err.to_string()))
         }
-    }
-}
-
-fn relationship_type(value: &str) -> String {
-    let relationship = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if relationship.is_empty() {
-        "RELATED_TO".to_string()
-    } else {
-        relationship
     }
 }
 

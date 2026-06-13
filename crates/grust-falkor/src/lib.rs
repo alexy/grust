@@ -339,24 +339,6 @@ fn cypher_string(value: &str) -> String {
     escaped
 }
 
-fn relationship_type(value: &str) -> String {
-    let relationship = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if relationship.is_empty() {
-        "RELATED_TO".to_string()
-    } else {
-        relationship
-    }
-}
-
 fn validate_label_path(labels: &str) -> Result<()> {
     for label in labels.split(':') {
         validate_label(label)?;

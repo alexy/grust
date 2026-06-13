@@ -107,21 +107,6 @@ pub fn edge_to_state(
     })
 }
 
-pub fn edge_key(edge: &Edge) -> String {
-    edge.id
-        .as_ref()
-        .map(EdgeId::as_str)
-        .map(ToString::to_string)
-        .unwrap_or_else(|| {
-            format!(
-                "{}\u{1f}{}\u{1f}{}",
-                edge.from.as_str(),
-                edge.label.as_str(),
-                edge.to.as_str()
-            )
-        })
-}
-
 fn id_key(id: &str) -> JsonValue {
     let mut key = JsonMap::new();
     key.insert("id".to_string(), JsonValue::String(id.to_string()));

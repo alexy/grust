@@ -27,6 +27,31 @@ fn builder_dedupes_nodes_and_edges() {
 }
 
 #[test]
+fn normalizes_relationship_types() {
+    assert_eq!(relationship_type("presents"), "PRESENTS");
+    assert_eq!(relationship_type("member-of"), "MEMBER_OF");
+    assert_eq!(relationship_type(""), "RELATED_TO");
+}
+
+#[test]
+fn normalizes_schema_identifiers() {
+    assert_eq!(
+        schema_identifier("Person Profile").unwrap(),
+        "person_profile"
+    );
+    assert!(schema_identifier("1bad").is_err());
+}
+
+#[test]
+fn edge_key_prefers_explicit_id_then_structural_identity() {
+    let edge = Edge::new("KNOWS", "a", "b", Props::new()).with_id("edge-1");
+    assert_eq!(edge_key(&edge), "edge-1");
+
+    let edge = Edge::new("KNOWS", "a", "b", Props::new());
+    assert_eq!(edge_key(&edge), "a\u{1f}KNOWS\u{1f}b");
+}
+
+#[test]
 fn graph_loads_from_yaml() {
     let graph = Graph::from_yaml(
         r#"

@@ -4,8 +4,17 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
-## 2026-06-12 - Unreleased
+## 2026-06-12 - 0.6.3
 
+- Preserved supported non-string properties in Helix node and edge writes
+  instead of silently dropping them; unsupported JSON object properties now
+  return an explicit error.
+- Moved shared relationship-type and structural edge-key helpers into
+  `grust-core`, reducing duplicated backend lowering logic.
+- Tightened pgGraph JSON property-key validation so generated JSONB
+  expressions only accept safe identifier-shaped keys.
+- Simplified SurrealDB HTTP authentication through reqwest's Basic auth helper
+  and selected the SurrealDB SDK namespace/database once at connection time.
 - Added `docs/INTEGRATION.md` as the contributor-facing guide for backend
   integration tests, including Docker, source-checkout, quick, full, and CI
   workflows.

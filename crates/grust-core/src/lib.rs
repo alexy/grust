@@ -675,6 +675,76 @@ impl Edge {
     }
 }
 
+/// Normalizes an edge label into an uppercase backend relationship type.
+///
+/// Non-ASCII-alphanumeric characters become underscores. Empty labels fall
+/// back to `RELATED_TO`.
+pub fn relationship_type(value: &str) -> String {
+    let relationship = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if relationship.is_empty() {
+        "RELATED_TO".to_string()
+    } else {
+        relationship
+    }
+}
+
+/// Normalizes arbitrary schema text into a lower_snake_case backend identifier.
+///
+/// This helper is for SQL-like backends that require identifiers to start with a
+/// non-digit ASCII alphanumeric or underscore character after normalization.
+pub fn schema_identifier(value: &str) -> Result<String> {
+    let identifier = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if identifier.is_empty()
+        || identifier
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_digit())
+    {
+        return Err(GrustError::Schema(format!(
+            "invalid schema identifier '{value}'"
+        )));
+    }
+    Ok(identifier)
+}
+
+/// Returns the stable key used by tabular/export backends for an edge.
+///
+/// Explicit edge IDs win. Otherwise the structural key joins `from`, `label`,
+/// and `to` with U+001F (Unit Separator). Callers that accept arbitrary IDs or
+/// labels should reject U+001F before relying on reversibility.
+pub fn edge_key(edge: &Edge) -> String {
+    edge.id
+        .as_ref()
+        .map(EdgeId::as_str)
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "{}\u{1f}{}\u{1f}{}",
+                edge.from.as_str(),
+                edge.label.as_str(),
+                edge.to.as_str()
+            )
+        })
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Graph {
     pub nodes: Vec<Node>,
@@ -1764,7 +1834,8 @@ pub mod prelude {
         Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, EdgeUniqueness, Field, FieldType,
         Graph, GraphAdminStore, GraphBuilder, GraphMutation, GraphMutationStore, GraphSchema,
         GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType,
-        Props, PutOutcome, Result, Start, Step, Traversal, Value,
+        Props, PutOutcome, Result, Start, Step, Traversal, Value, edge_key, relationship_type,
+        schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

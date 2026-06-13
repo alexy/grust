@@ -149,6 +149,14 @@ fn rejects_invalid_config_identifiers() {
     assert!(validate_identifier("grust-nodes").is_err());
 }
 
+#[test]
+fn rejects_unsafe_json_property_keys() {
+    assert!(validate_json_key("safe_key_1").is_ok());
+    assert!(validate_json_key("display-name").is_err());
+    assert!(validate_json_key("'} OR 1=1--").is_err());
+    assert!(validate_json_key("").is_err());
+}
+
 #[tokio::test]
 #[ignore = "requires PostgreSQL with the pgGraph graph extension"]
 async fn live_postgres_put_read_traverse_and_schema() {
