@@ -20,9 +20,9 @@ KEEP_RUNNING=0
 MODE="${GRUST_INTEGRATION_MODE:-auto}"
 PROFILE="${GRUST_INTEGRATION_PROFILE:-}"
 
-ALL_BACKENDS=(sail surreal falkor helix lancedb cocoindex pggraph)
-DOCKER_BACKENDS=(surreal falkor lancedb cocoindex pggraph)
-QUICK_BACKENDS=(lancedb cocoindex)
+ALL_BACKENDS=(sail surreal falkor helix ladybug lancedb cocoindex pggraph)
+DOCKER_BACKENDS=(surreal falkor ladybug lancedb cocoindex pggraph)
+QUICK_BACKENDS=(ladybug lancedb cocoindex)
 
 usage() {
   cat <<'USAGE'
@@ -34,10 +34,10 @@ Starts configured local backend services when needed, then runs live backend
 tests. A live test fails if its backend is absent; no successful run is produced
 by silently skipping an unavailable service.
 
-Backends: sail, surreal, falkor, helix, lancedb, cocoindex, pggraph
+Backends: sail, surreal, falkor, helix, ladybug, lancedb, cocoindex, pggraph
 
 Profiles:
-  quick   Local integration checks that do not need daemons: lancedb, cocoindex
+  quick   Local integration checks that do not need daemons: ladybug, lancedb, cocoindex
   docker  New-user path: Docker-backed services plus local checks
   all     Full maintainer matrix, including source/manual-only backends
 
@@ -123,7 +123,7 @@ if [[ ${#BACKENDS[@]} -eq 0 ]]; then
     BACKENDS=($(profile_backends "$PROFILE"))
   else
     # shellcheck disable=SC2206
-    BACKENDS=(${GRUST_INTEGRATION_BACKENDS:-sail surreal falkor helix lancedb cocoindex pggraph})
+    BACKENDS=(${GRUST_INTEGRATION_BACKENDS:-sail surreal falkor helix ladybug lancedb cocoindex pggraph})
   fi
 fi
 
@@ -340,7 +340,7 @@ start_pggraph() {
 
 backend_kind() {
   case "$1" in
-    lancedb|cocoindex)
+    ladybug|lancedb|cocoindex)
       echo "local"
       ;;
     surreal|falkor|pggraph)
@@ -486,6 +486,9 @@ run_backend() {
       start_helix
       wait_port helix "$HELIX_HOST" "$HELIX_PORT"
       cargo test -p grust-helix -- --ignored --test-threads=1
+      ;;
+    ladybug)
+      cargo test -p grust-ladybug -- --test-threads=1
       ;;
     lancedb)
       cargo test -p grust-lancedb -- --ignored --test-threads=1

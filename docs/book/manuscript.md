@@ -828,6 +828,7 @@ flowchart TB
   graphdb --> falkor["FalkorDB\nGRAPH.QUERY writes"]
   graphdb --> helix["HelixDB\nHTTP or SDK\nreads + traversal"]
   graphdb --> surreal["SurrealDB\nschemafull tables\nreads + traversal"]
+  graphdb --> ladybug["LadybugDB\nembedded Cypher\nschema-backed tables"]
   tabular --> lance["LanceDB\nuniversal + typed Arrow tables"]
   tabular --> pg["pgGraph\nSQL traversal + typed views"]
   tabular --> sail["Sail\nuniversal + typed Delta tables"]
@@ -889,6 +890,27 @@ read/traversal surface, while schema-labeled rows are mirrored into tables such
 as `grust_node_person` or `grust_edge_presents` with typed columns for declared
 fields. That gives analytical consumers and future vector extensions a native
 columnar surface without giving up the backend-neutral graph model.
+
+## LadybugDB
+
+`grust-ladybug` embeds LadybugDB directly through the Rust `lbug` crate. It is
+the durable local graph-database backend: no Docker service, no HTTP bridge,
+and no separate daemon. The store opens either an in-memory Ladybug database or
+an on-disk Ladybug directory and creates Grust-managed Ladybug node and
+relationship tables from graph labels.
+
+Ladybug is schemaful, so the backend keeps a small metadata layer for node IDs,
+labels, and relationship table definitions. Graph loads create any needed
+tables before opening a transaction, then write nodes and edges with Cypher
+`MERGE` statements. Reads reconstruct Grust `Node` and `Edge` values from the
+managed tables, while traversal evaluates the portable Grust traversal IR by
+walking Ladybug relationship tables and reading target nodes through the same
+`GraphStore` contract.
+
+The first implementation stores Grust properties as JSON text for portable
+round trips. Later schema lowering can add typed Ladybug columns, full-text
+indexes, vector indexes, and direct graph-RAG extension traits without changing
+the core graph model.
 
 ## pgGraph
 
@@ -1216,7 +1238,7 @@ forcing every backend to look the same.
 # 12. Where Grust Can Grow
 
 The next natural step is to deepen graph-native read and traversal support
-across the backends. HelixDB and SurrealDB now satisfy the portable
+across the backends. HelixDB, LadybugDB, and SurrealDB now satisfy the portable
 `GraphStore` read and traversal surface, while FalkorDB remains primarily a
 write and indexing adapter. Further work can push more traversal work into
 backend-native query forms and add richer result shapes.

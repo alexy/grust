@@ -6,6 +6,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added `grust-ladybug`, an embedded LadybugDB backend using the Rust `lbug`
+  crate directly for schema-backed graph writes, reads, and traversal.
+- Proposed `grust-ladybug` as a schema-first embedded LadybugDB backend, with
+  notes on storage layout, `lbug` integration, traversal lowering, and testing.
+
 ## 2026-06-13 - 0.7.0
 
 - Added `#[must_use]` diagnostics to graph builder completion methods so

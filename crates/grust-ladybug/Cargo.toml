@@ -1,0 +1,20 @@
+[package]
+name = "grust-ladybug"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "LadybugDB GraphStore backend for Grust."
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+grust-core = { version = "0.7.0", path = "../grust-core" }
+lbug = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }

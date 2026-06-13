@@ -48,6 +48,7 @@ crates/
   grust-core/     Core model, builder, schema, traversal IR, GraphStore trait
   grust-falkor/   FalkorDB writer using Redis GRAPH.QUERY
   grust-helix/    HelixDB writer using HTTP or the Rust SDK
+  grust-ladybug/  Embedded LadybugDB store using the Rust lbug crate
   grust-lancedb/  LanceDB store using the Rust SDK
   grust-memory/   Deterministic in-memory store for tests and local use
   grust-pggraph/  PostgreSQL/pgGraph store over universal graph tables
@@ -106,6 +107,7 @@ scripts/integration-test.sh --backend sail
 scripts/integration-test.sh --backend surreal
 scripts/integration-test.sh --backend falkor
 scripts/integration-test.sh --backend helix
+scripts/integration-test.sh --backend ladybug
 scripts/integration-test.sh --backend lancedb
 scripts/integration-test.sh --backend cocoindex
 scripts/integration-test.sh --backend pggraph
@@ -295,7 +297,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.0", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.7.0", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
@@ -304,6 +306,12 @@ supports graph replacement with `GRAPH.DELETE`.
 `grust-helix` provides both `HelixHttpGraphStore` and `HelixSdkGraphStore`.
 Both batch node and edge writes, preserve supported scalar and array properties,
 and use configured labels for replacement.
+
+`grust-ladybug` embeds LadybugDB directly through the Rust `lbug` crate. It
+creates Grust-managed Ladybug node and relationship tables from graph labels,
+persists label/table metadata for readback, writes graph loads in transactions,
+and exposes backend-neutral reads and bounded traversal without starting a
+daemon.
 
 `grust-cocoindex` converts `Graph` values into serializable node and
 relationship states with stable keys, endpoint labels, and plain JSON
@@ -563,7 +571,8 @@ Implemented:
   the backend can provide them
 - CocoIndex-style graph export adapter
 - in-memory backend
-- FalkorDB, HelixDB, LanceDB, pgGraph, Sail, and SurrealDB backend crates
+- FalkorDB, HelixDB, LadybugDB, LanceDB, pgGraph, Sail, and SurrealDB backend
+  crates
 
 Planned:
 

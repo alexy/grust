@@ -25,6 +25,7 @@ source checkout:
 - SurrealDB through Docker Compose.
 - FalkorDB through Docker Compose.
 - pgGraph through Docker Compose.
+- LadybugDB as an embedded local integration test.
 - LanceDB as a local storage integration test.
 - CocoIndex as a local export integration test.
 
@@ -45,6 +46,7 @@ scripts/integration-test.sh --profile all
 
 `quick` runs only local integration checks that do not need daemons:
 
+- LadybugDB
 - LanceDB
 - CocoIndex
 
@@ -52,6 +54,7 @@ scripts/integration-test.sh --profile all
 
 - SurrealDB
 - FalkorDB
+- LadybugDB
 - LanceDB
 - CocoIndex
 - pgGraph
@@ -62,6 +65,7 @@ scripts/integration-test.sh --profile all
 - SurrealDB
 - FalkorDB
 - HelixDB
+- LadybugDB
 - LanceDB
 - CocoIndex
 - pgGraph
@@ -202,9 +206,10 @@ That command will use the local service on `5432` only if it exposes the
 `graph` extension. Otherwise it will start Grust's own pgGraph container on a
 free high port such as `55432`.
 
-LanceDB and CocoIndex do not need daemon startup. Their integration tests still
-exercise real local storage/export behavior and are included in Docker and all
-profiles.
+LadybugDB, LanceDB, and CocoIndex do not need daemon startup. LadybugDB runs
+through the embedded Rust `lbug` crate, LanceDB exercises real local storage,
+and CocoIndex exercises export/import behavior. All three are included in
+Docker and all profiles.
 
 ## CI Strategy
 
