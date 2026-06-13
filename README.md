@@ -205,7 +205,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.6", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.6.7", features = ["memory"] }
 ```
 
 Then load and traverse a graph:
@@ -284,7 +284,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.6", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.6.7", features = ["falkor", "helix", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
@@ -308,7 +308,8 @@ tables.
 `grust-pggraph` stores Grust graphs in universal PostgreSQL tables, registers
 those tables with the pgGraph extension, supports SQL-backed reads/traversal,
 can build a pgGraph projection for graph-index experiments, and lowers
-`GraphSchema` into typed label views and expression indexes.
+`GraphSchema` into typed label views and expression indexes. Its mutation
+batches are wrapped in PostgreSQL transactions.
 
 `grust-sail` stores graphs as Spark DataFrames through Sail's SparkConnect
 server, lowers traversal IR to Spark SQL joins, and can mirror schema-labeled
@@ -321,7 +322,9 @@ relation tables. Reads and traversal batch target-node lookups where possible.
 Generic edge reads need `SurrealConfig.relationships`; if that list is empty,
 the backend returns a configuration error instead of silently scanning no
 relation tables. Explicit edge-label reads can still address a known relation
-table directly.
+table directly. Node deletes also need configured relationship labels so
+incident relation rows can be removed. HTTP and SDK mutation batches are
+wrapped in SurrealDB transactions.
 `GraphSchema` lowers to Surreal `DEFINE TABLE` and `DEFINE FIELD` statements.
 
 ## Traversal IR
@@ -538,6 +541,8 @@ Implemented:
 - schema structs
 - traversal structs and fluent helpers
 - async `GraphStore` trait
+- ordered `GraphMutationStore` trait, with transactional batch overrides where
+  the backend can provide them
 - CocoIndex-style graph export adapter
 - in-memory backend
 - FalkorDB, HelixDB, LanceDB, pgGraph, Sail, and SurrealDB backend crates

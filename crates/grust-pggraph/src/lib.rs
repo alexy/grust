@@ -257,6 +257,40 @@ impl GraphAdminStore for PgGraphStore {
     }
 }
 
+#[async_trait]
+impl GraphMutationStore for PgGraphStore {
+    async fn delete_node(&self, id: &NodeId) -> Result<()> {
+        self.execute(&delete_node_sql(&self.nodes_table(), id))
+            .await?;
+        if self.config.auto_build {
+            self.build_projection().await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
+        self.execute(&delete_edge_sql(&self.edges_table(), from, label, to))
+            .await?;
+        if self.config.auto_build {
+            self.build_projection().await?;
+        }
+        Ok(())
+    }
+
+    async fn apply_mutations(&self, mutations: &[GraphMutation]) -> Result<()> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
+        self.execute(&apply_mutations_sql(
+            &self.config,
+            &self.nodes_table(),
+            &self.edges_table(),
+            mutations,
+        )?)
+        .await
+    }
+}
+
 fn bootstrap_sql(config: &PgGraphConfig, nodes_table: &str, edges_table: &str) -> Result<String> {
     let schema = quote_ident(&config.schema);
     Ok(format!(
@@ -476,6 +510,62 @@ fn upsert_edges_sql(table: &str, edges: &[Edge]) -> Result<String> {
             id = EXCLUDED.id,
             props = EXCLUDED.props"
     ))
+}
+
+fn delete_node_sql(nodes_table: &str, id: &NodeId) -> String {
+    format!(
+        "DELETE FROM {nodes_table} WHERE id = {}",
+        sql_str(id.as_str())
+    )
+}
+
+fn delete_edge_sql(edges_table: &str, from: &NodeId, label: &Label, to: &NodeId) -> String {
+    format!(
+        "DELETE FROM {edges_table} WHERE from_id = {} AND label = {} AND to_id = {}",
+        sql_str(from.as_str()),
+        sql_str(label.as_str()),
+        sql_str(to.as_str())
+    )
+}
+
+fn mutation_sql(nodes_table: &str, edges_table: &str, mutation: &GraphMutation) -> Result<String> {
+    Ok(match mutation {
+        GraphMutation::UpsertNode(node) => {
+            upsert_nodes_sql(nodes_table, std::slice::from_ref(node))?
+        }
+        GraphMutation::DeleteNode(id) => delete_node_sql(nodes_table, id),
+        GraphMutation::UpsertEdge(edge) => {
+            upsert_edges_sql(edges_table, std::slice::from_ref(edge))?
+        }
+        GraphMutation::DeleteEdge {
+            from, label, to, ..
+        } => delete_edge_sql(edges_table, from, label, to),
+    })
+}
+
+fn apply_mutations_sql(
+    config: &PgGraphConfig,
+    nodes_table: &str,
+    edges_table: &str,
+    mutations: &[GraphMutation],
+) -> Result<String> {
+    let mut statements = vec!["BEGIN".to_string()];
+    for mutation in mutations {
+        statements.push(mutation_sql(nodes_table, edges_table, mutation)?);
+    }
+    if config.auto_build {
+        statements.push(format!(
+            "SELECT * FROM graph.build({})",
+            sql_str(config.build_mode.as_pggraph_mode())
+        ));
+    }
+    statements.push("COMMIT".to_string());
+    Ok(statements
+        .into_iter()
+        .map(|statement| statement.trim().trim_end_matches(';').to_string())
+        .filter(|statement| !statement.is_empty())
+        .collect::<Vec<_>>()
+        .join(";\n"))
 }
 
 fn traversal_sql(nodes_table: &str, edges_table: &str, traversal: &Traversal) -> Result<String> {

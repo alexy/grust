@@ -4,6 +4,15 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
+## 2026-06-13 - 0.6.7
+
+- Documented that the default `GraphMutationStore::apply_mutations`
+  implementation is ordered but non-atomic.
+- Added transactional `apply_mutations` overrides for pgGraph and SurrealDB so
+  mutation batches are wrapped in backend transactions.
+- Added pgGraph mutation support and SurrealDB HTTP/SDK mutation support for
+  node deletes, edge deletes, and ordered mutation batches.
+
 ## 2026-06-13 - 0.6.6
 
 - Replaced LanceDB `Start::NodesByProperty` JSON substring matching with exact

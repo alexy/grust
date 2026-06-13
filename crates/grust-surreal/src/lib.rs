@@ -235,6 +235,27 @@ impl GraphAdminStore for SurrealHttpGraphStore {
     }
 }
 
+#[async_trait]
+impl GraphMutationStore for SurrealHttpGraphStore {
+    async fn delete_node(&self, id: &NodeId) -> Result<()> {
+        self.post(&surreal_delete_node_query(id, &self.config)?)
+            .await
+    }
+
+    async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
+        self.post(&surreal_delete_edge_query(from, label, to, &self.config))
+            .await
+    }
+
+    async fn apply_mutations(&self, mutations: &[GraphMutation]) -> Result<()> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
+        self.post(&surreal_apply_mutations_query(mutations, &self.config)?)
+            .await
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SurrealSdkGraphStore {
     config: SurrealConfig,
@@ -387,6 +408,27 @@ impl GraphAdminStore for SurrealSdkGraphStore {
 
     async fn clear(&self) -> Result<()> {
         self.query(&surreal_delete_tables_query(&self.config)).await
+    }
+}
+
+#[async_trait]
+impl GraphMutationStore for SurrealSdkGraphStore {
+    async fn delete_node(&self, id: &NodeId) -> Result<()> {
+        self.query(&surreal_delete_node_query(id, &self.config)?)
+            .await
+    }
+
+    async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
+        self.query(&surreal_delete_edge_query(from, label, to, &self.config))
+            .await
+    }
+
+    async fn apply_mutations(&self, mutations: &[GraphMutation]) -> Result<()> {
+        if mutations.is_empty() {
+            return Ok(());
+        }
+        self.query(&surreal_apply_mutations_query(mutations, &self.config)?)
+            .await
     }
 }
 
@@ -772,6 +814,91 @@ fn surreal_relate_edges_query(
         })
         .collect::<Result<Vec<_>>>()?,
     );
+    Ok(statements.join("\n"))
+}
+
+fn surreal_delete_node_query(id: &NodeId, config: &SurrealConfig) -> Result<String> {
+    if config.relationships.is_empty() {
+        return Err(GrustError::Backend(
+            "SurrealConfig.relationships is empty; node deletes need configured relationship labels to remove incident edges".to_string(),
+        ));
+    }
+    let records = surreal_node_tables_for_id(id, config)
+        .into_iter()
+        .map(|table| {
+            format!(
+                "type::record({}, {})",
+                surreal_string(&table),
+                surreal_string(id.as_str())
+            )
+        })
+        .collect::<Vec<_>>();
+    let incident_clause = records
+        .iter()
+        .flat_map(|record| [format!("in = {record}"), format!("out = {record}")])
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let mut statements = surreal_edge_tables(None, config)
+        .into_iter()
+        .map(|table| format!("DELETE {table} WHERE {incident_clause};"))
+        .collect::<Vec<_>>();
+    statements.extend(
+        records
+            .into_iter()
+            .map(|record| format!("DELETE {record};")),
+    );
+    Ok(statements.join("\n"))
+}
+
+fn surreal_delete_edge_query(
+    from: &NodeId,
+    label: &Label,
+    to: &NodeId,
+    config: &SurrealConfig,
+) -> String {
+    let table = surreal_table_name(&relationship_type(label.as_str()));
+    let from_records = surreal_node_tables_for_id(from, config);
+    let to_records = surreal_node_tables_for_id(to, config);
+    let where_clause = from_records
+        .iter()
+        .flat_map(|from_table| {
+            to_records.iter().map(move |to_table| {
+                format!(
+                    "(in = type::record({}, {}) AND out = type::record({}, {}))",
+                    surreal_string(from_table),
+                    surreal_string(from.as_str()),
+                    surreal_string(to_table),
+                    surreal_string(to.as_str())
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    format!("DELETE {table} WHERE {where_clause};")
+}
+
+fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> Result<String> {
+    match mutation {
+        GraphMutation::UpsertNode(node) => surreal_upsert_nodes_query(std::slice::from_ref(node)),
+        GraphMutation::DeleteNode(id) => surreal_delete_node_query(id, config),
+        GraphMutation::UpsertEdge(edge) => {
+            surreal_relate_edges_query(std::slice::from_ref(edge), &edge_id_tables(edge))
+        }
+        GraphMutation::DeleteEdge {
+            from, label, to, ..
+        } => Ok(surreal_delete_edge_query(from, label, to, config)),
+    }
+}
+
+fn surreal_apply_mutations_query(
+    mutations: &[GraphMutation],
+    config: &SurrealConfig,
+) -> Result<String> {
+    let mut statements = vec!["BEGIN TRANSACTION;".to_string()];
+    for mutation in mutations {
+        statements.push(surreal_mutation_query(mutation, config)?);
+    }
+    statements.push("COMMIT TRANSACTION;".to_string());
     Ok(statements.join("\n"))
 }
 

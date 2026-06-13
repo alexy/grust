@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.6", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.6.7", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.6.6", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.6.6", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.6.7", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -883,6 +883,7 @@ The backend can bootstrap the `graph` extension, create tables and indexes,
 register graph tables, and optionally build the pgGraph projection. Reads use
 SQL against the universal tables. Traversal is lowered to SQL joins over those
 tables, with pgGraph projection support available as the backend matures.
+Mutation batches are wrapped in PostgreSQL transactions.
 
 Schema application adds typed label views and expression indexes. For example,
 a `Person` node schema with `name: String` and `age: Int` can produce a
@@ -929,17 +930,18 @@ dynamic-query path; backend-native schema-file generation can build on that same
 `GraphSchema` contract later.
 
 The SurrealDB backend also has HTTP and SDK stores. It can bootstrap, clear,
-upsert nodes, relate edges, read nodes and edges, and execute traversal
-hop-by-hop through the `GraphStore` contract. Applying a schema lowers node and
-edge declarations to Surreal `DEFINE TABLE` and `DEFINE FIELD` statements so
-the backend can run in schemafull mode where the schema calls for it. Reads use
-configured labels and relationships, plus ID-derived table names, to find
-records across Surreal's label-specific tables. Generic edge reads require
-`SurrealConfig.relationships`; when that list is empty, the backend returns a
-configuration error instead of silently scanning no relation tables. Explicit
-edge-label reads can still target a known relation table directly. Traversal
-batches target-node reads per step through `get_nodes`, avoiding a serial node
-lookup for every edge in a fan-out.
+upsert nodes, relate edges, delete nodes and edges, read nodes and edges, and
+execute traversal hop-by-hop through the `GraphStore` contract. Applying a
+schema lowers node and edge declarations to Surreal `DEFINE TABLE` and
+`DEFINE FIELD` statements so the backend can run in schemafull mode where the
+schema calls for it. Reads use configured labels and relationships, plus
+ID-derived table names, to find records across Surreal's label-specific tables.
+Generic edge reads and node deletes require `SurrealConfig.relationships`; when
+that list is empty, the backend returns a configuration error instead of
+silently scanning no relation tables. Explicit edge-label reads and deletes can
+still target a known relation table directly. Traversal batches target-node
+reads per step through `get_nodes`, avoiding a serial node lookup for every
+edge in a fan-out. Mutation batches are wrapped in SurrealDB transactions.
 
 ## CocoIndex
 
@@ -1203,7 +1205,12 @@ pub enum GraphMutation {
 
 That serves CocoIndex-style target-state systems, streaming pipelines, and
 ordinary applications that need to apply deltas instead of replacing whole
-graphs.
+graphs. The default `apply_mutations` implementation is ordered but not atomic:
+if a backend uses the default and a later mutation fails, earlier mutations may
+already be committed. Backends with real transaction support can override that
+method. The pgGraph backend wraps mutation batches in PostgreSQL transactions,
+and the SurrealDB HTTP and SDK stores wrap mutation batches in SurrealDB
+transactions.
 
 # Conclusion
 

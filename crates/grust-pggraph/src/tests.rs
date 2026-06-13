@@ -98,6 +98,59 @@ fn edge_upsert_uses_grust_edge_identity() {
 }
 
 #[test]
+fn mutation_batch_sql_wraps_ordered_mutations_in_transaction() {
+    let mutations = vec![
+        GraphMutation::UpsertNode(Node::new("Person", "person-1", Props::new())),
+        GraphMutation::UpsertNode(Node::new("Talk", "talk-1", Props::new())),
+        GraphMutation::UpsertEdge(Edge::new("PRESENTS", "person-1", "talk-1", Props::new())),
+        GraphMutation::DeleteEdge {
+            id: None,
+            from: NodeId::new("person-1"),
+            label: Label::new("PRESENTS"),
+            to: NodeId::new("talk-1"),
+        },
+        GraphMutation::DeleteNode(NodeId::new("person-1")),
+    ];
+    let sql = apply_mutations_sql(
+        &PgGraphConfig::default(),
+        "\"public\".\"grust_nodes\"",
+        "\"public\".\"grust_edges\"",
+        &mutations,
+    )
+    .unwrap();
+
+    assert!(sql.starts_with("BEGIN;\n"));
+    assert!(sql.ends_with(";\nCOMMIT"));
+    assert!(sql.contains("INSERT INTO \"public\".\"grust_nodes\""));
+    assert!(sql.contains("INSERT INTO \"public\".\"grust_edges\""));
+    assert!(sql.contains("DELETE FROM \"public\".\"grust_edges\" WHERE from_id = 'person-1' AND label = 'PRESENTS' AND to_id = 'talk-1'"));
+    assert!(sql.contains("DELETE FROM \"public\".\"grust_nodes\" WHERE id = 'person-1'"));
+}
+
+#[test]
+fn mutation_batch_sql_auto_builds_before_commit() {
+    let config = PgGraphConfig {
+        auto_build: true,
+        ..PgGraphConfig::default()
+    };
+    let sql = apply_mutations_sql(
+        &config,
+        "\"public\".\"grust_nodes\"",
+        "\"public\".\"grust_edges\"",
+        &[GraphMutation::UpsertNode(Node::new(
+            "Person",
+            "person-1",
+            Props::new(),
+        ))],
+    )
+    .unwrap();
+
+    let build = sql.find("SELECT * FROM graph.build").unwrap();
+    let commit = sql.find("COMMIT").unwrap();
+    assert!(build < commit);
+}
+
+#[test]
 fn traversal_sql_builds_exact_out_step() {
     let traversal = Traversal::from_node("person-1")
         .out("PRESENTS")

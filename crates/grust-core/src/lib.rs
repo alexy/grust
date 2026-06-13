@@ -1827,6 +1827,11 @@ pub trait GraphMutationStore: GraphStore {
     async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()>;
 
     /// Applies mutations in order, stopping at the first error.
+    ///
+    /// The default implementation calls the single-mutation methods one at a
+    /// time and is not atomic: if a later mutation fails, earlier successful
+    /// mutations are not rolled back. Backends with transaction support should
+    /// override this method and apply the whole slice in one transaction.
     async fn apply_mutations(&self, mutations: &[GraphMutation]) -> Result<()> {
         for mutation in mutations {
             match mutation {

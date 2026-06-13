@@ -137,6 +137,70 @@ fn relate_edges_are_idempotent_by_endpoints() {
 }
 
 #[test]
+fn mutation_batch_query_wraps_ordered_mutations_in_transaction() {
+    let config = SurrealConfig {
+        labels: vec!["Person".to_string(), "Talk".to_string()],
+        relationships: vec!["presents".to_string()],
+        ..SurrealConfig::default()
+    };
+    let query = surreal_apply_mutations_query(
+        &[
+            GraphMutation::UpsertNode(Node::new("Person", "person-1", Props::new())),
+            GraphMutation::UpsertNode(Node::new("Talk", "talk-1", Props::new())),
+            GraphMutation::UpsertEdge(Edge::new("presents", "person-1", "talk-1", Props::new())),
+            GraphMutation::DeleteEdge {
+                id: None,
+                from: NodeId::new("person-1"),
+                label: Label::new("presents"),
+                to: NodeId::new("talk-1"),
+            },
+            GraphMutation::DeleteNode(NodeId::new("person-1")),
+        ],
+        &config,
+    )
+    .unwrap();
+
+    assert!(query.starts_with("BEGIN TRANSACTION;\n"));
+    assert!(query.ends_with("\nCOMMIT TRANSACTION;"));
+    assert!(query.contains("UPSERT type::record(\"person\", \"person-1\")"));
+    assert!(query.contains("RELATE"));
+    assert!(query.contains("->presents->"));
+    assert!(query.contains("type::record(\"person\", \"person-1\")"));
+    assert!(query.contains("type::record(\"talk\", \"talk-1\")"));
+    assert!(query.contains("DELETE presents WHERE"));
+    assert!(query.contains("DELETE type::record(\"person\", \"person-1\");"));
+}
+
+#[test]
+fn delete_node_query_requires_relationship_config() {
+    let err = surreal_delete_node_query(&NodeId::new("person-1"), &SurrealConfig::default())
+        .expect_err("node deletes require configured relationships");
+
+    assert!(
+        err.to_string()
+            .contains("SurrealConfig.relationships is empty")
+    );
+}
+
+#[test]
+fn delete_edge_query_uses_candidate_endpoint_tables() {
+    let config = SurrealConfig {
+        labels: vec!["Person".to_string(), "Talk".to_string()],
+        ..SurrealConfig::default()
+    };
+    let query = surreal_delete_edge_query(
+        &NodeId::new("person-1"),
+        &Label::new("presents"),
+        &NodeId::new("talk-1"),
+        &config,
+    );
+
+    assert!(query.starts_with("DELETE presents WHERE"));
+    assert!(query.contains("type::record(\"person\", \"person-1\")"));
+    assert!(query.contains("type::record(\"talk\", \"talk-1\")"));
+}
+
+#[test]
 fn get_node_query_scans_candidate_tables_in_one_statement() {
     let config = SurrealConfig {
         labels: vec!["Talk".to_string(), "Person".to_string()],
