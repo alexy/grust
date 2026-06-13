@@ -6,6 +6,20 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 2026-06-13 - 0.7.2
+
+- Extended `grust-ladybug` to expose Ladybug typed and untyped graph modes
+  explicitly through `LadybugGraphMode`, `LadybugConfig::typed`, and
+  `LadybugConfig::untyped`.
+- Changed `grust-ladybug` to preserve an applied `GraphSchema` and validate
+  later node, edge, and graph writes against it, while keeping untyped dynamic
+  graph writes as the default mode.
+- Changed Ladybug `clear` to recreate applied schema tables so typed-mode
+  stores remain ready for validated writes after reset.
+- Updated README, the Ladybug backend proposal, the Grust book, and the
+  overview blog to describe Ladybug as supporting both typed and untyped graph
+  usage rather than only schema-first usage.
+
 ## 2026-06-13 - 0.7.1
 
 - Added Arrow IPC data-source support for `grust-ladybug`, including embedded

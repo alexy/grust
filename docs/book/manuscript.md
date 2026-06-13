@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.1", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.7.2", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.7.1", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.1", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.7.2", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -828,7 +828,7 @@ flowchart TB
   graphdb --> falkor["FalkorDB\nGRAPH.QUERY writes"]
   graphdb --> helix["HelixDB\nHTTP or SDK\nreads + traversal"]
   graphdb --> surreal["SurrealDB\nschemafull tables\nreads + traversal"]
-  graphdb --> ladybug["LadybugDB\nembedded Cypher\nschema-backed tables"]
+  graphdb --> ladybug["LadybugDB\nembedded Cypher\ntyped or untyped tables"]
   tabular --> lance["LanceDB\nuniversal + typed Arrow tables"]
   tabular --> pg["pgGraph\nSQL traversal + typed views"]
   tabular --> sail["Sail\nuniversal + typed Delta tables"]
@@ -899,13 +899,20 @@ and no separate daemon. The store opens either an in-memory Ladybug database or
 an on-disk Ladybug directory and creates Grust-managed Ladybug node and
 relationship tables from graph labels.
 
-Ladybug is schemaful, so the backend keeps a small metadata layer for node IDs,
-labels, and relationship table definitions. Graph loads create any needed
-tables before opening a transaction, then write nodes and edges with Cypher
-`MERGE` statements. Reads reconstruct Grust `Node` and `Edge` values from the
-managed tables, while traversal evaluates the portable Grust traversal IR by
-walking Ladybug relationship tables and reading target nodes through the same
-`GraphStore` contract.
+Ladybug can be used for typed or untyped property graphs, and the Grust backend
+now exposes that distinction directly. The default `LadybugGraphMode::Untyped`
+accepts ordinary Grust graphs and creates the needed Ladybug node and
+relationship tables from graph labels and endpoint labels on write. That mode
+matches Grust's raw `Graph`, JSON, YAML, and XML loading path, where labels and
+properties are data owned by the application.
+
+`LadybugGraphMode::Typed` requires `apply_schema` or `put_typed_graph` before
+writes. In that mode the backend creates the declared Ladybug tables up front,
+does not create undeclared tables during writes, and validates later writes
+against the applied `GraphSchema`. Reads reconstruct Grust `Node` and `Edge`
+values from the managed tables, while traversal evaluates the portable Grust
+traversal IR by walking Ladybug relationship tables and reading target nodes
+through the same `GraphStore` contract.
 
 The `ladybug-arrow` facade feature also exposes Ladybug's embedded Arrow table
 path through Arrow IPC streams. A caller can register IPC node tables,
@@ -1198,6 +1205,8 @@ different ways:
 - Memory stores the schema and validates local writes.
 - FalkorDB creates label/property indexes for declared node types.
 - Helix validates schema names that can be lowered through dynamic queries.
+- LadybugDB can run in untyped dynamic mode or typed schema-applied mode;
+  typed mode validates writes against the applied schema.
 - LanceDB creates typed Arrow tables per node and edge label and mirrors writes
   into them.
 - pgGraph/PostgreSQL exposes typed label views and expression indexes over the
@@ -1211,10 +1220,10 @@ every future write is enforced by the database. `put_typed_graph` always
 validates the whole graph with `GraphSchema::validate_graph` before applying
 schema metadata and writing. Callers that need backend-independent guarantees
 can run the same validation before ordinary `put_graph` or single-element
-writes. Memory enforces the applied schema on subsequent local writes; Sail and
-LanceDB validate writes before mirroring them into typed tables. FalkorDB,
-Helix, pgGraph, and SurrealDB currently use schema primarily for indexes,
-query-shape validation, views, or backend-native definitions.
+writes. Memory and LadybugDB enforce the applied schema on subsequent local
+writes; Sail and LanceDB validate writes before mirroring them into typed
+tables. FalkorDB, Helix, pgGraph, and SurrealDB currently use schema primarily
+for indexes, query-shape validation, views, or backend-native definitions.
 
 A flexible backend can keep universal node and edge tables as the portable
 interchange surface. A typed backend can add native tables, fields, indexes, or

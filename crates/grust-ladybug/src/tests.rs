@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use grust_core::prelude::*;
 
-use crate::{LadybugConfig, LadybugGraphStore, LadybugPath};
+use crate::{LadybugConfig, LadybugGraphMode, LadybugGraphStore, LadybugPath};
 
 fn props(entries: &[(&str, Value)]) -> Props {
     entries
@@ -39,7 +39,7 @@ fn sample_graph() -> Graph {
 
 #[tokio::test]
 async fn put_graph_reads_nodes_edges_and_traverses() -> Result<()> {
-    let store = LadybugGraphStore::in_memory()?;
+    let store = LadybugGraphStore::new(LadybugConfig::untyped())?;
     store.bootstrap().await?;
     let graph = sample_graph();
     assert_eq!(
@@ -77,9 +77,20 @@ async fn put_graph_reads_nodes_edges_and_traverses() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn ladybug_graph_mode_helpers_map_to_dynamic_schema() {
+    assert_eq!(
+        LadybugConfig::untyped().graph_mode(),
+        LadybugGraphMode::Untyped
+    );
+    assert!(LadybugConfig::untyped().dynamic_schema);
+    assert_eq!(LadybugConfig::typed().graph_mode(), LadybugGraphMode::Typed);
+    assert!(!LadybugConfig::typed().dynamic_schema);
+}
+
 #[tokio::test]
 async fn applies_schema_before_typed_graph_write() -> Result<()> {
-    let store = LadybugGraphStore::in_memory()?;
+    let store = LadybugGraphStore::new(LadybugConfig::typed())?;
     let schema = GraphSchema::builder()
         .node("Person", vec![])
         .node("Talk", vec![])
@@ -93,6 +104,33 @@ async fn applies_schema_before_typed_graph_write() -> Result<()> {
 
     let report = store.put_typed_graph(&schema, &sample_graph()).await?;
     assert_eq!(report, LoadReport { nodes: 2, edges: 1 });
+    Ok(())
+}
+
+#[tokio::test]
+async fn typed_mode_requires_schema_before_writes() -> Result<()> {
+    let store = LadybugGraphStore::new(LadybugConfig::typed())?;
+    let err = store
+        .put_graph(&sample_graph())
+        .await
+        .expect_err("typed Ladybug mode should require schema first");
+    assert!(err.to_string().contains("requires apply_schema"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn applied_schema_validates_later_untyped_writes() -> Result<()> {
+    let store = LadybugGraphStore::in_memory()?;
+    let schema = GraphSchema::builder()
+        .node("Person", vec![Field::required("name", FieldType::String)])
+        .build();
+    store.apply_schema(&schema).await?;
+
+    let err = store
+        .put_node(&Node::new("Person", "person:ada", Props::new()))
+        .await
+        .expect_err("applied schema should validate later writes");
+    assert!(err.to_string().contains("missing required field 'name'"));
     Ok(())
 }
 
@@ -122,6 +160,28 @@ async fn clear_removes_managed_graph() -> Result<()> {
     store.put_graph(&sample_graph()).await?;
     store.clear().await?;
     assert!(store.get_node(&NodeId::from("person:ada")).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn clear_preserves_applied_schema_tables_in_typed_mode() -> Result<()> {
+    let store = LadybugGraphStore::new(LadybugConfig::typed())?;
+    let schema = GraphSchema::builder()
+        .node("Person", vec![])
+        .node("Talk", vec![])
+        .edge(
+            "Presented By",
+            vec![Label::from("Person")],
+            vec![Label::from("Talk")],
+            vec![],
+        )
+        .build();
+    store.put_typed_graph(&schema, &sample_graph()).await?;
+    store.clear().await?;
+
+    let report = store.put_graph(&sample_graph()).await?;
+
+    assert_eq!(report, LoadReport { nodes: 2, edges: 1 });
     Ok(())
 }
 

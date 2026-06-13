@@ -207,7 +207,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.1", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.7.2", features = ["memory"] }
 ```
 
 The facade re-exports the full `grust-memory` crate surface when the feature is
@@ -297,7 +297,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.1", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.7.2", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 For Arrow-native data sources, enable `ladybug-arrow` to use embedded
@@ -318,6 +318,10 @@ creates Grust-managed Ladybug node and relationship tables from graph labels,
 persists label/table metadata for readback, writes graph loads in transactions,
 and exposes backend-neutral reads and bounded traversal without starting a
 daemon.
+The default `LadybugGraphMode::Untyped` accepts ordinary Grust graphs and
+creates the needed Ladybug tables from labels on write. `LadybugGraphMode::Typed`
+requires `apply_schema` or `put_typed_graph` before writes and validates later
+writes against the applied `GraphSchema`.
 With the `ladybug-arrow` facade feature, the backend can also register Arrow
 IPC node, relationship, and CSR relationship tables directly with Ladybug and
 return query results as Arrow IPC chunks.
@@ -445,6 +449,8 @@ The current backends use schema differently:
   tables, and typed fields.
 - HelixDB validates schema names through the dynamic-query backend while future
   schema-file generation remains backend-specific.
+- LadybugDB can run in untyped dynamic mode or typed schema-applied mode; typed
+  mode validates writes against the applied `GraphSchema`.
 - pgGraph keeps universal tables while exposing typed label views and indexes.
 - Sail keeps universal DataFrames while mirroring rows into typed Delta tables.
 - LanceDB keeps universal tables while mirroring rows into typed Arrow tables.

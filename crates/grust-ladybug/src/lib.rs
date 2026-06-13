@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
 
 #[cfg(feature = "arrow")]
@@ -19,6 +19,9 @@ use grust_core::prelude::*;
 pub struct LadybugConfig {
     pub path: LadybugPath,
     pub table_prefix: String,
+    /// Whether Grust may create Ladybug node/relationship tables from graph
+    /// labels on write. `true` is the untyped/schema-later Grust mode; `false`
+    /// is the strict typed mode where `apply_schema` must run first.
     pub dynamic_schema: bool,
     pub query_timeout_ms: Option<u64>,
 }
@@ -34,10 +37,47 @@ impl Default for LadybugConfig {
     }
 }
 
+impl LadybugConfig {
+    pub fn untyped() -> Self {
+        Self::default().with_graph_mode(LadybugGraphMode::Untyped)
+    }
+
+    pub fn typed() -> Self {
+        Self::default().with_graph_mode(LadybugGraphMode::Typed)
+    }
+
+    pub fn graph_mode(&self) -> LadybugGraphMode {
+        if self.dynamic_schema {
+            LadybugGraphMode::Untyped
+        } else {
+            LadybugGraphMode::Typed
+        }
+    }
+
+    pub fn with_graph_mode(mut self, mode: LadybugGraphMode) -> Self {
+        self.dynamic_schema = matches!(mode, LadybugGraphMode::Untyped);
+        self
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LadybugPath {
     InMemory,
     Directory(PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LadybugGraphMode {
+    /// Accept ordinary Grust graphs without a predeclared `GraphSchema`.
+    ///
+    /// The backend creates the Ladybug node and relationship tables it needs
+    /// from the graph's labels and endpoint labels.
+    Untyped,
+    /// Require `apply_schema` or `put_typed_graph` before writes.
+    ///
+    /// Writes are validated against the applied `GraphSchema`, and the backend
+    /// does not create undeclared node or relationship tables during writes.
+    Typed,
 }
 
 #[derive(Debug)]
@@ -45,6 +85,7 @@ pub struct LadybugGraphStore {
     config: LadybugConfig,
     db: Arc<lbug::Database>,
     lock: Mutex<()>,
+    schema: RwLock<Option<GraphSchema>>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -74,6 +115,7 @@ impl LadybugGraphStore {
             config,
             db: Arc::new(db),
             lock: Mutex::new(()),
+            schema: RwLock::new(None),
         })
     }
 
@@ -189,6 +231,58 @@ impl LadybugGraphStore {
             conn.set_query_timeout(timeout_ms);
         }
         f(&conn)
+    }
+
+    fn current_schema(&self) -> Option<GraphSchema> {
+        self.schema
+            .read()
+            .expect("Ladybug schema lock poisoned")
+            .clone()
+    }
+
+    fn write_schema(&self, schema: &GraphSchema) {
+        *self.schema.write().expect("Ladybug schema lock poisoned") = Some(schema.clone());
+    }
+
+    fn require_schema_for_typed_mode(&self) -> Result<Option<GraphSchema>> {
+        let schema = self.current_schema();
+        if schema.is_none() && self.config.graph_mode() == LadybugGraphMode::Typed {
+            return Err(GrustError::Schema(
+                "Ladybug typed mode requires apply_schema before writes".to_string(),
+            ));
+        }
+        Ok(schema)
+    }
+
+    fn validate_edge_with_applied_schema(
+        &self,
+        conn: &lbug::Connection<'_>,
+        schema: &GraphSchema,
+        edge: &Edge,
+    ) -> Result<()> {
+        let from = self.node_table_for_id(conn, &edge.from)?.ok_or_else(|| {
+            GrustError::Schema(format!(
+                "edge '{}' references unknown from node '{}'",
+                edge.label.as_str(),
+                edge.from.as_str()
+            ))
+        })?;
+        let to = self.node_table_for_id(conn, &edge.to)?.ok_or_else(|| {
+            GrustError::Schema(format!(
+                "edge '{}' references unknown to node '{}'",
+                edge.label.as_str(),
+                edge.to.as_str()
+            ))
+        })?;
+        schema.validate_edge_with(edge, |id| {
+            if id == &edge.from {
+                Some(&from.label)
+            } else if id == &edge.to {
+                Some(&to.label)
+            } else {
+                None
+            }
+        })
     }
 
     fn exec(conn: &lbug::Connection<'_>, query: &str) -> Result<()> {
@@ -676,18 +770,32 @@ impl GraphStore for LadybugGraphStore {
                 }
             }
             Ok(())
-        })
+        })?;
+        self.write_schema(schema);
+        Ok(())
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
+        if let Some(schema) = self.require_schema_for_typed_mode()? {
+            schema.validate_node(node)?;
+        }
         self.with_conn(|conn| self.put_node_locked(conn, node))
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
-        self.with_conn(|conn| self.put_edge_locked(conn, edge, None))
+        let schema = self.require_schema_for_typed_mode()?;
+        self.with_conn(|conn| {
+            if let Some(schema) = schema.as_ref() {
+                self.validate_edge_with_applied_schema(conn, schema, edge)?;
+            }
+            self.put_edge_locked(conn, edge, None)
+        })
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        if let Some(schema) = self.require_schema_for_typed_mode()? {
+            schema.validate_graph(graph)?;
+        }
         self.with_conn(|conn| {
             self.bootstrap_locked(conn)?;
             let labels = graph
@@ -865,7 +973,20 @@ impl GraphAdminStore for LadybugGraphStore {
             let (node_index, rel_index) = self.metadata_tables()?;
             Self::exec_ignore_missing(conn, &format!("DROP TABLE {rel_index};"))?;
             Self::exec_ignore_missing(conn, &format!("DROP TABLE {node_index};"))?;
-            self.bootstrap_locked(conn)
+            self.bootstrap_locked(conn)?;
+            if let Some(schema) = self.current_schema() {
+                for node in &schema.nodes {
+                    self.ensure_node_table(conn, &node.label)?;
+                }
+                for edge in &schema.edges {
+                    for from in &edge.from {
+                        for to in &edge.to {
+                            self.ensure_rel_table(conn, &edge.label, from, to)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
         })
     }
 }

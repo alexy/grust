@@ -89,7 +89,17 @@ Why not universal tables first:
 
 ## Schema Behavior
 
-`apply_schema` should be the primary setup path:
+Ladybug can support both typed and untyped property-graph usage, and the Grust
+backend should expose both:
+
+- untyped/schema-later mode accepts ordinary Grust graphs and creates the
+  Ladybug node and relationship tables it needs from graph labels and endpoint
+  labels;
+- typed/schema-applied mode requires `apply_schema` or `put_typed_graph` before
+  writes, creates declared Ladybug tables up front, and validates later writes
+  against the applied `GraphSchema`.
+
+`apply_schema` is the typed setup path:
 
 - create one node table per declared node label;
 - create one relationship table per declared edge label and declared endpoint
@@ -102,8 +112,10 @@ Why not universal tables first:
 For schema-free writes, the backend should choose a conservative behavior:
 
 - `put_typed_graph` works after applying the supplied schema;
-- `put_graph` works only if tables already exist or if the config enables
-  dynamic table creation from the graph's labels and endpoint labels;
+- `put_graph` works if the config enables dynamic table creation from the
+  graph's labels and endpoint labels;
+- strict typed mode returns a clear schema/configuration error if a write is
+  attempted before schema application;
 - a missing table returns a clear schema/configuration error.
 
 This mirrors the existing Grust contract: `apply_schema` is backend metadata,
@@ -233,9 +245,9 @@ Prefer a transaction:
 3. commit;
 4. return a `LoadReport` with `Upserted` outcomes.
 
-If dynamic schema is disabled and a table is missing, fail before writing any
-rows. If dynamic schema is enabled, infer node labels and endpoint-label pairs
-from the graph, create missing tables, then write.
+If strict typed mode is enabled and a schema has not been applied, fail before
+writing any rows. If untyped dynamic mode is enabled, infer node labels and
+endpoint-label pairs from the graph, create missing tables, then write.
 
 ### get_node
 
@@ -358,8 +370,9 @@ entry so maintainers have one command for the full backend matrix.
 ## Recommendation
 
 Add `grust-ladybug` as the next embedded durable graph backend, but build it as
-schema-first rather than universal-table-first. The first milestone should be a
-correct optional backend over `lbug` with `apply_schema`, transactional graph
-writes, reads, and bounded traversal. Treat full-text search, vector search,
-bulk import, and direct Cypher as backend-specific extension surfaces after the
-portable `GraphStore` contract is solid.
+Ladybug-native rather than universal-table-first. The first milestone should be
+a correct optional backend over `lbug` with untyped dynamic writes, typed
+schema-applied validation, transactional graph writes, reads, and bounded
+traversal. Treat full-text search, vector search, bulk import, and direct
+Cypher as backend-specific extension surfaces after the portable `GraphStore`
+contract is solid.
