@@ -317,9 +317,8 @@ fn cypher_map(props: &Props, config: &FalkorConfig) -> String {
             Value::Bool(value) => format!("{key}:{value}"),
             Value::Int(value) => format!("{key}:{value}"),
             Value::Float(value) => format!("{key}:{value}"),
-            Value::String(value) | Value::DateTime(value) => {
-                format!("{key}:{}", cypher_string(value))
-            }
+            Value::String(value) => format!("{key}:{}", cypher_string(value)),
+            Value::DateTime(value) => format!("{key}:{}", cypher_string(value.as_str())),
             Value::IntArray(values) => format!(
                 "{key}:[{}]",
                 values

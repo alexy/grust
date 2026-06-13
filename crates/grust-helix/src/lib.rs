@@ -374,7 +374,7 @@ fn helix_property_json(value: &Value) -> Result<serde_json::Value> {
         Value::Float(value) => Ok(json!({"F64": value})),
         Value::String(value) => Ok(json!({"String": value})),
         Value::DateTime(value) => {
-            let datetime = HelixDateTime::parse_rfc3339(value).map_err(|err| {
+            let datetime = HelixDateTime::parse_rfc3339(value.as_str()).map_err(|err| {
                 GrustError::Serialization(format!("invalid Helix datetime '{value}': {err}"))
             })?;
             Ok(json!({"DateTime": datetime.millis()}))
@@ -511,7 +511,7 @@ fn helix_property_input(value: &Value) -> Result<PropertyInput> {
         Value::Float(value) => PropertyValue::F64(*value),
         Value::String(value) => PropertyValue::String(value.clone()),
         Value::DateTime(value) => {
-            let datetime = HelixDateTime::parse_rfc3339(value).map_err(|err| {
+            let datetime = HelixDateTime::parse_rfc3339(value.as_str()).map_err(|err| {
                 GrustError::Serialization(format!("invalid Helix datetime '{value}': {err}"))
             })?;
             PropertyValue::DateTime(datetime.millis())

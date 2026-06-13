@@ -395,6 +395,10 @@ pub struct EdgeType {
 `GraphSchema::builder()` and `Field::required` / `Field::optional` provide a
 compact way to declare this structure:
 
+Date-time values are stored as validated `RfcDate` values inside
+`Value::DateTime`; use `Value::datetime` or `RfcDate::parse` instead of raw
+strings when constructing typed date-time values.
+
 ```rust
 let schema = GraphSchema::builder()
     .node(

@@ -850,7 +850,8 @@ fn validate_edge_props_checks_label_and_fields_only() {
 
 #[test]
 fn datetime_value_validates_rfc3339() {
-    assert!(Value::datetime("2026-06-12T09:30:00Z").is_ok());
+    let date = Value::datetime("2026-06-12T09:30:00Z").unwrap();
+    assert_eq!(date.as_datetime(), Some("2026-06-12T09:30:00Z"));
     assert!(Value::datetime("2026-06-12T09:30:00.123+02:00").is_ok());
     assert!(Value::datetime("2026-02-29T09:30:00Z").is_err());
     assert!(Value::datetime("2024-02-29T09:30:00Z").is_ok());
@@ -863,6 +864,18 @@ fn datetime_value_validates_rfc3339() {
     assert!(Value::datetime("2026-06-12T25:30:00Z").is_err());
     assert!(Value::datetime("2026-06-12T09:30:00").is_err());
     assert!(Value::datetime("2026-06-12T09:30:00.Z").is_err());
+
+    let valid: Value = serde_json::from_value(
+        serde_json::json!({"type": "date_time", "value": "2026-06-12T09:30:00Z"}),
+    )
+    .expect("valid tagged DateTime should deserialize");
+    assert_eq!(valid, date);
+
+    let err = serde_json::from_value::<Value>(
+        serde_json::json!({"type": "date_time", "value": "not a date"}),
+    )
+    .expect_err("invalid tagged DateTime should not deserialize");
+    assert!(err.to_string().contains("not an RFC 3339 date-time"));
 }
 
 #[test]

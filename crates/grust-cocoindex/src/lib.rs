@@ -217,7 +217,8 @@ fn value_to_json(value: &Value) -> Result<JsonValue> {
                     "cannot export non-finite float property value {value}"
                 ))
             })?,
-        Value::String(value) | Value::DateTime(value) => JsonValue::String(value.clone()),
+        Value::String(value) => JsonValue::String(value.clone()),
+        Value::DateTime(value) => JsonValue::String(value.as_str().to_string()),
         Value::IntArray(values) => JsonValue::Array(
             values
                 .iter()

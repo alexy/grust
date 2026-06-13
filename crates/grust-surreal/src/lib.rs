@@ -1131,7 +1131,8 @@ fn surreal_value(value: &Value) -> Result<String> {
         Value::Bool(value) => Ok(value.to_string()),
         Value::Int(value) => Ok(value.to_string()),
         Value::Float(value) => Ok(value.to_string()),
-        Value::String(value) | Value::DateTime(value) => Ok(surreal_string(value)),
+        Value::String(value) => Ok(surreal_string(value)),
+        Value::DateTime(value) => Ok(surreal_string(value.as_str())),
         Value::IntArray(values) => {
             serde_json::to_string(values).map_err(|err| GrustError::Serialization(err.to_string()))
         }

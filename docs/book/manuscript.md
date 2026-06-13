@@ -1145,9 +1145,11 @@ Grust has schema types: `GraphSchema`, `NodeType`, `EdgeType`, `Field`,
 `FieldType`, and `EdgeUniqueness`. `GraphSchema` validates labels, required
 fields, field value types, edge endpoint labels, edge direction, and declared
 edge uniqueness. `FieldType` includes scalar strings, integers, floats,
-booleans, RFC 3339 date-times, string/int/float arrays, and JSON. The default
-`GraphStore::apply_schema` implementation remains a no-op, which lets
-schemaless or schema-later backends work without ceremony.
+booleans, RFC 3339 date-times, string/int/float arrays, and JSON. Date-time
+values use the opaque `RfcDate` type internally; construct them through
+`Value::datetime` or `RfcDate::parse` so invalid strings cannot bypass
+validation. The default `GraphStore::apply_schema` implementation remains a
+no-op, which lets schemaless or schema-later backends work without ceremony.
 
 Schema becomes more important for backends that want typed tables, indexes, or
 label-partitioned layouts. The current schema-capable backends use it in

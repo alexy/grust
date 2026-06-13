@@ -4,7 +4,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 pub type Result<T> = std::result::Result<T, GrustError>;
 pub type Props = BTreeMap<String, Value>;
@@ -86,6 +86,58 @@ string_newtype!(
     Label
 );
 
+/// Validated RFC 3339 date-time string used by [`Value::DateTime`].
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct RfcDate(String);
+
+impl RfcDate {
+    /// Parses and stores an RFC 3339 date-time such as
+    /// `2026-06-12T09:30:00Z` or `2026-06-12T09:30:00.123+02:00`.
+    pub fn parse(value: impl Into<String>) -> Result<Self> {
+        let value = value.into();
+        if is_rfc3339_datetime(&value) {
+            Ok(Self(value))
+        } else {
+            Err(GrustError::Schema(format!(
+                "'{value}' is not an RFC 3339 date-time"
+            )))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl fmt::Display for RfcDate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl Serialize for RfcDate {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RfcDate {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Value {
@@ -96,7 +148,7 @@ pub enum Value {
     String(String),
     /// An RFC 3339 date-time, e.g. `2026-06-12T09:30:00Z`. Construct with
     /// [`Value::datetime`] to get format validation.
-    DateTime(String),
+    DateTime(RfcDate),
     StringArray(Vec<String>),
     IntArray(Vec<i64>),
     FloatArray(Vec<f64>),
@@ -108,14 +160,7 @@ impl Value {
     /// date-time such as `2026-06-12T09:30:00Z` or
     /// `2026-06-12T09:30:00.123+02:00`.
     pub fn datetime(value: impl Into<String>) -> Result<Self> {
-        let value = value.into();
-        if is_rfc3339_datetime(&value) {
-            Ok(Self::DateTime(value))
-        } else {
-            Err(GrustError::Schema(format!(
-                "'{value}' is not an RFC 3339 date-time"
-            )))
-        }
+        RfcDate::parse(value).map(Self::DateTime)
     }
 
     pub fn as_str(&self) -> Option<&str> {
@@ -127,7 +172,7 @@ impl Value {
 
     pub fn as_datetime(&self) -> Option<&str> {
         match self {
-            Self::DateTime(value) => Some(value),
+            Self::DateTime(value) => Some(value.as_str()),
             _ => None,
         }
     }
@@ -161,7 +206,8 @@ impl Value {
             Self::Bool(value) => serde_json::Value::Bool(*value),
             Self::Int(value) => serde_json::Value::from(*value),
             Self::Float(value) => serde_json::Value::from(*value),
-            Self::String(value) | Self::DateTime(value) => serde_json::Value::String(value.clone()),
+            Self::String(value) => serde_json::Value::String(value.clone()),
+            Self::DateTime(value) => serde_json::Value::String(value.as_str().to_string()),
             Self::StringArray(values) => serde_json::Value::from(values.clone()),
             Self::IntArray(values) => serde_json::Value::from(values.clone()),
             Self::FloatArray(values) => serde_json::Value::from(values.clone()),
@@ -1997,8 +2043,8 @@ pub mod prelude {
         Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, EdgeUniqueness, Field, FieldType,
         Graph, GraphAdminStore, GraphBuilder, GraphMutation, GraphMutationStore, GraphSchema,
         GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType,
-        Props, PutOutcome, Result, Start, Step, Traversal, Value, edge_key, relationship_type,
-        schema_identifier,
+        Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value, edge_key,
+        relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

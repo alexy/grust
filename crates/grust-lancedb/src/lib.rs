@@ -643,9 +643,8 @@ fn typed_prop_array<'a>(
             values
                 .iter()
                 .map(|value| match value {
-                    Some(Value::String(value)) | Some(Value::DateTime(value)) => {
-                        Some(value.as_str())
-                    }
+                    Some(Value::String(value)) => Some(value.as_str()),
+                    Some(Value::DateTime(value)) => Some(value.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>(),
