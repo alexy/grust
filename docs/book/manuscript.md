@@ -761,9 +761,13 @@ backup_store.put_graph(&graph).await?;
 println!("loaded {} nodes and {} edges", report.nodes, report.edges);
 ```
 
-Single-element writes return `PutOutcome`, which distinguishes inserted,
-updated, backend-opaque upserted, and deduped writes. `LoadReport` counts
-elements that were written or upserted, not necessarily newly created rows.
+Single-element writes return `PutOutcome`. Memory and builder paths can report
+precise inserted/updated/deduped outcomes. Remote upsert-oriented backends
+commonly return `Upserted` because distinguishing insert from update would
+require an extra read or a backend-specific write primitive. Portable callers
+should treat all written outcomes as success rather than depending on
+inserted-versus-updated. `LoadReport` counts elements that were written or
+upserted, not necessarily newly created rows.
 
 Administrative operations are split into `GraphAdminStore`:
 
@@ -1159,6 +1163,16 @@ different ways:
 - Sail creates typed Delta tables per node and edge label and mirrors writes
   into them.
 - SurrealDB lowers schema into `DEFINE TABLE` and `DEFINE FIELD` statements.
+
+`apply_schema` is therefore a backend metadata hook, not a portable promise that
+every future write is enforced by the database. `put_typed_graph` always
+validates the whole graph with `GraphSchema::validate_graph` before applying
+schema metadata and writing. Callers that need backend-independent guarantees
+can run the same validation before ordinary `put_graph` or single-element
+writes. Memory enforces the applied schema on subsequent local writes; Sail and
+LanceDB validate writes before mirroring them into typed tables. FalkorDB,
+Helix, pgGraph, and SurrealDB currently use schema primarily for indexes,
+query-shape validation, views, or backend-native definitions.
 
 A flexible backend can keep universal node and edge tables as the portable
 interchange surface. A typed backend can add native tables, fields, indexes, or

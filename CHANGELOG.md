@@ -14,6 +14,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   full `grust-memory` crate surface, matching other backend feature exports.
 - Expanded CocoIndex adapter coverage for zero-edge exports, missing source
   nodes, explicit edge IDs, and non-finite float export errors.
+- Documented the portable `PutOutcome` and `GraphSchema::apply_schema`
+  contracts so backend-specific upsert and schema-enforcement behavior is
+  explicit.
 - Expanded SurrealDB response-parser unit coverage across string, object,
   typed-object, and backtick-quoted record ID shapes.
 

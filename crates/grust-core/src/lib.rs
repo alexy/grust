@@ -1818,6 +1818,14 @@ pub struct EdgeQuery {
 }
 
 /// Outcome of writing a single node or edge.
+///
+/// `Inserted` and `Updated` are precise only for stores that can cheaply
+/// distinguish create from replace. Remote upsert-oriented backends commonly
+/// return `Upserted` because doing otherwise would require an extra read or a
+/// backend-specific write primitive. Portable callers should treat all three
+/// written outcomes as success and should not rely on `Inserted` or `Updated`
+/// unless they are intentionally targeting a backend that documents those
+/// precise outcomes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum PutOutcome {
     /// The element did not exist before and was created.
@@ -1849,11 +1857,36 @@ pub struct LoadReport {
 
 #[async_trait]
 pub trait GraphStore: Send + Sync {
+    /// Applies backend schema metadata.
+    ///
+    /// `GraphSchema` is a portable declaration of expected node labels, edge
+    /// labels, fields, endpoint labels, direction, and uniqueness. The default
+    /// implementation is a no-op for schemaless stores. Backend implementations
+    /// may use the schema for validation, typed native tables, views, indexes,
+    /// generated query shapes, or database-native schema definitions.
+    ///
+    /// Applying a schema does not imply the same enforcement guarantee on every
+    /// backend. Callers that need portable preflight validation should call
+    /// [`GraphSchema::validate_graph`] before writing, or use
+    /// [`GraphStore::put_typed_graph`], which does that validation before
+    /// applying the backend schema and writing the graph. Individual backends
+    /// document whether they also validate each subsequent write at runtime.
     async fn apply_schema(&self, _schema: &GraphSchema) -> Result<()> {
         Ok(())
     }
 
+    /// Writes one node.
+    ///
+    /// The returned [`PutOutcome`] reports the most precise result the backend
+    /// can provide. Remote upsert backends generally return
+    /// [`PutOutcome::Upserted`] for both inserts and updates.
     async fn put_node(&self, node: &Node) -> Result<PutOutcome>;
+
+    /// Writes one edge.
+    ///
+    /// The returned [`PutOutcome`] reports the most precise result the backend
+    /// can provide. Remote upsert backends generally return
+    /// [`PutOutcome::Upserted`] for both inserts and updates.
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome>;
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {

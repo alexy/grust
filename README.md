@@ -262,10 +262,15 @@ pub trait GraphStore: Send + Sync {
 
 `put_graph` borrows the graph instead of consuming it. That makes retries,
 validation, comparison, and multi-backend loads easier.
-Single-element writes return `PutOutcome`, which distinguishes inserted,
-updated, backend-opaque upserted, and deduped writes.
+Single-element writes return `PutOutcome`. Memory and builder paths can report
+precise inserted/updated/deduped outcomes, while remote upsert-oriented
+backends commonly return `Upserted` because they cannot distinguish insert from
+update without an extra read. Portable callers should treat all written
+outcomes as success rather than depending on inserted-versus-updated.
 `put_typed_graph` validates a graph against `GraphSchema`, applies that schema
-to the backend, and then writes the graph.
+to the backend, and then writes the graph. `apply_schema` itself is a backend
+metadata hook, not a portable promise that every future write is enforced by the
+database.
 With the optional `typed-garde` feature, `TypedNode::from_node` and
 `TypedEdge::from_edge` decode stored graph values back into validated Rust
 domain types.
