@@ -207,7 +207,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.0", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.7.1", features = ["memory"] }
 ```
 
 The facade re-exports the full `grust-memory` crate surface when the feature is
@@ -297,8 +297,14 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.0", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.7.1", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
 ```
+
+For Arrow-native data sources, enable `ladybug-arrow` to use embedded
+LadybugDB over Arrow IPC tables, or enable `sail` to stage Arrow IPC streams as
+Spark temp views. See
+[docs/Arrow.md](https://github.com/querygraph/grust/blob/main/docs/Arrow.md)
+for the full contract and the Arrow-version compatibility rationale.
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
 supports graph replacement with `GRAPH.DELETE`.
@@ -312,6 +318,9 @@ creates Grust-managed Ladybug node and relationship tables from graph labels,
 persists label/table metadata for readback, writes graph loads in transactions,
 and exposes backend-neutral reads and bounded traversal without starting a
 daemon.
+With the `ladybug-arrow` facade feature, the backend can also register Arrow
+IPC node, relationship, and CSR relationship tables directly with Ladybug and
+return query results as Arrow IPC chunks.
 
 `grust-cocoindex` converts `Graph` values into serializable node and
 relationship states with stable keys, endpoint labels, and plain JSON
@@ -336,6 +345,9 @@ server, lowers traversal IR to Spark SQL joins, and can mirror schema-labeled
 rows into typed Delta tables. SQL filters bind user values through Spark
 Connect named arguments; delete mutations stage their values as Arrow temp views
 before running argument-free SQL commands.
+It also exposes Sail's Arrow IPC path directly for staging arbitrary Arrow
+streams as session temp views, collecting Spark SQL results as IPC chunks, and
+loading Grust-shaped node/edge IPC streams through the graph write path.
 
 `grust-surreal` provides both `SurrealHttpGraphStore` and
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and

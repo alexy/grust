@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.0", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.7.1", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.7.0", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.0", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.7.1", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -907,6 +907,13 @@ managed tables, while traversal evaluates the portable Grust traversal IR by
 walking Ladybug relationship tables and reading target nodes through the same
 `GraphStore` contract.
 
+The `ladybug-arrow` facade feature also exposes Ladybug's embedded Arrow table
+path through Arrow IPC streams. A caller can register IPC node tables,
+relationship tables, and CSR relationship tables directly with Ladybug, then
+query them with Ladybug Cypher and receive result chunks back as Arrow IPC. The
+public boundary is IPC bytes rather than a Rust `RecordBatch` type, so callers
+do not have to match Ladybug's internal Arrow crate version exactly.
+
 The first implementation stores Grust properties as JSON text for portable
 round trips. Later schema lowering can add typed Ladybug columns, full-text
 indexes, vector indexes, and direct graph-RAG extension traits without changing
@@ -952,6 +959,13 @@ substitution while matching Sail's current command-parameter behavior.
 Traversal joins use globally unique node ids; source and destination label
 columns may be empty for single-edge writes where the full graph is not in
 scope.
+
+Sail's Arrow boundary is now public too. Applications can stage arbitrary Arrow
+IPC streams as session temp views and query them with Spark SQL, collect Spark
+SQL results as Arrow IPC chunks, or load Grust-shaped node and edge IPC streams
+through the normal graph write path. This gives Sail the same data-source role
+as Ladybug while keeping Sail's internal Arrow 58 dependency separate from
+Ladybug's Arrow 55 dependency.
 
 When a schema is applied, Sail creates typed Delta tables per node and edge
 label and mirrors writes into them with `MERGE INTO`. The universal Spark

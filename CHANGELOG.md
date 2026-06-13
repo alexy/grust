@@ -6,12 +6,25 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 2026-06-13 - 0.7.1
+
+- Added Arrow IPC data-source support for `grust-ladybug`, including embedded
+  Ladybug node-table, relationship-table, CSR relationship-table, Arrow query,
+  and Arrow table drop helpers behind the `arrow` feature.
+- Added `grust-graph`'s `ladybug-arrow` facade feature so applications can
+  enable embedded LadybugDB Arrow support through the main package.
+- Added Sail Arrow IPC APIs for staging arbitrary Arrow streams as session temp
+  views, collecting Spark SQL results as Arrow IPC chunks, and loading
+  Grust-shaped node/edge IPC streams through the normal graph write path.
+- Documented the Arrow IPC boundary in `docs/Arrow.md`, including why Grust
+  avoids requiring one exact Rust `arrow` crate version across Ladybug and Sail.
+
+## 2026-06-13 - 0.7.0
+
 - Added `grust-ladybug`, an embedded LadybugDB backend using the Rust `lbug`
   crate directly for schema-backed graph writes, reads, and traversal.
 - Proposed `grust-ladybug` as a schema-first embedded LadybugDB backend, with
   notes on storage layout, `lbug` integration, traversal lowering, and testing.
-
-## 2026-06-13 - 0.7.0
 
 - Added `#[must_use]` diagnostics to graph builder completion methods so
   accidentally discarded builder results warn at compile time.

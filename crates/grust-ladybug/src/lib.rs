@@ -4,6 +4,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[cfg(feature = "arrow")]
+use std::io::Cursor;
+
+#[cfg(feature = "arrow")]
+use arrow::{
+    ipc::{reader::StreamReader as ArrowStreamReader, writer::StreamWriter as ArrowStreamWriter},
+    record_batch::RecordBatch as ArrowRecordBatch,
+};
 use async_trait::async_trait;
 use grust_core::prelude::*;
 
@@ -77,6 +85,100 @@ impl LadybugGraphStore {
         Self::new(LadybugConfig {
             path: LadybugPath::Directory(path.into()),
             ..LadybugConfig::default()
+        })
+    }
+
+    /// Registers an Arrow IPC stream as a Ladybug node table.
+    ///
+    /// The stream is decoded into the Arrow version used by `lbug`, and the
+    /// first column in the Arrow schema becomes Ladybug's primary key column.
+    #[cfg(feature = "arrow")]
+    pub fn register_arrow_ipc_node_table(&self, table_name: &str, ipc_stream: &[u8]) -> Result<()> {
+        let batches = arrow_ipc_batches(ipc_stream)?;
+        self.with_conn(|conn| {
+            conn.create_arrow_table(table_name, &batches)
+                .map(drop)
+                .map_err(ladybug_error)
+        })
+    }
+
+    /// Registers an Arrow IPC stream as a Ladybug relationship table.
+    ///
+    /// The relationship stream must include endpoint columns named `from` and
+    /// `to`. The source and destination table names refer to Ladybug node
+    /// tables registered separately.
+    #[cfg(feature = "arrow")]
+    pub fn register_arrow_ipc_rel_table(
+        &self,
+        table_name: &str,
+        ipc_stream: &[u8],
+        src_table_name: &str,
+        dst_table_name: &str,
+    ) -> Result<()> {
+        let batches = arrow_ipc_batches(ipc_stream)?;
+        self.with_conn(|conn| {
+            conn.create_arrow_rel_table(table_name, &batches, src_table_name, dst_table_name)
+                .map(drop)
+                .map_err(ladybug_error)
+        })
+    }
+
+    /// Registers CSR-shaped Arrow IPC streams as a Ladybug relationship table.
+    ///
+    /// `indices_ipc` must contain a destination column named by
+    /// `dst_col_name`, while `indptr_ipc` contains the source offsets.
+    #[cfg(feature = "arrow")]
+    pub fn register_arrow_ipc_rel_table_csr(
+        &self,
+        table_name: &str,
+        indices_ipc: &[u8],
+        indptr_ipc: &[u8],
+        src_table_name: &str,
+        dst_table_name: &str,
+        dst_col_name: &str,
+    ) -> Result<()> {
+        let indices_batches = arrow_ipc_batches(indices_ipc)?;
+        let indptr_batches = arrow_ipc_batches(indptr_ipc)?;
+        self.with_conn(|conn| {
+            conn.create_arrow_rel_table_csr(
+                table_name,
+                &indices_batches,
+                &indptr_batches,
+                src_table_name,
+                dst_table_name,
+                dst_col_name,
+            )
+            .map(drop)
+            .map_err(ladybug_error)
+        })
+    }
+
+    /// Drops a Ladybug Arrow table registered through the embedded `lbug` API.
+    #[cfg(feature = "arrow")]
+    pub fn drop_arrow_table(&self, table_name: &str) -> Result<()> {
+        self.with_conn(|conn| {
+            conn.drop_arrow_table(table_name)
+                .map(drop)
+                .map_err(ladybug_error)
+        })
+    }
+
+    /// Executes a Ladybug query and returns result chunks as Arrow IPC streams.
+    ///
+    /// Each returned item is a complete Arrow IPC stream for one result batch,
+    /// so callers can decode the chunks with any compatible Arrow runtime.
+    #[cfg(feature = "arrow")]
+    pub fn query_arrow_ipc(&self, query: &str, chunk_size: usize) -> Result<Vec<Vec<u8>>> {
+        let chunk_size = chunk_size.max(1);
+        self.with_conn(|conn| {
+            let mut result = conn
+                .query_as_arrow(query, chunk_size)
+                .map_err(ladybug_error)?;
+            let mut chunks = Vec::new();
+            for batch in result.iter_arrow(chunk_size).map_err(ladybug_error)? {
+                chunks.push(arrow_batch_to_ipc(&batch)?);
+            }
+            Ok(chunks)
         })
     }
 
@@ -766,6 +868,34 @@ impl GraphAdminStore for LadybugGraphStore {
             self.bootstrap_locked(conn)
         })
     }
+}
+
+#[cfg(feature = "arrow")]
+fn arrow_ipc_batches(ipc_stream: &[u8]) -> Result<Vec<ArrowRecordBatch>> {
+    let reader = ArrowStreamReader::try_new(Cursor::new(ipc_stream), None)
+        .map_err(|err| GrustError::Backend(format!("Arrow IPC read failed: {err}")))?;
+    reader
+        .map(|batch| {
+            batch.map_err(|err| GrustError::Backend(format!("Arrow batch read failed: {err}")))
+        })
+        .collect()
+}
+
+#[cfg(feature = "arrow")]
+fn arrow_batch_to_ipc(batch: &ArrowRecordBatch) -> Result<Vec<u8>> {
+    let mut data = Vec::new();
+    {
+        let cursor = Cursor::new(&mut data);
+        let mut writer = ArrowStreamWriter::try_new(cursor, batch.schema().as_ref())
+            .map_err(|err| GrustError::Backend(format!("Arrow IPC write failed: {err}")))?;
+        writer
+            .write(batch)
+            .map_err(|err| GrustError::Backend(format!("Arrow IPC write failed: {err}")))?;
+        writer
+            .finish()
+            .map_err(|err| GrustError::Backend(format!("Arrow IPC write failed: {err}")))?;
+    }
+    Ok(data)
 }
 
 fn shift_query(query: &mut EdgeQuery) -> EdgeQuery {

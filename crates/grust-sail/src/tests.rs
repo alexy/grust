@@ -144,6 +144,32 @@ fn staged_edge_batch_round_trips_through_arrow_ipc() {
 }
 
 #[test]
+fn staged_edge_batch_preserves_explicit_arrow_edge_id() {
+    let from = NodeId::new("person-1");
+    let to = NodeId::new("talk-1");
+    let from_label = Label::new("Person");
+    let to_label = Label::new("Talk");
+    let edge = Edge::new("presents", from.as_str(), to.as_str(), Props::new()).with_id("edge-1");
+    let mut node_labels = std::collections::BTreeMap::new();
+    node_labels.insert(&from, &from_label);
+    node_labels.insert(&to, &to_label);
+
+    let batch = edges_record_batch(&[edge], &node_labels).unwrap();
+    let bytes = ipc_bytes(&batch).unwrap();
+    let edges = parse_edges_from_arrow(&bytes).unwrap();
+
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].id.as_ref().map(EdgeId::as_str), Some("edge-1"));
+}
+
+#[test]
+fn arrow_temp_view_names_must_be_safe_lower_snake_identifiers() {
+    assert!(validate_arrow_view_name("people_arrow").is_ok());
+    assert!(validate_arrow_view_name("PeopleArrow").is_err());
+    assert!(validate_arrow_view_name("people arrow").is_err());
+}
+
+#[test]
 fn props_json_is_plain_and_reads_legacy_tagged_form() {
     let mut props = Props::new();
     props.insert("name".to_string(), Value::from("Ada"));

@@ -11,7 +11,7 @@ categories.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-grust-core = { version = "0.7.0", path = "../grust-core" }
+grust-core = { version = "0.7.1", path = "../grust-core" }
 r2d2 = { workspace = true }
 redis = { workspace = true }
 

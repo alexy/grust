@@ -72,6 +72,50 @@ impl SailGraphStore {
         })
     }
 
+    /// Stages an Arrow IPC stream as a replaceable Sail session temp view.
+    ///
+    /// The view name must already be a safe Grust/Sail SQL identifier such as
+    /// `people_arrow`. Query it from the same `SailGraphStore` session.
+    pub async fn stage_arrow_ipc_view(&self, name: &str, ipc_stream: &[u8]) -> Result<()> {
+        validate_arrow_view_name(name)?;
+        self.run_plan(self.stage_view_request(name, ipc_stream.to_vec()), |_| {
+            Ok(())
+        })
+        .await
+    }
+
+    /// Executes Spark SQL through Sail and returns result batches as Arrow IPC streams.
+    ///
+    /// Each item in the returned vector is the complete IPC stream emitted by
+    /// one Spark Connect `ArrowBatch` response.
+    pub async fn query_arrow_ipc(&self, sql: &str) -> Result<Vec<Vec<u8>>> {
+        let mut chunks = Vec::new();
+        self.run_plan(self.query_request(sql, vec![])?, |data| {
+            chunks.push(data.to_vec());
+            Ok(())
+        })
+        .await?;
+        Ok(chunks)
+    }
+
+    /// Loads Grust-shaped Arrow IPC node and edge streams into Sail tables.
+    ///
+    /// Node streams must provide `id`, `label`, and `props` string columns.
+    /// Edge streams must provide `src_id`, `dst_id`, `edge_type`, and `props`
+    /// string columns, and may include an optional string `id` column.
+    pub async fn load_graph_arrow_ipc(
+        &self,
+        nodes_ipc: &[u8],
+        edges_ipc: &[u8],
+    ) -> Result<LoadReport> {
+        self.bootstrap().await?;
+        let graph = Graph::new(
+            parse_nodes_from_arrow(nodes_ipc)?,
+            parse_edges_from_arrow(edges_ipc)?,
+        );
+        self.put_graph(&graph).await
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────
 
     fn user_context(&self) -> UserContext {
@@ -999,6 +1043,17 @@ fn lit_expr(literal: expression::Literal) -> Expression {
     }
 }
 
+fn validate_arrow_view_name(name: &str) -> Result<()> {
+    let normalized = schema_identifier(name)?;
+    if normalized == name {
+        Ok(())
+    } else {
+        Err(GrustError::Schema(format!(
+            "Arrow view name '{name}' must be a safe lower_snake SQL identifier"
+        )))
+    }
+}
+
 fn sail_sql_type(ty: &FieldType) -> &'static str {
     match ty {
         FieldType::String
@@ -1161,6 +1216,7 @@ fn parse_edges_from_arrow(data: &[u8]) -> Result<Vec<Edge>> {
     let props_idx = schema
         .index_of("props")
         .map_err(|_| GrustError::Schema("grust_edges missing 'props' column".into()))?;
+    let id_idx = schema.index_of("id").ok();
 
     let mut edges = Vec::new();
     for batch in reader {
@@ -1185,6 +1241,17 @@ fn parse_edges_from_arrow(data: &[u8]) -> Result<Vec<Edge>> {
             .as_any()
             .downcast_ref::<StringArray>()
             .ok_or_else(|| GrustError::Schema("props column is not string".into()))?;
+        let ids = if let Some(id_idx) = id_idx {
+            Some(
+                batch
+                    .column(id_idx)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| GrustError::Schema("id column is not string".into()))?,
+            )
+        } else {
+            None
+        };
 
         for i in 0..batch.num_rows() {
             let props = if props_col.is_null(i) || props_col.value(i).is_empty() {
@@ -1192,8 +1259,15 @@ fn parse_edges_from_arrow(data: &[u8]) -> Result<Vec<Edge>> {
             } else {
                 props_from_json(props_col.value(i))?
             };
+            let id = ids.and_then(|ids| {
+                if ids.is_null(i) || ids.value(i).is_empty() {
+                    None
+                } else {
+                    Some(EdgeId::new(ids.value(i)))
+                }
+            });
             edges.push(Edge {
-                id: None,
+                id,
                 from: NodeId::new(src_ids.value(i)),
                 to: NodeId::new(dst_ids.value(i)),
                 label: Label::new(edge_types.value(i)),
