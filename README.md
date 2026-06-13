@@ -208,6 +208,9 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 grust = { package = "grust-graph", version = "0.6.8", features = ["memory"] }
 ```
 
+The facade re-exports the full `grust-memory` crate surface when the feature is
+enabled, matching the other backend feature exports.
+
 Then load and traverse a graph:
 
 ```rust
@@ -299,7 +302,8 @@ and use configured labels for replacement.
 
 `grust-cocoindex` converts `Graph` values into serializable node and
 relationship states with stable keys, endpoint labels, and plain JSON
-properties. It is a sync/export adapter rather than a `GraphStore`.
+properties, and can load that target-state JSON back into Grust graphs. It is a
+sync/import-export adapter rather than a `GraphStore`.
 
 `grust-lancedb` stores graphs in LanceDB tables using the official Rust SDK,
 upserts nodes and edges with `merge_insert`, supports backend-neutral reads and

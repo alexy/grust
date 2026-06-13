@@ -8,6 +8,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 - Added `#[must_use]` diagnostics to graph builder completion methods so
   accidentally discarded builder results warn at compile time.
+- Added `cocoindex_export_to_graph` so CocoIndex target-state JSON can be
+  loaded back into Grust graphs.
+- Changed the `grust-graph` memory facade and prelude exports to re-export the
+  full `grust-memory` crate surface, matching other backend feature exports.
 - Expanded SurrealDB response-parser unit coverage across string, object,
   typed-object, and backtick-quoted record ID shapes.
 

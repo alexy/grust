@@ -42,6 +42,25 @@ impl CocoIndexExport for Graph {
     }
 }
 
+pub fn cocoindex_export_to_graph(export: CocoIndexGraphExport) -> Result<Graph> {
+    let nodes = export
+        .nodes
+        .into_iter()
+        .map(node_from_state)
+        .collect::<Result<Vec<_>>>()?;
+    let node_labels = nodes
+        .iter()
+        .map(|node| (node.id.clone(), node.label.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let edges = export
+        .relationships
+        .into_iter()
+        .map(|relationship| edge_from_state(relationship, &node_labels))
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Graph::new(nodes, edges))
+}
+
 pub fn graph_to_cocoindex_export(graph: &Graph) -> Result<CocoIndexGraphExport> {
     let labels = graph
         .nodes
@@ -73,6 +92,14 @@ pub fn node_to_state(node: &Node) -> Result<CocoIndexNodeState> {
         key: id_key(node.id.as_str()),
         properties: props_to_json_object(&node.props)?,
     })
+}
+
+pub fn node_from_state(node: CocoIndexNodeState) -> Result<Node> {
+    Ok(Node::new(
+        node.label,
+        id_from_key(&node.key, "node")?,
+        props_from_json_object(node.properties),
+    ))
 }
 
 pub fn edge_to_state(
@@ -107,10 +134,42 @@ pub fn edge_to_state(
     })
 }
 
+pub fn edge_from_state(
+    relationship: CocoIndexRelationshipState,
+    node_labels: &BTreeMap<NodeId, Label>,
+) -> Result<Edge> {
+    let from = id_from_key(&relationship.source.key, "relationship source")?;
+    let to = id_from_key(&relationship.target.key, "relationship target")?;
+    let label = Label::new(relationship.rel_type);
+    validate_endpoint_label("source", &from, &relationship.source.label, node_labels)?;
+    validate_endpoint_label("target", &to, &relationship.target.label, node_labels)?;
+
+    let edge_key_id = id_from_key(&relationship.key, "relationship")?;
+    let props = props_from_json_object(relationship.properties);
+    let mut edge = Edge::new(label, from, to, props);
+    let structural_key = edge_key(&edge);
+    if edge_key_id.as_str() != structural_key {
+        edge.id = Some(EdgeId::new(edge_key_id.into_string()));
+    }
+    Ok(edge)
+}
+
 fn id_key(id: &str) -> JsonValue {
     let mut key = JsonMap::new();
     key.insert("id".to_string(), JsonValue::String(id.to_string()));
     JsonValue::Object(key)
+}
+
+fn id_from_key(key: &JsonValue, kind: &str) -> Result<NodeId> {
+    key.as_object()
+        .and_then(|object| object.get("id"))
+        .and_then(JsonValue::as_str)
+        .map(NodeId::new)
+        .ok_or_else(|| {
+            GrustError::Serialization(format!(
+                "CocoIndex {kind} key must be an object with a string id field"
+            ))
+        })
 }
 
 fn props_to_json_object(props: &Props) -> Result<JsonMap<String, JsonValue>> {
@@ -118,6 +177,32 @@ fn props_to_json_object(props: &Props) -> Result<JsonMap<String, JsonValue>> {
         .iter()
         .map(|(key, value)| Ok((key.clone(), value_to_json(value)?)))
         .collect()
+}
+
+fn props_from_json_object(properties: JsonMap<String, JsonValue>) -> Props {
+    properties
+        .into_iter()
+        .map(|(key, value)| (key, Value::from_json(value)))
+        .collect()
+}
+
+fn validate_endpoint_label(
+    endpoint: &str,
+    id: &NodeId,
+    label: &str,
+    node_labels: &BTreeMap<NodeId, Label>,
+) -> Result<()> {
+    match node_labels.get(id) {
+        Some(actual) if actual.as_str() == label => Ok(()),
+        Some(actual) => Err(GrustError::Schema(format!(
+            "CocoIndex relationship {endpoint} endpoint '{}' has label '{}' but imported node label is '{}'",
+            id, label, actual
+        ))),
+        None => Err(GrustError::Schema(format!(
+            "CocoIndex relationship {endpoint} endpoint '{}' references a missing imported node",
+            id
+        ))),
+    }
 }
 
 fn value_to_json(value: &Value) -> Result<JsonValue> {
@@ -226,6 +311,108 @@ mod tests {
     fn explicit_edge_id_becomes_relationship_key() {
         let edge = Edge::new("RSVPED", "person:ada", "event:123", Props::new()).with_id("rsvp:1");
         assert_eq!(edge_key(&edge), "rsvp:1");
+    }
+
+    #[test]
+    fn imports_exported_graph_state() {
+        let imported =
+            cocoindex_export_to_graph(meetup_graph().to_cocoindex_export().expect("export"))
+                .expect("import");
+
+        assert_eq!(imported.nodes.len(), 3);
+        assert_eq!(imported.edges.len(), 2);
+        let event = imported
+            .nodes
+            .iter()
+            .find(|node| node.id == NodeId::new("event:123"))
+            .expect("event node");
+        assert_eq!(event.label, Label::new("Event"));
+        assert_eq!(event.props.get("capacity"), Some(&Value::Int(80)));
+
+        let rsvp = imported
+            .edges
+            .iter()
+            .find(|edge| edge.label == Label::new("RSVPED"))
+            .expect("rsvp edge");
+        assert_eq!(rsvp.from, NodeId::new("person:ada"));
+        assert_eq!(rsvp.to, NodeId::new("event:123"));
+        assert_eq!(rsvp.id, None);
+        assert_eq!(
+            rsvp.props.get("status"),
+            Some(&Value::String("yes".to_string()))
+        );
+    }
+
+    #[test]
+    fn imports_explicit_relationship_keys_as_edge_ids() {
+        let export = CocoIndexGraphExport {
+            nodes: vec![
+                CocoIndexNodeState {
+                    label: "Person".to_string(),
+                    key: id_key("person:ada"),
+                    properties: JsonMap::new(),
+                },
+                CocoIndexNodeState {
+                    label: "Event".to_string(),
+                    key: id_key("event:123"),
+                    properties: JsonMap::new(),
+                },
+            ],
+            relationships: vec![CocoIndexRelationshipState {
+                rel_type: "RSVPED".to_string(),
+                source: CocoIndexEndpoint {
+                    label: "Person".to_string(),
+                    key: id_key("person:ada"),
+                },
+                target: CocoIndexEndpoint {
+                    label: "Event".to_string(),
+                    key: id_key("event:123"),
+                },
+                key: id_key("rsvp:1"),
+                properties: JsonMap::new(),
+            }],
+        };
+
+        let graph = cocoindex_export_to_graph(export).expect("import");
+
+        assert_eq!(graph.edges[0].id, Some(EdgeId::new("rsvp:1")));
+    }
+
+    #[test]
+    fn import_rejects_malformed_keys_and_endpoint_label_mismatches() {
+        let err = cocoindex_export_to_graph(CocoIndexGraphExport {
+            nodes: vec![CocoIndexNodeState {
+                label: "Person".to_string(),
+                key: JsonValue::String("person:ada".to_string()),
+                properties: JsonMap::new(),
+            }],
+            relationships: Vec::new(),
+        })
+        .expect_err("node key must be an object");
+        assert!(err.to_string().contains("node key"));
+
+        let err = cocoindex_export_to_graph(CocoIndexGraphExport {
+            nodes: vec![CocoIndexNodeState {
+                label: "Person".to_string(),
+                key: id_key("person:ada"),
+                properties: JsonMap::new(),
+            }],
+            relationships: vec![CocoIndexRelationshipState {
+                rel_type: "RSVPED".to_string(),
+                source: CocoIndexEndpoint {
+                    label: "Robot".to_string(),
+                    key: id_key("person:ada"),
+                },
+                target: CocoIndexEndpoint {
+                    label: "Event".to_string(),
+                    key: id_key("event:missing"),
+                },
+                key: id_key("rsvp:1"),
+                properties: JsonMap::new(),
+            }],
+        })
+        .expect_err("source label should match imported node");
+        assert!(err.to_string().contains("source endpoint"));
     }
 
     #[test]

@@ -13,7 +13,7 @@ pub use grust_helix::*;
 pub use grust_lancedb::*;
 
 #[cfg(feature = "memory")]
-pub use grust_memory::MemoryGraphStore;
+pub use grust_memory::*;
 
 #[cfg(feature = "pggraph")]
 pub use grust_pggraph::*;
@@ -40,7 +40,7 @@ pub mod prelude {
     pub use grust_lancedb::*;
 
     #[cfg(feature = "memory")]
-    pub use grust_memory::MemoryGraphStore;
+    pub use grust_memory::*;
 
     #[cfg(feature = "pggraph")]
     pub use grust_pggraph::*;

@@ -968,11 +968,14 @@ serializable node and relationship state:
 
 ```rust
 let export = graph.to_cocoindex_export()?;
+let graph = cocoindex_export_to_graph(export)?;
 ```
 
 The export uses Grust node IDs as target keys, converts properties to JSON, and
 requires edge endpoints to exist in the graph so relationship source and target
-labels can be emitted.
+labels can be emitted. The import path expects the same key shape, validates
+relationship endpoints against imported nodes, and preserves explicit
+relationship keys as Grust edge IDs.
 
 ## Backend Integration Tests
 
