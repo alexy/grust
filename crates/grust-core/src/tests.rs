@@ -27,6 +27,46 @@ fn builder_dedupes_nodes_and_edges() {
 }
 
 #[test]
+fn graph_index_validates_and_indexes_adjacency() {
+    let graph = Graph::new(
+        vec![
+            Node::new("Person", "a", Props::new()),
+            Node::new("Person", "b", Props::new()),
+            Node::new("Person", "c", Props::new()),
+        ],
+        vec![
+            Edge::new("KNOWS", "a", "b", Props::new()),
+            Edge::new("KNOWS", "a", "c", Props::new()),
+            Edge::new("KNOWS", "c", "a", Props::new()),
+        ],
+    );
+
+    let index = GraphIndex::new(&graph).expect("valid graph index");
+
+    assert_eq!(index.vertex_index(&NodeId::new("a")), Some(0));
+    assert_eq!(index.outgoing_edges(&NodeId::new("a")), &[0, 1]);
+    assert_eq!(index.incoming_edges(&NodeId::new("a")), &[2]);
+    assert_eq!(index.outgoing_by_vertex(0), &[0, 1]);
+    assert_eq!(index.incoming_by_vertex(0), &[2]);
+    assert_eq!(index.edge_endpoints(1), (0, 2));
+    assert_eq!(index.out_degree(0), 2);
+    assert_eq!(index.in_degree(0), 1);
+    assert_eq!(index.degree(0), 3);
+}
+
+#[test]
+fn graph_index_rejects_missing_edge_endpoints() {
+    let graph = Graph::new(
+        vec![Node::new("Person", "a", Props::new())],
+        vec![Edge::new("KNOWS", "a", "missing", Props::new())],
+    );
+
+    let error = GraphIndex::new(&graph).expect_err("missing endpoint must fail");
+
+    assert!(error.to_string().contains("edge destination 'missing'"));
+}
+
+#[test]
 fn normalizes_relationship_types() {
     assert_eq!(relationship_type("presents"), "PRESENTS");
     assert_eq!(relationship_type("member-of"), "MEMBER_OF");

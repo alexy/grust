@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
 };
 
@@ -887,12 +887,16 @@ pub fn edge_key(edge: &Edge) -> String {
         .map(EdgeId::as_str)
         .map(ToString::to_string)
         .unwrap_or_else(|| {
-            format!(
-                "{}\u{1f}{}\u{1f}{}",
-                edge.from.as_str(),
-                edge.label.as_str(),
-                edge.to.as_str()
-            )
+            let from = edge.from.as_str();
+            let label = edge.label.as_str();
+            let to = edge.to.as_str();
+            let mut key = String::with_capacity(from.len() + label.len() + to.len() + 2);
+            key.push_str(from);
+            key.push('\u{1f}');
+            key.push_str(label);
+            key.push('\u{1f}');
+            key.push_str(to);
+            key
         })
 }
 
@@ -933,6 +937,119 @@ impl Graph {
 
     pub fn builder() -> GraphBuilder {
         GraphBuilder::new()
+    }
+}
+
+/// Dense, reusable indexes over a [`Graph`].
+///
+/// This is backend-neutral: it validates edge endpoints, maps node ids to
+/// stable vertex indexes, and stores edge adjacency by both node id and vertex
+/// index. Higher-level crates can use it for local analytics or query planning
+/// without rebuilding the same maps.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GraphIndex {
+    vertex_by_id: HashMap<NodeId, usize>,
+    outgoing_by_vertex: Vec<Vec<usize>>,
+    incoming_by_vertex: Vec<Vec<usize>>,
+    edge_endpoints: Vec<(usize, usize)>,
+}
+
+impl GraphIndex {
+    pub fn new(graph: &Graph) -> Result<Self> {
+        let mut vertex_by_id = HashMap::with_capacity(graph.nodes.len());
+        for (index, vertex) in graph.nodes.iter().enumerate() {
+            if vertex_by_id.insert(vertex.id.clone(), index).is_some() {
+                return Err(GrustError::Schema(format!(
+                    "duplicate vertex id '{}'",
+                    vertex.id.as_str()
+                )));
+            }
+        }
+
+        let mut outgoing_by_vertex = vec![Vec::<usize>::new(); graph.nodes.len()];
+        let mut incoming_by_vertex = vec![Vec::<usize>::new(); graph.nodes.len()];
+        let mut edge_endpoints = Vec::<(usize, usize)>::with_capacity(graph.edges.len());
+
+        for (edge_index, edge) in graph.edges.iter().enumerate() {
+            let Some(&from_index) = vertex_by_id.get(&edge.from) else {
+                return Err(GrustError::Schema(format!(
+                    "edge source '{}' is not present in vertices",
+                    edge.from.as_str()
+                )));
+            };
+            let Some(&to_index) = vertex_by_id.get(&edge.to) else {
+                return Err(GrustError::Schema(format!(
+                    "edge destination '{}' is not present in vertices",
+                    edge.to.as_str()
+                )));
+            };
+
+            outgoing_by_vertex[from_index].push(edge_index);
+            incoming_by_vertex[to_index].push(edge_index);
+            edge_endpoints.push((from_index, to_index));
+        }
+
+        Ok(Self {
+            vertex_by_id,
+            outgoing_by_vertex,
+            incoming_by_vertex,
+            edge_endpoints,
+        })
+    }
+
+    pub fn vertex_index(&self, id: &NodeId) -> Option<usize> {
+        self.vertex_by_id.get(id).copied()
+    }
+
+    pub fn require_vertex_index(&self, id: &NodeId) -> Result<usize> {
+        self.vertex_index(id)
+            .ok_or_else(|| GrustError::Schema(format!("vertex '{}' is not present", id.as_str())))
+    }
+
+    pub fn outgoing_edges(&self, id: &NodeId) -> &[usize] {
+        self.vertex_index(id)
+            .map(|index| self.outgoing_by_vertex(index))
+            .unwrap_or(&[])
+    }
+
+    pub fn incoming_edges(&self, id: &NodeId) -> &[usize] {
+        self.vertex_index(id)
+            .map(|index| self.incoming_by_vertex(index))
+            .unwrap_or(&[])
+    }
+
+    pub fn outgoing_by_vertex(&self, index: usize) -> &[usize] {
+        self.outgoing_by_vertex
+            .get(index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn incoming_by_vertex(&self, index: usize) -> &[usize] {
+        self.incoming_by_vertex
+            .get(index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn edge_endpoints(&self, edge_index: usize) -> (usize, usize) {
+        self.edge_endpoints[edge_index]
+    }
+
+    pub fn edge_endpoints_slice(&self) -> &[(usize, usize)] {
+        &self.edge_endpoints
+    }
+
+    pub fn out_degree(&self, index: usize) -> usize {
+        self.outgoing_by_vertex[index].len()
+    }
+
+    pub fn in_degree(&self, index: usize) -> usize {
+        self.incoming_by_vertex[index].len()
+    }
+
+    pub fn degree(&self, index: usize) -> usize {
+        self.in_degree(index) + self.out_degree(index)
     }
 }
 
@@ -2040,9 +2157,9 @@ pub trait GraphMutationStore: GraphStore {
 pub mod prelude {
     pub use crate::{
         Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, EdgeUniqueness, Field, FieldType,
-        Graph, GraphAdminStore, GraphBuilder, GraphMutation, GraphMutationStore, GraphSchema,
-        GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType,
-        Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value, edge_key,
+        Graph, GraphAdminStore, GraphBuilder, GraphIndex, GraphMutation, GraphMutationStore,
+        GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId,
+        NodeType, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value, edge_key,
         relationship_type, schema_identifier,
     };
 

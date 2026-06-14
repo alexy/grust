@@ -65,6 +65,10 @@ Shared backend-lowering helpers such as `relationship_type`,
 not drift on relationship names, typed table identifiers, or structural edge
 keys.
 
+`GraphIndex` also lives in `grust-core`. It is the shared dense adjacency layer
+for local analytics, backend planning, and adapter crates that need validated
+edge endpoints without rebuilding their own node-id maps.
+
 `grust-cocoindex` is intentionally different: it exports Grust graphs as
 CocoIndex-style node and relationship target state so an incremental indexing
 flow can propagate changes into a downstream graph or table backend.
@@ -117,6 +121,20 @@ Use `--no-start` to require an already-running service, and `--keep-running` to
 leave services up for debugging. See [docs/INTEGRATION.md](docs/INTEGRATION.md)
 for profiles, modes, Docker image pins, source-checkout configuration, and the
 CI strategy.
+
+## Core Benchmarks
+
+The facade crate includes a dependency-free benchmark harness for core graph
+operations and `GraphIndex` construction:
+
+```sh
+cargo run --release -p grust-graph --example benchmarks
+```
+
+It uses the same synthetic graph families as GrustFrames, including
+Graph500/GAP-style deterministic R-MAT cases. The harness measures graph
+cloning, shared index construction, degree scans, endpoint scans, and structural
+edge-key generation.
 
 ## Core Model
 
