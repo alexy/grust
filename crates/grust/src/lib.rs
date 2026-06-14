@@ -22,7 +22,10 @@ pub use grust_memory::*;
 pub use grust_pggraph::*;
 
 #[cfg(feature = "sail")]
-pub use grust_sail::{SailConfig, SailGraphStore};
+pub use grust_sail::{
+    SailConfig, SailDegreePairRow, SailDegreeRow, SailGraphStore, sail_degree_pairs_sql,
+    sail_degrees_sql, sail_in_degrees_sql, sail_out_degrees_sql,
+};
 
 #[cfg(feature = "surreal")]
 pub use grust_surreal::*;
@@ -52,7 +55,10 @@ pub mod prelude {
     pub use grust_pggraph::*;
 
     #[cfg(feature = "sail")]
-    pub use grust_sail::{SailConfig, SailGraphStore};
+    pub use grust_sail::{
+        SailConfig, SailDegreePairRow, SailDegreeRow, SailGraphStore, sail_degree_pairs_sql,
+        sail_degrees_sql, sail_in_degrees_sql, sail_out_degrees_sql,
+    };
 
     #[cfg(feature = "surreal")]
     pub use grust_surreal::*;

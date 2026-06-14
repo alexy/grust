@@ -1,6 +1,9 @@
 use std::net::TcpStream;
+use std::sync::Arc;
 use std::sync::RwLock;
 
+use arrow::array::{Int64Array, StringArray};
+use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use grust_core::prelude::*;
 use tonic::transport::Channel;
 
@@ -328,6 +331,89 @@ async fn sql_arguments_are_named_for_sail_parser() {
 fn clear_sql_drops_delta_tables_for_robust_reset() {
     assert_eq!(DROP_NODES_SQL, "DROP TABLE IF EXISTS grust_nodes");
     assert_eq!(DROP_EDGES_SQL, "DROP TABLE IF EXISTS grust_edges");
+}
+
+#[test]
+fn generic_degree_sql_uses_persisted_sail_graph_tables() {
+    assert_eq!(
+        sail_out_degrees_sql(),
+        "SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id"
+    );
+    assert_eq!(
+        sail_in_degrees_sql(),
+        "SELECT dst_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY dst_id"
+    );
+    assert!(sail_degrees_sql().contains("UNION ALL"));
+    assert!(sail_degree_pairs_sql().contains("FROM grust_nodes n"));
+    assert!(sail_degree_pairs_sql().contains("LEFT JOIN"));
+}
+
+#[test]
+fn degree_arrow_results_parse_to_public_rows() {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", DataType::Utf8, false),
+        ArrowField::new("degree", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(["a", "b"])),
+            Arc::new(Int64Array::from_iter_values([3, 5])),
+        ],
+    )
+    .unwrap();
+
+    let rows = parse_degrees_from_arrow(&ipc_bytes(&batch).unwrap()).unwrap();
+
+    assert_eq!(
+        rows,
+        vec![
+            SailDegreeRow {
+                id: NodeId::new("a"),
+                degree: 3,
+            },
+            SailDegreeRow {
+                id: NodeId::new("b"),
+                degree: 5,
+            },
+        ]
+    );
+}
+
+#[test]
+fn degree_pair_arrow_results_parse_to_public_rows() {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", DataType::Utf8, false),
+        ArrowField::new("in_degree", DataType::Int64, false),
+        ArrowField::new("out_degree", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(["a", "isolated"])),
+            Arc::new(Int64Array::from_iter_values([2, 0])),
+            Arc::new(Int64Array::from_iter_values([4, 0])),
+        ],
+    )
+    .unwrap();
+
+    let rows = parse_degree_pairs_from_arrow(&ipc_bytes(&batch).unwrap()).unwrap();
+
+    assert_eq!(
+        rows,
+        vec![
+            SailDegreePairRow {
+                id: NodeId::new("a"),
+                in_degree: 2,
+                out_degree: 4,
+            },
+            SailDegreePairRow {
+                id: NodeId::new("isolated"),
+                in_degree: 0,
+                out_degree: 0,
+            },
+        ]
+    );
 }
 
 #[tokio::test]

@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::Cursor;
 use std::sync::{Arc, RwLock};
 
-use arrow::array::{Array as _, RecordBatch, StringArray};
+use arrow::array::{Array as _, Int64Array, RecordBatch, StringArray};
 use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
@@ -40,6 +40,19 @@ impl Default for SailConfig {
             batch_size: 1000,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SailDegreeRow {
+    pub id: NodeId,
+    pub degree: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SailDegreePairRow {
+    pub id: NodeId,
+    pub in_degree: usize,
+    pub out_degree: usize,
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────────
@@ -114,6 +127,51 @@ impl SailGraphStore {
             parse_edges_from_arrow(edges_ipc)?,
         );
         self.put_graph(&graph).await
+    }
+
+    /// Reads the generic persisted `grust_nodes` and `grust_edges` tables into
+    /// a portable Grust graph.
+    pub async fn read_graph(&self) -> Result<Graph> {
+        let nodes = self
+            .run_query("SELECT id, label, props FROM grust_nodes", vec![])
+            .await?;
+        let edges = self
+            .run_edge_query(
+                "SELECT src_id, src_label, dst_id, dst_label, edge_type, props FROM grust_edges",
+                vec![],
+            )
+            .await?;
+        Ok(Graph::new(nodes, edges))
+    }
+
+    /// Computes out-degrees over the generic persisted Sail edge table.
+    pub async fn out_degrees(&self) -> Result<Vec<SailDegreeRow>> {
+        self.run_degree_query(&sail_out_degrees_sql()).await
+    }
+
+    /// Computes in-degrees over the generic persisted Sail edge table.
+    pub async fn in_degrees(&self) -> Result<Vec<SailDegreeRow>> {
+        self.run_degree_query(&sail_in_degrees_sql()).await
+    }
+
+    /// Computes total degree for each non-isolated vertex over the generic
+    /// persisted Sail edge table.
+    pub async fn degrees(&self) -> Result<Vec<SailDegreeRow>> {
+        self.run_degree_query(&sail_degrees_sql()).await
+    }
+
+    /// Computes both directed degree components for every persisted vertex.
+    pub async fn degree_pairs(&self) -> Result<Vec<SailDegreePairRow>> {
+        let mut rows = Vec::new();
+        self.run_plan(
+            self.query_request(sail_degree_pairs_sql(), vec![])?,
+            |data| {
+                rows.extend(parse_degree_pairs_from_arrow(data)?);
+                Ok(())
+            },
+        )
+        .await?;
+        Ok(rows)
     }
 
     // ── helpers ───────────────────────────────────────────────────────────────
@@ -250,6 +308,16 @@ impl SailGraphStore {
         })
         .await?;
         Ok(edges)
+    }
+
+    async fn run_degree_query(&self, sql: &str) -> Result<Vec<SailDegreeRow>> {
+        let mut rows = Vec::new();
+        self.run_plan(self.query_request(sql, vec![])?, |data| {
+            rows.extend(parse_degrees_from_arrow(data)?);
+            Ok(())
+        })
+        .await?;
+        Ok(rows)
     }
 
     fn current_schema(&self) -> Option<GraphSchema> {
@@ -708,6 +776,35 @@ fn delete_edges_from_view_sql(table: &str, include_label: bool) -> Result<String
          WHEN MATCHED THEN DELETE",
         sql_table_ref(table)?
     ))
+}
+
+pub fn sail_out_degrees_sql() -> String {
+    "SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id".to_string()
+}
+
+pub fn sail_in_degrees_sql() -> String {
+    "SELECT dst_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY dst_id".to_string()
+}
+
+pub fn sail_degrees_sql() -> String {
+    "SELECT id, SUM(degree) AS degree FROM (\
+       SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id \
+       UNION ALL \
+       SELECT dst_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY dst_id\
+     ) degree_events GROUP BY id"
+        .to_string()
+}
+
+pub fn sail_degree_pairs_sql() -> String {
+    "SELECT n.id AS id, \
+            COALESCE(in_degrees.degree, 0) AS in_degree, \
+            COALESCE(out_degrees.degree, 0) AS out_degree \
+       FROM grust_nodes n \
+       LEFT JOIN (SELECT dst_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY dst_id) in_degrees \
+         ON n.id = in_degrees.id \
+       LEFT JOIN (SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id) out_degrees \
+         ON n.id = out_degrees.id"
+        .to_string()
 }
 
 fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
@@ -1276,6 +1373,84 @@ fn parse_edges_from_arrow(data: &[u8]) -> Result<Vec<Edge>> {
         }
     }
     Ok(edges)
+}
+
+fn parse_degrees_from_arrow(data: &[u8]) -> Result<Vec<SailDegreeRow>> {
+    let reader = StreamReader::try_new(Cursor::new(data), None)
+        .map_err(|e| GrustError::Backend(format!("Arrow IPC read failed: {e}")))?;
+    let schema = reader.schema();
+    let id_idx = schema
+        .index_of("id")
+        .map_err(|_| GrustError::Schema("degree result missing 'id' column".into()))?;
+    let degree_idx = schema
+        .index_of("degree")
+        .map_err(|_| GrustError::Schema("degree result missing 'degree' column".into()))?;
+
+    let mut rows = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| GrustError::Backend(format!("Arrow batch error: {e}")))?;
+        let ids = string_column(&batch, id_idx, "id")?;
+        let degrees = int64_column(&batch, degree_idx, "degree")?;
+        for i in 0..batch.num_rows() {
+            rows.push(SailDegreeRow {
+                id: NodeId::new(ids.value(i)),
+                degree: usize_from_i64(degrees.value(i), "degree")?,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+fn parse_degree_pairs_from_arrow(data: &[u8]) -> Result<Vec<SailDegreePairRow>> {
+    let reader = StreamReader::try_new(Cursor::new(data), None)
+        .map_err(|e| GrustError::Backend(format!("Arrow IPC read failed: {e}")))?;
+    let schema = reader.schema();
+    let id_idx = schema
+        .index_of("id")
+        .map_err(|_| GrustError::Schema("degree pair result missing 'id' column".into()))?;
+    let in_degree_idx = schema
+        .index_of("in_degree")
+        .map_err(|_| GrustError::Schema("degree pair result missing 'in_degree' column".into()))?;
+    let out_degree_idx = schema
+        .index_of("out_degree")
+        .map_err(|_| GrustError::Schema("degree pair result missing 'out_degree' column".into()))?;
+
+    let mut rows = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| GrustError::Backend(format!("Arrow batch error: {e}")))?;
+        let ids = string_column(&batch, id_idx, "id")?;
+        let in_degrees = int64_column(&batch, in_degree_idx, "in_degree")?;
+        let out_degrees = int64_column(&batch, out_degree_idx, "out_degree")?;
+        for i in 0..batch.num_rows() {
+            rows.push(SailDegreePairRow {
+                id: NodeId::new(ids.value(i)),
+                in_degree: usize_from_i64(in_degrees.value(i), "in_degree")?,
+                out_degree: usize_from_i64(out_degrees.value(i), "out_degree")?,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+fn string_column<'a>(batch: &'a RecordBatch, index: usize, name: &str) -> Result<&'a StringArray> {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| GrustError::Schema(format!("{name} column is not string")))
+}
+
+fn int64_column<'a>(batch: &'a RecordBatch, index: usize, name: &str) -> Result<&'a Int64Array> {
+    batch
+        .column(index)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .ok_or_else(|| GrustError::Schema(format!("{name} column is not int64")))
+}
+
+fn usize_from_i64(value: i64, name: &str) -> Result<usize> {
+    usize::try_from(value)
+        .map_err(|_| GrustError::Schema(format!("{name} value {value} cannot be represented")))
 }
 
 #[cfg(test)]
