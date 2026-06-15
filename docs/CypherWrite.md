@@ -166,11 +166,16 @@ Ignored live Sail tests should cover:
 - mixed ordered mutation batch, with documentation that it follows the target
   store's `apply_mutations` atomicity behavior.
 
-## Next Feature Roadmap
+## Piecemeal Feature Roadmap
 
 The next writable Cypher features should extend the strict v1 surface without
 changing the core rule: Cypher syntax must lower through Grust mutation
 planning and `GraphMutationStore`.
+
+The recommended next implementation slice is items 1 and 2 together:
+multi-statement batches plus local variable binding. That gives the biggest
+usability jump while staying inside the strict explicit-ID semantics already
+implemented in v1.
 
 1. Multi-statement ordered mutation batches.
 
@@ -227,7 +232,22 @@ planning and `GraphMutationStore`.
    The matched variables must resolve to exactly the explicit IDs present in
    the match patterns. The merge still lowers to `GraphMutation::UpsertEdge`.
 
-5. Property patch semantics.
+5. Existence-checked `CREATE`.
+
+   The shipped v1 treats `CREATE` and `MERGE` as Grust upserts because both
+   lower to existing mutation semantics. A later stricter mode can make
+   `CREATE` fail when the target node or edge identity already exists, while
+   `MERGE` remains idempotent:
+
+   ```cypher
+   CREATE (:Person {id: 'person-1', name: 'Ada'});
+   ```
+
+   This requires a read-before-write check and therefore has backend-specific
+   cost. It should be documented as stricter Cypher compatibility rather than
+   the default fast path.
+
+6. Property patch semantics.
 
    Defer general `SET` until Grust has explicit backend-neutral patch
    operations. The first acceptable form should be map patching, not arbitrary
@@ -240,6 +260,21 @@ planning and `GraphMutationStore`.
 
    This requires new mutation variants such as node and edge patch operations,
    plus clear semantics for null values and missing properties.
+
+7. Cardinality-aware mutating `MATCH`.
+
+   Broad mutating `MATCH` should come late because it can affect zero, one, or
+   many elements:
+
+   ```cypher
+   MATCH (n:Person {status: 'inactive'})
+   DELETE n;
+   ```
+
+   Before accepting this form, the report model must describe how many rows
+   matched and how many graph elements were changed. The planner should also
+   make backend atomicity explicit: a backend may apply an ordered mutation
+   batch without guaranteeing transaction rollback on later failure.
 
 ## Deferred Semantics
 
