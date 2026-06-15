@@ -71,6 +71,25 @@ pub enum SailGraphPatternDirection {
 
 pub type CypherMutationReport = GraphMutationReport;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CypherCreateMode {
+    UpsertCompatible,
+    ErrorIfExists,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CypherMutationOptions {
+    pub create_mode: CypherCreateMode,
+}
+
+impl Default for CypherMutationOptions {
+    fn default() -> Self {
+        Self {
+            create_mode: CypherCreateMode::UpsertCompatible,
+        }
+    }
+}
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 /// Session-scoped temp views used to stage Arrow batches before MERGE.
@@ -299,6 +318,9 @@ impl CypherMutationPlanner {
     fn plan_statement(&mut self, cypher: &str) -> Result<GraphMutationPlan> {
         let cypher = cypher.trim();
         let upper = cypher.to_ascii_uppercase();
+        if let Some(rest) = cypher.strip_prefix("MATCH ") {
+            return self.parse_match(rest);
+        }
         if upper.contains(" SET ") || upper.starts_with("SET ") {
             return Err(GrustError::Unsupported(
                 "writable Cypher SET is not supported in v1".to_string(),
@@ -308,9 +330,6 @@ impl CypherMutationPlanner {
             return Err(GrustError::Unsupported(
                 "writable Cypher REMOVE is not supported in v1".to_string(),
             ));
-        }
-        if let Some(rest) = cypher.strip_prefix("MATCH ") {
-            return self.parse_match(rest);
         }
         if let Some(rest) = cypher.strip_prefix("CREATE ") {
             return self.parse_upsert(rest, GraphMutationPlanKind::Create);
@@ -393,8 +412,11 @@ impl CypherMutationPlanner {
         if find_unquoted_keyword(statement, "MERGE").is_some() {
             return self.parse_match_merge(statement);
         }
+        if find_unquoted_keyword(statement, "SET").is_some() {
+            return self.parse_match_set(statement);
+        }
         Err(GrustError::Unsupported(
-            "only ID-resolved MATCH ... DELETE and MATCH ... MERGE edge forms are supported in writable Cypher".to_string(),
+            "only ID-resolved MATCH ... DELETE, MATCH ... MERGE edge, and MATCH ... SET += node forms are supported in writable Cypher".to_string(),
         ))
     }
 
@@ -481,6 +503,39 @@ impl CypherMutationPlanner {
                 kind: GraphMutationPlanKind::Merge,
                 edge: parsed.edge,
             },
+        ]))
+    }
+
+    fn parse_match_set(&mut self, statement: &str) -> Result<GraphMutationPlan> {
+        let (pattern, assignment) = split_match_set(statement)?;
+        let (target, props) = parse_map_patch_assignment(assignment)?;
+
+        if pattern.contains("->") {
+            return Err(GrustError::Unsupported(
+                "MATCH SET edge patching is not supported yet".to_string(),
+            ));
+        }
+
+        let (node, rest) = parse_cypher_node_pattern(pattern)?;
+        if !rest.trim().is_empty() {
+            return Err(GrustError::Unsupported(format!(
+                "unsupported writable Cypher MATCH SET pattern suffix: {}",
+                rest.trim()
+            )));
+        }
+        let Some(node_variable) = &node.variable else {
+            return Err(GrustError::Unsupported(
+                "MATCH SET requires the node pattern to bind the patch target".to_string(),
+            ));
+        };
+        if node_variable != &target {
+            return Err(GrustError::Unsupported(format!(
+                "MATCH SET target '{target}' does not match node variable '{node_variable}'"
+            )));
+        }
+        let id = self.resolve_node_id(&node, "MATCH node SET")?;
+        Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::PatchNode { id, props },
         ]))
     }
 
@@ -753,6 +808,49 @@ fn split_match_merge(statement: &str) -> Result<(&str, &str)> {
     Err(GrustError::Unsupported(
         "only ID-resolved MATCH ... MERGE is supported in writable Cypher".to_string(),
     ))
+}
+
+fn split_match_set(statement: &str) -> Result<(&str, &str)> {
+    if let Some(index) = find_unquoted_keyword(statement, "SET") {
+        let pattern = statement[..index].trim();
+        let assignment = statement[index + "SET".len()..].trim();
+        if pattern.is_empty() || assignment.is_empty() {
+            return Err(GrustError::Unsupported(
+                "MATCH SET requires both a pattern and a patch assignment".to_string(),
+            ));
+        }
+        return Ok((pattern, assignment));
+    }
+    Err(GrustError::Unsupported(
+        "only ID-resolved MATCH ... SET += is supported in writable Cypher".to_string(),
+    ))
+}
+
+fn parse_map_patch_assignment(assignment: &str) -> Result<(String, Props)> {
+    let Some(index) = find_unquoted_sequence(assignment, "+=") else {
+        return Err(GrustError::Unsupported(
+            "MATCH SET only supports map patch syntax: target += { ... }".to_string(),
+        ));
+    };
+    let target = parse_required_cypher_variable(&assignment[..index], "MATCH SET target")?;
+    let props = parse_cypher_props_map_literal(&assignment[index + 2..])?;
+    Ok((target, props))
+}
+
+fn parse_cypher_props_map_literal(value: &str) -> Result<Props> {
+    let value = value.trim();
+    let Some(body) = value.strip_prefix('{') else {
+        return Err(GrustError::Unsupported(
+            "MATCH SET += requires a Cypher property map".to_string(),
+        ));
+    };
+    let close = find_matching(body, '{', '}')?;
+    if !body[close + 1..].trim().is_empty() {
+        return Err(GrustError::Unsupported(
+            "unsupported content after MATCH SET property map".to_string(),
+        ));
+    }
+    parse_cypher_props(&body[..close])
 }
 
 fn split_cypher_body_props(body: &str) -> Result<(&str, Props)> {
@@ -1064,6 +1162,33 @@ fn find_unquoted_keyword(value: &str, keyword: &str) -> Option<usize> {
     None
 }
 
+fn find_unquoted_sequence(value: &str, target: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            _ if value[index..].starts_with(target) => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
 fn keyword_boundary(ch: Option<char>) -> bool {
     ch.is_none_or(char::is_whitespace)
 }
@@ -1123,11 +1248,77 @@ impl SailGraphStore {
 
     /// Executes the strict v1 writable-Cypher subset through Grust mutations.
     pub async fn execute_cypher_mutation(&self, cypher: &str) -> Result<CypherMutationReport> {
+        self.execute_cypher_mutation_with_options(cypher, CypherMutationOptions::default())
+            .await
+    }
+
+    /// Executes writable Cypher with explicit execution options.
+    ///
+    /// `CypherCreateMode::ErrorIfExists` performs a read-before-write preflight
+    /// for Cypher `CREATE` operations. It is intentionally opt-in because the
+    /// default Grust mutation path treats `CREATE` and `MERGE` as upsert intent.
+    pub async fn execute_cypher_mutation_with_options(
+        &self,
+        cypher: &str,
+        options: CypherMutationOptions,
+    ) -> Result<CypherMutationReport> {
         let plan = sail_cypher_mutation_plan(cypher)?;
         let report = plan.report();
+        if options.create_mode == CypherCreateMode::ErrorIfExists {
+            self.check_strict_create_conflicts(&plan).await?;
+        }
         let mutations = plan.into_mutations();
         self.apply_mutations(&mutations).await?;
         Ok(report)
+    }
+
+    async fn check_strict_create_conflicts(&self, plan: &GraphMutationPlan) -> Result<()> {
+        for operation in &plan.operations {
+            match operation {
+                GraphMutationPlanOp::UpsertNode {
+                    kind: GraphMutationPlanKind::Create,
+                    node,
+                } => {
+                    if self.get_node(&node.id).await?.is_some() {
+                        return Err(GrustError::Unsupported(format!(
+                            "Cypher CREATE would overwrite existing node '{}'",
+                            node.id.as_str()
+                        )));
+                    }
+                }
+                GraphMutationPlanOp::UpsertEdge {
+                    kind: GraphMutationPlanKind::Create,
+                    edge,
+                } => {
+                    if self.strict_create_edge_exists(edge).await? {
+                        return Err(GrustError::Unsupported(format!(
+                            "Cypher CREATE would overwrite existing edge '{}'",
+                            edge_key(edge)
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn strict_create_edge_exists(&self, edge: &Edge) -> Result<bool> {
+        let mut existing = self
+            .get_edges(EdgeQuery {
+                from: Some(edge.from.clone()),
+                to: Some(edge.to.clone()),
+                label: Some(edge.label.clone()),
+            })
+            .await?;
+
+        if let Some(id) = &edge.id {
+            let sql = "SELECT id, src_id, src_label, dst_id, dst_label, edge_type, props \
+                       FROM grust_edges WHERE id = ? LIMIT 1";
+            existing.extend(self.run_edge_query(sql, vec![lit_str(id.as_str())]).await?);
+        }
+
+        Ok(strict_create_edge_conflicts(edge, &existing))
     }
 
     /// Loads Grust-shaped Arrow IPC node and edge streams into Sail tables.
@@ -1791,6 +1982,18 @@ fn merge_edges_from_view_sql() -> String {
          WHEN NOT MATCHED THEN INSERT (edge_key, id, src_id, src_label, dst_id, dst_label, edge_type, props) \
            VALUES (s.edge_key, s.id, s.src_id, s.src_label, s.dst_id, s.dst_label, s.edge_type, s.props)"
     )
+}
+
+fn strict_create_edge_conflicts(edge: &Edge, existing: &[Edge]) -> bool {
+    existing.iter().any(|existing| {
+        let same_explicit_id = edge
+            .id
+            .as_ref()
+            .is_some_and(|id| existing.id.as_ref() == Some(id));
+        let same_structural_identity =
+            existing.from == edge.from && existing.to == edge.to && existing.label == edge.label;
+        same_explicit_id || same_structural_identity
+    })
 }
 
 fn delete_nodes_from_view_sql(table: &str) -> Result<String> {

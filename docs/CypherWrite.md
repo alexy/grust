@@ -378,6 +378,10 @@ Implementation notes:
 - Document the cost and race window unless a backend can provide stronger
   transaction semantics.
 
+Implementation status: implemented in the working tree after `0.8.4` with
+focused unit coverage and an ignored live Sail test; release notes and book
+prose should be finalized when this batch ships.
+
 ### Batch D: Backend-neutral patch mutations and `SET +=`
 
 Introduce explicit patch semantics before accepting any writable Cypher `SET`.
@@ -390,10 +394,10 @@ SET n += {name: 'Ada'};
 
 Acceptance criteria:
 
-- Add backend-neutral mutation variants or a companion trait for node and edge
-  property patch operations.
-- Define null handling explicitly: either null is stored as a value, removes a
-  property, or is rejected. Do not inherit backend-specific behavior silently.
+- Add backend-neutral mutation variants or a companion trait for node property
+  patch operations.
+- Define null handling explicitly: `null` is stored as `Value::Null`; it does
+  not remove the property.
 - `MATCH ... SET n += {...}` lowers only when `n` resolves to one explicit node
   ID.
 - Edge patching lands only after the edge identity policy is equally explicit.
@@ -406,6 +410,10 @@ Implementation notes:
   expressions only after the backend-neutral semantics are fixed.
 - Typed-table mirror writes must be updated or invalidated consistently when a
   patched property maps to a typed column.
+
+Implementation status: implemented in the working tree after `0.8.4` for node
+map patches via backend-neutral `PatchNode` mutations and default
+read-modify-write execution; edge patching remains deferred.
 
 ### Batch E: Cardinality-aware mutating `MATCH`
 

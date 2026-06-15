@@ -519,6 +519,15 @@ fn delete_node_sql(nodes_table: &str, id: &NodeId) -> String {
     )
 }
 
+fn patch_node_sql(nodes_table: &str, id: &NodeId, props: &Props) -> Result<String> {
+    let props = props_to_json(props)?;
+    Ok(format!(
+        "UPDATE {nodes_table} SET props = props || {}::jsonb WHERE id = {}",
+        sql_str(&props),
+        sql_str(id.as_str())
+    ))
+}
+
 fn delete_edge_sql(edges_table: &str, from: &NodeId, label: &Label, to: &NodeId) -> String {
     format!(
         "DELETE FROM {edges_table} WHERE from_id = {} AND label = {} AND to_id = {}",
@@ -533,6 +542,7 @@ fn mutation_sql(nodes_table: &str, edges_table: &str, mutation: &GraphMutation) 
         GraphMutation::UpsertNode(node) => {
             upsert_nodes_sql(nodes_table, std::slice::from_ref(node))?
         }
+        GraphMutation::PatchNode { id, props } => patch_node_sql(nodes_table, id, props)?,
         GraphMutation::DeleteNode(id) => delete_node_sql(nodes_table, id),
         GraphMutation::UpsertEdge(edge) => {
             upsert_edges_sql(edges_table, std::slice::from_ref(edge))?

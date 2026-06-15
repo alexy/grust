@@ -104,6 +104,10 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             kind: GraphMutationPlanKind::Merge,
             edge: edge.clone(),
         },
+        GraphMutationPlanOp::PatchNode {
+            id: NodeId::new("person-1"),
+            props: Props::from([("name".to_string(), Value::from("Ada"))]),
+        },
         GraphMutationPlanOp::DeleteEdge {
             from: NodeId::new("person-1"),
             label: Label::new("KNOWS"),
@@ -118,10 +122,12 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             creates: 1,
             merges: 1,
             deletes: 2,
+            patches: 1,
             node_upserts: 1,
             edge_upserts: 1,
             node_deletes: 1,
             edge_deletes: 1,
+            node_patches: 1,
         }
     );
     assert_eq!(
@@ -129,6 +135,10 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
         vec![
             GraphMutation::UpsertNode(node),
             GraphMutation::UpsertEdge(edge),
+            GraphMutation::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([("name".to_string(), Value::from("Ada"))]),
+            },
             GraphMutation::DeleteEdge {
                 from: NodeId::new("person-1"),
                 label: Label::new("KNOWS"),

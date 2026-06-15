@@ -6,6 +6,12 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added opt-in strict `CREATE` execution for Sail writable Cypher through
+  `CypherMutationOptions` and `CypherCreateMode::ErrorIfExists`, preserving the
+  default upsert-compatible path.
+- Added backend-neutral node patch mutations and Sail writable Cypher lowering
+  for strict `MATCH ... SET n += { ... }` node map patches.
+
 ## 2026-06-15 - 0.8.4
 
 - Extended strict writable Cypher planning in `grust-sail` with ID-resolved

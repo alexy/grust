@@ -194,6 +194,41 @@ fn generic_edge_merge_persists_edge_identity_columns() {
 }
 
 #[test]
+fn cypher_mutation_options_default_to_upsert_compatible_create() {
+    assert_eq!(
+        CypherMutationOptions::default(),
+        CypherMutationOptions {
+            create_mode: CypherCreateMode::UpsertCompatible,
+        }
+    );
+}
+
+#[test]
+fn strict_create_edge_conflicts_on_sail_write_identity() {
+    let structural = Edge::new("KNOWS", "person-1", "person-2", Props::new());
+    let explicit = Edge::new("KNOWS", "person-1", "person-2", Props::new()).with_id("edge-1");
+    let same_id_elsewhere =
+        Edge::new("KNOWS", "person-3", "person-4", Props::new()).with_id("edge-1");
+    let same_structural_different_id =
+        Edge::new("KNOWS", "person-1", "person-2", Props::new()).with_id("edge-2");
+    let unrelated = Edge::new("KNOWS", "person-2", "person-3", Props::new()).with_id("edge-3");
+
+    assert!(strict_create_edge_conflicts(
+        &structural,
+        &[same_structural_different_id.clone()]
+    ));
+    assert!(strict_create_edge_conflicts(
+        &explicit,
+        &[same_id_elsewhere]
+    ));
+    assert!(strict_create_edge_conflicts(
+        &explicit,
+        &[same_structural_different_id]
+    ));
+    assert!(!strict_create_edge_conflicts(&explicit, &[unrelated]));
+}
+
+#[test]
 fn staged_node_batch_round_trips_through_arrow_ipc() {
     let graph = sample_graph();
     let batch = nodes_record_batch(&graph.nodes).unwrap();
@@ -700,7 +735,6 @@ fn cypher_match_delete_rejects_unresolved_or_mismatched_patterns() {
         "MATCH (n:Person {id: 'person-1'}) DELETE m",
         "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) DELETE n",
         "MATCH (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'}) DELETE e",
-        "MATCH (n:Person {id: 'person-1'}) SET n += {name: 'Ada'}",
     ] {
         let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH must fail");
         assert!(matches!(error, GrustError::Unsupported(_)));
@@ -747,6 +781,54 @@ fn cypher_match_merge_rejects_unresolved_or_broad_forms() {
     ] {
         let error =
             sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH MERGE must fail");
+        assert!(matches!(error, GrustError::Unsupported(_)));
+    }
+}
+
+#[test]
+fn cypher_match_set_map_patch_lowers_id_resolved_node() {
+    let plan = sail_cypher_mutation_plan(
+        "
+        MATCH (n:Person {id: 'person-1'})
+        SET n += {name: 'Ada', nickname: null, note: 'literal += stays literal'}
+        ",
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            patches: 1,
+            node_patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        plan.into_mutations(),
+        vec![GraphMutation::PatchNode {
+            id: NodeId::new("person-1"),
+            props: Props::from([
+                ("name".to_string(), Value::from("Ada")),
+                ("nickname".to_string(), Value::Null),
+                (
+                    "note".to_string(),
+                    Value::String("literal += stays literal".to_string())
+                ),
+            ]),
+        }]
+    );
+}
+
+#[test]
+fn cypher_match_set_rejects_deferred_patch_forms() {
+    for cypher in [
+        "MATCH (n:Person {name: 'Ada'}) SET n += {name: 'Ada'}",
+        "MATCH (n:Person {id: 'person-1'}) SET m += {name: 'Ada'}",
+        "MATCH (n:Person {id: 'person-1'}) SET n.name = 'Ada'",
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) SET e += {since: 2026}",
+        "MATCH (n:Person {id: 'person-1'}) REMOVE n.name",
+    ] {
+        let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH SET must fail");
         assert!(matches!(error, GrustError::Unsupported(_)));
     }
 }
@@ -1140,6 +1222,62 @@ async fn test_execute_cypher_mutations() {
             .expect("read after node delete")
             .is_none()
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_mutation_strict_create() {
+    let store = store().await;
+    let strict = CypherMutationOptions {
+        create_mode: CypherCreateMode::ErrorIfExists,
+    };
+
+    store
+        .execute_cypher_mutation("CREATE (:Person {id: 'person-1', name: 'Ada'})")
+        .await
+        .expect("default create writes node");
+    store
+        .execute_cypher_mutation("CREATE (:Person {id: 'person-1', name: 'Ada Updated'})")
+        .await
+        .expect("default create remains upsert-compatible");
+
+    let error = store
+        .execute_cypher_mutation_with_options(
+            "CREATE (:Person {id: 'person-1', name: 'Ada Strict'})",
+            strict,
+        )
+        .await
+        .expect_err("strict create should reject existing node");
+    assert!(error.to_string().contains("existing node 'person-1'"));
+
+    store
+        .execute_cypher_mutation("MERGE (:Person {id: 'person-2', name: 'Bob'})")
+        .await
+        .expect("merge destination node");
+    store
+        .execute_cypher_mutation(
+            "CREATE (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-1'}]->(:Person {id: 'person-2'})",
+        )
+        .await
+        .expect("default create writes edge");
+
+    let error = store
+        .execute_cypher_mutation_with_options(
+            "CREATE (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-2'}]->(:Person {id: 'person-2'})",
+            strict,
+        )
+        .await
+        .expect_err("strict create should reject existing structural edge");
+    assert!(error.to_string().contains("existing edge"));
+
+    let error = store
+        .execute_cypher_mutation_with_options(
+            "CREATE (:Person {id: 'person-3'})-[e:KNOWS {id: 'edge-1'}]->(:Person {id: 'person-4'})",
+            strict,
+        )
+        .await
+        .expect_err("strict create should reject existing explicit edge id");
+    assert!(error.to_string().contains("existing edge"));
 }
 
 #[tokio::test]

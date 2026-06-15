@@ -1024,7 +1024,12 @@ statements into `GraphMutationPlan` and then ordinary `GraphMutation` values.
 The execution entrypoint, `SailGraphStore::execute_cypher_mutation`, runs those
 mutations through `GraphMutationStore`, so Cypher writes use the same staged
 Arrow, `MERGE INTO`, typed-table mirror, and delete paths as normal Grust
-writes.
+writes. When callers need stricter Cypher compatibility, the options entrypoint
+can make `CREATE` fail if the target node or edge identity already exists. That
+mode performs a read-before-write check and therefore keeps the default
+entrypoint on the lower-friction upsert-compatible path. ID-resolved
+`MATCH ... SET n += { ... }` lowers to a node patch mutation; `null` in the
+patch map is stored as `Value::Null` rather than treated as property removal.
 
 ## FalkorDB, HelixDB, and SurrealDB
 

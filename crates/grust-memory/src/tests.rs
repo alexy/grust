@@ -165,6 +165,13 @@ fn apply_mutations_upserts_and_deletes() {
         GraphMutation::UpsertNode(Node::new("Person", "a", Props::new())),
         GraphMutation::UpsertNode(Node::new("Person", "b", Props::new())),
         GraphMutation::UpsertEdge(Edge::new("KNOWS", "a", "b", Props::new())),
+        GraphMutation::PatchNode {
+            id: NodeId::new("a"),
+            props: Props::from([
+                ("name".to_string(), Value::from("Ada")),
+                ("nickname".to_string(), Value::Null),
+            ]),
+        },
         GraphMutation::DeleteEdge {
             from: NodeId::new("a"),
             label: Label::new("KNOWS"),
@@ -175,11 +182,11 @@ fn apply_mutations_upserts_and_deletes() {
 
     futures_executor::block_on(store.apply_mutations(&mutations)).unwrap();
 
-    assert!(
-        futures_executor::block_on(store.get_node(&NodeId::new("a")))
-            .unwrap()
-            .is_some()
-    );
+    let node = futures_executor::block_on(store.get_node(&NodeId::new("a")))
+        .unwrap()
+        .expect("patched node remains");
+    assert_eq!(node.props.get("name"), Some(&Value::from("Ada")));
+    assert_eq!(node.props.get("nickname"), Some(&Value::Null));
     assert!(
         futures_executor::block_on(store.get_node(&NodeId::new("b")))
             .unwrap()

@@ -388,6 +388,13 @@ variables bound from explicit-ID node patterns, plus ID-resolved
 `MATCH ... DELETE` and edge `MATCH ... MERGE` forms, while
 `SailGraphStore::execute_cypher_mutation` executes those plans through
 `GraphMutationStore` and the existing Sail staging and `MERGE INTO` paths.
+For stricter Cypher compatibility, callers can use
+`execute_cypher_mutation_with_options` with
+`CypherCreateMode::ErrorIfExists` to make `CREATE` perform a read-before-write
+existence check instead of following the default upsert-compatible path.
+Writable Cypher also lowers ID-resolved `MATCH ... SET n += { ... }` node map
+patches into backend-neutral node patch mutations; `null` is stored as a graph
+value rather than interpreted as property removal.
 
 `grust-surreal` provides both `SurrealHttpGraphStore` and
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and

@@ -2108,6 +2108,10 @@ pub trait GraphAdminStore: GraphStore {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GraphMutation {
     UpsertNode(Node),
+    PatchNode {
+        id: NodeId,
+        props: Props,
+    },
     DeleteNode(NodeId),
     UpsertEdge(Edge),
     DeleteEdge {
@@ -2128,6 +2132,10 @@ pub enum GraphMutationPlanOp {
     UpsertNode {
         kind: GraphMutationPlanKind,
         node: Node,
+    },
+    PatchNode {
+        id: NodeId,
+        props: Props,
     },
     UpsertEdge {
         kind: GraphMutationPlanKind,
@@ -2176,10 +2184,12 @@ pub struct GraphMutationReport {
     pub creates: usize,
     pub merges: usize,
     pub deletes: usize,
+    pub patches: usize,
     pub node_upserts: usize,
     pub edge_upserts: usize,
     pub node_deletes: usize,
     pub edge_deletes: usize,
+    pub node_patches: usize,
 }
 
 impl GraphMutationReport {
@@ -2197,6 +2207,10 @@ impl GraphMutationReport {
                     _ => {}
                 }
             }
+            GraphMutationPlanOp::PatchNode { .. } => {
+                self.patches += 1;
+                self.node_patches += 1;
+            }
             GraphMutationPlanOp::DeleteNode(_) => {
                 self.deletes += 1;
                 self.node_deletes += 1;
@@ -2213,6 +2227,7 @@ impl From<GraphMutationPlanOp> for GraphMutation {
     fn from(operation: GraphMutationPlanOp) -> Self {
         match operation {
             GraphMutationPlanOp::UpsertNode { node, .. } => Self::UpsertNode(node),
+            GraphMutationPlanOp::PatchNode { id, props } => Self::PatchNode { id, props },
             GraphMutationPlanOp::UpsertEdge { edge, .. } => Self::UpsertEdge(edge),
             GraphMutationPlanOp::DeleteNode(id) => Self::DeleteNode(id),
             GraphMutationPlanOp::DeleteEdge { from, label, to } => {
@@ -2245,6 +2260,14 @@ pub trait GraphMutationStore: GraphStore {
             match mutation {
                 GraphMutation::UpsertNode(node) => {
                     self.put_node(node).await?;
+                }
+                GraphMutation::PatchNode { id, props } => {
+                    if let Some(mut node) = self.get_node(id).await? {
+                        for (key, value) in props {
+                            node.props.insert(key.clone(), value.clone());
+                        }
+                        self.put_node(&node).await?;
+                    }
                 }
                 GraphMutation::DeleteNode(id) => self.delete_node(id).await?,
                 GraphMutation::UpsertEdge(edge) => {

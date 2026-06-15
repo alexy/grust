@@ -148,6 +148,10 @@ fn mutation_batch_query_wraps_ordered_mutations_in_transaction() {
             GraphMutation::UpsertNode(Node::new("Person", "person-1", Props::new())),
             GraphMutation::UpsertNode(Node::new("Talk", "talk-1", Props::new())),
             GraphMutation::UpsertEdge(Edge::new("presents", "person-1", "talk-1", Props::new())),
+            GraphMutation::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([("name".to_string(), Value::from("Ada"))]),
+            },
             GraphMutation::DeleteEdge {
                 from: NodeId::new("person-1"),
                 label: Label::new("presents"),
@@ -163,6 +167,7 @@ fn mutation_batch_query_wraps_ordered_mutations_in_transaction() {
     assert!(query.ends_with("\nCOMMIT TRANSACTION;"));
     assert!(query.contains("UPSERT type::record(\"person\", \"person-1\")"));
     assert!(query.contains("RELATE"));
+    assert!(query.contains("UPDATE type::record(\"person\", \"person-1\") SET name = \"Ada\";"));
     assert!(query.contains("->presents->"));
     assert!(query.contains("type::record(\"person\", \"person-1\")"));
     assert!(query.contains("type::record(\"talk\", \"talk-1\")"));
