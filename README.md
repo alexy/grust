@@ -225,7 +225,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.1", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.8.2", features = ["memory"] }
 ```
 
 The facade re-exports the full `grust-memory` crate surface when the feature is
@@ -315,7 +315,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.1", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.8.2", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 For Arrow-native data sources, enable `ladybug-arrow` to use embedded
@@ -380,6 +380,12 @@ backend writes.
 Typed-table descriptor helpers and directional triplet SQL helpers cover the
 common GrustFrames-style needs of selecting schema-backed Sail tables and
 lowering triplet filters, motifs, and aggregate-message passes.
+Writable Cypher starts as a strict Sail-specific v1 surface:
+`sail_cypher_mutation_plan` parses explicit-ID node `CREATE`/`MERGE`, resolved
+endpoint edge `CREATE`/`MERGE`, and resolved node/edge `DELETE` into Grust
+mutation plans, while `SailGraphStore::execute_cypher_mutation` executes those
+plans through `GraphMutationStore` and the existing Sail staging and `MERGE
+INTO` paths.
 
 `grust-surreal` provides both `SurrealHttpGraphStore` and
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and

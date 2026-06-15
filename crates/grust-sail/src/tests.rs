@@ -559,6 +559,114 @@ fn graph_table_contract_helpers_are_shared() {
 }
 
 #[test]
+fn cypher_node_create_requires_explicit_id_and_lowers_to_mutation() {
+    let plan =
+        sail_cypher_mutation_plan("CREATE (n:Person {id: 'person-1', name: 'Ada', age: 36})")
+            .unwrap();
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            creates: 1,
+            node_upserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        plan.into_mutations(),
+        vec![GraphMutation::UpsertNode(Node::new(
+            "Person",
+            "person-1",
+            Props::from([
+                ("age".to_string(), Value::Int(36)),
+                ("id".to_string(), Value::String("person-1".to_string())),
+                ("name".to_string(), Value::String("Ada".to_string())),
+            ]),
+        ))]
+    );
+
+    let error = sail_cypher_mutation_plan("CREATE (:Person {name: 'Ada'})")
+        .expect_err("missing id should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("requires explicit string property 'id'")
+    );
+}
+
+#[test]
+fn cypher_merge_edge_requires_resolved_endpoint_ids() {
+    let plan = sail_cypher_mutation_plan(
+        "MERGE (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-1', since: 2020}]->(:Person {id: 'person-2'})",
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            merges: 1,
+            edge_upserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        plan.into_mutations(),
+        vec![GraphMutation::UpsertEdge(
+            Edge::new(
+                "KNOWS",
+                "person-1",
+                "person-2",
+                Props::from([
+                    ("id".to_string(), Value::String("edge-1".to_string())),
+                    ("since".to_string(), Value::Int(2020)),
+                ]),
+            )
+            .with_id("edge-1")
+        )]
+    );
+
+    let error = sail_cypher_mutation_plan(
+        "CREATE (:Person {name: 'Ada'})-[:KNOWS]->(:Person {id: 'person-2'})",
+    )
+    .expect_err("unresolved source id should fail");
+    assert!(error.to_string().contains("edge mutation source node"));
+}
+
+#[test]
+fn cypher_delete_lowers_resolved_node_and_edge_patterns() {
+    let node_delete = sail_cypher_mutation_plan("DELETE (:Person {id: 'person-1'})").unwrap();
+    assert_eq!(
+        node_delete.into_mutations(),
+        vec![GraphMutation::DeleteNode(NodeId::new("person-1"))]
+    );
+
+    let edge_delete = sail_cypher_mutation_plan(
+        "DELETE (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'})",
+    )
+    .unwrap();
+    assert_eq!(
+        edge_delete.into_mutations(),
+        vec![GraphMutation::DeleteEdge {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+        }]
+    );
+}
+
+#[test]
+fn cypher_write_rejects_deferred_v1_semantics() {
+    for cypher in [
+        "MATCH (n:Person {id: 'person-1'}) DELETE n",
+        "CREATE (:Person {id: 'person-1'}) SET n.name = 'Ada'",
+        "REMOVE n.name",
+    ] {
+        let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported Cypher must fail");
+        assert!(matches!(error, GrustError::Unsupported(_)));
+    }
+}
+
+#[test]
 fn degree_arrow_results_parse_to_public_rows() {
     let schema = Arc::new(ArrowSchema::new(vec![
         ArrowField::new("id", DataType::Utf8, false),
@@ -722,6 +830,92 @@ async fn test_put_graph_and_traverse() {
         "traversal should return destination node"
     );
     assert_eq!(result[0].id.as_str(), "talk-1");
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_mutations() {
+    let store = store().await;
+
+    let report = store
+        .execute_cypher_mutation("CREATE (:Person {id: 'person-1', name: 'Ada'})")
+        .await
+        .expect("create source node");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            creates: 1,
+            node_upserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    store
+        .execute_cypher_mutation("MERGE (:Person {id: 'person-2', name: 'Bob'})")
+        .await
+        .expect("merge destination node");
+    store
+        .execute_cypher_mutation(
+            "CREATE (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-1', since: 2020}]->(:Person {id: 'person-2'})",
+        )
+        .await
+        .expect("create edge");
+
+    let edges = store
+        .get_edges(EdgeQuery {
+            from: Some(NodeId::new("person-1")),
+            to: Some(NodeId::new("person-2")),
+            label: Some(Label::new("KNOWS")),
+        })
+        .await
+        .expect("read cypher-created edge");
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].id.as_ref().map(EdgeId::as_str), Some("edge-1"));
+
+    let report = store
+        .execute_cypher_mutation(
+            "DELETE (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'})",
+        )
+        .await
+        .expect("delete edge");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            deletes: 1,
+            edge_deletes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert!(
+        store
+            .get_edges(EdgeQuery {
+                from: Some(NodeId::new("person-1")),
+                to: Some(NodeId::new("person-2")),
+                label: Some(Label::new("KNOWS")),
+            })
+            .await
+            .expect("read after edge delete")
+            .is_empty()
+    );
+
+    let report = store
+        .execute_cypher_mutation("DELETE (:Person {id: 'person-1'})")
+        .await
+        .expect("delete node");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            deletes: 1,
+            node_deletes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert!(
+        store
+            .get_node(&NodeId::new("person-1"))
+            .await
+            .expect("read after node delete")
+            .is_none()
+    );
 }
 
 #[tokio::test]

@@ -69,6 +69,8 @@ pub enum SailGraphPatternDirection {
     Undirected,
 }
 
+pub type CypherMutationReport = GraphMutationReport;
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 /// Session-scoped temp views used to stage Arrow batches before MERGE.
@@ -270,6 +272,419 @@ where
     missing
 }
 
+pub fn sail_cypher_mutation_plan(cypher: &str) -> Result<GraphMutationPlan> {
+    let cypher = cypher.trim().trim_end_matches(';').trim();
+    if cypher.is_empty() {
+        return Err(GrustError::Unsupported(
+            "writable Cypher statement is empty".to_string(),
+        ));
+    }
+    let upper = cypher.to_ascii_uppercase();
+    if upper.contains(" SET ") || upper.starts_with("SET ") {
+        return Err(GrustError::Unsupported(
+            "writable Cypher SET is not supported in v1".to_string(),
+        ));
+    }
+    if upper.contains(" REMOVE ") || upper.starts_with("REMOVE ") {
+        return Err(GrustError::Unsupported(
+            "writable Cypher REMOVE is not supported in v1".to_string(),
+        ));
+    }
+    if upper.starts_with("MATCH ") {
+        return Err(GrustError::Unsupported(
+            "mutating MATCH is not supported in writable Cypher v1".to_string(),
+        ));
+    }
+    if let Some(rest) = cypher.strip_prefix("CREATE ") {
+        return parse_cypher_upsert(rest, GraphMutationPlanKind::Create);
+    }
+    if let Some(rest) = cypher.strip_prefix("MERGE ") {
+        return parse_cypher_upsert(rest, GraphMutationPlanKind::Merge);
+    }
+    if let Some(rest) = cypher.strip_prefix("DELETE ") {
+        return parse_cypher_delete(rest);
+    }
+    Err(GrustError::Unsupported(format!(
+        "unsupported writable Cypher statement; expected CREATE, MERGE, or DELETE: {cypher}"
+    )))
+}
+
+fn parse_cypher_upsert(pattern: &str, kind: GraphMutationPlanKind) -> Result<GraphMutationPlan> {
+    if pattern.contains("->") {
+        let parsed = parse_cypher_edge_pattern(pattern)?;
+        return Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::UpsertEdge {
+                kind,
+                edge: parsed.edge,
+            },
+        ]));
+    }
+
+    let (node, rest) = parse_cypher_node_pattern(pattern)?;
+    if !rest.trim().is_empty() {
+        return Err(GrustError::Unsupported(format!(
+            "unsupported writable Cypher node pattern suffix: {}",
+            rest.trim()
+        )));
+    }
+    let label = node
+        .label
+        .ok_or_else(|| GrustError::Unsupported("node CREATE/MERGE requires a label".to_string()))?;
+    let id = required_string_prop(&node.props, "id", "node CREATE/MERGE")?;
+    Ok(GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind,
+            node: Node::new(label, id, node.props),
+        },
+    ]))
+}
+
+fn parse_cypher_delete(pattern: &str) -> Result<GraphMutationPlan> {
+    if pattern.contains("->") {
+        let parsed = parse_cypher_edge_pattern(pattern)?;
+        return Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::DeleteEdge {
+                from: parsed.from_id,
+                label: parsed.edge.label,
+                to: parsed.to_id,
+            },
+        ]));
+    }
+
+    let (node, rest) = parse_cypher_node_pattern(pattern)?;
+    if !rest.trim().is_empty() {
+        return Err(GrustError::Unsupported(format!(
+            "unsupported writable Cypher delete pattern suffix: {}",
+            rest.trim()
+        )));
+    }
+    let id = required_string_prop(&node.props, "id", "node DELETE")?;
+    Ok(GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::DeleteNode(NodeId::new(id)),
+    ]))
+}
+
+#[derive(Debug)]
+struct ParsedCypherNode {
+    label: Option<Label>,
+    props: Props,
+}
+
+#[derive(Debug)]
+struct ParsedCypherEdge {
+    from_id: NodeId,
+    to_id: NodeId,
+    edge: Edge,
+}
+
+fn parse_cypher_edge_pattern(pattern: &str) -> Result<ParsedCypherEdge> {
+    let (from, rest) = parse_cypher_node_pattern(pattern)?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("-[").ok_or_else(|| {
+        GrustError::Unsupported("edge mutation requires a directed -[...]-> pattern".to_string())
+    })?;
+    let rel_end = rest.find(']').ok_or_else(|| {
+        GrustError::Unsupported("edge mutation relationship pattern is missing ']'".to_string())
+    })?;
+    let rel = &rest[..rel_end];
+    let rest = rest[rel_end + 1..].trim_start();
+    let rest = rest.strip_prefix("->").ok_or_else(|| {
+        GrustError::Unsupported("edge mutation requires outgoing '->' direction".to_string())
+    })?;
+    let (to, rest) = parse_cypher_node_pattern(rest)?;
+    if !rest.trim().is_empty() {
+        return Err(GrustError::Unsupported(format!(
+            "unsupported writable Cypher edge pattern suffix: {}",
+            rest.trim()
+        )));
+    }
+
+    let from_id = NodeId::new(required_string_prop(
+        &from.props,
+        "id",
+        "edge mutation source node",
+    )?);
+    let to_id = NodeId::new(required_string_prop(
+        &to.props,
+        "id",
+        "edge mutation destination node",
+    )?);
+    let (label, props) = parse_cypher_relationship(rel)?;
+    let mut edge = Edge::new(label, from_id.clone(), to_id.clone(), props);
+    if let Some(id) = edge
+        .props
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    {
+        edge = edge.with_id(id);
+    }
+    Ok(ParsedCypherEdge {
+        from_id,
+        to_id,
+        edge,
+    })
+}
+
+fn parse_cypher_node_pattern(input: &str) -> Result<(ParsedCypherNode, &str)> {
+    let input = input.trim_start();
+    let input = input.strip_prefix('(').ok_or_else(|| {
+        GrustError::Unsupported("writable Cypher node pattern must start with '('".to_string())
+    })?;
+    let close = find_matching(input, '(', ')')?;
+    let body = input[..close].trim();
+    let rest = &input[close + 1..];
+    let (label, props) = parse_cypher_node_body(body)?;
+    Ok((ParsedCypherNode { label, props }, rest))
+}
+
+fn parse_cypher_node_body(body: &str) -> Result<(Option<Label>, Props)> {
+    let (head, props) = split_cypher_body_props(body)?;
+    let label = head
+        .split_once(':')
+        .map(|(_, label)| label.trim())
+        .filter(|label| !label.is_empty())
+        .map(|label| Label::new(label.to_string()));
+    Ok((label, props))
+}
+
+fn parse_cypher_relationship(body: &str) -> Result<(Label, Props)> {
+    let (head, props) = split_cypher_body_props(body.trim())?;
+    let label = head
+        .split_once(':')
+        .map(|(_, label)| label.trim())
+        .filter(|label| !label.is_empty())
+        .ok_or_else(|| {
+            GrustError::Unsupported("edge CREATE/MERGE/DELETE requires a relationship type".into())
+        })?;
+    Ok((Label::new(label.to_string()), props))
+}
+
+fn split_cypher_body_props(body: &str) -> Result<(&str, Props)> {
+    let body = body.trim();
+    if let Some(open) = body.find('{') {
+        let close = find_matching(&body[open + 1..], '{', '}')? + open + 1;
+        if !body[close + 1..].trim().is_empty() {
+            return Err(GrustError::Unsupported(
+                "unsupported content after Cypher property map".to_string(),
+            ));
+        }
+        Ok((&body[..open], parse_cypher_props(&body[open + 1..close])?))
+    } else {
+        Ok((body, Props::new()))
+    }
+}
+
+fn parse_cypher_props(body: &str) -> Result<Props> {
+    let mut props = Props::new();
+    for entry in split_top_level_commas(body)? {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let colon = find_unquoted(entry, ':').ok_or_else(|| {
+            GrustError::Unsupported(format!("Cypher property entry is missing ':': {entry}"))
+        })?;
+        let key = parse_cypher_prop_key(&entry[..colon])?;
+        let value = parse_cypher_literal(&entry[colon + 1..])?;
+        props.insert(key, value);
+    }
+    Ok(props)
+}
+
+fn parse_cypher_prop_key(key: &str) -> Result<String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return Err(GrustError::Unsupported(
+            "Cypher property key cannot be empty".to_string(),
+        ));
+    }
+    if is_quoted(key) {
+        parse_cypher_string(key)
+    } else if key
+        .chars()
+        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        Ok(key.to_string())
+    } else {
+        Err(GrustError::Unsupported(format!(
+            "unsupported Cypher property key: {key}"
+        )))
+    }
+}
+
+fn parse_cypher_literal(value: &str) -> Result<Value> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(GrustError::Unsupported(
+            "Cypher property value cannot be empty".to_string(),
+        ));
+    }
+    if is_quoted(value) {
+        return Ok(Value::String(parse_cypher_string(value)?));
+    }
+    match value {
+        "true" | "TRUE" => return Ok(Value::Bool(true)),
+        "false" | "FALSE" => return Ok(Value::Bool(false)),
+        "null" | "NULL" => return Ok(Value::Null),
+        _ => {}
+    }
+    if value.contains('.') {
+        return value.parse::<f64>().map(Value::Float).map_err(|_| {
+            GrustError::Unsupported(format!("unsupported Cypher literal value: {value}"))
+        });
+    }
+    value
+        .parse::<i64>()
+        .map(Value::Int)
+        .map_err(|_| GrustError::Unsupported(format!("unsupported Cypher literal value: {value}")))
+}
+
+fn parse_cypher_string(value: &str) -> Result<String> {
+    let value = value.trim();
+    if !is_quoted(value) {
+        return Err(GrustError::Unsupported(format!(
+            "expected quoted Cypher string literal: {value}"
+        )));
+    }
+    let quote = value.as_bytes()[0] as char;
+    let inner = &value[1..value.len() - 1];
+    let mut output = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            let escaped = chars.next().ok_or_else(|| {
+                GrustError::Unsupported("unterminated Cypher string escape".to_string())
+            })?;
+            output.push(match escaped {
+                '\\' => '\\',
+                '\'' if quote == '\'' => '\'',
+                '"' if quote == '"' => '"',
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                other => other,
+            });
+        } else {
+            output.push(ch);
+        }
+    }
+    Ok(output)
+}
+
+fn required_string_prop(props: &Props, key: &str, context: &str) -> Result<String> {
+    props
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            GrustError::Unsupported(format!(
+                "{context} requires explicit string property '{key}'"
+            ))
+        })
+}
+
+fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ',' => {
+                parts.push(&value[start..index]);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return Err(GrustError::Unsupported(
+            "unterminated Cypher string literal".to_string(),
+        ));
+    }
+    parts.push(&value[start..]);
+    Ok(parts)
+}
+
+fn find_matching(value: &str, _open: char, close: char) -> Result<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ch if ch == close => return Ok(index),
+            _ => {}
+        }
+    }
+    Err(GrustError::Unsupported(format!(
+        "Cypher pattern is missing '{close}'"
+    )))
+}
+
+fn find_unquoted(value: &str, target: char) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ch if ch == target => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn is_quoted(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 2
+        && ((bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"'))
+}
+
 pub struct SailGraphStore {
     config: SailConfig,
     client: SparkConnectServiceClient<Channel>,
@@ -314,6 +729,15 @@ impl SailGraphStore {
         })
         .await?;
         Ok(chunks)
+    }
+
+    /// Executes the strict v1 writable-Cypher subset through Grust mutations.
+    pub async fn execute_cypher_mutation(&self, cypher: &str) -> Result<CypherMutationReport> {
+        let plan = sail_cypher_mutation_plan(cypher)?;
+        let report = plan.report();
+        let mutations = plan.into_mutations();
+        self.apply_mutations(&mutations).await?;
+        Ok(report)
     }
 
     /// Loads Grust-shaped Arrow IPC node and edge streams into Sail tables.

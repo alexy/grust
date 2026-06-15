@@ -2117,6 +2117,111 @@ pub enum GraphMutation {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphMutationPlanKind {
+    Create,
+    Merge,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum GraphMutationPlanOp {
+    UpsertNode {
+        kind: GraphMutationPlanKind,
+        node: Node,
+    },
+    UpsertEdge {
+        kind: GraphMutationPlanKind,
+        edge: Edge,
+    },
+    DeleteNode(NodeId),
+    DeleteEdge {
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GraphMutationPlan {
+    pub operations: Vec<GraphMutationPlanOp>,
+}
+
+impl GraphMutationPlan {
+    pub fn new(operations: Vec<GraphMutationPlanOp>) -> Self {
+        Self { operations }
+    }
+
+    pub fn push(&mut self, operation: GraphMutationPlanOp) {
+        self.operations.push(operation);
+    }
+
+    pub fn report(&self) -> GraphMutationReport {
+        let mut report = GraphMutationReport::default();
+        for operation in &self.operations {
+            report.record(operation);
+        }
+        report
+    }
+
+    pub fn into_mutations(self) -> Vec<GraphMutation> {
+        self.operations
+            .into_iter()
+            .map(GraphMutation::from)
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GraphMutationReport {
+    pub creates: usize,
+    pub merges: usize,
+    pub deletes: usize,
+    pub node_upserts: usize,
+    pub edge_upserts: usize,
+    pub node_deletes: usize,
+    pub edge_deletes: usize,
+}
+
+impl GraphMutationReport {
+    pub fn record(&mut self, operation: &GraphMutationPlanOp) {
+        match operation {
+            GraphMutationPlanOp::UpsertNode { kind, .. }
+            | GraphMutationPlanOp::UpsertEdge { kind, .. } => {
+                match kind {
+                    GraphMutationPlanKind::Create => self.creates += 1,
+                    GraphMutationPlanKind::Merge => self.merges += 1,
+                }
+                match operation {
+                    GraphMutationPlanOp::UpsertNode { .. } => self.node_upserts += 1,
+                    GraphMutationPlanOp::UpsertEdge { .. } => self.edge_upserts += 1,
+                    _ => {}
+                }
+            }
+            GraphMutationPlanOp::DeleteNode(_) => {
+                self.deletes += 1;
+                self.node_deletes += 1;
+            }
+            GraphMutationPlanOp::DeleteEdge { .. } => {
+                self.deletes += 1;
+                self.edge_deletes += 1;
+            }
+        }
+    }
+}
+
+impl From<GraphMutationPlanOp> for GraphMutation {
+    fn from(operation: GraphMutationPlanOp) -> Self {
+        match operation {
+            GraphMutationPlanOp::UpsertNode { node, .. } => Self::UpsertNode(node),
+            GraphMutationPlanOp::UpsertEdge { edge, .. } => Self::UpsertEdge(edge),
+            GraphMutationPlanOp::DeleteNode(id) => Self::DeleteNode(id),
+            GraphMutationPlanOp::DeleteEdge { from, label, to } => {
+                Self::DeleteEdge { from, label, to }
+            }
+        }
+    }
+}
+
 /// Incremental mutation support for stores that can delete elements.
 ///
 /// Deletes are idempotent: removing an element that does not exist is not an
@@ -2157,7 +2262,8 @@ pub trait GraphMutationStore: GraphStore {
 pub mod prelude {
     pub use crate::{
         Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, EdgeUniqueness, Field, FieldType,
-        Graph, GraphAdminStore, GraphBuilder, GraphIndex, GraphMutation, GraphMutationStore,
+        Graph, GraphAdminStore, GraphBuilder, GraphIndex, GraphMutation, GraphMutationPlan,
+        GraphMutationPlanKind, GraphMutationPlanOp, GraphMutationReport, GraphMutationStore,
         GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId,
         NodeType, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value, edge_key,
         relationship_type, schema_identifier,

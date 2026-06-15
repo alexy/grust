@@ -235,6 +235,9 @@ client uses `tonic_prost::ProstCodec`.
 
 ### 2.4 Cypher Mutation Proposal
 
+See [Writable Cypher Implementation Plan](CypherWrite.md) for the concrete
+implementation plan derived from this proposal.
+
 Sail's first Cypher integration is read-only by design: `MATCH ... RETURN`
 lowers cleanly to relational scans, joins, filters, projections, ordering, and
 limits over `grust_nodes`, `grust_edges`, and typed schema tables. Cypher writes

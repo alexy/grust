@@ -6,6 +6,19 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 2026-06-14 - 0.8.2
+
+- Added backend-neutral `GraphMutationPlan`, `GraphMutationPlanOp`, and
+  `GraphMutationReport` types in `grust-core` for resolved graph mutation
+  planning.
+- Added strict v1 writable Cypher support in `grust-sail`, including
+  `sail_cypher_mutation_plan` and `SailGraphStore::execute_cypher_mutation`.
+  The v1 subset supports explicit-ID node `CREATE`/`MERGE`, resolved endpoint
+  edge `CREATE`/`MERGE`, and resolved node/edge `DELETE` through existing
+  `GraphMutationStore` semantics.
+- Added unit tests and an ignored live Sail integration test for writable
+  Cypher planning and execution.
+
 ## 2026-06-14 - 0.8.1
 
 - Added Sail Delta table properties for typed graph tables, marking generated

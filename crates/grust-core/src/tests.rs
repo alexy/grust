@@ -92,6 +92,54 @@ fn edge_key_prefers_explicit_id_then_structural_identity() {
 }
 
 #[test]
+fn mutation_plan_reports_and_lowers_to_graph_mutations() {
+    let node = Node::new("Person", "person-1", Props::new());
+    let edge = Edge::new("KNOWS", "person-1", "person-2", Props::new()).with_id("edge-1");
+    let plan = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: node.clone(),
+        },
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Merge,
+            edge: edge.clone(),
+        },
+        GraphMutationPlanOp::DeleteEdge {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+        },
+        GraphMutationPlanOp::DeleteNode(NodeId::new("person-3")),
+    ]);
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            creates: 1,
+            merges: 1,
+            deletes: 2,
+            node_upserts: 1,
+            edge_upserts: 1,
+            node_deletes: 1,
+            edge_deletes: 1,
+        }
+    );
+    assert_eq!(
+        plan.into_mutations(),
+        vec![
+            GraphMutation::UpsertNode(node),
+            GraphMutation::UpsertEdge(edge),
+            GraphMutation::DeleteEdge {
+                from: NodeId::new("person-1"),
+                label: Label::new("KNOWS"),
+                to: NodeId::new("person-2"),
+            },
+            GraphMutation::DeleteNode(NodeId::new("person-3")),
+        ]
+    );
+}
+
+#[test]
 fn graph_loads_from_yaml() {
     let graph = Graph::from_yaml(
         r#"
