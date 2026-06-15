@@ -907,9 +907,61 @@ fn cypher_match_set_map_patch_lowers_id_resolved_node() {
 }
 
 #[test]
+fn cypher_match_set_map_patch_lowers_broad_nodes_with_cardinality() {
+    let bounded = sail_cypher_mutation_plan(
+        "
+        MATCH (n:Person {status: 'inactive'})
+        SET n += {archived: true, note: null}
+        ",
+    )
+    .unwrap();
+
+    assert_eq!(
+        bounded.report(),
+        GraphMutationReport {
+            patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        bounded.operations,
+        vec![GraphMutationPlanOp::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            patch: Props::from([
+                ("archived".to_string(), Value::Bool(true)),
+                ("note".to_string(), Value::Null),
+            ]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+    assert_eq!(
+        bounded.into_mutations(),
+        vec![GraphMutation::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            patch: Props::from([
+                ("archived".to_string(), Value::Bool(true)),
+                ("note".to_string(), Value::Null),
+            ]),
+        }]
+    );
+
+    let unbounded = sail_cypher_mutation_plan("MATCH (n) SET n += {touched: true}").unwrap();
+    assert_eq!(
+        unbounded.operations,
+        vec![GraphMutationPlanOp::PatchMatchingNodes {
+            label: None,
+            props: Props::new(),
+            patch: Props::from([("touched".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::UnboundedMany,
+        }]
+    );
+}
+
+#[test]
 fn cypher_match_set_rejects_deferred_patch_forms() {
     for cypher in [
-        "MATCH (n:Person {name: 'Ada'}) SET n += {name: 'Ada'}",
         "MATCH (n:Person {id: 'person-1'}) SET m += {name: 'Ada'}",
         "MATCH (n:Person {id: 'person-1'}) SET n.name = 'Ada'",
         "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) SET e += {since: 2026}",
@@ -1112,8 +1164,10 @@ fn cypher_errors_are_structured_for_callers() {
         .expect_err("unresolved identity");
     assert!(matches!(error, GrustError::CypherUnresolvedIdentity(_)));
 
-    let error = sail_cypher_mutation_plan("MATCH (n:Person {name: 'Ada'}) SET n += {age: 37}")
-        .expect_err("broad patch cardinality");
+    let error = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'a'})-[e:KNOWS]->(:Person {id: 'b'}) SET e += {since: 2026}",
+    )
+    .expect_err("edge patch cardinality");
     assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
 
     let error = cypher_execution_error(GrustError::Backend("boom".to_string()));
@@ -1447,6 +1501,118 @@ async fn test_execute_cypher_broad_match_delete_nodes() {
             .await
             .expect("read after broad delete cascade")
             .is_empty()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_broad_match_set_nodes() {
+    let store = store().await;
+
+    let report = store
+        .execute_cypher_mutation("MATCH (n:Person {status: 'missing'}) SET n += {archived: true}")
+        .await
+        .expect("zero-match broad patch");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    store
+        .execute_cypher_mutation(
+            "
+            CREATE (:Person {id: 'person-inactive-1', status: 'inactive'});
+            CREATE (:Person {id: 'person-inactive-2', status: 'inactive'});
+            CREATE (:Person {id: 'person-active-1', status: 'active'});
+            ",
+        )
+        .await
+        .expect("seed graph for broad patch");
+
+    let report = store
+        .execute_cypher_mutation(
+            "MATCH (n:Person {status: 'inactive'}) SET n += {archived: true, note: null}",
+        )
+        .await
+        .expect("many-match broad patch");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            patches: 1,
+            matched_rows: 2,
+            changed_nodes: 2,
+            node_patches: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+    for id in ["person-inactive-1", "person-inactive-2"] {
+        let node = store
+            .get_node(&NodeId::new(id))
+            .await
+            .expect("read patched inactive node")
+            .expect("patched inactive node exists");
+        assert_eq!(node.props.get("archived"), Some(&Value::Bool(true)));
+        assert_eq!(node.props.get("note"), Some(&Value::Null));
+    }
+    let active = store
+        .get_node(&NodeId::new("person-active-1"))
+        .await
+        .expect("read remaining active node")
+        .expect("active node exists");
+    assert_eq!(active.props.get("archived"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_broad_match_set_updates_typed_nodes() {
+    let store = store().await;
+    store
+        .apply_schema(&person_schema())
+        .await
+        .expect("apply Person schema");
+    store
+        .execute_cypher_mutation(
+            "
+            CREATE (:Person {id: 'person-1', name: 'Ada'});
+            CREATE (:Person {id: 'person-2', name: 'Bob'});
+            ",
+        )
+        .await
+        .expect("seed typed Person rows");
+
+    let report = store
+        .execute_cypher_mutation("MATCH (n:Person) SET n += {age: 37}")
+        .await
+        .expect("broad patch typed Person age");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            patches: 1,
+            matched_rows: 2,
+            changed_nodes: 2,
+            node_patches: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let rows = query_string_rows(
+        store
+            .query_arrow_ipc(
+                "SELECT id, CAST(age AS STRING) AS age FROM grust_node_person ORDER BY id",
+            )
+            .await
+            .expect("query typed Person table"),
+        2,
+    );
+    assert_eq!(
+        rows,
+        vec![
+            vec!["person-1".to_string(), "37".to_string()],
+            vec!["person-2".to_string(), "37".to_string()],
+        ]
     );
 }
 

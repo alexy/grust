@@ -1020,7 +1020,7 @@ accepts only a strict v1 mutation subset: explicit-ID node `CREATE` and
 resolved node or edge `DELETE`. It also accepts ordered multi-statement
 batches, local node variables bound by explicit-ID node patterns, ID-resolved
 `MATCH ... DELETE`, edge `MATCH ... MERGE`, and cardinality-aware broad node
-`MATCH ... DELETE` forms. It lowers those
+`MATCH ... DELETE` / `MATCH ... SET n += { ... }` forms. It lowers those
 statements into `GraphMutationPlan` and then ordinary `GraphMutation` values.
 The execution entrypoint, `SailGraphStore::execute_cypher_mutation`, runs those
 mutations through `GraphMutationStore`, so Cypher writes use the same staged
@@ -1028,12 +1028,13 @@ Arrow, `MERGE INTO`, typed-table mirror, and delete paths as normal Grust
 writes. When callers need stricter Cypher compatibility, the options entrypoint
 can make `CREATE` fail if the target node or edge identity already exists. That
 mode performs a read-before-write check and therefore keeps the default
-entrypoint on the lower-friction upsert-compatible path. ID-resolved
-`MATCH ... SET n += { ... }` lowers to a node patch mutation; `null` in the
+entrypoint on the lower-friction upsert-compatible path. ID-resolved and broad
+node `MATCH ... SET n += { ... }` lower to node patch mutations; `null` in the
 patch map is stored as `Value::Null` rather than treated as property removal.
-For broad node deletes, the report records matched rows and changed graph
-elements, and Sail stages matched IDs before using the same node-delete helper
-that cascades incident-edge removal. The mutation parser keeps top-level
+For broad node deletes and broad node patches, the report records matched rows
+and changed graph elements, and Sail stages matched IDs before using the same
+delete or node-load helpers that keep generic and typed tables consistent. The
+mutation parser keeps top-level
 keywords case-insensitive and strips Cypher comments outside string literals.
 Callers can distinguish Cypher syntax, unresolved identity, unsupported
 cardinality, and execution failures through structured `GrustError` variants.

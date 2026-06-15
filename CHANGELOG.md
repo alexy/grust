@@ -19,6 +19,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added structured Cypher error variants for syntax, unresolved identity,
   unsupported cardinality, and execution failures while keeping execution
   Sail-specific over backend-neutral mutation plans.
+- Added backend-neutral matching-node patch planning and Sail execution for
+  broad node `MATCH ... SET n += { ... }`, including matched-row reporting and
+  typed-node mirror updates through the existing node load path.
 
 ## 2026-06-15 - 0.8.4
 

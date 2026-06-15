@@ -44,8 +44,9 @@ describe unreleased working-tree additions:
   cardinality-aware matched node delete in Sail. The planner marks the
   operation as bounded-many when a label or property predicate is present and
   unbounded-many for `MATCH (n) DELETE n`.
-- `MATCH ... SET n += { ... }` lowers only when `n` resolves to one explicit
-  node ID; `null` is stored as `Value::Null`.
+- `MATCH ... SET n += { ... }` lowers either when `n` resolves to one explicit
+  node ID or, for broad node matches, to a cardinality-aware matching-node
+  patch in Sail; `null` is stored as `Value::Null`.
 - Writable mutation keywords are parsed case-insensitively at the top level,
   and `// ...` plus `/* ... */` comments are stripped outside string literals.
 
@@ -53,7 +54,7 @@ The v1 implementation should reject, with clear errors:
 
 - generated node IDs;
 - node identity derived from non-`id` properties;
-- broad `MATCH ... SET` and edge patching;
+- edge patching;
 - `SET n.name = ...`, `REMOVE`, remove-on-null, arithmetic updates, or
   expression evaluation;
 - mutation plans whose endpoint variables cannot be resolved to stable node
@@ -95,6 +96,8 @@ to backend-neutral Grust mutation concepts:
 - node delete -> `GraphMutation::DeleteNode`;
 - edge delete -> `GraphMutation::DeleteEdge`;
 - explicit-ID node map patch -> `GraphMutation::PatchNode`;
+- broad node map patch -> `GraphMutation::PatchMatchingNodes` with cardinality
+  metadata retained in `GraphMutationPlanOp`;
 - Sail broad node delete -> `GraphMutation::DeleteMatchingNodes` with
   cardinality metadata retained in `GraphMutationPlanOp`.
 
@@ -248,7 +251,7 @@ feature slice should start at item 3.
 
    This should lower to the same `DeleteNode` and `DeleteEdge` plan operations
    as v1 literal `DELETE`. Broad node `MATCH ... DELETE` is handled separately
-   in Batch E; broad `MATCH ... SET` remains deferred.
+   in Batch E; broad node `MATCH ... SET +=` is handled separately in Batch G.
 
 4. ID-resolved `MATCH ... MERGE` for edges. Shipped in `0.8.4`.
 
@@ -308,7 +311,8 @@ feature slice should start at item 3.
    transaction rollback on later failure.
 
    Status: broad node `MATCH ... DELETE` is implemented in the working tree
-   after `0.8.4`; broad `MATCH ... SET` remains deferred.
+   after `0.8.4`; broad node `MATCH ... SET +=` is handled separately in
+   Batch G.
 
 ## Completion Batches
 
@@ -450,8 +454,8 @@ Acceptance criteria:
 
 Implementation notes:
 
-- Start with broad node `MATCH ... DELETE`; broad `MATCH ... SET` should wait
-  for separate broad patch execution semantics.
+- Broad operations should stage matched node IDs before applying graph changes,
+  then report actual matched rows and changed graph elements.
 - Live Sail tests should cover zero-match, one-match, many-match, and
   node-delete incident-edge cascade behavior.
 
@@ -494,10 +498,151 @@ deferred until the grammar grows beyond the current compact mutation subset.
 The following decisions should remain out of v1:
 
 - generated IDs and pluggable ID policies;
-- broad `MATCH ... SET`, edge patching, remove-on-null, `SET n.name = ...`,
-  arithmetic updates, and `REMOVE`;
+- edge patching, remove-on-null, `SET n.name = ...`, arithmetic updates, and
+  `REMOVE`;
 - cross-backend Cypher mutation APIs;
 - stronger transaction guarantees than the target backend documents.
 
 These are real product semantics, not parser details. They should be added only
 after Grust defines their backend-neutral behavior.
+
+## Next Build Plan
+
+The next phase should keep the same discipline as the completed writable
+Cypher batches: define the backend-neutral mutation semantics first, lower
+Cypher into those semantics, and let Sail execute by reusing existing staging,
+typed-table, and delete helpers. Each item below should be small enough to
+ship independently.
+
+### Batch G: Broad Node `MATCH ... SET +=`
+
+Extend cardinality-aware matching from broad node deletes to broad node map
+patches:
+
+```cypher
+MATCH (n:Person {status: 'inactive'})
+SET n += {archived: true};
+```
+
+Acceptance criteria:
+
+- Add a backend-neutral plan operation for matching node patches that carries
+  label, property predicates, patch props, and cardinality.
+- Keep `null` as `Value::Null`; do not introduce remove-on-null here.
+- Sail stages matched node IDs before patching and records matched rows,
+  changed nodes, and patch counts in the mutation report.
+- Typed node tables are updated when patched keys map to typed columns, or the
+  operation is rejected with a structured Cypher execution error when the typed
+  mirror cannot be kept consistent.
+- Unit tests cover bounded-many and unbounded-many planning; ignored live Sail
+  tests cover zero-match, one-match, many-match, and typed-table mirror
+  behavior.
+
+Implementation status: implemented in the working tree after `0.8.4`.
+`GraphMutationPlanOp::PatchMatchingNodes` and
+`GraphMutation::PatchMatchingNodes` carry label predicates, property
+predicates, patch props, and cardinality. Sail stages matched node IDs by
+querying the generic node table, merges patch props into each matched node,
+validates the active schema, and reuses the existing node load path so generic
+and typed node tables update together. Unit tests cover bounded and unbounded
+planning, and ignored live Sail tests cover zero-match, many-match, null
+storage, and typed-node mirror behavior.
+
+### Batch H: Edge Patch Semantics
+
+Add explicit edge patch operations only after edge identity is unambiguous.
+
+Acceptance criteria:
+
+- Add backend-neutral edge patch mutation semantics keyed by structural edge
+  identity `(from, label, to)` and, where available, explicit edge `id`.
+- Support ID-resolved edge map patching:
+
+  ```cypher
+  MATCH (:Person {id: 'a'})-[e:KNOWS]->(:Person {id: 'b'})
+  SET e += {since: 2026};
+  ```
+
+- Keep broad edge patching deferred until relationship match cardinality and
+  duplicate structural-edge behavior are explicit.
+- Sail updates generic edge rows and typed edge mirror tables consistently.
+- pgGraph and Surreal either implement equivalent patch lowering or return
+  explicit unsupported errors for the new mutation variant.
+
+### Batch I: Property Assignment And `REMOVE`
+
+Add property-level operations after map patching is stable.
+
+Acceptance criteria:
+
+- Define backend-neutral semantics for `SET n.key = value`, `SET e.key =
+  value`, and `REMOVE n.key` / `REMOVE e.key`.
+- Keep assignment expression support literal-only at first; defer arithmetic,
+  path expressions, parameters, and computed values.
+- Treat remove-on-null as a separate compatibility option rather than changing
+  `SET +=` null behavior.
+- Make report counts match patch/delete-property intent clearly.
+- Add parser tests that reject unsupported expression forms with
+  `CypherSyntax` or `CypherUnsupportedCardinality` as appropriate.
+
+### Batch J: ID Policy And Generated IDs
+
+Introduce generated or pluggable IDs only as an explicit caller-selected
+policy.
+
+Acceptance criteria:
+
+- Add a public ID policy type for writable Cypher execution options.
+- Keep explicit IDs as the default and preserve current strict behavior.
+- Support generated node IDs for node `CREATE` only; edge endpoint IDs must
+  still resolve before writing.
+- Return generated IDs in a new result shape only after deciding whether
+  mutation reports should remain count-only or gain optional accepted element
+  IDs.
+- Document race windows and backend consistency guarantees for generated IDs.
+
+### Batch K: Cross-backend Cypher Execution Facade
+
+Promote Cypher execution beyond Sail only when at least one more backend can
+reuse the mutation plan safely.
+
+Acceptance criteria:
+
+- Keep `sail_cypher_mutation_plan` as the parser/planner until a shared module
+  exists, but expose a backend-neutral trait such as
+  `CypherMutationExecutor` only if multiple backends can implement it.
+- Memory should be the first non-Sail execution target for deterministic tests.
+- Backends without native support must fail with structured execution errors,
+  not silently ignore unsupported operations.
+- Facade exports in `grust-graph` should remain feature-gated and documented.
+
+### Batch L: Parser Boundary And Grammar Growth
+
+Move the parser behind a module or parser crate when mutation syntax grows
+beyond the current compact subset.
+
+Acceptance criteria:
+
+- Extract parser code from `grust-sail` only when it has at least two
+  consumers or when expression grammar becomes too large for local helpers.
+- Preserve quote-aware statement splitting, comment stripping, and
+  case-insensitive top-level mutation keywords.
+- Add AST-level tests for every accepted mutation form and every structured
+  error category.
+- Keep lowering separate from parsing so Grust-owned mutation semantics remain
+  visible and testable.
+
+### Batch M: Transaction And Failure Semantics
+
+Make mutation atomicity explicit rather than implicit.
+
+Acceptance criteria:
+
+- Document per-backend guarantees for ordered application, partial failure,
+  rollback, and typed-table mirror consistency.
+- Add an optional transaction capability marker only for backends that can
+  prove atomicity for the active storage mode.
+- Add tests that simulate mid-batch execution failure for default
+  non-transactional behavior.
+- Avoid promising Cypher-level transactional semantics until the backend
+  contract can actually provide them.

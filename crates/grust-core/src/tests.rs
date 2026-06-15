@@ -108,6 +108,12 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             id: NodeId::new("person-1"),
             props: Props::from([("name".to_string(), Value::from("Ada"))]),
         },
+        GraphMutationPlanOp::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("active".to_string(), Value::Bool(false))]),
+            patch: Props::from([("archived".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
         GraphMutationPlanOp::DeleteMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("active".to_string(), Value::Bool(false))]),
@@ -127,7 +133,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             creates: 1,
             merges: 1,
             deletes: 3,
-            patches: 1,
+            patches: 2,
             matched_rows: 0,
             changed_nodes: 3,
             changed_edges: 2,
@@ -146,6 +152,11 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             GraphMutation::PatchNode {
                 id: NodeId::new("person-1"),
                 props: Props::from([("name".to_string(), Value::from("Ada"))]),
+            },
+            GraphMutation::PatchMatchingNodes {
+                label: Some(Label::new("Person")),
+                props: Props::from([("active".to_string(), Value::Bool(false))]),
+                patch: Props::from([("archived".to_string(), Value::Bool(true))]),
             },
             GraphMutation::DeleteMatchingNodes {
                 label: Some(Label::new("Person")),

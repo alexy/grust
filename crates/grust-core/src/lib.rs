@@ -2120,6 +2120,11 @@ pub enum GraphMutation {
         id: NodeId,
         props: Props,
     },
+    PatchMatchingNodes {
+        label: Option<Label>,
+        props: Props,
+        patch: Props,
+    },
     DeleteMatchingNodes {
         label: Option<Label>,
         props: Props,
@@ -2155,6 +2160,12 @@ pub enum GraphMutationPlanOp {
     PatchNode {
         id: NodeId,
         props: Props,
+    },
+    PatchMatchingNodes {
+        label: Option<Label>,
+        props: Props,
+        patch: Props,
+        cardinality: GraphMutationCardinality,
     },
     DeleteMatchingNodes {
         label: Option<Label>,
@@ -2245,6 +2256,9 @@ impl GraphMutationReport {
                 self.node_patches += 1;
                 self.changed_nodes += 1;
             }
+            GraphMutationPlanOp::PatchMatchingNodes { .. } => {
+                self.patches += 1;
+            }
             GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
                 self.deletes += 1;
             }
@@ -2267,6 +2281,16 @@ impl From<GraphMutationPlanOp> for GraphMutation {
         match operation {
             GraphMutationPlanOp::UpsertNode { node, .. } => Self::UpsertNode(node),
             GraphMutationPlanOp::PatchNode { id, props } => Self::PatchNode { id, props },
+            GraphMutationPlanOp::PatchMatchingNodes {
+                label,
+                props,
+                patch,
+                ..
+            } => Self::PatchMatchingNodes {
+                label,
+                props,
+                patch,
+            },
             GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
                 Self::DeleteMatchingNodes { label, props }
             }
@@ -2310,6 +2334,11 @@ pub trait GraphMutationStore: GraphStore {
                         }
                         self.put_node(&node).await?;
                     }
+                }
+                GraphMutation::PatchMatchingNodes { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched node patches require backend-specific query support".to_string(),
+                    ));
                 }
                 GraphMutation::DeleteMatchingNodes { .. } => {
                     return Err(GrustError::Unsupported(

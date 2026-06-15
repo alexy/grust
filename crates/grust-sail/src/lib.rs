@@ -478,7 +478,7 @@ impl CypherMutationPlanner {
                 GraphMutationPlanOp::DeleteNode(id),
             ]));
         }
-        let cardinality = match_delete_cardinality(&node);
+        let cardinality = match_node_cardinality(&node);
         Ok(GraphMutationPlan::new(vec![
             GraphMutationPlanOp::DeleteMatchingNodes {
                 label: node.label,
@@ -558,9 +558,15 @@ impl CypherMutationPlanner {
                 .as_ref()
                 .is_none_or(|variable| !self.node_bindings.contains_key(variable))
         {
-            return Err(cypher_unsupported_cardinality(
-                "MATCH SET += requires one resolved node identity; broad patching is not supported",
-            ));
+            let cardinality = match_node_cardinality(&node);
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::PatchMatchingNodes {
+                    label: node.label,
+                    props: node.props,
+                    patch: props,
+                    cardinality,
+                },
+            ]));
         }
         let id = self.resolve_node_id(&node, "MATCH node SET")?;
         Ok(GraphMutationPlan::new(vec![
@@ -889,7 +895,7 @@ fn parse_cypher_relationship(body: &str) -> Result<ParsedCypherRelationship> {
     })
 }
 
-fn match_delete_cardinality(node: &ParsedCypherNode) -> GraphMutationCardinality {
+fn match_node_cardinality(node: &ParsedCypherNode) -> GraphMutationCardinality {
     if node.label.is_some() || !node.props.is_empty() {
         GraphMutationCardinality::BoundedMany
     } else {
@@ -1416,6 +1422,15 @@ impl SailGraphStore {
     ) -> Result<()> {
         for operation in &plan.operations {
             match operation {
+                GraphMutationPlanOp::PatchMatchingNodes {
+                    label,
+                    props,
+                    patch,
+                    ..
+                } => {
+                    self.apply_patch_matching_nodes(label.as_ref(), props, patch, report)
+                        .await?;
+                }
                 GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
                     self.apply_delete_matching_nodes(label.as_ref(), props, report)
                         .await?;
@@ -1428,6 +1443,36 @@ impl SailGraphStore {
             }
         }
         Ok(())
+    }
+
+    async fn apply_patch_matching_nodes(
+        &self,
+        label: Option<&Label>,
+        props: &Props,
+        patch: &Props,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let (sql, args) = matching_nodes_sql(label, props)?;
+        let mut nodes = self.run_query(&sql, args).await?;
+        report.matched_rows += nodes.len();
+        report.node_patches += nodes.len();
+        report.changed_nodes += nodes.len();
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        for node in &mut nodes {
+            for (key, value) in patch {
+                node.props.insert(key.clone(), value.clone());
+            }
+        }
+        let schema = self.current_schema();
+        if let Some(schema) = schema.as_ref() {
+            for node in &nodes {
+                schema.validate_node(node)?;
+            }
+        }
+        self.load_nodes(schema.as_ref(), &nodes).await
     }
 
     async fn apply_delete_matching_nodes(

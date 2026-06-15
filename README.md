@@ -386,19 +386,21 @@ endpoint edge `CREATE`/`MERGE`, and resolved node/edge `DELETE` into Grust
 mutation plans. It also accepts ordered multi-statement batches and local node
 variables bound from explicit-ID node patterns, plus ID-resolved
 `MATCH ... DELETE`, edge `MATCH ... MERGE`, and cardinality-aware broad node
-`MATCH ... DELETE` forms, while
+`MATCH ... DELETE` / `MATCH ... SET n += { ... }` forms, while
 `SailGraphStore::execute_cypher_mutation` executes those plans through
 `GraphMutationStore` and the existing Sail staging and `MERGE INTO` paths.
 For stricter Cypher compatibility, callers can use
 `execute_cypher_mutation_with_options` with
 `CypherCreateMode::ErrorIfExists` to make `CREATE` perform a read-before-write
 existence check instead of following the default upsert-compatible path.
-Writable Cypher also lowers ID-resolved `MATCH ... SET n += { ... }` node map
-patches into backend-neutral node patch mutations; `null` is stored as a graph
-value rather than interpreted as property removal.
+Writable Cypher also lowers ID-resolved and broad node
+`MATCH ... SET n += { ... }` map patches into backend-neutral node patch
+mutations; `null` is stored as a graph value rather than interpreted as
+property removal.
 The mutation report includes matched-row and changed node/edge counts for
-broad Sail deletes, and the parser accepts top-level mutation keywords
-case-insensitively while stripping Cypher comments outside string literals.
+broad Sail deletes and broad Sail node patches, and the parser accepts
+top-level mutation keywords case-insensitively while stripping Cypher comments
+outside string literals.
 Cypher planning and execution failures use structured `GrustError` variants
 for syntax, unresolved identity, unsupported cardinality, and execution errors;
 execution remains Sail-specific over backend-neutral mutation plans.
