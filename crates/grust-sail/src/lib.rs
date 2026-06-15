@@ -292,7 +292,8 @@ where
 }
 
 pub fn sail_cypher_mutation_plan(cypher: &str) -> Result<GraphMutationPlan> {
-    let statements = split_cypher_statements(cypher)?;
+    let cypher = strip_cypher_comments(cypher)?;
+    let statements = split_cypher_statements(&cypher)?;
     if statements.is_empty() {
         return Err(GrustError::Unsupported(
             "writable Cypher statement is empty".to_string(),
@@ -317,27 +318,26 @@ struct CypherMutationPlanner {
 impl CypherMutationPlanner {
     fn plan_statement(&mut self, cypher: &str) -> Result<GraphMutationPlan> {
         let cypher = cypher.trim();
-        let upper = cypher.to_ascii_uppercase();
-        if let Some(rest) = cypher.strip_prefix("MATCH ") {
+        if let Some(rest) = strip_leading_keyword(cypher, "MATCH") {
             return self.parse_match(rest);
         }
-        if upper.contains(" SET ") || upper.starts_with("SET ") {
+        if find_unquoted_keyword(cypher, "SET").is_some() {
             return Err(GrustError::Unsupported(
                 "writable Cypher SET is not supported in v1".to_string(),
             ));
         }
-        if upper.contains(" REMOVE ") || upper.starts_with("REMOVE ") {
+        if find_unquoted_keyword(cypher, "REMOVE").is_some() {
             return Err(GrustError::Unsupported(
                 "writable Cypher REMOVE is not supported in v1".to_string(),
             ));
         }
-        if let Some(rest) = cypher.strip_prefix("CREATE ") {
+        if let Some(rest) = strip_leading_keyword(cypher, "CREATE") {
             return self.parse_upsert(rest, GraphMutationPlanKind::Create);
         }
-        if let Some(rest) = cypher.strip_prefix("MERGE ") {
+        if let Some(rest) = strip_leading_keyword(cypher, "MERGE") {
             return self.parse_upsert(rest, GraphMutationPlanKind::Merge);
         }
-        if let Some(rest) = cypher.strip_prefix("DELETE ") {
+        if let Some(rest) = strip_leading_keyword(cypher, "DELETE") {
             return self.parse_delete(rest);
         }
         Err(GrustError::Unsupported(format!(
@@ -463,9 +463,31 @@ impl CypherMutationPlanner {
                 "MATCH node DELETE target '{target}' does not match node variable '{node_variable}'"
             )));
         }
-        let id = self.resolve_node_id(&node, "MATCH node DELETE")?;
+        if let Some(id) = optional_string_prop(&node.props, "id") {
+            self.bind_node_variable(&node, &NodeId::new(id.clone()))?;
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::DeleteNode(NodeId::new(id)),
+            ]));
+        }
+        if node.variable.is_some()
+            && node
+                .variable
+                .as_ref()
+                .and_then(|variable| self.node_bindings.get(variable))
+                .is_some()
+        {
+            let id = self.resolve_node_id(&node, "MATCH node DELETE")?;
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::DeleteNode(id),
+            ]));
+        }
+        let cardinality = match_delete_cardinality(&node);
         Ok(GraphMutationPlan::new(vec![
-            GraphMutationPlanOp::DeleteNode(id),
+            GraphMutationPlanOp::DeleteMatchingNodes {
+                label: node.label,
+                props: node.props,
+                cardinality,
+            },
         ]))
     }
 
@@ -669,6 +691,68 @@ fn split_cypher_statements(cypher: &str) -> Result<Vec<&str>> {
     Ok(statements)
 }
 
+fn strip_cypher_comments(cypher: &str) -> Result<String> {
+    let mut output = String::with_capacity(cypher.len());
+    let mut chars = cypher.char_indices().peekable();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut line_comment = false;
+    let mut block_comment = false;
+
+    while let Some((_, ch)) = chars.next() {
+        if line_comment {
+            if ch == '\n' {
+                line_comment = false;
+                output.push(ch);
+            }
+            continue;
+        }
+        if block_comment {
+            if ch == '*' && chars.peek().is_some_and(|(_, next)| *next == '/') {
+                chars.next();
+                block_comment = false;
+            } else if ch == '\n' {
+                output.push(ch);
+            }
+            continue;
+        }
+        if let Some(active) = quote {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => {
+                quote = Some(ch);
+                output.push(ch);
+            }
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '/') => {
+                chars.next();
+                line_comment = true;
+            }
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '*') => {
+                chars.next();
+                block_comment = true;
+            }
+            _ => output.push(ch),
+        }
+    }
+
+    if block_comment {
+        return Err(GrustError::Unsupported(
+            "Cypher statement has an unterminated block comment".to_string(),
+        ));
+    }
+    Ok(output)
+}
+
 #[derive(Debug)]
 struct ParsedCypherNode {
     variable: Option<String>,
@@ -776,6 +860,14 @@ fn parse_cypher_relationship(body: &str) -> Result<ParsedCypherRelationship> {
         label: Label::new(label.to_string()),
         props,
     })
+}
+
+fn match_delete_cardinality(node: &ParsedCypherNode) -> GraphMutationCardinality {
+    if node.label.is_some() || !node.props.is_empty() {
+        GraphMutationCardinality::BoundedMany
+    } else {
+        GraphMutationCardinality::UnboundedMany
+    }
 }
 
 fn split_match_delete(statement: &str) -> Result<(&str, &str)> {
@@ -1150,7 +1242,9 @@ fn find_unquoted_keyword(value: &str, keyword: &str) -> Option<usize> {
         match ch {
             '\'' | '"' => quote = Some(ch),
             _ => {
-                if value[index..].starts_with(keyword)
+                if value[index..]
+                    .get(..keyword.len())
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(keyword))
                     && keyword_boundary(value[..index].chars().next_back())
                     && keyword_boundary(value[index + keyword.len()..].chars().next())
                 {
@@ -1191,6 +1285,19 @@ fn find_unquoted_sequence(value: &str, target: &str) -> Option<usize> {
 
 fn keyword_boundary(ch: Option<char>) -> bool {
     ch.is_none_or(char::is_whitespace)
+}
+
+fn strip_leading_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> {
+    let candidate = value.get(..keyword.len())?;
+    if !candidate.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = &value[keyword.len()..];
+    let first = rest.chars().next()?;
+    if !first.is_whitespace() {
+        return None;
+    }
+    Some(rest.trim_start())
 }
 
 fn is_quoted(value: &str) -> bool {
@@ -1263,13 +1370,59 @@ impl SailGraphStore {
         options: CypherMutationOptions,
     ) -> Result<CypherMutationReport> {
         let plan = sail_cypher_mutation_plan(cypher)?;
-        let report = plan.report();
+        let mut report = plan.report();
         if options.create_mode == CypherCreateMode::ErrorIfExists {
             self.check_strict_create_conflicts(&plan).await?;
         }
-        let mutations = plan.into_mutations();
-        self.apply_mutations(&mutations).await?;
+        self.apply_cypher_mutation_plan(&plan, &mut report).await?;
         Ok(report)
+    }
+
+    async fn apply_cypher_mutation_plan(
+        &self,
+        plan: &GraphMutationPlan,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        for operation in &plan.operations {
+            match operation {
+                GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
+                    self.apply_delete_matching_nodes(label.as_ref(), props, report)
+                        .await?;
+                }
+                _ => {
+                    let mutation = GraphMutation::from(operation.clone());
+                    self.apply_mutations(std::slice::from_ref(&mutation))
+                        .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_delete_matching_nodes(
+        &self,
+        label: Option<&Label>,
+        props: &Props,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let (sql, args) = matching_nodes_sql(label, props)?;
+        let nodes = self.run_query(&sql, args).await?;
+        report.matched_rows += nodes.len();
+        report.node_deletes += nodes.len();
+        report.changed_nodes += nodes.len();
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        let ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+        let all_edges = self.get_edges(EdgeQuery::default()).await?;
+        let incident_edges = all_edges
+            .iter()
+            .filter(|edge| ids.iter().any(|id| id == &edge.from || id == &edge.to))
+            .count();
+        report.changed_edges += incident_edges;
+        report.edge_deletes += incident_edges;
+        self.delete_nodes_by_ids(&ids).await
     }
 
     async fn check_strict_create_conflicts(&self, plan: &GraphMutationPlan) -> Result<()> {
@@ -1319,6 +1472,36 @@ impl SailGraphStore {
         }
 
         Ok(strict_create_edge_conflicts(edge, &existing))
+    }
+
+    async fn delete_nodes_by_ids(&self, ids: &[NodeId]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let id_refs = ids.iter().collect::<Vec<_>>();
+        self.stage_record_batch(DELETE_NODE_STAGE_VIEW, node_ids_record_batch(&id_refs)?)
+            .await?;
+        self.run_command(&delete_nodes_from_view_sql("grust_nodes")?, vec![])
+            .await?;
+        self.run_command(&delete_node_edges_from_view_sql("grust_edges")?, vec![])
+            .await?;
+        if let Some(schema) = self.current_schema() {
+            for node_type in &schema.nodes {
+                self.run_command(
+                    &delete_nodes_from_view_sql(&sail_node_table(node_type.label.as_str())?)?,
+                    vec![],
+                )
+                .await?;
+            }
+            for edge_type in &schema.edges {
+                self.run_command(
+                    &delete_node_edges_from_view_sql(&sail_edge_table(edge_type.label.as_str())?)?,
+                    vec![],
+                )
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     /// Loads Grust-shaped Arrow IPC node and edge streams into Sail tables.
@@ -1775,29 +1958,7 @@ impl GraphAdminStore for SailGraphStore {
 #[async_trait]
 impl GraphMutationStore for SailGraphStore {
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
-        self.stage_record_batch(DELETE_NODE_STAGE_VIEW, node_ids_record_batch(&[id])?)
-            .await?;
-        self.run_command(&delete_nodes_from_view_sql("grust_nodes")?, vec![])
-            .await?;
-        self.run_command(&delete_node_edges_from_view_sql("grust_edges")?, vec![])
-            .await?;
-        if let Some(schema) = self.current_schema() {
-            for node_type in &schema.nodes {
-                self.run_command(
-                    &delete_nodes_from_view_sql(&sail_node_table(node_type.label.as_str())?)?,
-                    vec![],
-                )
-                .await?;
-            }
-            for edge_type in &schema.edges {
-                self.run_command(
-                    &delete_node_edges_from_view_sql(&sail_edge_table(edge_type.label.as_str())?)?,
-                    vec![],
-                )
-                .await?;
-            }
-        }
-        Ok(())
+        self.delete_nodes_by_ids(std::slice::from_ref(id)).await
     }
 
     async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
@@ -2253,6 +2414,60 @@ fn typed_edge_merge_from_view_sql(edge_type: &EdgeType) -> Result<String> {
             .map(|column| format!("s.{column}"))
             .collect::<Vec<_>>()
             .join(", ")
+    ))
+}
+
+fn matching_nodes_sql(
+    label: Option<&Label>,
+    props: &Props,
+) -> Result<(String, Vec<expression::Literal>)> {
+    let mut conditions = Vec::new();
+    let mut args = Vec::new();
+    if let Some(label) = label {
+        conditions.push("label = ?".to_string());
+        args.push(lit_str(label.as_str()));
+    }
+    for (key, value) in props {
+        validate_json_key(key)?;
+        let json_value = sail_json_property_expr("props", key)?;
+        match value {
+            Value::String(s) => {
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(s));
+            }
+            Value::Int(n) => {
+                conditions.push(format!("CAST({json_value} AS BIGINT) = ?"));
+                args.push(lit_long(*n));
+            }
+            Value::Float(f) => {
+                conditions.push(format!("CAST({json_value} AS DOUBLE) = ?"));
+                args.push(lit_double(*f));
+            }
+            Value::Bool(b) => {
+                conditions.push(format!("CAST({json_value} AS BOOLEAN) = ?"));
+                args.push(lit_bool(*b));
+            }
+            Value::Null => conditions.push(format!("{json_value} IS NULL")),
+            Value::DateTime(_)
+            | Value::StringArray(_)
+            | Value::IntArray(_)
+            | Value::FloatArray(_)
+            | Value::Json(_) => {
+                let json = serde_json::to_string(&value.to_json())
+                    .map_err(|err| GrustError::Serialization(err.to_string()))?;
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(&json));
+            }
+        }
+    }
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    Ok((
+        format!("SELECT id, label, props FROM grust_nodes{where_clause}"),
+        args,
     ))
 }
 

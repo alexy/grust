@@ -905,6 +905,9 @@ fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> R
     match mutation {
         GraphMutation::UpsertNode(node) => surreal_upsert_nodes_query(std::slice::from_ref(node)),
         GraphMutation::PatchNode { id, props } => surreal_patch_node_query(id, props, config),
+        GraphMutation::DeleteMatchingNodes { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched node deletes are not implemented yet".to_string(),
+        )),
         GraphMutation::DeleteNode(id) => surreal_delete_node_query(id, config),
         GraphMutation::UpsertEdge(edge) => {
             surreal_relate_edges_query(std::slice::from_ref(edge), &edge_id_tables(edge))

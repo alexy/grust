@@ -1019,7 +1019,8 @@ accepts only a strict v1 mutation subset: explicit-ID node `CREATE` and
 `MERGE`, edge `CREATE` and `MERGE` when both endpoint IDs are resolved, and
 resolved node or edge `DELETE`. It also accepts ordered multi-statement
 batches, local node variables bound by explicit-ID node patterns, ID-resolved
-`MATCH ... DELETE`, and edge `MATCH ... MERGE` forms. It lowers those
+`MATCH ... DELETE`, edge `MATCH ... MERGE`, and cardinality-aware broad node
+`MATCH ... DELETE` forms. It lowers those
 statements into `GraphMutationPlan` and then ordinary `GraphMutation` values.
 The execution entrypoint, `SailGraphStore::execute_cypher_mutation`, runs those
 mutations through `GraphMutationStore`, so Cypher writes use the same staged
@@ -1030,6 +1031,10 @@ mode performs a read-before-write check and therefore keeps the default
 entrypoint on the lower-friction upsert-compatible path. ID-resolved
 `MATCH ... SET n += { ... }` lowers to a node patch mutation; `null` in the
 patch map is stored as `Value::Null` rather than treated as property removal.
+For broad node deletes, the report records matched rows and changed graph
+elements, and Sail stages matched IDs before using the same node-delete helper
+that cascades incident-edge removal. The mutation parser keeps top-level
+keywords case-insensitive and strips Cypher comments outside string literals.
 
 ## FalkorDB, HelixDB, and SurrealDB
 

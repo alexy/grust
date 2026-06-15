@@ -543,6 +543,11 @@ fn mutation_sql(nodes_table: &str, edges_table: &str, mutation: &GraphMutation) 
             upsert_nodes_sql(nodes_table, std::slice::from_ref(node))?
         }
         GraphMutation::PatchNode { id, props } => patch_node_sql(nodes_table, id, props)?,
+        GraphMutation::DeleteMatchingNodes { .. } => {
+            return Err(GrustError::Unsupported(
+                "pgGraph matched node deletes are not implemented yet".to_string(),
+            ));
+        }
         GraphMutation::DeleteNode(id) => delete_node_sql(nodes_table, id),
         GraphMutation::UpsertEdge(edge) => {
             upsert_edges_sql(edges_table, std::slice::from_ref(edge))?

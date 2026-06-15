@@ -293,7 +293,9 @@ Open semantic decisions before accepting general Cypher writes:
 - Schema validation: mutations should validate through `GraphSchema` before
   they reach backend SQL.
 - Match cardinality: mutating `MATCH ... SET/DELETE` may affect zero, one, or
-  many rows; the result shape and error policy must be explicit.
+  many rows; broad node `MATCH ... DELETE` now reports matched rows and changed
+  graph elements, while broad patching still needs explicit result shape and
+  error policy.
 - Atomicity: Sail/Delta operations may need staged Arrow temp views and grouped
   `MERGE`/`DELETE` commands, but multi-statement Spark SQL should not be
   described as transactional unless Sail can prove it for the active table

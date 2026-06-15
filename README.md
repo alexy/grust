@@ -385,7 +385,8 @@ Writable Cypher starts as a strict Sail-specific v1 surface:
 endpoint edge `CREATE`/`MERGE`, and resolved node/edge `DELETE` into Grust
 mutation plans. It also accepts ordered multi-statement batches and local node
 variables bound from explicit-ID node patterns, plus ID-resolved
-`MATCH ... DELETE` and edge `MATCH ... MERGE` forms, while
+`MATCH ... DELETE`, edge `MATCH ... MERGE`, and cardinality-aware broad node
+`MATCH ... DELETE` forms, while
 `SailGraphStore::execute_cypher_mutation` executes those plans through
 `GraphMutationStore` and the existing Sail staging and `MERGE INTO` paths.
 For stricter Cypher compatibility, callers can use
@@ -395,6 +396,9 @@ existence check instead of following the default upsert-compatible path.
 Writable Cypher also lowers ID-resolved `MATCH ... SET n += { ... }` node map
 patches into backend-neutral node patch mutations; `null` is stored as a graph
 value rather than interpreted as property removal.
+The mutation report includes matched-row and changed node/edge counts for
+broad Sail deletes, and the parser accepts top-level mutation keywords
+case-insensitively while stripping Cypher comments outside string literals.
 
 `grust-surreal` provides both `SurrealHttpGraphStore` and
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and

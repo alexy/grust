@@ -325,7 +325,8 @@ plan before applying it to a store. Sail uses that layer for its strict
 writable-Cypher subset: explicit-ID node `CREATE`/`MERGE`, resolved endpoint
 edge `CREATE`/`MERGE`, resolved node/edge `DELETE`, ordered multi-statement
 batches, local node variables bound from explicit IDs, ID-resolved
-`MATCH ... DELETE`, and edge `MATCH ... MERGE`.
+`MATCH ... DELETE`, edge `MATCH ... MERGE`, and broad node
+`MATCH ... DELETE` with matched-row and changed-element reporting.
 
 The book chapter **The Store Contract** gives this trait the attention it
 deserves. It is the piece that lets a memory store, a LanceDB table layout, a
@@ -409,8 +410,9 @@ Grust writes produce.
 Writable Cypher follows the same rule. In Sail, Cypher write text is not a
 separate persistence path. `sail_cypher_mutation_plan` accepts a strict v1
 subset, ordered mutation batches, local explicit-ID node variables,
-ID-resolved `MATCH ... DELETE`, and edge `MATCH ... MERGE`, then lowers them
-into `GraphMutationPlan`; `SailGraphStore` executes that plan through
+ID-resolved `MATCH ... DELETE`, edge `MATCH ... MERGE`, broad node
+`MATCH ... DELETE`, and ID-resolved node map patches, then lowers them into
+`GraphMutationPlan`; `SailGraphStore` executes that plan through
 `GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`, typed-table
 mirror writes, and the same delete paths as ordinary Grust mutations.
 

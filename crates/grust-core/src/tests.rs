@@ -108,6 +108,11 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             id: NodeId::new("person-1"),
             props: Props::from([("name".to_string(), Value::from("Ada"))]),
         },
+        GraphMutationPlanOp::DeleteMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("active".to_string(), Value::Bool(false))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
         GraphMutationPlanOp::DeleteEdge {
             from: NodeId::new("person-1"),
             label: Label::new("KNOWS"),
@@ -121,8 +126,11 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
         GraphMutationReport {
             creates: 1,
             merges: 1,
-            deletes: 2,
+            deletes: 3,
             patches: 1,
+            matched_rows: 0,
+            changed_nodes: 3,
+            changed_edges: 2,
             node_upserts: 1,
             edge_upserts: 1,
             node_deletes: 1,
@@ -138,6 +146,10 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             GraphMutation::PatchNode {
                 id: NodeId::new("person-1"),
                 props: Props::from([("name".to_string(), Value::from("Ada"))]),
+            },
+            GraphMutation::DeleteMatchingNodes {
+                label: Some(Label::new("Person")),
+                props: Props::from([("active".to_string(), Value::Bool(false))]),
             },
             GraphMutation::DeleteEdge {
                 from: NodeId::new("person-1"),

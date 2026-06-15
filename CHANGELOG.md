@@ -11,6 +11,11 @@ reconstructed from Git history, release commits, and the shipped docs.
   default upsert-compatible path.
 - Added backend-neutral node patch mutations and Sail writable Cypher lowering
   for strict `MATCH ... SET n += { ... }` node map patches.
+- Added cardinality-aware Sail writable Cypher planning and execution for broad
+  node `MATCH ... DELETE`, including matched-row and changed-element mutation
+  report fields plus ignored live Sail cascade coverage.
+- Polished Sail writable Cypher parsing with case-insensitive top-level
+  mutation keywords and comment stripping outside string literals.
 
 ## 2026-06-15 - 0.8.4
 

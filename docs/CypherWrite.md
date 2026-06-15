@@ -11,11 +11,12 @@ graph queries and already persists Grust graphs through Spark SQL, staged Arrow
 temp views, Delta `MERGE INTO`, typed-table mirror writes, and staged delete
 helpers.
 
-## Shipped V1 Scope
+## Current Implemented Scope
 
 The writable Cypher surface is deliberately strict. The first slice shipped in
-the `0.8.2` line, ordered batches and local variables shipped in `0.8.3`, and
-ID-resolved `MATCH` mutation forms shipped in `0.8.4`:
+the `0.8.2` line, ordered batches and local variables shipped in `0.8.3`,
+ID-resolved `MATCH` mutation forms shipped in `0.8.4`, and the later bullets
+describe unreleased working-tree additions:
 
 - `CREATE (:Label {id: ..., ...})` writes a node only when the node `id` is
   explicit in the literal property map.
@@ -39,15 +40,22 @@ ID-resolved `MATCH` mutation forms shipped in `0.8.4`:
 - `MATCH (a:Src {id: ...}), (b:Dst {id: ...}) MERGE (a)-[:TYPE]->(b)` lowers
   to an edge merge when both endpoint variables are resolved by explicit-ID
   node patterns.
+- `MATCH (n:Label {...}) DELETE n` without an explicit `id` lowers to a
+  cardinality-aware matched node delete in Sail. The planner marks the
+  operation as bounded-many when a label or property predicate is present and
+  unbounded-many for `MATCH (n) DELETE n`.
+- `MATCH ... SET n += { ... }` lowers only when `n` resolves to one explicit
+  node ID; `null` is stored as `Value::Null`.
+- Writable mutation keywords are parsed case-insensitively at the top level,
+  and `// ...` plus `/* ... */` comments are stripped outside string literals.
 
 The v1 implementation should reject, with clear errors:
 
 - generated node IDs;
 - node identity derived from non-`id` properties;
-- general cardinality-changing mutating `MATCH`;
-- `MATCH ... SET`;
-- `SET`, `REMOVE`, property patching, remove-on-null, or partial update
-  semantics;
+- broad `MATCH ... SET` and edge patching;
+- `SET n.name = ...`, `REMOVE`, remove-on-null, arithmetic updates, or
+  expression evaluation;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
 
@@ -85,7 +93,10 @@ to backend-neutral Grust mutation concepts:
 - node create/merge -> `GraphMutation::UpsertNode`;
 - edge create/merge -> `GraphMutation::UpsertEdge`;
 - node delete -> `GraphMutation::DeleteNode`;
-- edge delete -> `GraphMutation::DeleteEdge`.
+- edge delete -> `GraphMutation::DeleteEdge`;
+- explicit-ID node map patch -> `GraphMutation::PatchNode`;
+- Sail broad node delete -> `GraphMutation::DeleteMatchingNodes` with
+  cardinality metadata retained in `GraphMutationPlanOp`.
 
 `grust-sail` should not emit independent ad hoc table edits from Cypher syntax.
 It should reuse the same persistence path used by `put_node`, `put_edge`,
@@ -120,13 +131,12 @@ impl SailGraphStore {
 }
 ```
 
-The report should be intentionally small in v1:
+The report stays count-oriented rather than returning rows:
 
-- accepted operation class, such as create, merge, or delete;
-- number of planned node upserts;
-- number of planned edge upserts;
-- number of planned node deletes;
-- number of planned edge deletes.
+- accepted operation class counts, such as create, merge, delete, and patch;
+- planned node and edge upsert/delete/patch counts when the identity is known;
+- matched row count for cardinality-aware execution;
+- changed node and edge counts when the planner or backend can determine them.
 
 The API should not promise atomicity beyond the target store. If Sail later
 proves transactional guarantees for the active table format, that can be added
@@ -232,7 +242,8 @@ feature slice should start at item 3.
    ```
 
    This should lower to the same `DeleteNode` and `DeleteEdge` plan operations
-   as v1 literal `DELETE`. Broad cardinality-changing `MATCH` remains deferred.
+   as v1 literal `DELETE`. Broad node `MATCH ... DELETE` is handled separately
+   in Batch E; broad `MATCH ... SET` remains deferred.
 
 4. ID-resolved `MATCH ... MERGE` for edges. Shipped in `0.8.4`.
 
@@ -278,18 +289,21 @@ feature slice should start at item 3.
 
 7. Cardinality-aware mutating `MATCH`.
 
-   Broad mutating `MATCH` should come late because it can affect zero, one, or
-   many elements:
+   Broad mutating `MATCH` should be explicit because it can affect zero, one,
+   or many elements:
 
    ```cypher
    MATCH (n:Person {status: 'inactive'})
    DELETE n;
    ```
 
-   Before accepting this form, the report model must describe how many rows
-   matched and how many graph elements were changed. The planner should also
-   make backend atomicity explicit: a backend may apply an ordered mutation
-   batch without guaranteeing transaction rollback on later failure.
+   The report model must describe how many rows matched and how many graph
+   elements were changed. The planner should also make backend atomicity
+   explicit: a backend may apply an ordered mutation batch without guaranteeing
+   transaction rollback on later failure.
+
+   Status: broad node `MATCH ... DELETE` is implemented in the working tree
+   after `0.8.4`; broad `MATCH ... SET` remains deferred.
 
 ## Completion Batches
 
@@ -431,10 +445,16 @@ Acceptance criteria:
 
 Implementation notes:
 
-- Start with broad `MATCH ... DELETE`; broad `MATCH ... SET` should wait until
-  Batch D is complete.
+- Start with broad node `MATCH ... DELETE`; broad `MATCH ... SET` should wait
+  for separate broad patch execution semantics.
 - Live Sail tests should cover zero-match, one-match, many-match, and
   node-delete incident-edge cascade behavior.
+
+Implementation status: implemented in the working tree after `0.8.4` for broad
+node deletes in Sail. Planning preserves `BoundedMany` versus `UnboundedMany`,
+execution stages matched IDs before calling the existing node-delete helpers,
+and ignored live tests cover zero-match, many-match, and incident-edge cascade
+behavior.
 
 ### Batch F: Parser and API polish
 
@@ -442,8 +462,9 @@ After the mutation semantics are complete, harden the user-facing API surface.
 
 Acceptance criteria:
 
-- Replace the hand-rolled mutation parser with a shared parser module or
-  parser crate boundary if the grammar keeps growing.
+- Keep the current hand-rolled parser while the grammar remains compact; move
+  it behind a shared parser module or parser crate boundary if more expression
+  syntax, nested patterns, or return-bearing mutation forms are added.
 - Make case sensitivity, whitespace handling, comments, and statement splitting
   explicit and tested.
 - Add structured error variants for unsupported syntax, unresolved identity,
@@ -453,14 +474,19 @@ Acceptance criteria:
 - Update README, book prose, `docs/Arrow.md` if Sail/Arrow examples change,
   changelog, and ignored live integration tests for every shipped batch.
 
+Implementation status: partially implemented in the working tree after
+`0.8.4`. Top-level mutation keywords are case-insensitive, semicolon splitting
+is quote-aware, and `// ...` plus `/* ... */` comments are stripped outside
+string literals. Structured error variants and a parser module boundary remain
+deferred.
+
 ## Deferred Semantics
 
 The following decisions should remain out of v1:
 
 - generated IDs and pluggable ID policies;
-- `CREATE` duplicate-ID errors distinct from upsert behavior;
-- property patching, remove-on-null, `SET`, and `REMOVE`;
-- mutating `MATCH` cardinality and result shape;
+- broad `MATCH ... SET`, edge patching, remove-on-null, `SET n.name = ...`,
+  arithmetic updates, and `REMOVE`;
 - cross-backend Cypher mutation APIs;
 - stronger transaction guarantees than the target backend documents.
 

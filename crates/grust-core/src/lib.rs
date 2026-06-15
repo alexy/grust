@@ -2112,6 +2112,10 @@ pub enum GraphMutation {
         id: NodeId,
         props: Props,
     },
+    DeleteMatchingNodes {
+        label: Option<Label>,
+        props: Props,
+    },
     DeleteNode(NodeId),
     UpsertEdge(Edge),
     DeleteEdge {
@@ -2127,6 +2131,13 @@ pub enum GraphMutationPlanKind {
     Merge,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphMutationCardinality {
+    SingleIdentity,
+    BoundedMany,
+    UnboundedMany,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GraphMutationPlanOp {
     UpsertNode {
@@ -2136,6 +2147,11 @@ pub enum GraphMutationPlanOp {
     PatchNode {
         id: NodeId,
         props: Props,
+    },
+    DeleteMatchingNodes {
+        label: Option<Label>,
+        props: Props,
+        cardinality: GraphMutationCardinality,
     },
     UpsertEdge {
         kind: GraphMutationPlanKind,
@@ -2185,6 +2201,9 @@ pub struct GraphMutationReport {
     pub merges: usize,
     pub deletes: usize,
     pub patches: usize,
+    pub matched_rows: usize,
+    pub changed_nodes: usize,
+    pub changed_edges: usize,
     pub node_upserts: usize,
     pub edge_upserts: usize,
     pub node_deletes: usize,
@@ -2202,22 +2221,34 @@ impl GraphMutationReport {
                     GraphMutationPlanKind::Merge => self.merges += 1,
                 }
                 match operation {
-                    GraphMutationPlanOp::UpsertNode { .. } => self.node_upserts += 1,
-                    GraphMutationPlanOp::UpsertEdge { .. } => self.edge_upserts += 1,
+                    GraphMutationPlanOp::UpsertNode { .. } => {
+                        self.node_upserts += 1;
+                        self.changed_nodes += 1;
+                    }
+                    GraphMutationPlanOp::UpsertEdge { .. } => {
+                        self.edge_upserts += 1;
+                        self.changed_edges += 1;
+                    }
                     _ => {}
                 }
             }
             GraphMutationPlanOp::PatchNode { .. } => {
                 self.patches += 1;
                 self.node_patches += 1;
+                self.changed_nodes += 1;
+            }
+            GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
+                self.deletes += 1;
             }
             GraphMutationPlanOp::DeleteNode(_) => {
                 self.deletes += 1;
                 self.node_deletes += 1;
+                self.changed_nodes += 1;
             }
             GraphMutationPlanOp::DeleteEdge { .. } => {
                 self.deletes += 1;
                 self.edge_deletes += 1;
+                self.changed_edges += 1;
             }
         }
     }
@@ -2228,6 +2259,9 @@ impl From<GraphMutationPlanOp> for GraphMutation {
         match operation {
             GraphMutationPlanOp::UpsertNode { node, .. } => Self::UpsertNode(node),
             GraphMutationPlanOp::PatchNode { id, props } => Self::PatchNode { id, props },
+            GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
+                Self::DeleteMatchingNodes { label, props }
+            }
             GraphMutationPlanOp::UpsertEdge { edge, .. } => Self::UpsertEdge(edge),
             GraphMutationPlanOp::DeleteNode(id) => Self::DeleteNode(id),
             GraphMutationPlanOp::DeleteEdge { from, label, to } => {
@@ -2269,6 +2303,11 @@ pub trait GraphMutationStore: GraphStore {
                         self.put_node(&node).await?;
                     }
                 }
+                GraphMutation::DeleteMatchingNodes { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched node deletes require backend-specific query support".to_string(),
+                    ));
+                }
                 GraphMutation::DeleteNode(id) => self.delete_node(id).await?,
                 GraphMutation::UpsertEdge(edge) => {
                     self.put_edge(edge).await?;
@@ -2285,11 +2324,11 @@ pub trait GraphMutationStore: GraphStore {
 pub mod prelude {
     pub use crate::{
         Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, EdgeUniqueness, Field, FieldType,
-        Graph, GraphAdminStore, GraphBuilder, GraphIndex, GraphMutation, GraphMutationPlan,
-        GraphMutationPlanKind, GraphMutationPlanOp, GraphMutationReport, GraphMutationStore,
-        GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId,
-        NodeType, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value, edge_key,
-        relationship_type, schema_identifier,
+        Graph, GraphAdminStore, GraphBuilder, GraphIndex, GraphMutation, GraphMutationCardinality,
+        GraphMutationPlan, GraphMutationPlanKind, GraphMutationPlanOp, GraphMutationReport,
+        GraphMutationStore, GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label,
+        LoadReport, Node, NodeId, NodeType, Props, PutOutcome, Result, RfcDate, Start, Step,
+        Traversal, Value, edge_key, relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

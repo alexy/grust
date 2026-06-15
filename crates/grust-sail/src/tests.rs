@@ -603,6 +603,7 @@ fn cypher_node_create_requires_explicit_id_and_lowers_to_mutation() {
         plan.report(),
         GraphMutationReport {
             creates: 1,
+            changed_nodes: 1,
             node_upserts: 1,
             ..GraphMutationReport::default()
         }
@@ -640,6 +641,7 @@ fn cypher_merge_edge_requires_resolved_endpoint_ids() {
         plan.report(),
         GraphMutationReport {
             merges: 1,
+            changed_edges: 1,
             edge_upserts: 1,
             ..GraphMutationReport::default()
         }
@@ -697,6 +699,7 @@ fn cypher_match_delete_lowers_id_resolved_patterns() {
         node_delete.report(),
         GraphMutationReport {
             deletes: 1,
+            changed_nodes: 1,
             node_deletes: 1,
             ..GraphMutationReport::default()
         }
@@ -714,6 +717,7 @@ fn cypher_match_delete_lowers_id_resolved_patterns() {
         edge_delete.report(),
         GraphMutationReport {
             deletes: 1,
+            changed_edges: 1,
             edge_deletes: 1,
             ..GraphMutationReport::default()
         }
@@ -729,9 +733,45 @@ fn cypher_match_delete_lowers_id_resolved_patterns() {
 }
 
 #[test]
+fn cypher_match_delete_lowers_broad_node_patterns_with_cardinality() {
+    let bounded = sail_cypher_mutation_plan("MATCH (n:Person {active: false}) DELETE n").unwrap();
+    assert_eq!(
+        bounded.report(),
+        GraphMutationReport {
+            deletes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        bounded.operations,
+        vec![GraphMutationPlanOp::DeleteMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("active".to_string(), Value::Bool(false))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+    assert_eq!(
+        bounded.into_mutations(),
+        vec![GraphMutation::DeleteMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("active".to_string(), Value::Bool(false))]),
+        }]
+    );
+
+    let unbounded = sail_cypher_mutation_plan("MATCH (n) DELETE n").unwrap();
+    assert_eq!(
+        unbounded.operations,
+        vec![GraphMutationPlanOp::DeleteMatchingNodes {
+            label: None,
+            props: Props::new(),
+            cardinality: GraphMutationCardinality::UnboundedMany,
+        }]
+    );
+}
+
+#[test]
 fn cypher_match_delete_rejects_unresolved_or_mismatched_patterns() {
     for cypher in [
-        "MATCH (n:Person) DELETE n",
         "MATCH (n:Person {id: 'person-1'}) DELETE m",
         "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) DELETE n",
         "MATCH (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'}) DELETE e",
@@ -739,6 +779,41 @@ fn cypher_match_delete_rejects_unresolved_or_mismatched_patterns() {
         let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH must fail");
         assert!(matches!(error, GrustError::Unsupported(_)));
     }
+}
+
+#[test]
+fn matching_nodes_sql_filters_by_label_and_properties() {
+    let (sql, args) = matching_nodes_sql(
+        Some(&Label::new("Person")),
+        &Props::from([
+            ("active".to_string(), Value::Bool(false)),
+            ("age".to_string(), Value::Int(36)),
+            ("name".to_string(), Value::from("Ada")),
+        ]),
+    )
+    .unwrap();
+
+    assert_eq!(
+        sql,
+        "SELECT id, label, props FROM grust_nodes WHERE label = ? AND CAST(GET_JSON_OBJECT(props, '$.active') AS BOOLEAN) = ? AND CAST(GET_JSON_OBJECT(props, '$.age') AS BIGINT) = ? AND GET_JSON_OBJECT(props, '$.name') = ?"
+    );
+    assert_eq!(args.len(), 4);
+    assert!(matches!(
+        &args[0].literal_type,
+        Some(expression::literal::LiteralType::String(_))
+    ));
+    assert!(matches!(
+        &args[1].literal_type,
+        Some(expression::literal::LiteralType::Boolean(_))
+    ));
+    assert!(matches!(
+        &args[2].literal_type,
+        Some(expression::literal::LiteralType::Long(_))
+    ));
+    assert!(matches!(
+        &args[3].literal_type,
+        Some(expression::literal::LiteralType::String(_))
+    ));
 }
 
 #[test]
@@ -755,6 +830,7 @@ fn cypher_match_merge_lowers_id_resolved_edge_pattern() {
         plan.report(),
         GraphMutationReport {
             merges: 1,
+            changed_edges: 1,
             edge_upserts: 1,
             ..GraphMutationReport::default()
         }
@@ -799,6 +875,7 @@ fn cypher_match_set_map_patch_lowers_id_resolved_node() {
         plan.report(),
         GraphMutationReport {
             patches: 1,
+            changed_nodes: 1,
             node_patches: 1,
             ..GraphMutationReport::default()
         }
@@ -851,6 +928,8 @@ fn cypher_multi_statement_batch_preserves_order_and_aggregates_report() {
             creates: 2,
             merges: 1,
             deletes: 1,
+            changed_nodes: 3,
+            changed_edges: 1,
             node_upserts: 2,
             edge_upserts: 1,
             node_deletes: 1,
@@ -891,6 +970,45 @@ fn cypher_multi_statement_batch_preserves_order_and_aggregates_report() {
 }
 
 #[test]
+fn cypher_parser_polish_handles_comments_keyword_case_and_statement_splitting() {
+    let plan = sail_cypher_mutation_plan(
+        r#"
+        // full-line comment before the batch
+        create (:Person {id: 'person-1', note: 'semicolon; and // literal'});
+        /* block comment with ; and MATCH (n) DELETE n */
+        mErGe (:Person {id: 'person-2'});
+        MaTcH (n:Person {status: 'inactive'}) DeLeTe n;
+        "#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            creates: 1,
+            merges: 1,
+            deletes: 1,
+            changed_nodes: 2,
+            node_upserts: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(plan.operations.len(), 3);
+    assert!(matches!(
+        &plan.operations[2],
+        GraphMutationPlanOp::DeleteMatchingNodes {
+            label,
+            cardinality: GraphMutationCardinality::BoundedMany,
+            ..
+        } if label.as_ref().is_some_and(|label| label.as_str() == "Person")
+    ));
+
+    let error = sail_cypher_mutation_plan("CREATE (:Person {id: 'person-1'}); /* nope")
+        .expect_err("unterminated block comment should fail");
+    assert!(error.to_string().contains("unterminated block comment"));
+}
+
+#[test]
 fn cypher_local_variables_resolve_edge_endpoints_and_deletes() {
     let plan = sail_cypher_mutation_plan(
         "
@@ -909,6 +1027,8 @@ fn cypher_local_variables_resolve_edge_endpoints_and_deletes() {
             creates: 2,
             merges: 1,
             deletes: 2,
+            changed_nodes: 3,
+            changed_edges: 2,
             node_upserts: 2,
             edge_upserts: 1,
             node_deletes: 1,
@@ -965,7 +1085,6 @@ fn cypher_local_variables_reject_rebinding_and_unbound_refs() {
 #[test]
 fn cypher_write_rejects_deferred_v1_semantics() {
     for cypher in [
-        "MATCH (n:Person {name: 'Ada'}) DELETE n",
         "CREATE (:Person {id: 'person-1'}) SET n.name = 'Ada'",
         "REMOVE n.name",
     ] {
@@ -1160,6 +1279,8 @@ async fn test_execute_cypher_mutations() {
         GraphMutationReport {
             creates: 2,
             merges: 1,
+            changed_nodes: 2,
+            changed_edges: 1,
             node_upserts: 2,
             edge_upserts: 1,
             ..GraphMutationReport::default()
@@ -1187,6 +1308,7 @@ async fn test_execute_cypher_mutations() {
         report,
         GraphMutationReport {
             deletes: 1,
+            changed_edges: 1,
             edge_deletes: 1,
             ..GraphMutationReport::default()
         }
@@ -1211,6 +1333,7 @@ async fn test_execute_cypher_mutations() {
         report,
         GraphMutationReport {
             deletes: 1,
+            changed_nodes: 1,
             node_deletes: 1,
             ..GraphMutationReport::default()
         }
@@ -1221,6 +1344,82 @@ async fn test_execute_cypher_mutations() {
             .await
             .expect("read after node delete")
             .is_none()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_broad_match_delete_nodes() {
+    let store = store().await;
+
+    let report = store
+        .execute_cypher_mutation("MATCH (n:Person {status: 'missing'}) DELETE n")
+        .await
+        .expect("zero-match broad delete");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            deletes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    store
+        .execute_cypher_mutation(
+            "
+            CREATE (a:Person {id: 'person-inactive-1', status: 'inactive'});
+            CREATE (b:Person {id: 'person-inactive-2', status: 'inactive'});
+            CREATE (c:Person {id: 'person-active-1', status: 'active'});
+            CREATE (a)-[:KNOWS]->(b);
+            CREATE (a)-[:KNOWS]->(c);
+            ",
+        )
+        .await
+        .expect("seed graph for broad delete");
+
+    let report = store
+        .execute_cypher_mutation("MATCH (n:Person {status: 'inactive'}) DELETE n")
+        .await
+        .expect("many-match broad delete");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            deletes: 1,
+            matched_rows: 2,
+            changed_nodes: 2,
+            changed_edges: 2,
+            node_deletes: 2,
+            edge_deletes: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert!(
+        store
+            .get_node(&NodeId::new("person-inactive-1"))
+            .await
+            .expect("read deleted inactive node")
+            .is_none()
+    );
+    assert!(
+        store
+            .get_node(&NodeId::new("person-inactive-2"))
+            .await
+            .expect("read deleted inactive node")
+            .is_none()
+    );
+    assert!(
+        store
+            .get_node(&NodeId::new("person-active-1"))
+            .await
+            .expect("read remaining active node")
+            .is_some()
+    );
+    assert!(
+        store
+            .get_edges(EdgeQuery::default())
+            .await
+            .expect("read after broad delete cascade")
+            .is_empty()
     );
 }
 
