@@ -112,6 +112,7 @@ scripts/integration-test.sh --backend sail
 scripts/integration-test.sh --backend surreal
 scripts/integration-test.sh --backend falkor
 scripts/integration-test.sh --backend helix
+scripts/integration-test.sh --backend issundb
 scripts/integration-test.sh --backend ladybug
 scripts/integration-test.sh --backend lancedb
 scripts/integration-test.sh --backend cocoindex
