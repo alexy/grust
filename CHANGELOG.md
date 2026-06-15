@@ -6,6 +6,29 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 2026-06-14 - 0.8.0
+
+- Added `GraphIndex` to `grust-core` as a shared dense adjacency layer for
+  local analytics, backend planning, and adapters that need validated edge
+  endpoint indexes.
+- Added a dependency-free `benchmarks` example in `grust-graph` with ring,
+  grid, layered DAG, clustered, Graph500-style R-MAT, and GAP-style R-MAT graph
+  families for core graph/index operations.
+- Added Sail graph analytics helpers for reading the persisted generic graph
+  tables and computing in-degree, out-degree, total degree, and directed degree
+  pairs through Spark SQL.
+- Added public Sail table/column contract helpers for generic and typed graph
+  planning, including field projection helpers shared with GrustFrames-style
+  lowerings.
+- Added Sail typed-table descriptors and directional triplet SQL helpers for
+  GrustFrames-style triplet filters, motifs, and aggregate-message lowerings.
+- Changed Sail generic edge persistence to keep staged `edge_key` and optional
+  explicit edge `id` columns in `grust_edges`, so read-back and external
+  planners can preserve stable edge identity.
+- Changed structural `edge_key` construction to preallocate and append instead
+  of using `format!`, reducing allocation overhead in graph-index and benchmark
+  paths.
+
 ## 2026-06-13 - 0.7.2
 
 - Extended `grust-ladybug` to expose Ladybug typed and untyped graph modes

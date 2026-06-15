@@ -83,6 +83,40 @@ fn schema_sql_creates_typed_delta_tables() {
 }
 
 #[test]
+fn graph_schema_typed_table_contract_is_public() {
+    let tables = sail_graph_schema_typed_tables(&person_schema()).unwrap();
+
+    assert!(tables.contains(&SailGraphTypedTable {
+        kind: SailGraphTypedTableKind::Node,
+        label: "Person".to_string(),
+        table: "grust_node_person".to_string(),
+        columns: vec!["id".to_string(), "name".to_string(), "age".to_string()],
+    }));
+    assert!(tables.contains(&SailGraphTypedTable {
+        kind: SailGraphTypedTableKind::Edge,
+        label: "presents".to_string(),
+        table: "grust_edge_presents".to_string(),
+        columns: vec![
+            "edge_key".to_string(),
+            "id".to_string(),
+            "src_id".to_string(),
+            "dst_id".to_string(),
+            "source".to_string(),
+        ],
+    }));
+
+    let schema = person_schema();
+    assert_eq!(
+        sail_typed_node_columns(schema.node_type(&Label::new("Person")).unwrap()).unwrap(),
+        ["id", "name", "age"]
+    );
+    assert_eq!(
+        sail_typed_edge_columns(schema.edge_type(&Label::new("presents")).unwrap()).unwrap(),
+        ["edge_key", "id", "src_id", "dst_id", "source"]
+    );
+}
+
+#[test]
 fn typed_node_merge_extracts_fields_from_staged_json() {
     let schema = person_schema();
     let node_type = schema.node_type(&Label::new("Person")).unwrap();
@@ -106,6 +140,22 @@ fn typed_edge_merge_extracts_fields_from_staged_json() {
     assert!(sql.contains("FROM grust_stage_edges s WHERE s.edge_type = 'presents'"));
     assert!(sql.contains("ON t.edge_key = s.edge_key"));
     assert!(sql.contains("GET_JSON_OBJECT(s.props, '$.source') AS `source`"));
+}
+
+#[test]
+fn generic_edge_merge_persists_edge_identity_columns() {
+    let sql = merge_edges_from_view_sql();
+
+    assert!(sql.contains("t.edge_key = s.edge_key"));
+    assert!(sql.contains("t.id = s.id"));
+    assert!(
+        sql.contains(
+            "INSERT (edge_key, id, src_id, src_label, dst_id, dst_label, edge_type, props)"
+        )
+    );
+    assert!(sql.contains(
+        "VALUES (s.edge_key, s.id, s.src_id, s.src_label, s.dst_id, s.dst_label, s.edge_type, s.props)"
+    ));
 }
 
 #[test]
@@ -163,6 +213,42 @@ fn staged_edge_batch_preserves_explicit_arrow_edge_id() {
 
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].id.as_ref().map(EdgeId::as_str), Some("edge-1"));
+}
+
+#[test]
+fn generic_edge_arrow_results_preserve_explicit_edge_id() {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("id", DataType::Utf8, true),
+        ArrowField::new("src_id", DataType::Utf8, false),
+        ArrowField::new("src_label", DataType::Utf8, false),
+        ArrowField::new("dst_id", DataType::Utf8, false),
+        ArrowField::new("dst_label", DataType::Utf8, false),
+        ArrowField::new("edge_type", DataType::Utf8, false),
+        ArrowField::new("props", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from(vec![Some("edge-1")])),
+            Arc::new(StringArray::from_iter_values(["person-1"])),
+            Arc::new(StringArray::from_iter_values(["Person"])),
+            Arc::new(StringArray::from_iter_values(["talk-1"])),
+            Arc::new(StringArray::from_iter_values(["Talk"])),
+            Arc::new(StringArray::from_iter_values(["presents"])),
+            Arc::new(StringArray::from_iter_values([r#"{"source":"schedule"}"#])),
+        ],
+    )
+    .unwrap();
+    let bytes = ipc_bytes(&batch).unwrap();
+
+    let edges = parse_edges_from_arrow(&bytes).unwrap();
+
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].id.as_ref().map(EdgeId::as_str), Some("edge-1"));
+    assert_eq!(
+        edges[0].props.get("source"),
+        Some(&Value::String("schedule".into()))
+    );
 }
 
 #[test]
@@ -346,6 +432,91 @@ fn generic_degree_sql_uses_persisted_sail_graph_tables() {
     assert!(sail_degrees_sql().contains("UNION ALL"));
     assert!(sail_degree_pairs_sql().contains("FROM grust_nodes n"));
     assert!(sail_degree_pairs_sql().contains("LEFT JOIN"));
+    assert!(sail_triplets_sql().contains("FROM grust_edges e"));
+    assert!(sail_triplets_sql().contains("JOIN grust_nodes src ON src.id = e.src_id"));
+    assert!(sail_triplets_sql().contains("JOIN grust_nodes dst ON dst.id = e.dst_id"));
+    assert_eq!(
+        sail_triplets_sql(),
+        sail_triplets_sql_for_direction(SailGraphPatternDirection::Outgoing)
+    );
+    let incoming = sail_triplets_sql_for_direction(SailGraphPatternDirection::Incoming);
+    assert!(incoming.contains("dst.id AS src_id"));
+    assert!(incoming.contains("src.id AS dst_id"));
+    let undirected = sail_triplets_sql_for_direction(SailGraphPatternDirection::Undirected);
+    assert!(undirected.contains("UNION ALL"));
+    assert!(undirected.contains("src.id AS src_id"));
+    assert!(undirected.contains("dst.id AS src_id"));
+}
+
+#[test]
+fn graph_table_contract_helpers_are_shared() {
+    assert_eq!(GRUST_NODES_TABLE, "grust_nodes");
+    assert_eq!(GRUST_EDGES_TABLE, "grust_edges");
+    assert_eq!(
+        sail_node_field_projection("id"),
+        SailGraphFieldProjection::PhysicalColumn(NODE_ID_COLUMN)
+    );
+    assert_eq!(
+        sail_node_field_projection("name"),
+        SailGraphFieldProjection::JsonProperty("name".to_string())
+    );
+    assert_eq!(
+        sail_edge_field_projection("label"),
+        SailGraphFieldProjection::PhysicalColumn(EDGE_TYPE_COLUMN)
+    );
+    assert_eq!(
+        sail_edge_field_projection("since"),
+        SailGraphFieldProjection::JsonProperty("since".to_string())
+    );
+    assert_eq!(
+        sail_json_property_expr("n.props", "age").unwrap(),
+        "GET_JSON_OBJECT(n.props, '$.age')"
+    );
+    assert!(sail_json_property_expr("n.props", "age') = 1 OR ('1'='1").is_err());
+    assert_eq!(
+        sail_node_table("Person Profile").unwrap(),
+        "grust_node_person_profile"
+    );
+    assert_eq!(sail_edge_table("Knows").unwrap(), "grust_edge_knows");
+    assert!(sail_typed_node_field_compatible("age"));
+    assert!(sail_typed_node_field_compatible("label"));
+    assert!(!sail_typed_node_field_compatible("props"));
+    assert!(sail_typed_edge_field_compatible("since"));
+    assert!(sail_typed_edge_field_compatible("label"));
+    assert!(!sail_typed_edge_field_compatible("src_label"));
+    assert!(!sail_typed_edge_field_compatible("dst_label"));
+    assert!(!sail_typed_edge_field_compatible("props"));
+    assert!(sail_typed_node_table_has_fields(
+        &["id", "label", "age"],
+        &["id", "age"]
+    ));
+    assert!(!sail_typed_node_table_has_fields(
+        &["id", "name"],
+        &["id", "age"]
+    ));
+    assert_eq!(
+        sail_typed_node_table_missing_fields(&["id", "name", "props"], &["id", "age"]),
+        ["name", "props"]
+    );
+    assert!(!sail_typed_node_table_has_fields(
+        &["id", "props"],
+        &["id", "props"]
+    ));
+    assert!(sail_typed_edge_table_has_fields(
+        &["src_id", "dst_id", "label", "since"],
+        &["edge_key", "src_id", "dst_id", "since"]
+    ));
+    assert!(!sail_typed_edge_table_has_fields(
+        &["src_id", "dst_id", "src_label"],
+        &["src_id", "dst_id", "src_label"]
+    ));
+    assert_eq!(
+        sail_typed_edge_table_missing_fields(
+            &["src_id", "dst_id", "src_label", "props"],
+            &["src_id", "src_label", "props"]
+        ),
+        ["dst_id", "props", "src_label"]
+    );
 }
 
 #[test]
@@ -413,6 +584,63 @@ fn degree_pair_arrow_results_parse_to_public_rows() {
                 out_degree: 0,
             },
         ]
+    );
+}
+
+#[test]
+fn triplet_arrow_results_parse_to_public_rows() {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("src_id", DataType::Utf8, false),
+        ArrowField::new("src_label", DataType::Utf8, false),
+        ArrowField::new("src_props", DataType::Utf8, true),
+        ArrowField::new("edge_id", DataType::Utf8, true),
+        ArrowField::new("edge_src_id", DataType::Utf8, false),
+        ArrowField::new("edge_src_label", DataType::Utf8, false),
+        ArrowField::new("edge_dst_id", DataType::Utf8, false),
+        ArrowField::new("edge_dst_label", DataType::Utf8, false),
+        ArrowField::new("edge_type", DataType::Utf8, false),
+        ArrowField::new("edge_props", DataType::Utf8, true),
+        ArrowField::new("dst_id", DataType::Utf8, false),
+        ArrowField::new("dst_label", DataType::Utf8, false),
+        ArrowField::new("dst_props", DataType::Utf8, true),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(["person-1"])),
+            Arc::new(StringArray::from_iter_values(["Person"])),
+            Arc::new(StringArray::from_iter_values([r#"{"name":"Ada"}"#])),
+            Arc::new(StringArray::from(vec![Some("edge-1")])),
+            Arc::new(StringArray::from_iter_values(["person-1"])),
+            Arc::new(StringArray::from_iter_values(["Person"])),
+            Arc::new(StringArray::from_iter_values(["talk-1"])),
+            Arc::new(StringArray::from_iter_values(["Talk"])),
+            Arc::new(StringArray::from_iter_values(["presents"])),
+            Arc::new(StringArray::from_iter_values([r#"{"source":"schedule"}"#])),
+            Arc::new(StringArray::from_iter_values(["talk-1"])),
+            Arc::new(StringArray::from_iter_values(["Talk"])),
+            Arc::new(StringArray::from_iter_values([
+                r#"{"title":"Sail Graphs"}"#,
+            ])),
+        ],
+    )
+    .unwrap();
+
+    let rows = parse_triplets_from_arrow(&ipc_bytes(&batch).unwrap()).unwrap();
+
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].src.id, NodeId::new("person-1"));
+    assert_eq!(rows[0].src.props.get("name"), Some(&Value::from("Ada")));
+    assert_eq!(rows[0].edge.id.as_ref().map(EdgeId::as_str), Some("edge-1"));
+    assert_eq!(rows[0].edge.label, Label::new("presents"));
+    assert_eq!(
+        rows[0].edge.props.get("source"),
+        Some(&Value::from("schedule"))
+    );
+    assert_eq!(rows[0].dst.id, NodeId::new("talk-1"));
+    assert_eq!(
+        rows[0].dst.props.get("title"),
+        Some(&Value::from("Sail Graphs"))
     );
 }
 

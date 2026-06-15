@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS grust_nodes (
 ) USING delta;
 
 CREATE TABLE IF NOT EXISTS grust_edges (
+    edge_key  STRING NOT NULL,
+    id        STRING,
     src_id    STRING NOT NULL,
     src_label STRING NOT NULL,
     dst_id    STRING NOT NULL,
@@ -33,7 +35,40 @@ CREATE TABLE IF NOT EXISTS grust_edges (
 `grust_edges` carries `src_label` and `dst_label` so traversal JOINs can
 match on label without a back-join to `grust_nodes`. The original proposal
 omitted these columns; they were added during implementation to make the
-JOIN conditions self-contained.
+JOIN conditions self-contained. It also persists `edge_key` and optional `id`
+from the staged Arrow batch so external planners can project stable edge
+identity fields; the generic merge still matches the current Grust edge
+identity of `(src_id, dst_id, edge_type)`.
+
+The crate exposes the generic table contract as public constants and helper
+functions so Sail-native graph planning, GrustFrames distributed lowerings, and
+external Grust clients do not drift:
+
+- `GRUST_NODES_TABLE`, `GRUST_EDGES_TABLE`
+- node columns: `NODE_ID_COLUMN`, `NODE_LABEL_COLUMN`, `NODE_PROPS_COLUMN`
+- edge columns: `EDGE_ID_COLUMN`, `EDGE_KEY_COLUMN`, `EDGE_SRC_ID_COLUMN`,
+  `EDGE_SRC_LABEL_COLUMN`, `EDGE_DST_ID_COLUMN`, `EDGE_DST_LABEL_COLUMN`,
+  `EDGE_TYPE_COLUMN`, `EDGE_PROPS_COLUMN`
+- `sail_node_field_projection` and `sail_edge_field_projection`, which classify
+  fields as physical columns or JSON properties and map edge `label` to
+  `edge_type`
+- `sail_json_property_expr`, `sail_node_table`, and `sail_edge_table`
+- `sail_typed_node_columns`, `sail_typed_edge_columns`,
+  `sail_graph_schema_typed_tables`, `SailGraphTypedTable`, and
+  `SailGraphTypedTableKind`, which expose the typed table names and columns
+  derived from `GraphSchema`
+- `sail_typed_node_field_compatible`, `sail_typed_edge_field_compatible`,
+  `sail_typed_node_table_has_fields`, and `sail_typed_edge_table_has_fields`,
+  which define when a typed Sail graph table can satisfy a graph query without
+  falling back to generic JSON properties
+- `sail_typed_node_table_missing_fields` and
+  `sail_typed_edge_table_missing_fields`, which explain the exact missing or
+  incompatible fields when a typed table cannot satisfy a graph query
+- `sail_triplets_sql`, `sail_triplets_sql_for_direction`,
+  `SailGraphPatternDirection`, `SailTripletRow`, and
+  `SailGraphStore::triplets` / `triplets_for_direction`, which expose the
+  generic edge-to-source/destination node join needed by GrustFrames triplet
+  filters, motifs, and aggregate-message lowerings
 
 ### 1.2 Props Serialization
 

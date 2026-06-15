@@ -18,13 +18,13 @@ The project is here:
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
 - Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
-The current `0.7.2` line is the first version where I think the whole shape is
+The current `0.8.0` line is the first version where I think the whole shape is
 visible and release-tested against live backends: the core graph model,
 document loading, typed ingestion, schema-backed store writes, traversal
-lowering, backend-specific typed storage hooks, and explicit Sail, SurrealDB,
-FalkorDB, HelixDB, LanceDB, CocoIndex, and pgGraph integration checks are all
-present in the same workspace. Some backend features are still young, but the
-contract is no longer just a sketch.
+lowering, shared graph-index construction, backend-specific typed storage
+hooks, and explicit Sail, SurrealDB, FalkorDB, HelixDB, LanceDB, CocoIndex, and
+pgGraph integration checks are all present in the same workspace. Some backend
+features are still young, but the contract is no longer just a sketch.
 
 For the longer treatment, read the Grust book in the repository, especially
 **The Shape of Grust**, **The Core Property Graph**, **Building Graphs**,
@@ -145,7 +145,7 @@ them into ordinary Grust nodes and edges:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.2", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.8.0", features = ["typed-garde"] }
 ```
 
 ```rust
@@ -198,7 +198,7 @@ treats it as typed. In Grust, `zod-rs` plays that role for
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.2", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.8.0", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers
@@ -339,7 +339,7 @@ Grust has several backend and integration crates:
 - `grust-lancedb` stores universal nodes and edges in LanceDB tables, supports backend-neutral reads and bounded traversal, batches traversal target-node reads, matches property starts exactly after decoding Grust props, and mirrors schema-labeled writes into typed Arrow tables.
 - `grust-ladybug` embeds LadybugDB through the Rust `lbug` crate, supports untyped dynamic graphs and typed schema-applied graphs without a daemon, and can register Arrow IPC node, relationship, and CSR tables for direct Cypher queries.
 - `grust-pggraph` stores universal graph tables in PostgreSQL, registers them with pgGraph, lowers traversal to SQL joins, wraps mutation batches in PostgreSQL transactions, and exposes typed label views and expression indexes from `GraphSchema`.
-- `grust-sail` stages bulk writes as Arrow `LocalRelation` temp views through Sail Spark Connect, can stage arbitrary Arrow IPC streams as temp views, lowers traversal to Spark SQL joins over DataFrames, and mirrors schema-labeled writes into typed Delta tables.
+- `grust-sail` stages bulk writes as Arrow `LocalRelation` temp views through Sail Spark Connect, can stage arbitrary Arrow IPC streams as temp views, lowers traversal to Spark SQL joins over DataFrames, exposes degree, triplet, typed-table, and public table-contract helpers over the persisted graph tables, and mirrors schema-labeled writes into typed Delta tables.
 - `grust-falkor` writes through Redis `GRAPH.QUERY` using FalkorDB's Cypher-like surface and creates schema-driven label/property indexes.
 - `grust-helix` supports HTTP and SDK stores for HelixDB writes, reads, and traversal; supported scalar and array properties are preserved on write, while unsupported JSON object properties fail explicitly.
 - `grust-surreal` supports HTTP and SDK stores for SurrealDB writes, reads, traversal, transactional mutation batches, and schemafull table and field definitions. Generic edge reads and node deletes now fail clearly when `SurrealConfig.relationships` is empty instead of silently scanning no relation tables.
@@ -441,6 +441,7 @@ reinforce each other without having to be the same abstraction.
 The current backend behavior is deliberately pragmatic:
 
 - Memory stores the schema and validates local writes.
+- Core `GraphIndex` gives local analytics and adapters one shared dense adjacency layer.
 - LanceDB keeps universal graph tables and mirrors typed rows into Arrow tables.
 - Ladybug keeps embedded graph tables, validates applied schemas in typed mode, and can query external Arrow IPC tables.
 - pgGraph/PostgreSQL keeps universal JSONB tables and adds typed views and indexes.

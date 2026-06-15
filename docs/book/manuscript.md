@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.2", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.8.0", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.7.2", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.7.2", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.8.0", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -728,6 +728,16 @@ This design also protects application code. A caller asks for a graph-shaped
 operation; the backend decides whether that operation becomes a map scan, a SQL
 join, a DataFrame query, a Redis graph command, or a future native graph query.
 
+For local analytics and backend planning, `grust-core` also exposes
+`GraphIndex`. It builds a dense vertex index from a `Graph`, validates that
+every edge endpoint exists, and stores incoming and outgoing edge indexes per
+vertex. That gives adapters and examples one shared adjacency layer instead of
+rebuilding node-id maps in each backend. The `grust-graph` facade includes a
+dependency-free `benchmarks` example that exercises graph cloning,
+`GraphIndex` construction, degree scans, endpoint scans, and structural
+edge-key generation over ring, grid, layered, clustered, Graph500-style R-MAT,
+and GAP-style R-MAT graph families.
+
 # 6. The Store Contract
 
 The central backend trait is `GraphStore`:
@@ -978,6 +988,31 @@ When a schema is applied, Sail creates typed Delta tables per node and edge
 label and mirrors writes into them with `MERGE INTO`. The universal Spark
 tables keep traversal simple and portable; the typed tables make declared graph
 labels available as ordinary Spark columns.
+
+Sail also has reusable graph analytics helpers over the persisted generic
+tables. `read_graph` collects the generic `grust_nodes` and `grust_edges`
+tables back into a portable Grust `Graph`. `in_degrees`, `out_degrees`,
+`degrees`, and `degree_pairs` run Spark SQL over those same tables and decode
+the Arrow results into small Rust row types. These helpers are deliberately
+low-level: they expose common graph measurements without making the
+backend-neutral `GraphStore` trait depend on Spark-specific analytics.
+
+The Sail crate now also publishes its generic table contract. Constants name
+`grust_nodes`, `grust_edges`, and the physical node and edge columns, including
+the persisted generic edge `edge_key` and optional explicit edge `id`.
+Projection helpers classify requested graph fields as physical columns or JSON
+properties, map edge `label` to the stored `edge_type`, and check when a typed
+Sail node or edge table can satisfy a graph query directly. This keeps
+Sail-native graph planning and GrustFrames-style distributed lowerings aligned
+with the same backend layout that Grust writes.
+
+The same contract layer exposes typed table descriptors derived from
+`GraphSchema` and directional triplet SQL. The triplet helpers join generic
+edges back to their source and destination nodes, and can orient rows as
+outgoing, incoming, or undirected pairs. That is the shared primitive needed by
+distributed triplet filters, motif expansion, and aggregate-message style
+passes without making the backend-neutral store trait depend on those higher
+level algorithms.
 
 ## FalkorDB, HelixDB, and SurrealDB
 

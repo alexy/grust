@@ -55,6 +55,20 @@ pub struct SailDegreePairRow {
     pub out_degree: usize,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SailTripletRow {
+    pub src: Node,
+    pub edge: Edge,
+    pub dst: Node,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SailGraphPatternDirection {
+    Outgoing,
+    Incoming,
+    Undirected,
+}
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 /// Session-scoped temp views used to stage Arrow batches before MERGE.
@@ -62,8 +76,195 @@ const NODE_STAGE_VIEW: &str = "grust_stage_nodes";
 const EDGE_STAGE_VIEW: &str = "grust_stage_edges";
 const DELETE_NODE_STAGE_VIEW: &str = "grust_delete_node_ids";
 const DELETE_EDGE_STAGE_VIEW: &str = "grust_delete_edges";
+pub const GRUST_NODES_TABLE: &str = "grust_nodes";
+pub const GRUST_EDGES_TABLE: &str = "grust_edges";
+pub const NODE_ID_COLUMN: &str = "id";
+pub const NODE_LABEL_COLUMN: &str = "label";
+pub const NODE_PROPS_COLUMN: &str = "props";
+pub const EDGE_ID_COLUMN: &str = "id";
+pub const EDGE_KEY_COLUMN: &str = "edge_key";
+pub const EDGE_SRC_ID_COLUMN: &str = "src_id";
+pub const EDGE_SRC_LABEL_COLUMN: &str = "src_label";
+pub const EDGE_DST_ID_COLUMN: &str = "dst_id";
+pub const EDGE_DST_LABEL_COLUMN: &str = "dst_label";
+pub const EDGE_TYPE_COLUMN: &str = "edge_type";
+pub const EDGE_PROPS_COLUMN: &str = "props";
 const DROP_NODES_SQL: &str = "DROP TABLE IF EXISTS grust_nodes";
 const DROP_EDGES_SQL: &str = "DROP TABLE IF EXISTS grust_edges";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SailGraphFieldProjection {
+    PhysicalColumn(&'static str),
+    JsonProperty(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SailGraphTypedTableKind {
+    Node,
+    Edge,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SailGraphTypedTable {
+    pub kind: SailGraphTypedTableKind,
+    pub label: String,
+    pub table: String,
+    pub columns: Vec<String>,
+}
+
+pub fn sail_node_field_projection(field: &str) -> SailGraphFieldProjection {
+    match field {
+        NODE_ID_COLUMN => SailGraphFieldProjection::PhysicalColumn(NODE_ID_COLUMN),
+        NODE_LABEL_COLUMN => SailGraphFieldProjection::PhysicalColumn(NODE_LABEL_COLUMN),
+        NODE_PROPS_COLUMN => SailGraphFieldProjection::PhysicalColumn(NODE_PROPS_COLUMN),
+        _ => SailGraphFieldProjection::JsonProperty(field.to_string()),
+    }
+}
+
+pub fn sail_edge_field_projection(field: &str) -> SailGraphFieldProjection {
+    match field {
+        EDGE_ID_COLUMN => SailGraphFieldProjection::PhysicalColumn(EDGE_ID_COLUMN),
+        EDGE_KEY_COLUMN => SailGraphFieldProjection::PhysicalColumn(EDGE_KEY_COLUMN),
+        EDGE_SRC_ID_COLUMN => SailGraphFieldProjection::PhysicalColumn(EDGE_SRC_ID_COLUMN),
+        EDGE_SRC_LABEL_COLUMN => SailGraphFieldProjection::PhysicalColumn(EDGE_SRC_LABEL_COLUMN),
+        EDGE_DST_ID_COLUMN => SailGraphFieldProjection::PhysicalColumn(EDGE_DST_ID_COLUMN),
+        EDGE_DST_LABEL_COLUMN => SailGraphFieldProjection::PhysicalColumn(EDGE_DST_LABEL_COLUMN),
+        EDGE_TYPE_COLUMN | NODE_LABEL_COLUMN => {
+            SailGraphFieldProjection::PhysicalColumn(EDGE_TYPE_COLUMN)
+        }
+        EDGE_PROPS_COLUMN => SailGraphFieldProjection::PhysicalColumn(EDGE_PROPS_COLUMN),
+        _ => SailGraphFieldProjection::JsonProperty(field.to_string()),
+    }
+}
+
+pub fn sail_json_property_expr(props_column: &str, key: &str) -> Result<String> {
+    validate_json_key(key)?;
+    Ok(format!("GET_JSON_OBJECT({props_column}, '$.{key}')"))
+}
+
+pub fn sail_node_table(label: &str) -> Result<String> {
+    Ok(format!("grust_node_{}", schema_identifier(label)?))
+}
+
+pub fn sail_edge_table(label: &str) -> Result<String> {
+    Ok(format!("grust_edge_{}", schema_identifier(label)?))
+}
+
+pub fn sail_typed_node_columns(node_type: &NodeType) -> Result<Vec<String>> {
+    let mut columns = vec![NODE_ID_COLUMN.to_string()];
+    for field in &node_type.fields {
+        sql_ident(&field.name)?;
+        columns.push(field.name.clone());
+    }
+    Ok(columns)
+}
+
+pub fn sail_typed_edge_columns(edge_type: &EdgeType) -> Result<Vec<String>> {
+    let mut columns = vec![
+        EDGE_KEY_COLUMN.to_string(),
+        EDGE_ID_COLUMN.to_string(),
+        EDGE_SRC_ID_COLUMN.to_string(),
+        EDGE_DST_ID_COLUMN.to_string(),
+    ];
+    for field in &edge_type.fields {
+        sql_ident(&field.name)?;
+        columns.push(field.name.clone());
+    }
+    Ok(columns)
+}
+
+pub fn sail_graph_schema_typed_tables(schema: &GraphSchema) -> Result<Vec<SailGraphTypedTable>> {
+    let mut tables = Vec::new();
+    for node_type in &schema.nodes {
+        tables.push(SailGraphTypedTable {
+            kind: SailGraphTypedTableKind::Node,
+            label: node_type.label.as_str().to_string(),
+            table: sail_node_table(node_type.label.as_str())?,
+            columns: sail_typed_node_columns(node_type)?,
+        });
+    }
+    for edge_type in &schema.edges {
+        tables.push(SailGraphTypedTable {
+            kind: SailGraphTypedTableKind::Edge,
+            label: edge_type.label.as_str().to_string(),
+            table: sail_edge_table(edge_type.label.as_str())?,
+            columns: sail_typed_edge_columns(edge_type)?,
+        });
+    }
+    Ok(tables)
+}
+
+pub fn sail_typed_node_field_compatible(field: &str) -> bool {
+    field != NODE_PROPS_COLUMN
+}
+
+pub fn sail_typed_edge_field_compatible(field: &str) -> bool {
+    !matches!(
+        field,
+        EDGE_SRC_LABEL_COLUMN | EDGE_DST_LABEL_COLUMN | EDGE_PROPS_COLUMN
+    )
+}
+
+pub fn sail_typed_node_table_has_fields<F, C>(fields: &[F], columns: &[C]) -> bool
+where
+    F: AsRef<str>,
+    C: AsRef<str>,
+{
+    sail_typed_node_table_missing_fields(fields, columns).is_empty()
+}
+
+pub fn sail_typed_node_table_missing_fields<F, C>(fields: &[F], columns: &[C]) -> Vec<String>
+where
+    F: AsRef<str>,
+    C: AsRef<str>,
+{
+    let mut missing = fields
+        .iter()
+        .filter_map(|field| {
+            let field = field.as_ref();
+            let available = field == NODE_LABEL_COLUMN
+                || (sail_typed_node_field_compatible(field)
+                    && columns
+                        .iter()
+                        .any(|column| column.as_ref().eq_ignore_ascii_case(field)));
+            (!available).then(|| field.to_string())
+        })
+        .collect::<Vec<_>>();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+pub fn sail_typed_edge_table_has_fields<F, C>(fields: &[F], columns: &[C]) -> bool
+where
+    F: AsRef<str>,
+    C: AsRef<str>,
+{
+    sail_typed_edge_table_missing_fields(fields, columns).is_empty()
+}
+
+pub fn sail_typed_edge_table_missing_fields<F, C>(fields: &[F], columns: &[C]) -> Vec<String>
+where
+    F: AsRef<str>,
+    C: AsRef<str>,
+{
+    let mut missing = fields
+        .iter()
+        .filter_map(|field| {
+            let field = field.as_ref();
+            let available = field == NODE_LABEL_COLUMN
+                || field == EDGE_TYPE_COLUMN
+                || (sail_typed_edge_field_compatible(field)
+                    && columns
+                        .iter()
+                        .any(|column| column.as_ref().eq_ignore_ascii_case(field)));
+            (!available).then(|| field.to_string())
+        })
+        .collect::<Vec<_>>();
+    missing.sort();
+    missing.dedup();
+    missing
+}
 
 pub struct SailGraphStore {
     config: SailConfig,
@@ -137,7 +338,7 @@ impl SailGraphStore {
             .await?;
         let edges = self
             .run_edge_query(
-                "SELECT src_id, src_label, dst_id, dst_label, edge_type, props FROM grust_edges",
+                "SELECT id, src_id, src_label, dst_id, dst_label, edge_type, props FROM grust_edges",
                 vec![],
             )
             .await?;
@@ -167,6 +368,30 @@ impl SailGraphStore {
             self.query_request(sail_degree_pairs_sql(), vec![])?,
             |data| {
                 rows.extend(parse_degree_pairs_from_arrow(data)?);
+                Ok(())
+            },
+        )
+        .await?;
+        Ok(rows)
+    }
+
+    /// Reads edge triplets by joining generic persisted edge rows to source and
+    /// destination node rows.
+    pub async fn triplets(&self) -> Result<Vec<SailTripletRow>> {
+        self.triplets_for_direction(SailGraphPatternDirection::Outgoing)
+            .await
+    }
+
+    /// Reads edge triplets oriented for a graph pattern direction.
+    pub async fn triplets_for_direction(
+        &self,
+        direction: SailGraphPatternDirection,
+    ) -> Result<Vec<SailTripletRow>> {
+        let mut rows = Vec::new();
+        self.run_plan(
+            self.query_request(sail_triplets_sql_for_direction(direction), vec![])?,
+            |data| {
+                rows.extend(parse_triplets_from_arrow(data)?);
                 Ok(())
             },
         )
@@ -464,7 +689,7 @@ impl GraphStore for SailGraphStore {
             format!(" WHERE {}", conditions.join(" AND "))
         };
         let sql = format!(
-            "SELECT src_id, src_label, dst_id, dst_label, edge_type, props FROM grust_edges{}",
+            "SELECT id, src_id, src_label, dst_id, dst_label, edge_type, props FROM grust_edges{}",
             where_clause
         );
         self.run_edge_query(&sql, args).await
@@ -492,7 +717,9 @@ impl GraphAdminStore for SailGraphStore {
         .await?;
         self.run_command(
             "CREATE TABLE IF NOT EXISTS grust_edges USING delta AS \
-             SELECT CAST(NULL AS STRING) AS src_id, \
+             SELECT CAST(NULL AS STRING) AS edge_key, \
+                    CAST(NULL AS STRING) AS id, \
+                    CAST(NULL AS STRING) AS src_id, \
                     CAST(NULL AS STRING) AS src_label, \
                     CAST(NULL AS STRING) AS dst_id, \
                     CAST(NULL AS STRING) AS dst_label, \
@@ -742,9 +969,9 @@ fn merge_edges_from_view_sql() -> String {
         "MERGE INTO grust_edges AS t \
          USING {EDGE_STAGE_VIEW} AS s \
          ON t.src_id = s.src_id AND t.dst_id = s.dst_id AND t.edge_type = s.edge_type \
-         WHEN MATCHED THEN UPDATE SET t.src_label = s.src_label, t.dst_label = s.dst_label, t.props = s.props \
-         WHEN NOT MATCHED THEN INSERT (src_id, src_label, dst_id, dst_label, edge_type, props) \
-           VALUES (s.src_id, s.src_label, s.dst_id, s.dst_label, s.edge_type, s.props)"
+         WHEN MATCHED THEN UPDATE SET t.edge_key = s.edge_key, t.id = s.id, t.src_label = s.src_label, t.dst_label = s.dst_label, t.props = s.props \
+         WHEN NOT MATCHED THEN INSERT (edge_key, id, src_id, src_label, dst_id, dst_label, edge_type, props) \
+           VALUES (s.edge_key, s.id, s.src_id, s.src_label, s.dst_id, s.dst_label, s.edge_type, s.props)"
     )
 }
 
@@ -807,6 +1034,53 @@ pub fn sail_degree_pairs_sql() -> String {
         .to_string()
 }
 
+pub fn sail_triplets_sql() -> String {
+    sail_triplets_sql_for_direction(SailGraphPatternDirection::Outgoing)
+}
+
+pub fn sail_triplets_sql_for_direction(direction: SailGraphPatternDirection) -> String {
+    let outgoing = "SELECT src.id AS src_id, \
+            src.label AS src_label, \
+            src.props AS src_props, \
+            e.id AS edge_id, \
+            e.src_id AS edge_src_id, \
+            e.src_label AS edge_src_label, \
+            e.dst_id AS edge_dst_id, \
+            e.dst_label AS edge_dst_label, \
+            e.edge_type AS edge_type, \
+            e.props AS edge_props, \
+            dst.id AS dst_id, \
+            dst.label AS dst_label, \
+            dst.props AS dst_props \
+       FROM grust_edges e \
+       JOIN grust_nodes src ON src.id = e.src_id \
+       JOIN grust_nodes dst ON dst.id = e.dst_id";
+    let incoming = "SELECT dst.id AS src_id, \
+            dst.label AS src_label, \
+            dst.props AS src_props, \
+            e.id AS edge_id, \
+            e.src_id AS edge_src_id, \
+            e.src_label AS edge_src_label, \
+            e.dst_id AS edge_dst_id, \
+            e.dst_label AS edge_dst_label, \
+            e.edge_type AS edge_type, \
+            e.props AS edge_props, \
+            src.id AS dst_id, \
+            src.label AS dst_label, \
+            src.props AS dst_props \
+       FROM grust_edges e \
+       JOIN grust_nodes src ON src.id = e.src_id \
+       JOIN grust_nodes dst ON dst.id = e.dst_id";
+
+    match direction {
+        SailGraphPatternDirection::Outgoing => outgoing.to_string(),
+        SailGraphPatternDirection::Incoming => incoming.to_string(),
+        SailGraphPatternDirection::Undirected => {
+            format!("{outgoing} UNION ALL {incoming}")
+        }
+    }
+}
+
 fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
     let mut statements = Vec::new();
     for node_type in &schema.nodes {
@@ -861,8 +1135,7 @@ fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
 /// SQL expression extracting one typed field from the staged plain-JSON props
 /// column.
 fn props_field_expr(props_column: &str, field: &Field) -> Result<String> {
-    validate_json_key(&field.name)?;
-    let raw = format!("GET_JSON_OBJECT({props_column}, '$.{}')", field.name);
+    let raw = sail_json_property_expr(props_column, &field.name)?;
     Ok(match field.ty {
         FieldType::String | FieldType::DateTime => raw,
         FieldType::Int => format!("CAST({raw} AS BIGINT)"),
@@ -1165,14 +1438,6 @@ fn sail_sql_type(ty: &FieldType) -> &'static str {
     }
 }
 
-fn sail_node_table(label: &str) -> Result<String> {
-    Ok(format!("grust_node_{}", schema_identifier(label)?))
-}
-
-fn sail_edge_table(label: &str) -> Result<String> {
-    Ok(format!("grust_edge_{}", schema_identifier(label)?))
-}
-
 fn sql_ident(value: &str) -> Result<String> {
     let identifier = schema_identifier(value)?;
     Ok(format!("`{identifier}`"))
@@ -1375,6 +1640,93 @@ fn parse_edges_from_arrow(data: &[u8]) -> Result<Vec<Edge>> {
     Ok(edges)
 }
 
+fn parse_triplets_from_arrow(data: &[u8]) -> Result<Vec<SailTripletRow>> {
+    let reader = StreamReader::try_new(Cursor::new(data), None)
+        .map_err(|e| GrustError::Backend(format!("Arrow IPC read failed: {e}")))?;
+    let schema = reader.schema();
+    let src_id_idx = schema
+        .index_of("src_id")
+        .map_err(|_| GrustError::Schema("triplet result missing 'src_id' column".into()))?;
+    let src_label_idx = schema
+        .index_of("src_label")
+        .map_err(|_| GrustError::Schema("triplet result missing 'src_label' column".into()))?;
+    let src_props_idx = schema
+        .index_of("src_props")
+        .map_err(|_| GrustError::Schema("triplet result missing 'src_props' column".into()))?;
+    let edge_id_idx = schema.index_of("edge_id").ok();
+    let edge_src_id_idx = schema
+        .index_of("edge_src_id")
+        .map_err(|_| GrustError::Schema("triplet result missing 'edge_src_id' column".into()))?;
+    let edge_dst_id_idx = schema
+        .index_of("edge_dst_id")
+        .map_err(|_| GrustError::Schema("triplet result missing 'edge_dst_id' column".into()))?;
+    let edge_type_idx = schema
+        .index_of("edge_type")
+        .map_err(|_| GrustError::Schema("triplet result missing 'edge_type' column".into()))?;
+    let edge_props_idx = schema
+        .index_of("edge_props")
+        .map_err(|_| GrustError::Schema("triplet result missing 'edge_props' column".into()))?;
+    let dst_id_idx = schema
+        .index_of("dst_id")
+        .map_err(|_| GrustError::Schema("triplet result missing 'dst_id' column".into()))?;
+    let dst_label_idx = schema
+        .index_of("dst_label")
+        .map_err(|_| GrustError::Schema("triplet result missing 'dst_label' column".into()))?;
+    let dst_props_idx = schema
+        .index_of("dst_props")
+        .map_err(|_| GrustError::Schema("triplet result missing 'dst_props' column".into()))?;
+
+    let mut rows = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| GrustError::Backend(format!("Arrow batch error: {e}")))?;
+        let src_ids = string_column(&batch, src_id_idx, "src_id")?;
+        let src_labels = string_column(&batch, src_label_idx, "src_label")?;
+        let src_props = string_column(&batch, src_props_idx, "src_props")?;
+        let edge_ids = if let Some(edge_id_idx) = edge_id_idx {
+            Some(string_column(&batch, edge_id_idx, "edge_id")?)
+        } else {
+            None
+        };
+        let edge_src_ids = string_column(&batch, edge_src_id_idx, "edge_src_id")?;
+        let edge_dst_ids = string_column(&batch, edge_dst_id_idx, "edge_dst_id")?;
+        let edge_types = string_column(&batch, edge_type_idx, "edge_type")?;
+        let edge_props = string_column(&batch, edge_props_idx, "edge_props")?;
+        let dst_ids = string_column(&batch, dst_id_idx, "dst_id")?;
+        let dst_labels = string_column(&batch, dst_label_idx, "dst_label")?;
+        let dst_props = string_column(&batch, dst_props_idx, "dst_props")?;
+
+        for i in 0..batch.num_rows() {
+            let edge_id = edge_ids.and_then(|ids| {
+                if ids.is_null(i) || ids.value(i).is_empty() {
+                    None
+                } else {
+                    Some(EdgeId::new(ids.value(i)))
+                }
+            });
+            rows.push(SailTripletRow {
+                src: Node {
+                    id: NodeId::new(src_ids.value(i)),
+                    label: Label::new(src_labels.value(i)),
+                    props: props_column_value(src_props, i)?,
+                },
+                edge: Edge {
+                    id: edge_id,
+                    from: NodeId::new(edge_src_ids.value(i)),
+                    to: NodeId::new(edge_dst_ids.value(i)),
+                    label: Label::new(edge_types.value(i)),
+                    props: props_column_value(edge_props, i)?,
+                },
+                dst: Node {
+                    id: NodeId::new(dst_ids.value(i)),
+                    label: Label::new(dst_labels.value(i)),
+                    props: props_column_value(dst_props, i)?,
+                },
+            });
+        }
+    }
+    Ok(rows)
+}
+
 fn parse_degrees_from_arrow(data: &[u8]) -> Result<Vec<SailDegreeRow>> {
     let reader = StreamReader::try_new(Cursor::new(data), None)
         .map_err(|e| GrustError::Backend(format!("Arrow IPC read failed: {e}")))?;
@@ -1438,6 +1790,14 @@ fn string_column<'a>(batch: &'a RecordBatch, index: usize, name: &str) -> Result
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| GrustError::Schema(format!("{name} column is not string")))
+}
+
+fn props_column_value(column: &StringArray, row: usize) -> Result<Props> {
+    if column.is_null(row) || column.value(row).is_empty() {
+        Ok(Props::new())
+    } else {
+        props_from_json(column.value(row))
+    }
 }
 
 fn int64_column<'a>(batch: &'a RecordBatch, index: usize, name: &str) -> Result<&'a Int64Array> {
