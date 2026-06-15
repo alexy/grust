@@ -309,10 +309,8 @@ impl CypherMutationPlanner {
                 "writable Cypher REMOVE is not supported in v1".to_string(),
             ));
         }
-        if upper.starts_with("MATCH ") {
-            return Err(GrustError::Unsupported(
-                "mutating MATCH is not supported in writable Cypher v1".to_string(),
-            ));
+        if let Some(rest) = cypher.strip_prefix("MATCH ") {
+            return self.parse_match(rest);
         }
         if let Some(rest) = cypher.strip_prefix("CREATE ") {
             return self.parse_upsert(rest, GraphMutationPlanKind::Create);
@@ -388,6 +386,104 @@ impl CypherMutationPlanner {
         ]))
     }
 
+    fn parse_match(&mut self, statement: &str) -> Result<GraphMutationPlan> {
+        if find_unquoted_keyword(statement, "DELETE").is_some() {
+            return self.parse_match_delete(statement);
+        }
+        if find_unquoted_keyword(statement, "MERGE").is_some() {
+            return self.parse_match_merge(statement);
+        }
+        Err(GrustError::Unsupported(
+            "only ID-resolved MATCH ... DELETE and MATCH ... MERGE edge forms are supported in writable Cypher".to_string(),
+        ))
+    }
+
+    fn parse_match_delete(&mut self, statement: &str) -> Result<GraphMutationPlan> {
+        let (pattern, target) = split_match_delete(statement)?;
+        let target = parse_required_cypher_variable(target.trim(), "MATCH DELETE target")?;
+
+        if pattern.contains("->") {
+            let parsed = self.parse_edge_pattern(pattern)?;
+            let Some(edge_variable) = parsed.edge_variable else {
+                return Err(GrustError::Unsupported(
+                    "MATCH edge DELETE requires the relationship pattern to bind the DELETE target"
+                        .to_string(),
+                ));
+            };
+            if edge_variable != target {
+                return Err(GrustError::Unsupported(format!(
+                    "MATCH edge DELETE target '{target}' does not match relationship variable '{edge_variable}'"
+                )));
+            }
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::DeleteEdge {
+                    from: parsed.from_id,
+                    label: parsed.edge.label,
+                    to: parsed.to_id,
+                },
+            ]));
+        }
+
+        let (node, rest) = parse_cypher_node_pattern(pattern)?;
+        if !rest.trim().is_empty() {
+            return Err(GrustError::Unsupported(format!(
+                "unsupported writable Cypher MATCH DELETE pattern suffix: {}",
+                rest.trim()
+            )));
+        }
+        let Some(node_variable) = &node.variable else {
+            return Err(GrustError::Unsupported(
+                "MATCH node DELETE requires the node pattern to bind the DELETE target".to_string(),
+            ));
+        };
+        if node_variable != &target {
+            return Err(GrustError::Unsupported(format!(
+                "MATCH node DELETE target '{target}' does not match node variable '{node_variable}'"
+            )));
+        }
+        let id = self.resolve_node_id(&node, "MATCH node DELETE")?;
+        Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::DeleteNode(id),
+        ]))
+    }
+
+    fn parse_match_merge(&mut self, statement: &str) -> Result<GraphMutationPlan> {
+        let (match_clause, merge_pattern) = split_match_merge(statement)?;
+        for pattern in split_top_level_patterns(match_clause)? {
+            let (node, rest) = parse_cypher_node_pattern(pattern)?;
+            if !rest.trim().is_empty() {
+                return Err(GrustError::Unsupported(format!(
+                    "unsupported writable Cypher MATCH pattern suffix: {}",
+                    rest.trim()
+                )));
+            }
+            if node.variable.is_none() {
+                return Err(GrustError::Unsupported(
+                    "MATCH MERGE requires each matched node pattern to bind a variable".to_string(),
+                ));
+            }
+            self.resolve_node_id(&node, "MATCH MERGE node")?;
+        }
+
+        if !merge_pattern.contains("->") {
+            return Err(GrustError::Unsupported(
+                "MATCH MERGE currently supports one relationship pattern only".to_string(),
+            ));
+        }
+        let parsed = self.parse_edge_pattern(merge_pattern)?;
+        if parsed.from_variable.is_none() || parsed.to_variable.is_none() {
+            return Err(GrustError::Unsupported(
+                "MATCH MERGE relationship endpoints must be bound variables".to_string(),
+            ));
+        }
+        Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::UpsertEdge {
+                kind: GraphMutationPlanKind::Merge,
+                edge: parsed.edge,
+            },
+        ]))
+    }
+
     fn parse_edge_pattern(&mut self, pattern: &str) -> Result<ParsedCypherEdge> {
         let (from, rest) = parse_cypher_node_pattern(pattern)?;
         let rest = rest.trim_start();
@@ -412,8 +508,13 @@ impl CypherMutationPlanner {
 
         let from_id = self.resolve_node_id(&from, "edge mutation source node")?;
         let to_id = self.resolve_node_id(&to, "edge mutation destination node")?;
-        let (label, props) = parse_cypher_relationship(rel)?;
-        let mut edge = Edge::new(label, from_id.clone(), to_id.clone(), props);
+        let relationship = parse_cypher_relationship(rel)?;
+        let mut edge = Edge::new(
+            relationship.label,
+            from_id.clone(),
+            to_id.clone(),
+            relationship.props,
+        );
         if let Some(id) = edge
             .props
             .get("id")
@@ -426,6 +527,9 @@ impl CypherMutationPlanner {
             from_id,
             to_id,
             edge,
+            edge_variable: relationship.variable,
+            from_variable: from.variable,
+            to_variable: to.variable,
         })
     }
 
@@ -522,6 +626,16 @@ struct ParsedCypherEdge {
     from_id: NodeId,
     to_id: NodeId,
     edge: Edge,
+    edge_variable: Option<String>,
+    from_variable: Option<String>,
+    to_variable: Option<String>,
+}
+
+#[derive(Debug)]
+struct ParsedCypherRelationship {
+    variable: Option<String>,
+    label: Label,
+    props: Props,
 }
 
 fn parse_cypher_node_pattern(input: &str) -> Result<(ParsedCypherNode, &str)> {
@@ -575,6 +689,11 @@ fn parse_optional_cypher_variable(value: &str) -> Result<Option<String>> {
     )))
 }
 
+fn parse_required_cypher_variable(value: &str, context: &str) -> Result<String> {
+    parse_optional_cypher_variable(value)?
+        .ok_or_else(|| GrustError::Unsupported(format!("{context} requires a variable name")))
+}
+
 fn is_cypher_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
@@ -584,16 +703,56 @@ fn is_cypher_identifier(value: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn parse_cypher_relationship(body: &str) -> Result<(Label, Props)> {
+fn parse_cypher_relationship(body: &str) -> Result<ParsedCypherRelationship> {
     let (head, props) = split_cypher_body_props(body.trim())?;
-    let label = head
-        .split_once(':')
-        .map(|(_, label)| label.trim())
-        .filter(|label| !label.is_empty())
-        .ok_or_else(|| {
-            GrustError::Unsupported("edge CREATE/MERGE/DELETE requires a relationship type".into())
-        })?;
-    Ok((Label::new(label.to_string()), props))
+    let Some((variable, label)) = head.trim().split_once(':') else {
+        return Err(GrustError::Unsupported(
+            "edge CREATE/MERGE/DELETE requires a relationship type".into(),
+        ));
+    };
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(GrustError::Unsupported(
+            "edge CREATE/MERGE/DELETE requires a relationship type".into(),
+        ));
+    }
+    Ok(ParsedCypherRelationship {
+        variable: parse_optional_cypher_variable(variable.trim())?,
+        label: Label::new(label.to_string()),
+        props,
+    })
+}
+
+fn split_match_delete(statement: &str) -> Result<(&str, &str)> {
+    if let Some(index) = find_unquoted_keyword(statement, "DELETE") {
+        let pattern = statement[..index].trim();
+        let target = statement[index + "DELETE".len()..].trim();
+        if pattern.is_empty() || target.is_empty() {
+            return Err(GrustError::Unsupported(
+                "MATCH DELETE requires both a pattern and a delete target".to_string(),
+            ));
+        }
+        return Ok((pattern, target));
+    }
+    Err(GrustError::Unsupported(
+        "only ID-resolved MATCH ... DELETE is supported in writable Cypher".to_string(),
+    ))
+}
+
+fn split_match_merge(statement: &str) -> Result<(&str, &str)> {
+    if let Some(index) = find_unquoted_keyword(statement, "MERGE") {
+        let match_clause = statement[..index].trim();
+        let merge_pattern = statement[index + "MERGE".len()..].trim();
+        if match_clause.is_empty() || merge_pattern.is_empty() {
+            return Err(GrustError::Unsupported(
+                "MATCH MERGE requires both matched node patterns and a merge pattern".to_string(),
+            ));
+        }
+        return Ok((match_clause, merge_pattern));
+    }
+    Err(GrustError::Unsupported(
+        "only ID-resolved MATCH ... MERGE is supported in writable Cypher".to_string(),
+    ))
 }
 
 fn split_cypher_body_props(body: &str) -> Result<(&str, Props)> {
@@ -762,6 +921,60 @@ fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
     Ok(parts)
 }
 
+fn split_top_level_patterns(value: &str) -> Result<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.saturating_sub(1),
+            '[' => bracket_depth += 1,
+            ']' => bracket_depth = bracket_depth.saturating_sub(1),
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
+                let part = value[start..index].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return Err(GrustError::Unsupported(
+            "unterminated Cypher string literal".to_string(),
+        ));
+    }
+    let part = value[start..].trim();
+    if !part.is_empty() {
+        parts.push(part);
+    }
+    Ok(parts)
+}
+
 fn find_matching(value: &str, _open: char, close: char) -> Result<usize> {
     let mut quote = None;
     let mut escaped = false;
@@ -816,6 +1029,43 @@ fn find_unquoted(value: &str, target: char) -> Option<usize> {
         }
     }
     None
+}
+
+fn find_unquoted_keyword(value: &str, keyword: &str) -> Option<usize> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            _ => {
+                if value[index..].starts_with(keyword)
+                    && keyword_boundary(value[..index].chars().next_back())
+                    && keyword_boundary(value[index + keyword.len()..].chars().next())
+                {
+                    return Some(index);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn keyword_boundary(ch: Option<char>) -> bool {
+    ch.is_none_or(char::is_whitespace)
 }
 
 fn is_quoted(value: &str) -> bool {

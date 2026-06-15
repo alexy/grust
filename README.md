@@ -225,7 +225,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.3", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.8.4", features = ["memory"] }
 ```
 
 The facade re-exports the full `grust-memory` crate surface when the feature is
@@ -315,7 +315,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.3", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.8.4", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 For Arrow-native data sources, enable `ladybug-arrow` to use embedded
@@ -384,7 +384,8 @@ Writable Cypher starts as a strict Sail-specific v1 surface:
 `sail_cypher_mutation_plan` parses explicit-ID node `CREATE`/`MERGE`, resolved
 endpoint edge `CREATE`/`MERGE`, and resolved node/edge `DELETE` into Grust
 mutation plans. It also accepts ordered multi-statement batches and local node
-variables bound from explicit-ID node patterns, while
+variables bound from explicit-ID node patterns, plus ID-resolved
+`MATCH ... DELETE` and edge `MATCH ... MERGE` forms, while
 `SailGraphStore::execute_cypher_mutation` executes those plans through
 `GraphMutationStore` and the existing Sail staging and `MERGE INTO` paths.
 

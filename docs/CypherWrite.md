@@ -14,7 +14,8 @@ helpers.
 ## Shipped V1 Scope
 
 The writable Cypher surface is deliberately strict. The first slice shipped in
-the `0.8.2` line and the ordered-batch extension shipped in the `0.8.3` line:
+the `0.8.2` line, ordered batches and local variables shipped in `0.8.3`, and
+ID-resolved `MATCH` mutation forms shipped in `0.8.4`:
 
 - `CREATE (:Label {id: ..., ...})` writes a node only when the node `id` is
   explicit in the literal property map.
@@ -30,12 +31,21 @@ the `0.8.2` line and the ordered-batch extension shipped in the `0.8.3` line:
   across the whole batch.
 - Local node variables can be introduced by explicit-ID node patterns and
   reused by later edge or delete patterns in the same batch.
+- `MATCH (n:Label {id: ...}) DELETE n` lowers to node delete when the target
+  variable matches the single resolved node pattern.
+- `MATCH (:Src {id: ...})-[e:TYPE]->(:Dst {id: ...}) DELETE e` lowers to edge
+  delete when both endpoints are resolved and the target variable matches the
+  relationship pattern.
+- `MATCH (a:Src {id: ...}), (b:Dst {id: ...}) MERGE (a)-[:TYPE]->(b)` lowers
+  to an edge merge when both endpoint variables are resolved by explicit-ID
+  node patterns.
 
 The v1 implementation should reject, with clear errors:
 
 - generated node IDs;
 - node identity derived from non-`id` properties;
-- general `MATCH ... SET` and `MATCH ... DELETE`;
+- general cardinality-changing mutating `MATCH`;
+- `MATCH ... SET`;
 - `SET`, `REMOVE`, property patching, remove-on-null, or partial update
   semantics;
 - mutation plans whose endpoint variables cannot be resolved to stable node
@@ -212,7 +222,7 @@ feature slice should start at item 3.
    `execute_cypher_mutation`. A variable can bind only to a resolved `NodeId`.
    Rebinding a variable to a different node ID should be an error.
 
-3. ID-resolved `MATCH ... DELETE`.
+3. ID-resolved `MATCH ... DELETE`. Shipped in `0.8.4`.
 
    Add only the forms whose target identity is explicit and single-pattern:
 
@@ -224,7 +234,7 @@ feature slice should start at item 3.
    This should lower to the same `DeleteNode` and `DeleteEdge` plan operations
    as v1 literal `DELETE`. Broad cardinality-changing `MATCH` remains deferred.
 
-4. ID-resolved `MATCH ... MERGE` for edges.
+4. ID-resolved `MATCH ... MERGE` for edges. Shipped in `0.8.4`.
 
    Support matching explicit endpoint IDs and merging one relationship between
    them:
@@ -280,6 +290,160 @@ feature slice should start at item 3.
    matched and how many graph elements were changed. The planner should also
    make backend atomicity explicit: a backend may apply an ordered mutation
    batch without guaranteeing transaction rollback on later failure.
+
+## Completion Batches
+
+The remaining writable Cypher work should land in small releaseable batches.
+Each batch should keep the same invariant as v1: parse Cypher syntax, resolve
+identity and cardinality into Grust-owned semantics, then execute through
+`GraphMutationStore` or a new backend-neutral mutation trait when the existing
+trait is not expressive enough.
+
+### Batch A: ID-resolved `MATCH ... DELETE`
+
+Implement the strict single-pattern forms from roadmap item 3:
+
+```cypher
+MATCH (n:Person {id: 'person-1'}) DELETE n;
+MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) DELETE e;
+```
+
+Acceptance criteria:
+
+- Node `MATCH ... DELETE` lowers to `GraphMutationPlanOp::DeleteNode` only when
+  the matched node has an explicit string `id` and the `DELETE` target matches
+  the node variable.
+- Edge `MATCH ... DELETE` lowers to `GraphMutationPlanOp::DeleteEdge` only when
+  both endpoint IDs are explicit or already bound and the `DELETE` target
+  matches the relationship variable.
+- Broad `MATCH`, property-derived identity, target-variable mismatch, and
+  `MATCH ... SET` remain rejected.
+- Unit tests cover node delete, edge delete, missing ID, missing relationship
+  variable, mismatched target, and continued rejection of `MATCH ... SET`.
+
+Implementation status: shipped in `0.8.4`.
+
+### Batch B: ID-resolved `MATCH ... MERGE` for edges
+
+Add the strict edge-merge form from roadmap item 4:
+
+```cypher
+MATCH (a:Person {id: 'person-1'}), (b:Person {id: 'person-2'})
+MERGE (a)-[:KNOWS {since: 2026}]->(b);
+```
+
+Acceptance criteria:
+
+- The `MATCH` clause can bind one or more explicit-ID node variables.
+- The following `MERGE` clause can create exactly one relationship pattern whose
+  endpoints are those bound variables.
+- The relationship lowers to `GraphMutationPlanOp::UpsertEdge` with
+  `GraphMutationPlanKind::Merge`.
+- Endpoint variables that are unbound, rebound to different IDs, or resolved by
+  non-`id` properties are rejected.
+- General `MATCH ... CREATE`, multi-row matching, and path expansion remain
+  deferred.
+
+Implementation notes:
+
+- Reuse the same per-call variable binding context introduced for ordered
+  batches.
+- Add a small parser helper for comma-separated explicit-ID node match
+  patterns, using the existing quote-aware comma splitting.
+- Keep the report shape unchanged; this batch still produces one edge upsert.
+
+Implementation status: shipped in `0.8.4`.
+
+### Batch C: Strict `CREATE` existence checks
+
+Add an opt-in stricter Cypher-compatibility mode where `CREATE` fails if the
+target identity already exists while `MERGE` remains idempotent.
+
+Acceptance criteria:
+
+- The default fast path can continue treating `CREATE` as an upsert until a
+  public option is introduced.
+- A new option, config flag, or separate entrypoint makes strict `CREATE`
+  semantics explicit to callers.
+- Node `CREATE` checks `get_node(id)` before writing.
+- Edge `CREATE` checks the target structural edge identity, including explicit
+  edge IDs where supported, before writing.
+- The report distinguishes accepted create intent from merge/upsert execution
+  only if the backend-neutral report model can do so clearly.
+
+Implementation notes:
+
+- This batch requires async read-before-write behavior and therefore belongs in
+  execution, not only in `GraphMutationPlan`.
+- Document the cost and race window unless a backend can provide stronger
+  transaction semantics.
+
+### Batch D: Backend-neutral patch mutations and `SET +=`
+
+Introduce explicit patch semantics before accepting any writable Cypher `SET`.
+The first syntax should be map patching:
+
+```cypher
+MATCH (n:Person {id: 'person-1'})
+SET n += {name: 'Ada'};
+```
+
+Acceptance criteria:
+
+- Add backend-neutral mutation variants or a companion trait for node and edge
+  property patch operations.
+- Define null handling explicitly: either null is stored as a value, removes a
+  property, or is rejected. Do not inherit backend-specific behavior silently.
+- `MATCH ... SET n += {...}` lowers only when `n` resolves to one explicit node
+  ID.
+- Edge patching lands only after the edge identity policy is equally explicit.
+- `SET n.name = ...`, `REMOVE`, arithmetic updates, and expression evaluation
+  remain deferred.
+
+Implementation notes:
+
+- Sail can implement patches with staged Arrow temp views and SQL JSON merge
+  expressions only after the backend-neutral semantics are fixed.
+- Typed-table mirror writes must be updated or invalidated consistently when a
+  patched property maps to a typed column.
+
+### Batch E: Cardinality-aware mutating `MATCH`
+
+Allow broad matching only after Grust has a report and execution model for
+zero, one, or many affected graph elements.
+
+Acceptance criteria:
+
+- The mutation report records matched row count and changed graph-element
+  counts separately.
+- The planner can describe whether the operation is single-identity,
+  bounded-many, or unbounded-many before execution.
+- Sail execution stages matched IDs before applying deletes or patches.
+- Partial failure and transaction behavior are documented per backend.
+
+Implementation notes:
+
+- Start with broad `MATCH ... DELETE`; broad `MATCH ... SET` should wait until
+  Batch D is complete.
+- Live Sail tests should cover zero-match, one-match, many-match, and
+  node-delete incident-edge cascade behavior.
+
+### Batch F: Parser and API polish
+
+After the mutation semantics are complete, harden the user-facing API surface.
+
+Acceptance criteria:
+
+- Replace the hand-rolled mutation parser with a shared parser module or
+  parser crate boundary if the grammar keeps growing.
+- Make case sensitivity, whitespace handling, comments, and statement splitting
+  explicit and tested.
+- Add structured error variants for unsupported syntax, unresolved identity,
+  unsupported cardinality, and backend execution failure.
+- Decide whether writable Cypher remains Sail-specific or graduates to a
+  backend-neutral facade API.
+- Update README, book prose, `docs/Arrow.md` if Sail/Arrow examples change,
+  changelog, and ignored live integration tests for every shipped batch.
 
 ## Deferred Semantics
 

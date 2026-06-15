@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.3", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.8.4", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.8.3", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.3", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.8.4", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -1018,12 +1018,13 @@ Writable Cypher in Sail follows the same rule. `sail_cypher_mutation_plan`
 accepts only a strict v1 mutation subset: explicit-ID node `CREATE` and
 `MERGE`, edge `CREATE` and `MERGE` when both endpoint IDs are resolved, and
 resolved node or edge `DELETE`. It also accepts ordered multi-statement
-batches and local node variables bound by explicit-ID node patterns. It lowers
-those statements into `GraphMutationPlan` and then ordinary `GraphMutation`
-values. The execution entrypoint, `SailGraphStore::execute_cypher_mutation`,
-runs those mutations through `GraphMutationStore`, so Cypher writes use the
-same staged Arrow, `MERGE INTO`, typed-table mirror, and delete paths as normal
-Grust writes.
+batches, local node variables bound by explicit-ID node patterns, ID-resolved
+`MATCH ... DELETE`, and edge `MATCH ... MERGE` forms. It lowers those
+statements into `GraphMutationPlan` and then ordinary `GraphMutation` values.
+The execution entrypoint, `SailGraphStore::execute_cypher_mutation`, runs those
+mutations through `GraphMutationStore`, so Cypher writes use the same staged
+Arrow, `MERGE INTO`, typed-table mirror, and delete paths as normal Grust
+writes.
 
 ## FalkorDB, HelixDB, and SurrealDB
 

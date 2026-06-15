@@ -11,10 +11,10 @@ categories.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-grust-core = { version = "0.8.3", path = "../grust-core" }
+grust-core = { version = "0.8.4", path = "../grust-core" }
 
 [dev-dependencies]
 futures-executor.workspace = true
-grust-core = { version = "0.8.3", path = "../grust-core", features = ["typed-garde"] }
+grust-core = { version = "0.8.4", path = "../grust-core", features = ["typed-garde"] }
 garde = { workspace = true, features = ["derive"] }
 serde.workspace = true

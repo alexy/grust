@@ -655,6 +655,103 @@ fn cypher_delete_lowers_resolved_node_and_edge_patterns() {
 }
 
 #[test]
+fn cypher_match_delete_lowers_id_resolved_patterns() {
+    let node_delete =
+        sail_cypher_mutation_plan("MATCH (n:Person {id: 'person-1'}) DELETE n").unwrap();
+    assert_eq!(
+        node_delete.report(),
+        GraphMutationReport {
+            deletes: 1,
+            node_deletes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        node_delete.into_mutations(),
+        vec![GraphMutation::DeleteNode(NodeId::new("person-1"))]
+    );
+
+    let edge_delete = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) DELETE e",
+    )
+    .unwrap();
+    assert_eq!(
+        edge_delete.report(),
+        GraphMutationReport {
+            deletes: 1,
+            edge_deletes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        edge_delete.into_mutations(),
+        vec![GraphMutation::DeleteEdge {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+        }]
+    );
+}
+
+#[test]
+fn cypher_match_delete_rejects_unresolved_or_mismatched_patterns() {
+    for cypher in [
+        "MATCH (n:Person) DELETE n",
+        "MATCH (n:Person {id: 'person-1'}) DELETE m",
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) DELETE n",
+        "MATCH (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'}) DELETE e",
+        "MATCH (n:Person {id: 'person-1'}) SET n += {name: 'Ada'}",
+    ] {
+        let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH must fail");
+        assert!(matches!(error, GrustError::Unsupported(_)));
+    }
+}
+
+#[test]
+fn cypher_match_merge_lowers_id_resolved_edge_pattern() {
+    let plan = sail_cypher_mutation_plan(
+        "
+        MATCH (a:Person {id: 'person-1', note: 'contains, comma'}), (b:Person {id: 'person-2'})
+        MERGE (a)-[:KNOWS {since: 2026}]->(b)
+        ",
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            merges: 1,
+            edge_upserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        plan.into_mutations(),
+        vec![GraphMutation::UpsertEdge(Edge::new(
+            "KNOWS",
+            "person-1",
+            "person-2",
+            Props::from([("since".to_string(), Value::Int(2026))]),
+        ))]
+    );
+}
+
+#[test]
+fn cypher_match_merge_rejects_unresolved_or_broad_forms() {
+    for cypher in [
+        "MATCH (:Person {id: 'person-1'}), (b:Person {id: 'person-2'}) MERGE (:Person {id: 'person-1'})-[:KNOWS]->(b)",
+        "MATCH (a:Person {id: 'person-1'}) MERGE (a)-[:KNOWS]->(b)",
+        "MATCH (a:Person {name: 'Ada'}), (b:Person {id: 'person-2'}) MERGE (a)-[:KNOWS]->(b)",
+        "MATCH (a:Person {id: 'person-1'}) MERGE (:Person {id: 'person-3'})",
+        "MATCH (a:Person {id: 'person-1'}) CREATE (a)-[:KNOWS]->(:Person {id: 'person-2'})",
+    ] {
+        let error =
+            sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH MERGE must fail");
+        assert!(matches!(error, GrustError::Unsupported(_)));
+    }
+}
+
+#[test]
 fn cypher_multi_statement_batch_preserves_order_and_aggregates_report() {
     let plan = sail_cypher_mutation_plan(
         "
@@ -786,7 +883,7 @@ fn cypher_local_variables_reject_rebinding_and_unbound_refs() {
 #[test]
 fn cypher_write_rejects_deferred_v1_semantics() {
     for cypher in [
-        "MATCH (n:Person {id: 'person-1'}) DELETE n",
+        "MATCH (n:Person {name: 'Ada'}) DELETE n",
         "CREATE (:Person {id: 'person-1'}) SET n.name = 'Ada'",
         "REMOVE n.name",
     ] {

@@ -24,7 +24,7 @@ The project is here:
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
 - Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-ladybug](https://crates.io/crates/grust-ladybug), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
-The `0.8.3` line is the first point where I think the full idea is visible in
+The `0.8.4` line is the first point where I think the full idea is visible in
 code. The workspace has the core graph model, document fixtures, typed
 ingestion, schema-backed writes, traversal lowering, shared graph-index
 construction, backend-specific typed storage, LadybugDB and Sail Arrow IPC
@@ -161,7 +161,7 @@ them into ordinary Grust nodes and edges:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.3", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.8.4", features = ["typed-garde"] }
 ```
 
 ```rust
@@ -214,7 +214,7 @@ treats it as typed. In Grust, `zod-rs` plays that role for
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.3", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.8.4", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers
@@ -319,13 +319,13 @@ capabilities.
 
 Incremental changes live in `GraphMutationStore`. It keeps ordinary graph
 writes simple while giving capable backends a place to expose node and edge
-upserts, deletes, and backend-specific transaction semantics. The 0.8.3 line
-adds `GraphMutationPlan` and `GraphMutationReport` so frontends and query
-lowerings can resolve a mutation plan before applying it to a store. Sail uses
-that layer for its first strict writable-Cypher subset: explicit-ID node
-`CREATE`/`MERGE`, resolved endpoint edge `CREATE`/`MERGE`, and resolved
-node/edge `DELETE`, ordered multi-statement batches, and local node variables
-bound from explicit IDs.
+upserts, deletes, and backend-specific transaction semantics. `GraphMutationPlan`
+and `GraphMutationReport` let frontends and query lowerings resolve a mutation
+plan before applying it to a store. Sail uses that layer for its strict
+writable-Cypher subset: explicit-ID node `CREATE`/`MERGE`, resolved endpoint
+edge `CREATE`/`MERGE`, resolved node/edge `DELETE`, ordered multi-statement
+batches, local node variables bound from explicit IDs, ID-resolved
+`MATCH ... DELETE`, and edge `MATCH ... MERGE`.
 
 The book chapter **The Store Contract** gives this trait the attention it
 deserves. It is the piece that lets a memory store, a LanceDB table layout, a
@@ -408,11 +408,11 @@ Grust writes produce.
 
 Writable Cypher follows the same rule. In Sail, Cypher write text is not a
 separate persistence path. `sail_cypher_mutation_plan` accepts a strict v1
-subset, ordered mutation batches, and local explicit-ID node variables, then
-lowers them into `GraphMutationPlan`; `SailGraphStore` executes that plan
-through `GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`,
-typed-table mirror writes, and the same delete paths as ordinary Grust
-mutations.
+subset, ordered mutation batches, local explicit-ID node variables,
+ID-resolved `MATCH ... DELETE`, and edge `MATCH ... MERGE`, then lowers them
+into `GraphMutationPlan`; `SailGraphStore` executes that plan through
+`GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`, typed-table
+mirror writes, and the same delete paths as ordinary Grust mutations.
 
 ## Traversal as IR
 

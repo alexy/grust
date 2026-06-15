@@ -6,6 +6,15 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 2026-06-15 - 0.8.4
+
+- Extended strict writable Cypher planning in `grust-sail` with ID-resolved
+  `MATCH ... DELETE` for single node or edge patterns.
+- Added ID-resolved `MATCH ... MERGE` edge planning, allowing explicit-ID node
+  matches to bind variables used by one relationship `MERGE`.
+- Documented the remaining writable Cypher completion batches in
+  `docs/CypherWrite.md`.
+
 ## 2026-06-14 - 0.8.3
 
 - Extended strict writable Cypher planning in `grust-sail` to accept ordered
