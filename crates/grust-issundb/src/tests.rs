@@ -34,7 +34,11 @@ async fn put_and_get_node_round_trips() {
     // Writing the same id again updates in place.
     let outcome = store.put_node(&person("alice", "Alice B.")).await.unwrap();
     assert_eq!(outcome, PutOutcome::Updated);
-    let fetched = store.get_node(&NodeId::new("alice")).await.unwrap().unwrap();
+    let fetched = store
+        .get_node(&NodeId::new("alice"))
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(fetched.props.get("name"), Some(&Value::from("Alice B.")));
 }
 
@@ -80,7 +84,11 @@ async fn delete_node_and_edge() {
         .unwrap();
 
     store
-        .delete_edge(&NodeId::new("alice"), &Label::new("KNOWS"), &NodeId::new("bob"))
+        .delete_edge(
+            &NodeId::new("alice"),
+            &Label::new("KNOWS"),
+            &NodeId::new("bob"),
+        )
         .await
         .unwrap();
     let edges = store
@@ -93,7 +101,13 @@ async fn delete_node_and_edge() {
     assert!(edges.is_empty());
 
     store.delete_node(&NodeId::new("alice")).await.unwrap();
-    assert!(store.get_node(&NodeId::new("alice")).await.unwrap().is_none());
+    assert!(
+        store
+            .get_node(&NodeId::new("alice"))
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

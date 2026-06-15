@@ -244,7 +244,11 @@ impl GraphStore for IssunGraphStore {
                 }
             }
         } else if let Some(label) = &query.label {
-            for eid in self.graph.edges_by_type(label.as_str()).map_err(issun_err)? {
+            for eid in self
+                .graph
+                .edges_by_type(label.as_str())
+                .map_err(issun_err)?
+            {
                 if let Some(record) = self.graph.get_edge(eid).map_err(issun_err)? {
                     raw.push((record.src, record.dst, eid, record.edge_type));
                 }
@@ -292,9 +296,10 @@ impl GraphStore for IssunGraphStore {
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
         let mut current: Vec<u64> = match &traversal.start {
             Start::Node(id) => self.resolve(id).into_iter().collect(),
-            Start::NodesByLabel(label) => {
-                self.graph.nodes_by_label(label.as_str()).map_err(issun_err)?
-            }
+            Start::NodesByLabel(label) => self
+                .graph
+                .nodes_by_label(label.as_str())
+                .map_err(issun_err)?,
             Start::NodesByProperty { label, key, value } => self
                 .graph
                 .nodes_by_property(label.as_str(), key.as_str(), prop_value(value)?)
@@ -461,8 +466,9 @@ fn edge_props_json(props: &Props) -> serde_json::Value {
 }
 
 fn decode_props(bytes: &[u8]) -> Result<Props> {
-    let value: serde_json::Value = rmp_serde::from_slice(bytes)
-        .map_err(|err| GrustError::Serialization(format!("issundb property decode error: {err}")))?;
+    let value: serde_json::Value = rmp_serde::from_slice(bytes).map_err(|err| {
+        GrustError::Serialization(format!("issundb property decode error: {err}"))
+    })?;
     Ok(json_to_props(value))
 }
 
