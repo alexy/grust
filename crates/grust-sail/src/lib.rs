@@ -273,99 +273,246 @@ where
 }
 
 pub fn sail_cypher_mutation_plan(cypher: &str) -> Result<GraphMutationPlan> {
-    let cypher = cypher.trim().trim_end_matches(';').trim();
-    if cypher.is_empty() {
+    let statements = split_cypher_statements(cypher)?;
+    if statements.is_empty() {
         return Err(GrustError::Unsupported(
             "writable Cypher statement is empty".to_string(),
         ));
     }
-    let upper = cypher.to_ascii_uppercase();
-    if upper.contains(" SET ") || upper.starts_with("SET ") {
-        return Err(GrustError::Unsupported(
-            "writable Cypher SET is not supported in v1".to_string(),
-        ));
+
+    let mut planner = CypherMutationPlanner::default();
+    let mut plan = GraphMutationPlan::default();
+    for statement in statements {
+        for operation in planner.plan_statement(statement)?.operations {
+            plan.push(operation);
+        }
     }
-    if upper.contains(" REMOVE ") || upper.starts_with("REMOVE ") {
-        return Err(GrustError::Unsupported(
-            "writable Cypher REMOVE is not supported in v1".to_string(),
-        ));
-    }
-    if upper.starts_with("MATCH ") {
-        return Err(GrustError::Unsupported(
-            "mutating MATCH is not supported in writable Cypher v1".to_string(),
-        ));
-    }
-    if let Some(rest) = cypher.strip_prefix("CREATE ") {
-        return parse_cypher_upsert(rest, GraphMutationPlanKind::Create);
-    }
-    if let Some(rest) = cypher.strip_prefix("MERGE ") {
-        return parse_cypher_upsert(rest, GraphMutationPlanKind::Merge);
-    }
-    if let Some(rest) = cypher.strip_prefix("DELETE ") {
-        return parse_cypher_delete(rest);
-    }
-    Err(GrustError::Unsupported(format!(
-        "unsupported writable Cypher statement; expected CREATE, MERGE, or DELETE: {cypher}"
-    )))
+    Ok(plan)
 }
 
-fn parse_cypher_upsert(pattern: &str, kind: GraphMutationPlanKind) -> Result<GraphMutationPlan> {
-    if pattern.contains("->") {
-        let parsed = parse_cypher_edge_pattern(pattern)?;
-        return Ok(GraphMutationPlan::new(vec![
-            GraphMutationPlanOp::UpsertEdge {
+#[derive(Default)]
+struct CypherMutationPlanner {
+    node_bindings: HashMap<String, NodeId>,
+}
+
+impl CypherMutationPlanner {
+    fn plan_statement(&mut self, cypher: &str) -> Result<GraphMutationPlan> {
+        let cypher = cypher.trim();
+        let upper = cypher.to_ascii_uppercase();
+        if upper.contains(" SET ") || upper.starts_with("SET ") {
+            return Err(GrustError::Unsupported(
+                "writable Cypher SET is not supported in v1".to_string(),
+            ));
+        }
+        if upper.contains(" REMOVE ") || upper.starts_with("REMOVE ") {
+            return Err(GrustError::Unsupported(
+                "writable Cypher REMOVE is not supported in v1".to_string(),
+            ));
+        }
+        if upper.starts_with("MATCH ") {
+            return Err(GrustError::Unsupported(
+                "mutating MATCH is not supported in writable Cypher v1".to_string(),
+            ));
+        }
+        if let Some(rest) = cypher.strip_prefix("CREATE ") {
+            return self.parse_upsert(rest, GraphMutationPlanKind::Create);
+        }
+        if let Some(rest) = cypher.strip_prefix("MERGE ") {
+            return self.parse_upsert(rest, GraphMutationPlanKind::Merge);
+        }
+        if let Some(rest) = cypher.strip_prefix("DELETE ") {
+            return self.parse_delete(rest);
+        }
+        Err(GrustError::Unsupported(format!(
+            "unsupported writable Cypher statement; expected CREATE, MERGE, or DELETE: {cypher}"
+        )))
+    }
+
+    fn parse_upsert(
+        &mut self,
+        pattern: &str,
+        kind: GraphMutationPlanKind,
+    ) -> Result<GraphMutationPlan> {
+        if pattern.contains("->") {
+            let parsed = self.parse_edge_pattern(pattern)?;
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::UpsertEdge {
+                    kind,
+                    edge: parsed.edge,
+                },
+            ]));
+        }
+
+        let (node, rest) = parse_cypher_node_pattern(pattern)?;
+        if !rest.trim().is_empty() {
+            return Err(GrustError::Unsupported(format!(
+                "unsupported writable Cypher node pattern suffix: {}",
+                rest.trim()
+            )));
+        }
+        let label = node.label.clone().ok_or_else(|| {
+            GrustError::Unsupported("node CREATE/MERGE requires a label".to_string())
+        })?;
+        let id = required_string_prop(&node.props, "id", "node CREATE/MERGE")?;
+        self.bind_node_variable(&node, &NodeId::new(id.clone()))?;
+        Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::UpsertNode {
                 kind,
-                edge: parsed.edge,
+                node: Node::new(label, id, node.props),
             },
-        ]));
+        ]))
     }
 
-    let (node, rest) = parse_cypher_node_pattern(pattern)?;
-    if !rest.trim().is_empty() {
-        return Err(GrustError::Unsupported(format!(
-            "unsupported writable Cypher node pattern suffix: {}",
-            rest.trim()
-        )));
+    fn parse_delete(&mut self, pattern: &str) -> Result<GraphMutationPlan> {
+        if pattern.contains("->") {
+            let parsed = self.parse_edge_pattern(pattern)?;
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::DeleteEdge {
+                    from: parsed.from_id,
+                    label: parsed.edge.label,
+                    to: parsed.to_id,
+                },
+            ]));
+        }
+
+        let (node, rest) = parse_cypher_node_pattern(pattern)?;
+        if !rest.trim().is_empty() {
+            return Err(GrustError::Unsupported(format!(
+                "unsupported writable Cypher delete pattern suffix: {}",
+                rest.trim()
+            )));
+        }
+        let id = self.resolve_node_id(&node, "node DELETE")?;
+        Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::DeleteNode(id),
+        ]))
     }
-    let label = node
-        .label
-        .ok_or_else(|| GrustError::Unsupported("node CREATE/MERGE requires a label".to_string()))?;
-    let id = required_string_prop(&node.props, "id", "node CREATE/MERGE")?;
-    Ok(GraphMutationPlan::new(vec![
-        GraphMutationPlanOp::UpsertNode {
-            kind,
-            node: Node::new(label, id, node.props),
-        },
-    ]))
+
+    fn parse_edge_pattern(&mut self, pattern: &str) -> Result<ParsedCypherEdge> {
+        let (from, rest) = parse_cypher_node_pattern(pattern)?;
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix("-[").ok_or_else(|| {
+            GrustError::Unsupported(
+                "edge mutation requires a directed -[...]-> pattern".to_string(),
+            )
+        })?;
+        let rel_end = find_matching(rest, '[', ']')?;
+        let rel = &rest[..rel_end];
+        let rest = rest[rel_end + 1..].trim_start();
+        let rest = rest.strip_prefix("->").ok_or_else(|| {
+            GrustError::Unsupported("edge mutation requires outgoing '->' direction".to_string())
+        })?;
+        let (to, rest) = parse_cypher_node_pattern(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(GrustError::Unsupported(format!(
+                "unsupported writable Cypher edge pattern suffix: {}",
+                rest.trim()
+            )));
+        }
+
+        let from_id = self.resolve_node_id(&from, "edge mutation source node")?;
+        let to_id = self.resolve_node_id(&to, "edge mutation destination node")?;
+        let (label, props) = parse_cypher_relationship(rel)?;
+        let mut edge = Edge::new(label, from_id.clone(), to_id.clone(), props);
+        if let Some(id) = edge
+            .props
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        {
+            edge = edge.with_id(id);
+        }
+        Ok(ParsedCypherEdge {
+            from_id,
+            to_id,
+            edge,
+        })
+    }
+
+    fn resolve_node_id(&mut self, node: &ParsedCypherNode, context: &str) -> Result<NodeId> {
+        if let Some(id) = optional_string_prop(&node.props, "id") {
+            let id = NodeId::new(id);
+            self.bind_node_variable(node, &id)?;
+            return Ok(id);
+        }
+        if let Some(variable) = &node.variable {
+            if let Some(id) = self.node_bindings.get(variable) {
+                return Ok(id.clone());
+            }
+            return Err(GrustError::Unsupported(format!(
+                "{context} variable '{variable}' is not bound to a node id"
+            )));
+        }
+        Err(GrustError::Unsupported(format!(
+            "{context} requires explicit string property 'id'"
+        )))
+    }
+
+    fn bind_node_variable(&mut self, node: &ParsedCypherNode, id: &NodeId) -> Result<()> {
+        let Some(variable) = &node.variable else {
+            return Ok(());
+        };
+        if let Some(existing) = self.node_bindings.get(variable) {
+            if existing != id {
+                return Err(GrustError::Unsupported(format!(
+                    "Cypher variable '{variable}' is already bound to node id '{}'",
+                    existing.as_str()
+                )));
+            }
+            return Ok(());
+        }
+        self.node_bindings.insert(variable.clone(), id.clone());
+        Ok(())
+    }
 }
 
-fn parse_cypher_delete(pattern: &str) -> Result<GraphMutationPlan> {
-    if pattern.contains("->") {
-        let parsed = parse_cypher_edge_pattern(pattern)?;
-        return Ok(GraphMutationPlan::new(vec![
-            GraphMutationPlanOp::DeleteEdge {
-                from: parsed.from_id,
-                label: parsed.edge.label,
-                to: parsed.to_id,
-            },
-        ]));
+fn split_cypher_statements(cypher: &str) -> Result<Vec<&str>> {
+    let mut statements = Vec::new();
+    let mut start = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (index, ch) in cypher.char_indices() {
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+            continue;
+        }
+
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            ';' => {
+                let statement = cypher[start..index].trim();
+                if !statement.is_empty() {
+                    statements.push(statement);
+                }
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
     }
 
-    let (node, rest) = parse_cypher_node_pattern(pattern)?;
-    if !rest.trim().is_empty() {
-        return Err(GrustError::Unsupported(format!(
-            "unsupported writable Cypher delete pattern suffix: {}",
-            rest.trim()
-        )));
+    if quote.is_some() {
+        return Err(GrustError::Unsupported(
+            "Cypher statement has an unterminated string literal".to_string(),
+        ));
     }
-    let id = required_string_prop(&node.props, "id", "node DELETE")?;
-    Ok(GraphMutationPlan::new(vec![
-        GraphMutationPlanOp::DeleteNode(NodeId::new(id)),
-    ]))
+
+    let statement = cypher[start..].trim();
+    if !statement.is_empty() {
+        statements.push(statement);
+    }
+    Ok(statements)
 }
 
 #[derive(Debug)]
 struct ParsedCypherNode {
+    variable: Option<String>,
     label: Option<Label>,
     props: Props,
 }
@@ -377,55 +524,6 @@ struct ParsedCypherEdge {
     edge: Edge,
 }
 
-fn parse_cypher_edge_pattern(pattern: &str) -> Result<ParsedCypherEdge> {
-    let (from, rest) = parse_cypher_node_pattern(pattern)?;
-    let rest = rest.trim_start();
-    let rest = rest.strip_prefix("-[").ok_or_else(|| {
-        GrustError::Unsupported("edge mutation requires a directed -[...]-> pattern".to_string())
-    })?;
-    let rel_end = rest.find(']').ok_or_else(|| {
-        GrustError::Unsupported("edge mutation relationship pattern is missing ']'".to_string())
-    })?;
-    let rel = &rest[..rel_end];
-    let rest = rest[rel_end + 1..].trim_start();
-    let rest = rest.strip_prefix("->").ok_or_else(|| {
-        GrustError::Unsupported("edge mutation requires outgoing '->' direction".to_string())
-    })?;
-    let (to, rest) = parse_cypher_node_pattern(rest)?;
-    if !rest.trim().is_empty() {
-        return Err(GrustError::Unsupported(format!(
-            "unsupported writable Cypher edge pattern suffix: {}",
-            rest.trim()
-        )));
-    }
-
-    let from_id = NodeId::new(required_string_prop(
-        &from.props,
-        "id",
-        "edge mutation source node",
-    )?);
-    let to_id = NodeId::new(required_string_prop(
-        &to.props,
-        "id",
-        "edge mutation destination node",
-    )?);
-    let (label, props) = parse_cypher_relationship(rel)?;
-    let mut edge = Edge::new(label, from_id.clone(), to_id.clone(), props);
-    if let Some(id) = edge
-        .props
-        .get("id")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-    {
-        edge = edge.with_id(id);
-    }
-    Ok(ParsedCypherEdge {
-        from_id,
-        to_id,
-        edge,
-    })
-}
-
 fn parse_cypher_node_pattern(input: &str) -> Result<(ParsedCypherNode, &str)> {
     let input = input.trim_start();
     let input = input.strip_prefix('(').ok_or_else(|| {
@@ -434,18 +532,56 @@ fn parse_cypher_node_pattern(input: &str) -> Result<(ParsedCypherNode, &str)> {
     let close = find_matching(input, '(', ')')?;
     let body = input[..close].trim();
     let rest = &input[close + 1..];
-    let (label, props) = parse_cypher_node_body(body)?;
-    Ok((ParsedCypherNode { label, props }, rest))
+    let (variable, label, props) = parse_cypher_node_body(body)?;
+    Ok((
+        ParsedCypherNode {
+            variable,
+            label,
+            props,
+        },
+        rest,
+    ))
 }
 
-fn parse_cypher_node_body(body: &str) -> Result<(Option<Label>, Props)> {
+fn parse_cypher_node_body(body: &str) -> Result<(Option<String>, Option<Label>, Props)> {
     let (head, props) = split_cypher_body_props(body)?;
-    let label = head
-        .split_once(':')
-        .map(|(_, label)| label.trim())
-        .filter(|label| !label.is_empty())
-        .map(|label| Label::new(label.to_string()));
-    Ok((label, props))
+    let head = head.trim();
+    let (variable, label) = if let Some((variable, label)) = head.split_once(':') {
+        let label = label.trim();
+        (
+            parse_optional_cypher_variable(variable.trim())?,
+            if label.is_empty() {
+                None
+            } else {
+                Some(Label::new(label.to_string()))
+            },
+        )
+    } else {
+        (parse_optional_cypher_variable(head)?, None)
+    };
+    Ok((variable, label, props))
+}
+
+fn parse_optional_cypher_variable(value: &str) -> Result<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if is_cypher_identifier(value) {
+        return Ok(Some(value.to_string()));
+    }
+    Err(GrustError::Unsupported(format!(
+        "unsupported Cypher variable name: {value}"
+    )))
+}
+
+fn is_cypher_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
 fn parse_cypher_relationship(body: &str) -> Result<(Label, Props)> {
@@ -582,6 +718,10 @@ fn required_string_prop(props: &Props, key: &str, context: &str) -> Result<Strin
                 "{context} requires explicit string property '{key}'"
             ))
         })
+}
+
+fn optional_string_prop(props: &Props, key: &str) -> Option<String> {
+    props.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
 fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {

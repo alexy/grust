@@ -13,8 +13,8 @@ helpers.
 
 ## Shipped V1 Scope
 
-The first writable Cypher slice is deliberately strict and is implemented in
-the `0.8.2` line:
+The writable Cypher surface is deliberately strict. The first slice shipped in
+the `0.8.2` line and the ordered-batch extension shipped in the `0.8.3` line:
 
 - `CREATE (:Label {id: ..., ...})` writes a node only when the node `id` is
   explicit in the literal property map.
@@ -25,6 +25,11 @@ the `0.8.2` line:
 - `DELETE` removes resolved nodes or edges through `GraphMutationStore`.
   Deleting a node also removes incident edges, matching the existing Grust
   mutation contract.
+- Ordered multi-statement batches produce one `GraphMutationPlan` whose
+  operations stay in source order and whose `CypherMutationReport` aggregates
+  across the whole batch.
+- Local node variables can be introduced by explicit-ID node patterns and
+  reused by later edge or delete patterns in the same batch.
 
 The v1 implementation should reject, with clear errors:
 
@@ -172,12 +177,12 @@ The next writable Cypher features should extend the strict v1 surface without
 changing the core rule: Cypher syntax must lower through Grust mutation
 planning and `GraphMutationStore`.
 
-The recommended next implementation slice is items 1 and 2 together:
-multi-statement batches plus local variable binding. That gives the biggest
-usability jump while staying inside the strict explicit-ID semantics already
-implemented in v1.
+Items 1 and 2 shipped together in `0.8.3`: multi-statement batches plus local
+variable binding. That gives the biggest usability jump while staying inside
+the strict explicit-ID semantics already implemented in v1. The next remaining
+feature slice should start at item 3.
 
-1. Multi-statement ordered mutation batches.
+1. Multi-statement ordered mutation batches. Shipped in `0.8.3`.
 
    Accept a sequence such as:
 
@@ -192,7 +197,7 @@ implemented in v1.
    batch. Execution should use the target store's existing ordered
    `apply_mutations` behavior and must not claim stronger atomicity.
 
-2. Local variable binding inside one mutation batch.
+2. Local variable binding inside one mutation batch. Shipped in `0.8.3`.
 
    Support variables introduced by explicit-ID node patterns and reused by
    later edge patterns in the same batch:

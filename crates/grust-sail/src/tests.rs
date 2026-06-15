@@ -655,6 +655,135 @@ fn cypher_delete_lowers_resolved_node_and_edge_patterns() {
 }
 
 #[test]
+fn cypher_multi_statement_batch_preserves_order_and_aggregates_report() {
+    let plan = sail_cypher_mutation_plan(
+        "
+        CREATE (:Person {id: 'person-1', name: 'Ada; still one literal'});
+        MERGE (:Person {id: 'person-2', name: 'Bob'});
+        CREATE (:Person {id: 'person-1'})-[:KNOWS {since: 2026}]->(:Person {id: 'person-2'});
+        DELETE (:Person {id: 'person-2'});
+        ",
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            creates: 2,
+            merges: 1,
+            deletes: 1,
+            node_upserts: 2,
+            edge_upserts: 1,
+            node_deletes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        plan.into_mutations(),
+        vec![
+            GraphMutation::UpsertNode(Node::new(
+                "Person",
+                "person-1",
+                Props::from([
+                    ("id".to_string(), Value::String("person-1".to_string())),
+                    (
+                        "name".to_string(),
+                        Value::String("Ada; still one literal".to_string())
+                    ),
+                ]),
+            )),
+            GraphMutation::UpsertNode(Node::new(
+                "Person",
+                "person-2",
+                Props::from([
+                    ("id".to_string(), Value::String("person-2".to_string())),
+                    ("name".to_string(), Value::String("Bob".to_string())),
+                ]),
+            )),
+            GraphMutation::UpsertEdge(Edge::new(
+                "KNOWS",
+                "person-1",
+                "person-2",
+                Props::from([("since".to_string(), Value::Int(2026))]),
+            )),
+            GraphMutation::DeleteNode(NodeId::new("person-2")),
+        ]
+    );
+}
+
+#[test]
+fn cypher_local_variables_resolve_edge_endpoints_and_deletes() {
+    let plan = sail_cypher_mutation_plan(
+        "
+        CREATE (a:Person {id: 'person-1', name: 'Ada'});
+        MERGE (b:Person {id: 'person-2', name: 'Bob'});
+        CREATE (a)-[:KNOWS]->(b);
+        DELETE (a)-[:KNOWS]->(b);
+        DELETE (a);
+        ",
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            creates: 2,
+            merges: 1,
+            deletes: 2,
+            node_upserts: 2,
+            edge_upserts: 1,
+            node_deletes: 1,
+            edge_deletes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        plan.into_mutations(),
+        vec![
+            GraphMutation::UpsertNode(Node::new(
+                "Person",
+                "person-1",
+                Props::from([
+                    ("id".to_string(), Value::String("person-1".to_string())),
+                    ("name".to_string(), Value::String("Ada".to_string())),
+                ]),
+            )),
+            GraphMutation::UpsertNode(Node::new(
+                "Person",
+                "person-2",
+                Props::from([
+                    ("id".to_string(), Value::String("person-2".to_string())),
+                    ("name".to_string(), Value::String("Bob".to_string())),
+                ]),
+            )),
+            GraphMutation::UpsertEdge(Edge::new("KNOWS", "person-1", "person-2", Props::new(),)),
+            GraphMutation::DeleteEdge {
+                from: NodeId::new("person-1"),
+                label: Label::new("KNOWS"),
+                to: NodeId::new("person-2"),
+            },
+            GraphMutation::DeleteNode(NodeId::new("person-1")),
+        ]
+    );
+}
+
+#[test]
+fn cypher_local_variables_reject_rebinding_and_unbound_refs() {
+    let error = sail_cypher_mutation_plan(
+        "
+        CREATE (a:Person {id: 'person-1'});
+        CREATE (a:Person {id: 'person-2'});
+        ",
+    )
+    .expect_err("rebinding a variable to a different id should fail");
+    assert!(error.to_string().contains("already bound to node id"));
+
+    let error = sail_cypher_mutation_plan("CREATE (a)-[:KNOWS]->(:Person {id: 'person-2'})")
+        .expect_err("unbound edge endpoint should fail");
+    assert!(error.to_string().contains("variable 'a' is not bound"));
+}
+
+#[test]
 fn cypher_write_rejects_deferred_v1_semantics() {
     for cypher in [
         "MATCH (n:Person {id: 'person-1'}) DELETE n",
@@ -838,27 +967,25 @@ async fn test_execute_cypher_mutations() {
     let store = store().await;
 
     let report = store
-        .execute_cypher_mutation("CREATE (:Person {id: 'person-1', name: 'Ada'})")
+        .execute_cypher_mutation(
+            "
+            CREATE (a:Person {id: 'person-1', name: 'Ada'});
+            MERGE (b:Person {id: 'person-2', name: 'Bob'});
+            CREATE (a)-[e:KNOWS {id: 'edge-1', since: 2020}]->(b);
+            ",
+        )
         .await
-        .expect("create source node");
+        .expect("execute ordered Cypher mutation batch");
     assert_eq!(
         report,
         GraphMutationReport {
-            creates: 1,
-            node_upserts: 1,
+            creates: 2,
+            merges: 1,
+            node_upserts: 2,
+            edge_upserts: 1,
             ..GraphMutationReport::default()
         }
     );
-    store
-        .execute_cypher_mutation("MERGE (:Person {id: 'person-2', name: 'Bob'})")
-        .await
-        .expect("merge destination node");
-    store
-        .execute_cypher_mutation(
-            "CREATE (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-1', since: 2020}]->(:Person {id: 'person-2'})",
-        )
-        .await
-        .expect("create edge");
 
     let edges = store
         .get_edges(EdgeQuery {

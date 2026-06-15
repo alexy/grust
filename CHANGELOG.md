@@ -6,6 +6,16 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 2026-06-14 - 0.8.3
+
+- Extended strict writable Cypher planning in `grust-sail` to accept ordered
+  multi-statement mutation batches and aggregate mutation reports across the
+  whole batch.
+- Added local node variable binding for writable Cypher batches, allowing
+  explicit-ID node patterns to bind variables and later edge or delete patterns
+  to reuse those variables while rejecting unbound references and conflicting
+  rebinding.
+
 ## 2026-06-14 - 0.8.2
 
 - Added backend-neutral `GraphMutationPlan`, `GraphMutationPlanOp`, and
