@@ -2125,6 +2125,13 @@ pub enum GraphMutation {
         props: Props,
         patch: Props,
     },
+    PatchEdge {
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+        id: Option<EdgeId>,
+        props: Props,
+    },
     DeleteMatchingNodes {
         label: Option<Label>,
         props: Props,
@@ -2166,6 +2173,13 @@ pub enum GraphMutationPlanOp {
         props: Props,
         patch: Props,
         cardinality: GraphMutationCardinality,
+    },
+    PatchEdge {
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+        id: Option<EdgeId>,
+        props: Props,
     },
     DeleteMatchingNodes {
         label: Option<Label>,
@@ -2228,6 +2242,7 @@ pub struct GraphMutationReport {
     pub node_deletes: usize,
     pub edge_deletes: usize,
     pub node_patches: usize,
+    pub edge_patches: usize,
 }
 
 impl GraphMutationReport {
@@ -2258,6 +2273,11 @@ impl GraphMutationReport {
             }
             GraphMutationPlanOp::PatchMatchingNodes { .. } => {
                 self.patches += 1;
+            }
+            GraphMutationPlanOp::PatchEdge { .. } => {
+                self.patches += 1;
+                self.edge_patches += 1;
+                self.changed_edges += 1;
             }
             GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
                 self.deletes += 1;
@@ -2290,6 +2310,19 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 label,
                 props,
                 patch,
+            },
+            GraphMutationPlanOp::PatchEdge {
+                from,
+                label,
+                to,
+                id,
+                props,
+            } => Self::PatchEdge {
+                from,
+                label,
+                to,
+                id,
+                props,
             },
             GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
                 Self::DeleteMatchingNodes { label, props }
@@ -2339,6 +2372,39 @@ pub trait GraphMutationStore: GraphStore {
                     return Err(GrustError::Unsupported(
                         "matched node patches require backend-specific query support".to_string(),
                     ));
+                }
+                GraphMutation::PatchEdge {
+                    from,
+                    label,
+                    to,
+                    id,
+                    props,
+                } => {
+                    let mut edges = self
+                        .get_edges(EdgeQuery {
+                            from: Some(from.clone()),
+                            to: Some(to.clone()),
+                            label: Some(label.clone()),
+                        })
+                        .await?;
+                    if let Some(id) = id {
+                        edges.retain(|edge| edge.id.as_ref() == Some(id));
+                    }
+                    match edges.len() {
+                        0 => {}
+                        1 => {
+                            let mut edge = edges.remove(0);
+                            for (key, value) in props {
+                                edge.props.insert(key.clone(), value.clone());
+                            }
+                            self.put_edge(&edge).await?;
+                        }
+                        count => {
+                            return Err(GrustError::CypherUnsupportedCardinality(format!(
+                                "edge patch matched {count} edges; add an explicit edge id"
+                            )));
+                        }
+                    }
                 }
                 GraphMutation::DeleteMatchingNodes { .. } => {
                     return Err(GrustError::Unsupported(

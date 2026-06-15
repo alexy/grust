@@ -298,7 +298,9 @@ Open semantic decisions before accepting general Cypher writes:
 - Match cardinality: mutating `MATCH ... SET/DELETE` may affect zero, one, or
   many rows; broad node `MATCH ... DELETE` now reports matched rows and changed
   graph elements, and broad node `MATCH ... SET +=` uses the same matched-row
-  reporting model for node patches.
+  reporting model for node patches. ID-resolved edge patches use structural
+  edge identity plus optional explicit edge `id`; broad relationship matching
+  remains deferred.
 - Atomicity: Sail/Delta operations may need staged Arrow temp views and grouped
   `MERGE`/`DELETE` commands, but multi-statement Spark SQL should not be
   described as transactional unless Sail can prove it for the active table

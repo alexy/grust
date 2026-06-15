@@ -960,11 +960,60 @@ fn cypher_match_set_map_patch_lowers_broad_nodes_with_cardinality() {
 }
 
 #[test]
+fn cypher_match_set_map_patch_lowers_id_resolved_edge() {
+    let plan = sail_cypher_mutation_plan(
+        "
+        MATCH (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-1'}]->(:Person {id: 'person-2'})
+        SET e += {since: 2026, note: null}
+        ",
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            patches: 1,
+            changed_edges: 1,
+            edge_patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        plan.into_mutations(),
+        vec![GraphMutation::PatchEdge {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+            id: Some(EdgeId::new("edge-1")),
+            props: Props::from([
+                ("note".to_string(), Value::Null),
+                ("since".to_string(), Value::Int(2026)),
+            ]),
+        }]
+    );
+
+    let structural = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) SET e += {since: 2026}",
+    )
+    .unwrap();
+    assert_eq!(
+        structural.into_mutations(),
+        vec![GraphMutation::PatchEdge {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+            id: None,
+            props: Props::from([("since".to_string(), Value::Int(2026))]),
+        }]
+    );
+}
+
+#[test]
 fn cypher_match_set_rejects_deferred_patch_forms() {
     for cypher in [
         "MATCH (n:Person {id: 'person-1'}) SET m += {name: 'Ada'}",
         "MATCH (n:Person {id: 'person-1'}) SET n.name = 'Ada'",
-        "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) SET e += {since: 2026}",
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS {since: 2020}]->(:Person {id: 'person-2'}) SET e += {since: 2026}",
         "MATCH (n:Person {id: 'person-1'}) REMOVE n.name",
     ] {
         let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH SET must fail");
@@ -1165,7 +1214,7 @@ fn cypher_errors_are_structured_for_callers() {
     assert!(matches!(error, GrustError::CypherUnresolvedIdentity(_)));
 
     let error = sail_cypher_mutation_plan(
-        "MATCH (:Person {id: 'a'})-[e:KNOWS]->(:Person {id: 'b'}) SET e += {since: 2026}",
+        "MATCH (:Person {id: 'a'})-[e:KNOWS {since: 2020}]->(:Person {id: 'b'}) SET e += {since: 2026}",
     )
     .expect_err("edge patch cardinality");
     assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
@@ -1614,6 +1663,63 @@ async fn test_execute_cypher_broad_match_set_updates_typed_nodes() {
             vec!["person-2".to_string(), "37".to_string()],
         ]
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_match_set_edge_patch_updates_typed_edges() {
+    let store = store().await;
+    store
+        .apply_schema(&person_schema())
+        .await
+        .expect("apply Person schema");
+    store
+        .execute_cypher_mutation(
+            "
+            CREATE (:Person {id: 'person-1'})-[e:presents {id: 'edge-1', source: 'draft'}]->(:Talk {id: 'talk-1'});
+            ",
+        )
+        .await
+        .expect("seed typed edge row");
+
+    let report = store
+        .execute_cypher_mutation(
+            "
+            MATCH (:Person {id: 'person-1'})-[e:presents {id: 'edge-1'}]->(:Talk {id: 'talk-1'})
+            SET e += {source: 'final'}
+            ",
+        )
+        .await
+        .expect("patch typed edge row");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            patches: 1,
+            changed_edges: 1,
+            edge_patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let edges = store
+        .get_edges(EdgeQuery {
+            from: Some(NodeId::new("person-1")),
+            to: Some(NodeId::new("talk-1")),
+            label: Some(Label::new("presents")),
+        })
+        .await
+        .expect("read patched edge");
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].props.get("source"), Some(&Value::from("final")));
+
+    let rows = query_string_rows(
+        store
+            .query_arrow_ipc("SELECT id, source FROM grust_edge_presents ORDER BY id")
+            .await
+            .expect("query typed presents edge table"),
+        2,
+    );
+    assert_eq!(rows, vec![vec!["edge-1".to_string(), "final".to_string()]]);
 }
 
 #[tokio::test]

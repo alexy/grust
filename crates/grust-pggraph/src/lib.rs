@@ -548,6 +548,11 @@ fn mutation_sql(nodes_table: &str, edges_table: &str, mutation: &GraphMutation) 
                 "pgGraph matched node patches are not implemented yet".to_string(),
             ));
         }
+        GraphMutation::PatchEdge { .. } => {
+            return Err(GrustError::Unsupported(
+                "pgGraph edge patches are not implemented yet".to_string(),
+            ));
+        }
         GraphMutation::DeleteMatchingNodes { .. } => {
             return Err(GrustError::Unsupported(
                 "pgGraph matched node deletes are not implemented yet".to_string(),

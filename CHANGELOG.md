@@ -22,6 +22,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added backend-neutral matching-node patch planning and Sail execution for
   broad node `MATCH ... SET n += { ... }`, including matched-row reporting and
   typed-node mirror updates through the existing node load path.
+- Added backend-neutral edge patch mutations and Sail lowering for ID-resolved
+  `MATCH ... SET e += { ... }`, with typed-edge mirror updates through the
+  existing edge load path.
 
 ## 2026-06-15 - 0.8.4
 

@@ -114,6 +114,13 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             patch: Props::from([("archived".to_string(), Value::Bool(true))]),
             cardinality: GraphMutationCardinality::BoundedMany,
         },
+        GraphMutationPlanOp::PatchEdge {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+            id: Some(EdgeId::new("edge-1")),
+            props: Props::from([("since".to_string(), Value::Int(2026))]),
+        },
         GraphMutationPlanOp::DeleteMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("active".to_string(), Value::Bool(false))]),
@@ -133,15 +140,16 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             creates: 1,
             merges: 1,
             deletes: 3,
-            patches: 2,
+            patches: 3,
             matched_rows: 0,
             changed_nodes: 3,
-            changed_edges: 2,
+            changed_edges: 3,
             node_upserts: 1,
             edge_upserts: 1,
             node_deletes: 1,
             edge_deletes: 1,
             node_patches: 1,
+            edge_patches: 1,
         }
     );
     assert_eq!(
@@ -157,6 +165,13 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
                 label: Some(Label::new("Person")),
                 props: Props::from([("active".to_string(), Value::Bool(false))]),
                 patch: Props::from([("archived".to_string(), Value::Bool(true))]),
+            },
+            GraphMutation::PatchEdge {
+                from: NodeId::new("person-1"),
+                label: Label::new("KNOWS"),
+                to: NodeId::new("person-2"),
+                id: Some(EdgeId::new("edge-1")),
+                props: Props::from([("since".to_string(), Value::Int(2026))]),
             },
             GraphMutation::DeleteMatchingNodes {
                 label: Some(Label::new("Person")),

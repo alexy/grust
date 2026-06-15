@@ -47,6 +47,8 @@ describe unreleased working-tree additions:
 - `MATCH ... SET n += { ... }` lowers either when `n` resolves to one explicit
   node ID or, for broad node matches, to a cardinality-aware matching-node
   patch in Sail; `null` is stored as `Value::Null`.
+- `MATCH ... SET e += { ... }` lowers when the relationship identity is
+  resolved by endpoint IDs, relationship type, and optional explicit edge `id`.
 - Writable mutation keywords are parsed case-insensitively at the top level,
   and `// ...` plus `/* ... */` comments are stripped outside string literals.
 
@@ -54,7 +56,8 @@ The v1 implementation should reject, with clear errors:
 
 - generated node IDs;
 - node identity derived from non-`id` properties;
-- edge patching;
+- broad edge patching and relationship property predicates beyond explicit
+  edge `id`;
 - `SET n.name = ...`, `REMOVE`, remove-on-null, arithmetic updates, or
   expression evaluation;
 - mutation plans whose endpoint variables cannot be resolved to stable node
@@ -98,6 +101,7 @@ to backend-neutral Grust mutation concepts:
 - explicit-ID node map patch -> `GraphMutation::PatchNode`;
 - broad node map patch -> `GraphMutation::PatchMatchingNodes` with cardinality
   metadata retained in `GraphMutationPlanOp`;
+- ID-resolved edge map patch -> `GraphMutation::PatchEdge`;
 - Sail broad node delete -> `GraphMutation::DeleteMatchingNodes` with
   cardinality metadata retained in `GraphMutationPlanOp`.
 
@@ -292,8 +296,9 @@ feature slice should start at item 3.
    SET n += {name: 'Ada'};
    ```
 
-   This requires new mutation variants such as node and edge patch operations,
-   plus clear semantics for null values and missing properties.
+   This requires new mutation variants for node patch operations, plus clear
+   semantics for null values and missing properties. Edge map patching is
+   handled separately in Batch H.
 
 7. Cardinality-aware mutating `MATCH`.
 
@@ -436,7 +441,8 @@ Implementation notes:
 
 Implementation status: implemented in the working tree after `0.8.4` for node
 map patches via backend-neutral `PatchNode` mutations and default
-read-modify-write execution; edge patching remains deferred.
+read-modify-write execution; edge map patching is handled separately in
+Batch H.
 
 ### Batch E: Cardinality-aware mutating `MATCH`
 
@@ -498,8 +504,8 @@ deferred until the grammar grows beyond the current compact mutation subset.
 The following decisions should remain out of v1:
 
 - generated IDs and pluggable ID policies;
-- edge patching, remove-on-null, `SET n.name = ...`, arithmetic updates, and
-  `REMOVE`;
+- broad edge patching, relationship property predicates beyond explicit edge
+  `id`, remove-on-null, `SET n.name = ...`, arithmetic updates, and `REMOVE`;
 - cross-backend Cypher mutation APIs;
 - stronger transaction guarantees than the target backend documents.
 
@@ -568,6 +574,17 @@ Acceptance criteria:
 - Sail updates generic edge rows and typed edge mirror tables consistently.
 - pgGraph and Surreal either implement equivalent patch lowering or return
   explicit unsupported errors for the new mutation variant.
+
+Implementation status: implemented in the working tree after `0.8.4` for
+ID-resolved edge map patches. `GraphMutationPlanOp::PatchEdge` and
+`GraphMutation::PatchEdge` carry structural edge identity, optional explicit
+edge `id`, and patch props. Sail lowers `MATCH ... SET e += {...}` when endpoint
+IDs and relationship type are resolved, rejects non-`id` relationship property
+predicates, and executes through the existing `get_edges` plus `put_edge` path
+so generic and typed edge tables update together. The default mutation path
+rejects ambiguous structural matches that resolve to multiple physical edges
+without an explicit edge `id`. pgGraph and Surreal return explicit unsupported
+errors for the new mutation variant.
 
 ### Batch I: Property Assignment And `REMOVE`
 

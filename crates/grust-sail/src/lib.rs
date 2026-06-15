@@ -530,9 +530,33 @@ impl CypherMutationPlanner {
         let (target, props) = parse_map_patch_assignment(assignment)?;
 
         if pattern.contains("->") {
-            return Err(cypher_unsupported_cardinality(
-                "MATCH SET edge patching is not supported yet".to_string(),
-            ));
+            let parsed = self.parse_edge_pattern(pattern)?;
+            let Some(edge_variable) = parsed.edge_variable else {
+                return Err(cypher_syntax(
+                    "MATCH edge SET requires the relationship pattern to bind the patch target",
+                ));
+            };
+            if edge_variable != target {
+                return Err(cypher_syntax(format!(
+                    "MATCH edge SET target '{target}' does not match relationship variable '{edge_variable}'"
+                )));
+            }
+            let id = parsed.edge.id.clone();
+            let non_identity_props = parsed.edge.props.keys().any(|key| key.as_str() != "id");
+            if non_identity_props {
+                return Err(cypher_unsupported_cardinality(
+                    "MATCH edge SET only supports endpoint, type, and optional edge id identity",
+                ));
+            }
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::PatchEdge {
+                    from: parsed.from_id,
+                    label: parsed.edge.label,
+                    to: parsed.to_id,
+                    id,
+                    props,
+                },
+            ]));
         }
 
         let (node, rest) = parse_cypher_node_pattern(pattern)?;

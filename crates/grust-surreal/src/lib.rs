@@ -908,6 +908,9 @@ fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> R
         GraphMutation::PatchMatchingNodes { .. } => Err(GrustError::Unsupported(
             "SurrealDB matched node patches are not implemented yet".to_string(),
         )),
+        GraphMutation::PatchEdge { .. } => Err(GrustError::Unsupported(
+            "SurrealDB edge patches are not implemented yet".to_string(),
+        )),
         GraphMutation::DeleteMatchingNodes { .. } => Err(GrustError::Unsupported(
             "SurrealDB matched node deletes are not implemented yet".to_string(),
         )),

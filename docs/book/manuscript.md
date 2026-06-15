@@ -1020,7 +1020,8 @@ accepts only a strict v1 mutation subset: explicit-ID node `CREATE` and
 resolved node or edge `DELETE`. It also accepts ordered multi-statement
 batches, local node variables bound by explicit-ID node patterns, ID-resolved
 `MATCH ... DELETE`, edge `MATCH ... MERGE`, and cardinality-aware broad node
-`MATCH ... DELETE` / `MATCH ... SET n += { ... }` forms. It lowers those
+`MATCH ... DELETE` / `MATCH ... SET n += { ... }` forms, plus ID-resolved edge
+`MATCH ... SET e += { ... }`. It lowers those
 statements into `GraphMutationPlan` and then ordinary `GraphMutation` values.
 The execution entrypoint, `SailGraphStore::execute_cypher_mutation`, runs those
 mutations through `GraphMutationStore`, so Cypher writes use the same staged
@@ -1031,6 +1032,8 @@ mode performs a read-before-write check and therefore keeps the default
 entrypoint on the lower-friction upsert-compatible path. ID-resolved and broad
 node `MATCH ... SET n += { ... }` lower to node patch mutations; `null` in the
 patch map is stored as `Value::Null` rather than treated as property removal.
+ID-resolved edge `MATCH ... SET e += { ... }` lowers to an edge patch mutation
+and reuses the same typed-edge mirror writes as ordinary edge upserts.
 For broad node deletes and broad node patches, the report records matched rows
 and changed graph elements, and Sail stages matched IDs before using the same
 delete or node-load helpers that keep generic and typed tables consistent. The
