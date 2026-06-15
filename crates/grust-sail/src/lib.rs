@@ -89,6 +89,10 @@ pub const EDGE_DST_ID_COLUMN: &str = "dst_id";
 pub const EDGE_DST_LABEL_COLUMN: &str = "dst_label";
 pub const EDGE_TYPE_COLUMN: &str = "edge_type";
 pub const EDGE_PROPS_COLUMN: &str = "props";
+pub const GRAPH_TABLE_KIND_PROPERTY: &str = "grust.graph.kind";
+pub const GRAPH_TABLE_LABEL_PROPERTY: &str = "grust.graph.label";
+pub const GRAPH_TABLE_KIND_NODE: &str = "node";
+pub const GRAPH_TABLE_KIND_EDGE: &str = "edge";
 const DROP_NODES_SQL: &str = "DROP TABLE IF EXISTS grust_nodes";
 const DROP_EDGES_SQL: &str = "DROP TABLE IF EXISTS grust_edges";
 
@@ -1102,8 +1106,12 @@ fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
             format!(", {fields}")
         };
         statements.push(format!(
-            "CREATE TABLE IF NOT EXISTS {} (id STRING NOT NULL{fields}) USING delta",
-            sail_node_table(node_type.label.as_str())?
+            "CREATE TABLE IF NOT EXISTS {} (id STRING NOT NULL{fields}) USING delta TBLPROPERTIES ({} = {}, {} = {})",
+            sail_node_table(node_type.label.as_str())?,
+            sql_str(GRAPH_TABLE_KIND_PROPERTY),
+            sql_str(GRAPH_TABLE_KIND_NODE),
+            sql_str(GRAPH_TABLE_LABEL_PROPERTY),
+            sql_str(node_type.label.as_str())
         ));
     }
     for edge_type in &schema.edges {
@@ -1125,8 +1133,12 @@ fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
             format!(", {fields}")
         };
         statements.push(format!(
-            "CREATE TABLE IF NOT EXISTS {} (edge_key STRING NOT NULL, id STRING, src_id STRING NOT NULL, dst_id STRING NOT NULL{fields}) USING delta",
-            sail_edge_table(edge_type.label.as_str())?
+            "CREATE TABLE IF NOT EXISTS {} (edge_key STRING NOT NULL, id STRING, src_id STRING NOT NULL, dst_id STRING NOT NULL{fields}) USING delta TBLPROPERTIES ({} = {}, {} = {})",
+            sail_edge_table(edge_type.label.as_str())?,
+            sql_str(GRAPH_TABLE_KIND_PROPERTY),
+            sql_str(GRAPH_TABLE_KIND_EDGE),
+            sql_str(GRAPH_TABLE_LABEL_PROPERTY),
+            sql_str(edge_type.label.as_str())
         ));
     }
     Ok(statements)

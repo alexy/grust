@@ -6,6 +6,16 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 2026-06-14 - 0.8.1
+
+- Added Sail Delta table properties for typed graph tables, marking generated
+  node and edge tables with `grust.graph.kind` and `grust.graph.label`
+  metadata for downstream planners.
+- Added public Sail constants for graph table property names and values.
+- Added an ignored live Sail test covering Cypher `MATCH` over Grust backend
+  tables, including outgoing, incoming, undirected, and `LIMIT ALL` query
+  forms.
+
 ## 2026-06-14 - 0.8.0
 
 - Added `GraphIndex` to `grust-core` as a shared dense adjacency layer for

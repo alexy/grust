@@ -233,7 +233,84 @@ client uses `tonic_prost::ProstCodec`.
 | CREATE TABLE, MERGE INTO, DELETE | `Command(SqlCommand { sql })` | `SqlCommandResult` (drained) |
 | SELECT | `Root(Relation::Sql { query })` | `ArrowBatch` stream |
 
-### 2.4 Arrow Decoding
+### 2.4 Cypher Mutation Proposal
+
+Sail's first Cypher integration is read-only by design: `MATCH ... RETURN`
+lowers cleanly to relational scans, joins, filters, projections, ordering, and
+limits over `grust_nodes`, `grust_edges`, and typed schema tables. Cypher writes
+should not be added by teaching Sail to mutate graph tables directly from a
+second, Sail-owned graph model.
+
+The mutation boundary should remain Grust:
+
+```text
+Cypher mutation text
+        |
+        v
+Sail parser/analyzer graph mutation IR
+        |
+        v
+Grust-style mutation semantics
+        |
+        v
+GraphMutationStore / grust-sail persistence helpers
+        |
+        v
+Spark Connect SqlCommand: MERGE INTO / DELETE / staged Arrow temp views
+```
+
+The goal is to let Cypher be one user-facing syntax for the same mutation
+contract already exposed by Grust:
+
+- `CREATE (n:Label {props})` maps to `GraphMutation::UpsertNode` only after an
+  explicit ID policy has produced a stable `NodeId`.
+- `CREATE (a)-[e:TYPE {props}]->(b)` maps to `GraphMutation::UpsertEdge` once
+  both endpoints are bound by ID.
+- `MERGE` maps to idempotent upsert semantics, matching `put_node`,
+  `put_edge`, and `put_graph`.
+- `SET` maps to replacement or patch semantics only after Grust defines that
+  distinction explicitly; today `put_node` and `put_edge` are replacement
+  upserts for the affected element.
+- `DELETE` maps to `GraphMutationStore::delete_node` or `delete_edge`. Node
+  deletes remove incident edges, matching the existing mutation trait.
+
+This keeps mutation behavior portable across backends. Backends that support
+transactions can override `apply_mutations` atomically. Backends that use the
+default implementation remain ordered but not atomic, and Cypher mutation
+planning must not promise stronger behavior than the target store can provide.
+
+Open semantic decisions before accepting general Cypher writes:
+
+- ID policy: whether node IDs must be supplied, generated, or derived from
+  labels/properties.
+- `CREATE` versus `MERGE`: whether duplicate IDs are errors or replacement
+  upserts.
+- Property update mode: replacement, shallow patch, remove-on-null, or explicit
+  `REMOVE` support.
+- Schema validation: mutations should validate through `GraphSchema` before
+  they reach backend SQL.
+- Match cardinality: mutating `MATCH ... SET/DELETE` may affect zero, one, or
+  many rows; the result shape and error policy must be explicit.
+- Atomicity: Sail/Delta operations may need staged Arrow temp views and grouped
+  `MERGE`/`DELETE` commands, but multi-statement Spark SQL should not be
+  described as transactional unless Sail can prove it for the active table
+  format.
+
+Recommended implementation phases:
+
+1. Define a backend-neutral `GraphMutationPlan` in Grust or `grust-core` that
+   is close to `GraphMutation` but can represent unresolved IDs and matched
+   bindings during planning.
+2. Add `grust-sail` lowering from resolved mutation batches to the existing
+   `MERGE INTO`, typed-table mirror writes, and staged Arrow delete helpers.
+3. In Sail, parse Cypher mutation syntax into `spec` nodes, but lower execution
+   through the Grust-compatible mutation plan rather than direct ad hoc table
+   edits.
+4. Add ignored live `grust-sail` Spark Connect tests for each mutation form,
+   then add Sail parser/analyzer/planner tests that prove the same semantics
+   through `SqlCommand`.
+
+### 2.5 Arrow Decoding
 
 ```rust
 fn parse_nodes_from_arrow(data: &[u8]) -> Result<Vec<Node>> {
@@ -375,3 +452,4 @@ scripts/integration-test.sh --backend sail
 | Streaming ingestion | Spark structured streaming as write path |
 | De-duplication in `Both` traversal | Intermediate node dedup across UNION branches |
 | Property predicate pushdown | Requires typed columns (label-partitioned layout) |
+| Cypher mutations | Route through Grust mutation semantics and `grust-sail` helpers, not direct Sail-owned table edits |

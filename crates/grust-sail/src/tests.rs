@@ -1,9 +1,12 @@
+use std::io::Cursor;
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use arrow::array::Array as _;
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
+use arrow::ipc::reader::StreamReader;
 use grust_core::prelude::*;
 use tonic::transport::Channel;
 
@@ -34,6 +37,30 @@ fn request_store() -> SailGraphStore {
         ),
         schema: RwLock::new(None),
     }
+}
+
+fn query_string_rows(chunks: Vec<Vec<u8>>, columns: usize) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    for chunk in chunks {
+        let reader = StreamReader::try_new(Cursor::new(chunk), None).expect("Arrow IPC stream");
+        for batch in reader {
+            let batch = batch.expect("Arrow record batch");
+            for row in 0..batch.num_rows() {
+                let mut values = Vec::with_capacity(columns);
+                for column in 0..columns {
+                    let strings = batch
+                        .column(column)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .expect("string column");
+                    assert!(!strings.is_null(row), "unexpected null string value");
+                    values.push(strings.value(row).to_string());
+                }
+                rows.push(values);
+            }
+        }
+    }
+    rows
 }
 
 fn sample_graph() -> Graph {
@@ -77,8 +104,16 @@ fn schema_sql_creates_typed_delta_tables() {
         "CREATE TABLE IF NOT EXISTS grust_node_person (id STRING NOT NULL, `name` STRING, `age` BIGINT) USING delta"
     )));
     assert!(sql.iter().any(|statement| {
+        statement.contains("'grust.graph.kind' = 'node'")
+            && statement.contains("'grust.graph.label' = 'Person'")
+    }));
+    assert!(sql.iter().any(|statement| {
         statement.contains("CREATE TABLE IF NOT EXISTS grust_edge_presents")
             && statement.contains("`source` STRING")
+    }));
+    assert!(sql.iter().any(|statement| {
+        statement.contains("'grust.graph.kind' = 'edge'")
+            && statement.contains("'grust.graph.label' = 'presents'")
     }));
 }
 
@@ -452,6 +487,10 @@ fn generic_degree_sql_uses_persisted_sail_graph_tables() {
 fn graph_table_contract_helpers_are_shared() {
     assert_eq!(GRUST_NODES_TABLE, "grust_nodes");
     assert_eq!(GRUST_EDGES_TABLE, "grust_edges");
+    assert_eq!(GRAPH_TABLE_KIND_PROPERTY, "grust.graph.kind");
+    assert_eq!(GRAPH_TABLE_LABEL_PROPERTY, "grust.graph.label");
+    assert_eq!(GRAPH_TABLE_KIND_NODE, "node");
+    assert_eq!(GRAPH_TABLE_KIND_EDGE, "edge");
     assert_eq!(
         sail_node_field_projection("id"),
         SailGraphFieldProjection::PhysicalColumn(NODE_ID_COLUMN)
@@ -683,6 +722,118 @@ async fn test_put_graph_and_traverse() {
         "traversal should return destination node"
     );
     assert_eq!(result[0].id.as_str(), "talk-1");
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_cypher_match_over_grust_backend_tables() {
+    let store = store().await;
+
+    let mut builder = Graph::builder();
+    let _ = builder
+        .node("Person", "person-1")
+        .prop("name", "Alice")
+        .prop("age", "42")
+        .finish();
+    let _ = builder
+        .node("Person", "person-2")
+        .prop("name", "Bob")
+        .prop("age", "31")
+        .finish();
+    let _ = builder
+        .node("Document", "doc-1")
+        .prop("name", "Paper")
+        .prop("age", "42")
+        .finish();
+    let _ = builder
+        .edge("KNOWS", "person-1", "person-2")
+        .id("edge-1")
+        .prop("since", "2020")
+        .finish();
+    let _ = builder
+        .edge("LIKES", "person-2", "person-1")
+        .id("edge-2")
+        .prop("since", "2021")
+        .finish();
+    let _ = builder
+        .edge("KNOWS", "doc-1", "person-2")
+        .id("edge-3")
+        .prop("since", "2022")
+        .finish();
+    let graph = builder.build();
+
+    store.put_graph(&graph).await.expect("put graph");
+
+    let outgoing = query_string_rows(
+        store
+            .query_arrow_ipc(
+                "MATCH (a:Person {age: '42'})-[e:KNOWS {since: '2020'}]->(b:Person) \
+                 RETURN a.id, e.id, b.name \
+                 ORDER BY b.name",
+            )
+            .await
+            .expect("outgoing Cypher query"),
+        3,
+    );
+    assert_eq!(outgoing, vec![vec!["person-1", "edge-1", "Bob"]]);
+
+    let incoming = query_string_rows(
+        store
+            .query_arrow_ipc(
+                "MATCH (a)<-[e]-(b) \
+                 RETURN a.id, e.id, b.id \
+                 ORDER BY e.id",
+            )
+            .await
+            .expect("incoming Cypher query"),
+        3,
+    );
+    assert_eq!(
+        incoming,
+        vec![
+            vec!["person-2", "edge-1", "person-1"],
+            vec!["person-1", "edge-2", "person-2"],
+            vec!["person-2", "edge-3", "doc-1"],
+        ]
+    );
+
+    let undirected = query_string_rows(
+        store
+            .query_arrow_ipc(
+                "MATCH (a)-[e]-(b) \
+                 RETURN a.id, e.id, b.id \
+                 ORDER BY e.id, a.id",
+            )
+            .await
+            .expect("undirected Cypher query"),
+        3,
+    );
+    assert_eq!(
+        undirected,
+        vec![
+            vec!["person-1", "edge-1", "person-2"],
+            vec!["person-2", "edge-1", "person-1"],
+            vec!["person-1", "edge-2", "person-2"],
+            vec!["person-2", "edge-2", "person-1"],
+            vec!["doc-1", "edge-3", "person-2"],
+            vec!["person-2", "edge-3", "doc-1"],
+        ]
+    );
+
+    let limit_all = query_string_rows(
+        store
+            .query_arrow_ipc(
+                "MATCH (a:Person)-->(b:Person) \
+                 RETURN b.name \
+                 ORDER BY b.name \
+                 SKIP 1 \
+                 LIMIT ALL",
+            )
+            .await
+            .expect("LIMIT ALL Cypher query"),
+        1,
+    );
+    assert_eq!(limit_all, vec![vec!["Bob"]]);
 }
 
 #[tokio::test]

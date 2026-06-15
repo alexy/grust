@@ -225,7 +225,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.0", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.8.1", features = ["memory"] }
 ```
 
 The facade re-exports the full `grust-memory` crate surface when the feature is
@@ -315,7 +315,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.0", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.8.1", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 For Arrow-native data sources, enable `ladybug-arrow` to use embedded
