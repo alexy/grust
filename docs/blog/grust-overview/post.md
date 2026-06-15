@@ -415,6 +415,9 @@ ID-resolved `MATCH ... DELETE`, edge `MATCH ... MERGE`, broad node
 `GraphMutationPlan`; `SailGraphStore` executes that plan through
 `GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`, typed-table
 mirror writes, and the same delete paths as ordinary Grust mutations.
+Structured Cypher errors separate syntax, unresolved identity, unsupported
+cardinality, and execution failures without making every backend expose a
+Cypher execution API.
 
 ## Traversal as IR
 

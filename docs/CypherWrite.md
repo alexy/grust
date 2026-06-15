@@ -142,6 +142,11 @@ The API should not promise atomicity beyond the target store. If Sail later
 proves transactional guarantees for the active table format, that can be added
 as documented backend behavior.
 
+Writable Cypher execution remains Sail-specific for now. The shared core
+surface is the backend-neutral mutation plan and report types; other backends
+can opt into Cypher execution later by adding their own parser/executor or by
+sharing a parser module once the grammar grows enough to justify that boundary.
+
 ## Sail Lowering
 
 `grust-sail` already has the needed execution primitives:
@@ -474,11 +479,15 @@ Acceptance criteria:
 - Update README, book prose, `docs/Arrow.md` if Sail/Arrow examples change,
   changelog, and ignored live integration tests for every shipped batch.
 
-Implementation status: partially implemented in the working tree after
-`0.8.4`. Top-level mutation keywords are case-insensitive, semicolon splitting
-is quote-aware, and `// ...` plus `/* ... */` comments are stripped outside
-string literals. Structured error variants and a parser module boundary remain
-deferred.
+Implementation status: implemented in the working tree after `0.8.4` for the
+current compact mutation subset. Top-level mutation keywords are
+case-insensitive, semicolon splitting is quote-aware, and `// ...` plus
+`/* ... */` comments are stripped outside string literals. Structured Cypher
+error variants distinguish syntax, unresolved identity, unsupported
+cardinality, and execution failures. Writable Cypher execution remains
+Sail-specific while `GraphMutationPlan`, `GraphMutationPlanOp`, and
+`GraphMutationReport` stay backend-neutral. A parser module boundary remains
+deferred until the grammar grows beyond the current compact mutation subset.
 
 ## Deferred Semantics
 

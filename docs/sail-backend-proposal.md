@@ -281,6 +281,9 @@ This keeps mutation behavior portable across backends. Backends that support
 transactions can override `apply_mutations` atomically. Backends that use the
 default implementation remain ordered but not atomic, and Cypher mutation
 planning must not promise stronger behavior than the target store can provide.
+Writable Cypher execution remains a Sail entrypoint at this stage; the shared
+cross-backend contract is the Grust mutation plan, report, and structured
+Cypher error categories.
 
 Open semantic decisions before accepting general Cypher writes:
 

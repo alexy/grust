@@ -63,6 +63,16 @@ fn query_string_rows(chunks: Vec<Vec<u8>>, columns: usize) -> Vec<Vec<String>> {
     rows
 }
 
+fn is_cypher_planning_error(error: &GrustError) -> bool {
+    matches!(
+        error,
+        GrustError::CypherSyntax(_)
+            | GrustError::CypherUnresolvedIdentity(_)
+            | GrustError::CypherUnsupportedCardinality(_)
+            | GrustError::Unsupported(_)
+    )
+}
+
 fn sample_graph() -> Graph {
     let mut b = Graph::builder();
     let _ = b
@@ -777,7 +787,7 @@ fn cypher_match_delete_rejects_unresolved_or_mismatched_patterns() {
         "MATCH (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'}) DELETE e",
     ] {
         let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH must fail");
-        assert!(matches!(error, GrustError::Unsupported(_)));
+        assert!(is_cypher_planning_error(&error));
     }
 }
 
@@ -857,7 +867,7 @@ fn cypher_match_merge_rejects_unresolved_or_broad_forms() {
     ] {
         let error =
             sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH MERGE must fail");
-        assert!(matches!(error, GrustError::Unsupported(_)));
+        assert!(is_cypher_planning_error(&error));
     }
 }
 
@@ -906,7 +916,7 @@ fn cypher_match_set_rejects_deferred_patch_forms() {
         "MATCH (n:Person {id: 'person-1'}) REMOVE n.name",
     ] {
         let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH SET must fail");
-        assert!(matches!(error, GrustError::Unsupported(_)));
+        assert!(is_cypher_planning_error(&error));
     }
 }
 
@@ -1089,8 +1099,25 @@ fn cypher_write_rejects_deferred_v1_semantics() {
         "REMOVE n.name",
     ] {
         let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported Cypher must fail");
-        assert!(matches!(error, GrustError::Unsupported(_)));
+        assert!(is_cypher_planning_error(&error));
     }
+}
+
+#[test]
+fn cypher_errors_are_structured_for_callers() {
+    let error = sail_cypher_mutation_plan("RETURN 1").expect_err("unsupported syntax");
+    assert!(matches!(error, GrustError::CypherSyntax(_)));
+
+    let error = sail_cypher_mutation_plan("DELETE (:Person {name: 'Ada'})")
+        .expect_err("unresolved identity");
+    assert!(matches!(error, GrustError::CypherUnresolvedIdentity(_)));
+
+    let error = sail_cypher_mutation_plan("MATCH (n:Person {name: 'Ada'}) SET n += {age: 37}")
+        .expect_err("broad patch cardinality");
+    assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
+
+    let error = cypher_execution_error(GrustError::Backend("boom".to_string()));
+    assert!(matches!(error, GrustError::CypherExecution(_)));
 }
 
 #[test]

@@ -17,6 +17,14 @@ pub enum GrustError {
     Schema(String),
     #[error("unsupported graph feature: {0}")]
     Unsupported(String),
+    #[error("Cypher syntax error: {0}")]
+    CypherSyntax(String),
+    #[error("Cypher unresolved identity: {0}")]
+    CypherUnresolvedIdentity(String),
+    #[error("Cypher unsupported cardinality: {0}")]
+    CypherUnsupportedCardinality(String),
+    #[error("Cypher execution error: {0}")]
+    CypherExecution(String),
     #[error("serialization error: {0}")]
     Serialization(String),
 }

@@ -399,6 +399,9 @@ value rather than interpreted as property removal.
 The mutation report includes matched-row and changed node/edge counts for
 broad Sail deletes, and the parser accepts top-level mutation keywords
 case-insensitively while stripping Cypher comments outside string literals.
+Cypher planning and execution failures use structured `GrustError` variants
+for syntax, unresolved identity, unsupported cardinality, and execution errors;
+execution remains Sail-specific over backend-neutral mutation plans.
 
 `grust-surreal` provides both `SurrealHttpGraphStore` and
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and

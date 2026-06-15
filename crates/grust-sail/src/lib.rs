@@ -295,9 +295,7 @@ pub fn sail_cypher_mutation_plan(cypher: &str) -> Result<GraphMutationPlan> {
     let cypher = strip_cypher_comments(cypher)?;
     let statements = split_cypher_statements(&cypher)?;
     if statements.is_empty() {
-        return Err(GrustError::Unsupported(
-            "writable Cypher statement is empty".to_string(),
-        ));
+        return Err(cypher_syntax("writable Cypher statement is empty"));
     }
 
     let mut planner = CypherMutationPlanner::default();
@@ -322,13 +320,11 @@ impl CypherMutationPlanner {
             return self.parse_match(rest);
         }
         if find_unquoted_keyword(cypher, "SET").is_some() {
-            return Err(GrustError::Unsupported(
-                "writable Cypher SET is not supported in v1".to_string(),
-            ));
+            return Err(cypher_syntax("writable Cypher SET is not supported in v1"));
         }
         if find_unquoted_keyword(cypher, "REMOVE").is_some() {
-            return Err(GrustError::Unsupported(
-                "writable Cypher REMOVE is not supported in v1".to_string(),
+            return Err(cypher_syntax(
+                "writable Cypher REMOVE is not supported in v1",
             ));
         }
         if let Some(rest) = strip_leading_keyword(cypher, "CREATE") {
@@ -340,7 +336,7 @@ impl CypherMutationPlanner {
         if let Some(rest) = strip_leading_keyword(cypher, "DELETE") {
             return self.parse_delete(rest);
         }
-        Err(GrustError::Unsupported(format!(
+        Err(cypher_syntax(format!(
             "unsupported writable Cypher statement; expected CREATE, MERGE, or DELETE: {cypher}"
         )))
     }
@@ -362,14 +358,15 @@ impl CypherMutationPlanner {
 
         let (node, rest) = parse_cypher_node_pattern(pattern)?;
         if !rest.trim().is_empty() {
-            return Err(GrustError::Unsupported(format!(
+            return Err(cypher_syntax(format!(
                 "unsupported writable Cypher node pattern suffix: {}",
                 rest.trim()
             )));
         }
-        let label = node.label.clone().ok_or_else(|| {
-            GrustError::Unsupported("node CREATE/MERGE requires a label".to_string())
-        })?;
+        let label = node
+            .label
+            .clone()
+            .ok_or_else(|| cypher_syntax("node CREATE/MERGE requires a label"))?;
         let id = required_string_prop(&node.props, "id", "node CREATE/MERGE")?;
         self.bind_node_variable(&node, &NodeId::new(id.clone()))?;
         Ok(GraphMutationPlan::new(vec![
@@ -394,7 +391,7 @@ impl CypherMutationPlanner {
 
         let (node, rest) = parse_cypher_node_pattern(pattern)?;
         if !rest.trim().is_empty() {
-            return Err(GrustError::Unsupported(format!(
+            return Err(cypher_syntax(format!(
                 "unsupported writable Cypher delete pattern suffix: {}",
                 rest.trim()
             )));
@@ -415,7 +412,7 @@ impl CypherMutationPlanner {
         if find_unquoted_keyword(statement, "SET").is_some() {
             return self.parse_match_set(statement);
         }
-        Err(GrustError::Unsupported(
+        Err(cypher_syntax(
             "only ID-resolved MATCH ... DELETE, MATCH ... MERGE edge, and MATCH ... SET += node forms are supported in writable Cypher".to_string(),
         ))
     }
@@ -427,13 +424,13 @@ impl CypherMutationPlanner {
         if pattern.contains("->") {
             let parsed = self.parse_edge_pattern(pattern)?;
             let Some(edge_variable) = parsed.edge_variable else {
-                return Err(GrustError::Unsupported(
+                return Err(cypher_syntax(
                     "MATCH edge DELETE requires the relationship pattern to bind the DELETE target"
                         .to_string(),
                 ));
             };
             if edge_variable != target {
-                return Err(GrustError::Unsupported(format!(
+                return Err(cypher_syntax(format!(
                     "MATCH edge DELETE target '{target}' does not match relationship variable '{edge_variable}'"
                 )));
             }
@@ -448,18 +445,18 @@ impl CypherMutationPlanner {
 
         let (node, rest) = parse_cypher_node_pattern(pattern)?;
         if !rest.trim().is_empty() {
-            return Err(GrustError::Unsupported(format!(
+            return Err(cypher_syntax(format!(
                 "unsupported writable Cypher MATCH DELETE pattern suffix: {}",
                 rest.trim()
             )));
         }
         let Some(node_variable) = &node.variable else {
-            return Err(GrustError::Unsupported(
+            return Err(cypher_syntax(
                 "MATCH node DELETE requires the node pattern to bind the DELETE target".to_string(),
             ));
         };
         if node_variable != &target {
-            return Err(GrustError::Unsupported(format!(
+            return Err(cypher_syntax(format!(
                 "MATCH node DELETE target '{target}' does not match node variable '{node_variable}'"
             )));
         }
@@ -496,13 +493,13 @@ impl CypherMutationPlanner {
         for pattern in split_top_level_patterns(match_clause)? {
             let (node, rest) = parse_cypher_node_pattern(pattern)?;
             if !rest.trim().is_empty() {
-                return Err(GrustError::Unsupported(format!(
+                return Err(cypher_syntax(format!(
                     "unsupported writable Cypher MATCH pattern suffix: {}",
                     rest.trim()
                 )));
             }
             if node.variable.is_none() {
-                return Err(GrustError::Unsupported(
+                return Err(cypher_syntax(
                     "MATCH MERGE requires each matched node pattern to bind a variable".to_string(),
                 ));
             }
@@ -510,13 +507,13 @@ impl CypherMutationPlanner {
         }
 
         if !merge_pattern.contains("->") {
-            return Err(GrustError::Unsupported(
+            return Err(cypher_syntax(
                 "MATCH MERGE currently supports one relationship pattern only".to_string(),
             ));
         }
         let parsed = self.parse_edge_pattern(merge_pattern)?;
         if parsed.from_variable.is_none() || parsed.to_variable.is_none() {
-            return Err(GrustError::Unsupported(
+            return Err(cypher_syntax(
                 "MATCH MERGE relationship endpoints must be bound variables".to_string(),
             ));
         }
@@ -533,27 +530,37 @@ impl CypherMutationPlanner {
         let (target, props) = parse_map_patch_assignment(assignment)?;
 
         if pattern.contains("->") {
-            return Err(GrustError::Unsupported(
+            return Err(cypher_unsupported_cardinality(
                 "MATCH SET edge patching is not supported yet".to_string(),
             ));
         }
 
         let (node, rest) = parse_cypher_node_pattern(pattern)?;
         if !rest.trim().is_empty() {
-            return Err(GrustError::Unsupported(format!(
+            return Err(cypher_syntax(format!(
                 "unsupported writable Cypher MATCH SET pattern suffix: {}",
                 rest.trim()
             )));
         }
         let Some(node_variable) = &node.variable else {
-            return Err(GrustError::Unsupported(
+            return Err(cypher_syntax(
                 "MATCH SET requires the node pattern to bind the patch target".to_string(),
             ));
         };
         if node_variable != &target {
-            return Err(GrustError::Unsupported(format!(
+            return Err(cypher_syntax(format!(
                 "MATCH SET target '{target}' does not match node variable '{node_variable}'"
             )));
+        }
+        if optional_string_prop(&node.props, "id").is_none()
+            && node
+                .variable
+                .as_ref()
+                .is_none_or(|variable| !self.node_bindings.contains_key(variable))
+        {
+            return Err(cypher_unsupported_cardinality(
+                "MATCH SET += requires one resolved node identity; broad patching is not supported",
+            ));
         }
         let id = self.resolve_node_id(&node, "MATCH node SET")?;
         Ok(GraphMutationPlan::new(vec![
@@ -564,20 +571,18 @@ impl CypherMutationPlanner {
     fn parse_edge_pattern(&mut self, pattern: &str) -> Result<ParsedCypherEdge> {
         let (from, rest) = parse_cypher_node_pattern(pattern)?;
         let rest = rest.trim_start();
-        let rest = rest.strip_prefix("-[").ok_or_else(|| {
-            GrustError::Unsupported(
-                "edge mutation requires a directed -[...]-> pattern".to_string(),
-            )
-        })?;
+        let rest = rest
+            .strip_prefix("-[")
+            .ok_or_else(|| cypher_syntax("edge mutation requires a directed -[...]-> pattern"))?;
         let rel_end = find_matching(rest, '[', ']')?;
         let rel = &rest[..rel_end];
         let rest = rest[rel_end + 1..].trim_start();
-        let rest = rest.strip_prefix("->").ok_or_else(|| {
-            GrustError::Unsupported("edge mutation requires outgoing '->' direction".to_string())
-        })?;
+        let rest = rest
+            .strip_prefix("->")
+            .ok_or_else(|| cypher_syntax("edge mutation requires outgoing '->' direction"))?;
         let (to, rest) = parse_cypher_node_pattern(rest)?;
         if !rest.trim().is_empty() {
-            return Err(GrustError::Unsupported(format!(
+            return Err(cypher_syntax(format!(
                 "unsupported writable Cypher edge pattern suffix: {}",
                 rest.trim()
             )));
@@ -620,11 +625,11 @@ impl CypherMutationPlanner {
             if let Some(id) = self.node_bindings.get(variable) {
                 return Ok(id.clone());
             }
-            return Err(GrustError::Unsupported(format!(
+            return Err(cypher_unresolved_identity(format!(
                 "{context} variable '{variable}' is not bound to a node id"
             )));
         }
-        Err(GrustError::Unsupported(format!(
+        Err(cypher_unresolved_identity(format!(
             "{context} requires explicit string property 'id'"
         )))
     }
@@ -635,7 +640,7 @@ impl CypherMutationPlanner {
         };
         if let Some(existing) = self.node_bindings.get(variable) {
             if existing != id {
-                return Err(GrustError::Unsupported(format!(
+                return Err(cypher_unresolved_identity(format!(
                     "Cypher variable '{variable}' is already bound to node id '{}'",
                     existing.as_str()
                 )));
@@ -644,6 +649,28 @@ impl CypherMutationPlanner {
         }
         self.node_bindings.insert(variable.clone(), id.clone());
         Ok(())
+    }
+}
+
+fn cypher_syntax(message: impl Into<String>) -> GrustError {
+    GrustError::CypherSyntax(message.into())
+}
+
+fn cypher_unresolved_identity(message: impl Into<String>) -> GrustError {
+    GrustError::CypherUnresolvedIdentity(message.into())
+}
+
+fn cypher_unsupported_cardinality(message: impl Into<String>) -> GrustError {
+    GrustError::CypherUnsupportedCardinality(message.into())
+}
+
+fn cypher_execution_error(error: GrustError) -> GrustError {
+    match error {
+        GrustError::CypherSyntax(_)
+        | GrustError::CypherUnresolvedIdentity(_)
+        | GrustError::CypherUnsupportedCardinality(_)
+        | GrustError::CypherExecution(_) => error,
+        other => GrustError::CypherExecution(other.to_string()),
     }
 }
 
@@ -679,7 +706,7 @@ fn split_cypher_statements(cypher: &str) -> Result<Vec<&str>> {
     }
 
     if quote.is_some() {
-        return Err(GrustError::Unsupported(
+        return Err(cypher_syntax(
             "Cypher statement has an unterminated string literal".to_string(),
         ));
     }
@@ -746,7 +773,7 @@ fn strip_cypher_comments(cypher: &str) -> Result<String> {
     }
 
     if block_comment {
-        return Err(GrustError::Unsupported(
+        return Err(cypher_syntax(
             "Cypher statement has an unterminated block comment".to_string(),
         ));
     }
@@ -1372,9 +1399,13 @@ impl SailGraphStore {
         let plan = sail_cypher_mutation_plan(cypher)?;
         let mut report = plan.report();
         if options.create_mode == CypherCreateMode::ErrorIfExists {
-            self.check_strict_create_conflicts(&plan).await?;
+            self.check_strict_create_conflicts(&plan)
+                .await
+                .map_err(cypher_execution_error)?;
         }
-        self.apply_cypher_mutation_plan(&plan, &mut report).await?;
+        self.apply_cypher_mutation_plan(&plan, &mut report)
+            .await
+            .map_err(cypher_execution_error)?;
         Ok(report)
     }
 

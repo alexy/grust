@@ -16,6 +16,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   report fields plus ignored live Sail cascade coverage.
 - Polished Sail writable Cypher parsing with case-insensitive top-level
   mutation keywords and comment stripping outside string literals.
+- Added structured Cypher error variants for syntax, unresolved identity,
+  unsupported cardinality, and execution failures while keeping execution
+  Sail-specific over backend-neutral mutation plans.
 
 ## 2026-06-15 - 0.8.4
 

@@ -1035,6 +1035,10 @@ For broad node deletes, the report records matched rows and changed graph
 elements, and Sail stages matched IDs before using the same node-delete helper
 that cascades incident-edge removal. The mutation parser keeps top-level
 keywords case-insensitive and strips Cypher comments outside string literals.
+Callers can distinguish Cypher syntax, unresolved identity, unsupported
+cardinality, and execution failures through structured `GrustError` variants.
+Execution remains Sail-specific for now, while the mutation plan and report
+types stay backend-neutral.
 
 ## FalkorDB, HelixDB, and SurrealDB
 
