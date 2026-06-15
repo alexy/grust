@@ -11,9 +11,10 @@ graph queries and already persists Grust graphs through Spark SQL, staged Arrow
 temp views, Delta `MERGE INTO`, typed-table mirror writes, and staged delete
 helpers.
 
-## V1 Scope
+## Shipped V1 Scope
 
-The first writable Cypher slice is deliberately strict:
+The first writable Cypher slice is deliberately strict and is implemented in
+the `0.8.2` line:
 
 - `CREATE (:Label {id: ..., ...})` writes a node only when the node `id` is
   explicit in the literal property map.
@@ -77,11 +78,10 @@ It should reuse the same persistence path used by `put_node`, `put_edge`,
 generic table writes, edge identity, and delete behavior consistent across all
 Grust write surfaces.
 
-## Public API Direction
+## Public API
 
-Add a backend-neutral planning type in `grust-core`, close to the current
-`GraphMutation` type but able to represent parse/planning state before every ID
-and binding is resolved. A likely shape is:
+`grust-core` exposes a backend-neutral planning type close to the current
+`GraphMutation` type but able to preserve mutation intent before execution:
 
 ```rust
 pub struct GraphMutationPlan {
@@ -89,12 +89,14 @@ pub struct GraphMutationPlan {
 }
 ```
 
-The resolved form should expose a conversion into `Vec<GraphMutation>` only
-after ID policy, endpoint binding, and unsupported syntax checks have succeeded.
+The resolved form exposes conversion into `Vec<GraphMutation>` only after ID
+policy, endpoint binding, and unsupported syntax checks have succeeded.
 
-Add a Sail-specific entrypoint for execution, for example:
+`grust-sail` exposes the Sail-specific planning and execution entrypoints:
 
 ```rust
+pub fn sail_cypher_mutation_plan(cypher: &str) -> Result<GraphMutationPlan>;
+
 impl SailGraphStore {
     pub async fn execute_cypher_mutation(
         &self,
@@ -163,6 +165,81 @@ Ignored live Sail tests should cover:
 - delete node with incident-edge cascade;
 - mixed ordered mutation batch, with documentation that it follows the target
   store's `apply_mutations` atomicity behavior.
+
+## Next Feature Roadmap
+
+The next writable Cypher features should extend the strict v1 surface without
+changing the core rule: Cypher syntax must lower through Grust mutation
+planning and `GraphMutationStore`.
+
+1. Multi-statement ordered mutation batches.
+
+   Accept a sequence such as:
+
+   ```cypher
+   CREATE (:Person {id: 'person-1', name: 'Ada'});
+   MERGE (:Person {id: 'person-2', name: 'Bob'});
+   CREATE (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'});
+   ```
+
+   The parser should produce one `GraphMutationPlan` with operations in source
+   order, and `CypherMutationReport` should aggregate counts across the whole
+   batch. Execution should use the target store's existing ordered
+   `apply_mutations` behavior and must not claim stronger atomicity.
+
+2. Local variable binding inside one mutation batch.
+
+   Support variables introduced by explicit-ID node patterns and reused by
+   later edge patterns in the same batch:
+
+   ```cypher
+   CREATE (a:Person {id: 'person-1', name: 'Ada'});
+   CREATE (b:Person {id: 'person-2', name: 'Bob'});
+   CREATE (a)-[:KNOWS]->(b);
+   ```
+
+   Bindings should be local to one call to `sail_cypher_mutation_plan` or
+   `execute_cypher_mutation`. A variable can bind only to a resolved `NodeId`.
+   Rebinding a variable to a different node ID should be an error.
+
+3. ID-resolved `MATCH ... DELETE`.
+
+   Add only the forms whose target identity is explicit and single-pattern:
+
+   ```cypher
+   MATCH (n:Person {id: 'person-1'}) DELETE n;
+   MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) DELETE e;
+   ```
+
+   This should lower to the same `DeleteNode` and `DeleteEdge` plan operations
+   as v1 literal `DELETE`. Broad cardinality-changing `MATCH` remains deferred.
+
+4. ID-resolved `MATCH ... MERGE` for edges.
+
+   Support matching explicit endpoint IDs and merging one relationship between
+   them:
+
+   ```cypher
+   MATCH (a:Person {id: 'person-1'}), (b:Person {id: 'person-2'})
+   MERGE (a)-[:KNOWS {since: 2026}]->(b);
+   ```
+
+   The matched variables must resolve to exactly the explicit IDs present in
+   the match patterns. The merge still lowers to `GraphMutation::UpsertEdge`.
+
+5. Property patch semantics.
+
+   Defer general `SET` until Grust has explicit backend-neutral patch
+   operations. The first acceptable form should be map patching, not arbitrary
+   property assignment:
+
+   ```cypher
+   MATCH (n:Person {id: 'person-1'})
+   SET n += {name: 'Ada'};
+   ```
+
+   This requires new mutation variants such as node and edge patch operations,
+   plus clear semantics for null values and missing properties.
 
 ## Deferred Semantics
 
