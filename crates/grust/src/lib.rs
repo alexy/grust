@@ -9,6 +9,9 @@ pub use grust_falkor::*;
 #[cfg(feature = "helix")]
 pub use grust_helix::*;
 
+#[cfg(feature = "issundb")]
+pub use grust_issundb::*;
+
 #[cfg(feature = "ladybug")]
 pub use grust_ladybug::*;
 
@@ -45,6 +48,9 @@ pub mod prelude {
 
     #[cfg(feature = "helix")]
     pub use grust_helix::*;
+
+    #[cfg(feature = "issundb")]
+    pub use grust_issundb::*;
 
     #[cfg(feature = "ladybug")]
     pub use grust_ladybug::*;

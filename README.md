@@ -48,6 +48,7 @@ crates/
   grust-core/     Core model, builder, schema, traversal IR, GraphStore trait
   grust-falkor/   FalkorDB writer using Redis GRAPH.QUERY
   grust-helix/    HelixDB writer using HTTP or the Rust SDK
+  grust-issundb/  Embedded IssunDB store using the Rust issundb crate
   grust-ladybug/  Embedded LadybugDB store using the Rust lbug crate
   grust-lancedb/  LanceDB store using the Rust SDK
   grust-memory/   Deterministic in-memory store for tests and local use

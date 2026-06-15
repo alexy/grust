@@ -5,6 +5,7 @@ members = [
     "crates/grust-core",
     "crates/grust-falkor",
     "crates/grust-helix",
+    "crates/grust-issundb",
     "crates/grust-ladybug",
     "crates/grust-lancedb",
     "crates/grust-memory",
@@ -27,7 +28,9 @@ categories = ["database", "data-structures"]
 async-trait = "0.1.89"
 base64 = "0.22.1"
 helix-db = "=2.0.0"
+issundb = "0.1.0-alpha.6"
 lbug = "0.17.1"
+rmp-serde = "1"
 lancedb = "0.30.0"
 redis = "1.2.1"
 r2d2 = "0.8.10"

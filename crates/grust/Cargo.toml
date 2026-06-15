@@ -18,6 +18,7 @@ default = []
 cocoindex = ["dep:grust-cocoindex"]
 falkor = ["dep:grust-falkor"]
 helix = ["dep:grust-helix"]
+issundb = ["dep:grust-issundb"]
 ladybug = ["dep:grust-ladybug"]
 ladybug-arrow = ["ladybug", "grust-ladybug/arrow"]
 lancedb = ["dep:grust-lancedb"]
@@ -33,6 +34,7 @@ grust-core = { version = "0.8.1", path = "../grust-core" }
 grust-cocoindex = { version = "0.8.1", path = "../grust-cocoindex", optional = true }
 grust-falkor = { version = "0.8.1", path = "../grust-falkor", optional = true }
 grust-helix = { version = "0.8.1", path = "../grust-helix", optional = true }
+grust-issundb = { version = "0.8.1", path = "../grust-issundb", optional = true }
 grust-ladybug = { version = "0.8.1", path = "../grust-ladybug", optional = true }
 grust-lancedb = { version = "0.8.1", path = "../grust-lancedb", optional = true }
 grust-memory = { version = "0.8.1", path = "../grust-memory", optional = true }
