@@ -1780,6 +1780,150 @@ fn cypher_match_set_property_assignment_lowers_resolved_node_and_edge() {
 }
 
 #[test]
+fn cypher_match_set_multiple_assignments_lowers_in_order() {
+    let plan = sail_cypher_mutation_plan_with_options(
+        "MATCH (n:Person {id: 'person-1'}) SET n.name = $name, n.updated_at = $ts, n.count = n.count + 1, n.name = 'Ada final'",
+        CypherMutationOptions {
+            parameters: CypherParameters::from([
+                ("name".to_string(), Value::from("Ada")),
+                ("ts".to_string(), Value::from("2026-06-16T00:00:00Z")),
+            ]),
+            ..CypherMutationOptions::default()
+        },
+    )
+    .unwrap()
+    .0;
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            patches: 4,
+            changed_nodes: 3,
+            node_patches: 3,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        plan.operations,
+        vec![
+            GraphMutationPlanOp::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([("name".to_string(), Value::from("Ada"))]),
+            },
+            GraphMutationPlanOp::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([(
+                    "updated_at".to_string(),
+                    Value::from("2026-06-16T00:00:00Z")
+                )]),
+            },
+            GraphMutationPlanOp::UpdateMatchingNodeProperty {
+                label: None,
+                props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                predicates: Vec::new(),
+                target_key: "count".to_string(),
+                source_key: "count".to_string(),
+                op: GraphNumericOp::Add,
+                operand: Value::Int(1),
+                cardinality: GraphMutationCardinality::SingleIdentity,
+            },
+            GraphMutationPlanOp::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([("name".to_string(), Value::from("Ada final"))]),
+            },
+        ]
+    );
+}
+
+#[test]
+fn cypher_match_set_multiple_assignments_preserves_nested_commas() {
+    let node = sail_cypher_mutation_plan(
+        "MATCH (n:Person {id: 'person-1'}) SET n += {name: 'Ada, Countess', note: 'x,y'}, n.flag = true",
+    )
+    .unwrap();
+    assert_eq!(
+        node.operations,
+        vec![
+            GraphMutationPlanOp::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([
+                    ("name".to_string(), Value::from("Ada, Countess")),
+                    ("note".to_string(), Value::from("x,y")),
+                ]),
+            },
+            GraphMutationPlanOp::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([("flag".to_string(), Value::Bool(true))]),
+            },
+        ]
+    );
+
+    let edge = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-1'}]->(:Person {id: 'person-2'}) SET e.since = 2026, e.note = 'a,b'",
+    )
+    .unwrap();
+    assert_eq!(
+        edge.operations,
+        vec![
+            GraphMutationPlanOp::PatchEdge {
+                from: NodeId::new("person-1"),
+                label: Label::new("KNOWS"),
+                to: NodeId::new("person-2"),
+                id: Some(EdgeId::new("edge-1")),
+                props: Props::from([("since".to_string(), Value::Int(2026))]),
+            },
+            GraphMutationPlanOp::PatchEdge {
+                from: NodeId::new("person-1"),
+                label: Label::new("KNOWS"),
+                to: NodeId::new("person-2"),
+                id: Some(EdgeId::new("edge-1")),
+                props: Props::from([("note".to_string(), Value::from("a,b"))]),
+            },
+        ]
+    );
+}
+
+#[test]
+fn cypher_match_set_multiple_assignments_supports_null_removal() {
+    let plan = sail_cypher_mutation_plan_with_options(
+        "MATCH (n:Person {id: 'person-1'}) SET n.nickname = null, n.name = 'Ada'",
+        CypherMutationOptions {
+            null_assignment: CypherNullAssignment::RemoveProperty,
+            ..CypherMutationOptions::default()
+        },
+    )
+    .unwrap()
+    .0;
+
+    assert_eq!(
+        plan.operations,
+        vec![
+            GraphMutationPlanOp::RemoveNodeProps {
+                id: NodeId::new("person-1"),
+                keys: vec!["nickname".to_string()],
+            },
+            GraphMutationPlanOp::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([("name".to_string(), Value::from("Ada"))]),
+            },
+        ]
+    );
+}
+
+#[test]
+fn cypher_match_set_multiple_assignments_rejects_invalid_items() {
+    for cypher in [
+        "MATCH (n:Person {id: 'person-1'}) SET n.name = 'Ada', m.name = 'Bob'",
+        "MATCH (:Person {id: 'a'})-[e:KNOWS]->(:Person {id: 'b'}) SET e.weight = e.weight + 1, e.note = 'x'",
+        "MATCH (n:Person {id: 'person-1'}) SET n.name = 'Ada',",
+    ] {
+        let error =
+            sail_cypher_mutation_plan(cypher).expect_err("invalid assignment list should fail");
+        assert!(is_cypher_planning_error(&error));
+    }
+}
+
+#[test]
 fn cypher_null_assignment_option_removes_properties() {
     let options = CypherMutationOptions {
         null_assignment: CypherNullAssignment::RemoveProperty,
@@ -2198,6 +2342,37 @@ fn sail_cypher_plan_executes_on_memory_facade() {
             .unwrap()
             .is_some()
     );
+}
+
+#[test]
+fn sail_cypher_multiple_set_assignments_execute_in_order_on_memory_facade() {
+    let plan = sail_cypher_mutation_plan(
+        "
+        CREATE (:Counter {id: 'c1', count: 1});
+        MATCH (n:Counter {id: 'c1'}) SET n.count = n.count + 1, n.count = n.count * 2;
+        ",
+    )
+    .unwrap();
+    let store = MemoryGraphStore::new();
+
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&plan)).unwrap();
+
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            creates: 1,
+            patches: 2,
+            matched_rows: 2,
+            changed_nodes: 3,
+            node_upserts: 1,
+            node_patches: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+    let node = futures_executor::block_on(store.get_node(&NodeId::new("c1")))
+        .unwrap()
+        .expect("counter node");
+    assert_eq!(node.props.get("count"), Some(&Value::Int(4)));
 }
 
 #[test]

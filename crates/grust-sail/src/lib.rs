@@ -725,10 +725,25 @@ impl CypherMutationPlanner {
     }
 
     fn parse_match_set(&mut self, statement: &str) -> Result<GraphMutationPlan> {
-        let (pattern, assignment) = split_match_set(statement)?;
+        let (pattern, assignments) = split_match_set(statement)?;
+        let assignments =
+            parse_patch_assignments(assignments, &self.parameters, self.null_assignment)?;
+        let mut plan = GraphMutationPlan::default();
+        for assignment in assignments {
+            plan.operations.extend(
+                self.lower_match_set_assignment(pattern, assignment)?
+                    .operations,
+            );
+        }
+        Ok(plan)
+    }
+
+    fn lower_match_set_assignment(
+        &mut self,
+        pattern: &str,
+        assignment: PatchAssignment,
+    ) -> Result<GraphMutationPlan> {
         let (pattern, where_predicates) = split_match_where(pattern, &self.parameters)?;
-        let assignment =
-            parse_patch_assignment(assignment, &self.parameters, self.null_assignment)?;
 
         if find_unquoted_sequence(pattern, "->").is_some() {
             let mut parsed = self.parse_edge_match_pattern(pattern)?;
@@ -1769,6 +1784,24 @@ fn parse_patch_assignment(
     })
 }
 
+fn parse_patch_assignments(
+    assignments: &str,
+    parameters: &CypherParameters,
+    null_assignment: CypherNullAssignment,
+) -> Result<Vec<PatchAssignment>> {
+    split_top_level_commas(assignments)?
+        .into_iter()
+        .map(str::trim)
+        .map(|assignment| {
+            if assignment.is_empty() {
+                Err(cypher_syntax("MATCH SET contains an empty assignment"))
+            } else {
+                parse_patch_assignment(assignment, parameters, null_assignment)
+            }
+        })
+        .collect()
+}
+
 struct NumericExpression {
     source_target: String,
     source_key: String,
@@ -2003,6 +2036,10 @@ fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
     let mut start = 0;
     let mut quote = None;
     let mut escaped = false;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+
     for (index, ch) in value.char_indices() {
         if escaped {
             escaped = false;
@@ -2020,7 +2057,25 @@ fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
         }
         match ch {
             '\'' | '"' => quote = Some(ch),
-            ',' => {
+            '(' => paren_depth += 1,
+            ')' => {
+                paren_depth = paren_depth.checked_sub(1).ok_or_else(|| {
+                    cypher_syntax("unmatched ')' in Cypher expression".to_string())
+                })?;
+            }
+            '[' => bracket_depth += 1,
+            ']' => {
+                bracket_depth = bracket_depth.checked_sub(1).ok_or_else(|| {
+                    cypher_syntax("unmatched ']' in Cypher expression".to_string())
+                })?;
+            }
+            '{' => brace_depth += 1,
+            '}' => {
+                brace_depth = brace_depth.checked_sub(1).ok_or_else(|| {
+                    cypher_syntax("unmatched '}' in Cypher expression".to_string())
+                })?;
+            }
+            ',' if paren_depth == 0 && bracket_depth == 0 && brace_depth == 0 => {
                 parts.push(&value[start..index]);
                 start = index + ch.len_utf8();
             }
@@ -2031,6 +2086,9 @@ fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
         return Err(GrustError::Unsupported(
             "unterminated Cypher string literal".to_string(),
         ));
+    }
+    if paren_depth != 0 || bracket_depth != 0 || brace_depth != 0 {
+        return Err(cypher_syntax("unclosed grouping in Cypher expression"));
     }
     parts.push(&value[start..]);
     Ok(parts)

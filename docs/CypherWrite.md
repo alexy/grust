@@ -94,6 +94,10 @@ describe unreleased working-tree additions:
 - `CypherMutationOptions::null_assignment` can opt into Cypher-compatible
   `SET x.key = null` property removal. The default remains `StoreNull`, and
   `SET x += {key: null}` always stores `Value::Null`.
+- `MATCH ... SET` accepts comma-separated assignment lists and lowers each item
+  as an ordered plan operation, preserving source order for repeated property
+  targets while retaining the supported literal, map patch, remove-on-null, and
+  numeric node update forms.
 - Writable mutation keywords are parsed case-insensitively at the top level,
   and `// ...` plus `/* ... */` comments are stripped outside string literals.
 
@@ -1279,6 +1283,17 @@ Acceptance criteria:
   cardinality or identity rules cannot make the result deterministic.
 - Add tests for repeated property targets, parameters, numeric updates, and
   unsupported expression forms inside a multi-assignment clause.
+
+Implementation status: implemented in the working tree after Batch X. `MATCH
+... SET` now parses comma-separated assignment lists with quote- and
+grouping-aware splitting, including map literals and string values that contain
+commas. Each assignment lowers through the existing single-assignment path into
+one ordered plan operation, so repeated property targets preserve source order.
+Planner tests cover ordered repeated targets, parameters, numeric updates,
+nested commas, remove-on-null compatibility, edge assignments, target
+mismatches, rejected relationship numeric updates, and trailing empty
+assignments. A Memory execution test verifies ordered numeric updates against
+the final stored value.
 
 ### Batch Z: Lightweight Constraint Checks
 

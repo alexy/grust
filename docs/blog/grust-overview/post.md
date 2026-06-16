@@ -332,7 +332,9 @@ changed-element reporting, plus ID-resolved edge `MATCH ... SET e += { ... }`,
 literal property assignment, and explicit property `REMOVE` for resolved
 identities, row-producing edge `MATCH ... CREATE` / `MATCH ... MERGE` over
 matched endpoint variables, plus broad relationship delete, patch, assignment,
-and removal over endpoint predicates.
+and removal over endpoint predicates. `MATCH ... SET` can now contain
+comma-separated assignments, lowered as ordered plan operations across the
+supported literal, map patch, remove-on-null, and numeric node update forms.
 
 The book chapter **The Store Contract** gives this trait the attention it
 deserves. It is the piece that lets a memory store, a LanceDB table layout, a

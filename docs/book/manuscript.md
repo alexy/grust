@@ -1056,11 +1056,15 @@ and ordered comparisons are limited to numbers or strings.
 defaults to storing `SET x.key = null` as `Value::Null`, but callers can choose
 `CypherNullAssignment::RemoveProperty` to lower explicit null assignment to the
 same property-removal operations used by `REMOVE`; map patches such as
-`SET x += {key: null}` always store `Value::Null`. The first expression form
-is deliberately small: node property assignment can read a property on the same
-node variable and apply `+`, `-`, `*`, or `/` with an integer or float literal
-or parameter. That lowers to an explicit read-modify-write mutation plan
-instead of hidden parser-side arithmetic. Resolved mutation-plan execution is
+`SET x += {key: null}` always store `Value::Null`. `MATCH ... SET` clauses can
+contain comma-separated assignments, and each assignment is lowered as its own
+ordered plan operation so repeated property targets preserve source order while
+still using only the supported literal, map patch, remove-on-null, and numeric
+node update forms. The first expression form is deliberately small: node
+property assignment can read a property on the same node variable and apply
+`+`, `-`, `*`, or `/` with an integer or float literal or parameter. That
+lowers to an explicit read-modify-write mutation plan instead of hidden
+parser-side arithmetic. Resolved mutation-plan execution is
 backend-neutral through `CypherMutationExecutor`: Sail still owns text parsing, but the
 resulting `GraphMutationPlan` can execute on Sail or on the in-memory backend
 for deterministic tests. Backends that cannot execute a plan operation report

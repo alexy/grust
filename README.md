@@ -422,6 +422,10 @@ are limited to numbers or strings.
 `CypherNullAssignment::RemoveProperty` to lower explicit null assignment to
 the same property-removal operations used by `REMOVE`. Map patches such as
 `SET x += {key: null}` always store `Value::Null`.
+`MATCH ... SET` clauses can contain comma-separated assignments. Each
+assignment is lowered as its own ordered plan operation, so repeated property
+targets preserve source order while still using only the supported literal,
+map patch, remove-on-null, and numeric node update forms.
 The first expression form is intentionally small: node property assignments can
 read the current value of another property on the same node variable and apply
 `+`, `-`, `*`, or `/` with an integer or float literal or parameter, lowering

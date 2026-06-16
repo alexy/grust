@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added Sail writable Cypher support for comma-separated `MATCH ... SET`
+  assignments, preserving source order across literal patches, map patches,
+  remove-on-null compatibility, and numeric node property updates.
 - Added row-producing Sail writable Cypher `MATCH ... MERGE` for edges whose
   endpoints come from matched node variables, reusing the row materialization
   and backend-neutral execution path introduced for row-producing
