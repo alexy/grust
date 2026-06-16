@@ -430,7 +430,11 @@ returned in a result shape separate from the count-oriented report, while
 `MERGE` and edge endpoint writes keep requiring resolved IDs.
 Parameters are option-driven too: callers can bind Grust `Value`s to `$name`
 placeholders in literal positions such as IDs, property maps, and literal
-property assignments without enabling arbitrary expression evaluation.
+property assignments. The first expression form is deliberately narrow:
+same-variable node property arithmetic such as
+`SET n.count = n.count + $delta` lowers to an explicit read-modify-write
+mutation plan for Sail and Memory while broader computed expressions remain
+out of scope.
 Plan execution is no longer Sail-only: `CypherMutationExecutor` lets the
 resolved `GraphMutationPlan` run on Sail or Memory, which keeps parser growth
 separate from backend mutation semantics.

@@ -290,6 +290,42 @@ impl CypherMutationExecutor for MemoryGraphStore {
                         inner.nodes.insert(node.id.clone(), node);
                     }
                 }
+                GraphMutationPlanOp::UpdateMatchingNodeProperty {
+                    label,
+                    props,
+                    target_key,
+                    source_key,
+                    op,
+                    operand,
+                    ..
+                } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props);
+                    report.matched_rows += ids.len();
+                    report.node_patches += ids.len();
+                    report.changed_nodes += ids.len();
+
+                    let mut updated = Vec::with_capacity(ids.len());
+                    for id in &ids {
+                        if let Some(node) = inner.nodes.get(id) {
+                            let mut node = node.clone();
+                            let current = node.props.get(source_key).ok_or_else(|| {
+                                GrustError::CypherExecution(format!(
+                                    "numeric expression source property '{source_key}' is missing"
+                                ))
+                            })?;
+                            let value = evaluate_numeric_update(current, *op, operand)?;
+                            node.props.insert(target_key.clone(), value);
+                            if let Some(schema) = &inner.schema {
+                                schema.validate_node(&node)?;
+                            }
+                            updated.push(node);
+                        }
+                    }
+                    for node in updated {
+                        inner.nodes.insert(node.id.clone(), node);
+                    }
+                }
                 GraphMutationPlanOp::RemoveMatchingNodeProps {
                     label, props, keys, ..
                 } => {

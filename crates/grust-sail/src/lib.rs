@@ -633,6 +633,11 @@ impl CypherMutationPlanner {
                     assignment.target
                 )));
             }
+            let PatchAssignmentKind::Props(props) = assignment.kind else {
+                return Err(cypher_unsupported_cardinality(
+                    "MATCH edge SET does not support numeric expression updates",
+                ));
+            };
             if parsed
                 .relationship
                 .props
@@ -653,7 +658,7 @@ impl CypherMutationPlanner {
                         label: parsed.relationship.label,
                         to,
                         id,
-                        props: assignment.props,
+                        props,
                     },
                 ]));
             }
@@ -661,7 +666,7 @@ impl CypherMutationPlanner {
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::PatchMatchingEdges {
                     relationship,
-                    patch: assignment.props,
+                    patch: props,
                     cardinality: GraphMutationCardinality::BoundedMany,
                 },
             ]));
@@ -685,6 +690,45 @@ impl CypherMutationPlanner {
                 assignment.target
             )));
         }
+        let numeric_expression = match assignment.kind {
+            PatchAssignmentKind::NumericExpression {
+                key,
+                source_target,
+                source_key,
+                op,
+                operand,
+            } => {
+                if source_target != assignment.target {
+                    return Err(cypher_unsupported_cardinality(
+                        "MATCH SET numeric expressions cannot reference another variable",
+                    ));
+                }
+                Some((key, source_key, op, operand))
+            }
+            PatchAssignmentKind::Props(props) => {
+                if optional_string_prop(&node.props, "id").is_none()
+                    && node
+                        .variable
+                        .as_ref()
+                        .is_none_or(|variable| !self.node_bindings.contains_key(variable))
+                {
+                    let cardinality = match_node_cardinality(&node);
+                    return Ok(GraphMutationPlan::new(vec![
+                        GraphMutationPlanOp::PatchMatchingNodes {
+                            label: node.label,
+                            props: node.props,
+                            patch: props,
+                            cardinality,
+                        },
+                    ]));
+                }
+                let id = self.resolve_node_id(&node, "MATCH node SET")?;
+                return Ok(GraphMutationPlan::new(vec![
+                    GraphMutationPlanOp::PatchNode { id, props },
+                ]));
+            }
+        };
+        let (target_key, source_key, op, operand) = numeric_expression.expect("expression checked");
         if optional_string_prop(&node.props, "id").is_none()
             && node
                 .variable
@@ -693,19 +737,27 @@ impl CypherMutationPlanner {
         {
             let cardinality = match_node_cardinality(&node);
             return Ok(GraphMutationPlan::new(vec![
-                GraphMutationPlanOp::PatchMatchingNodes {
+                GraphMutationPlanOp::UpdateMatchingNodeProperty {
                     label: node.label,
                     props: node.props,
-                    patch: assignment.props,
+                    target_key,
+                    source_key,
+                    op,
+                    operand,
                     cardinality,
                 },
             ]));
         }
         let id = self.resolve_node_id(&node, "MATCH node SET")?;
         Ok(GraphMutationPlan::new(vec![
-            GraphMutationPlanOp::PatchNode {
-                id,
-                props: assignment.props,
+            GraphMutationPlanOp::UpdateMatchingNodeProperty {
+                label: None,
+                props: Props::from([("id".to_string(), Value::from(id.as_str()))]),
+                target_key,
+                source_key,
+                op,
+                operand,
+                cardinality: GraphMutationCardinality::SingleIdentity,
             },
         ]))
     }
@@ -1343,7 +1395,18 @@ fn split_match_remove(statement: &str) -> Result<(&str, &str)> {
 
 struct PatchAssignment {
     target: String,
-    props: Props,
+    kind: PatchAssignmentKind,
+}
+
+enum PatchAssignmentKind {
+    Props(Props),
+    NumericExpression {
+        key: String,
+        source_target: String,
+        source_key: String,
+        op: GraphNumericOp,
+        operand: Value,
+    },
 }
 
 fn parse_patch_assignment(
@@ -1353,7 +1416,10 @@ fn parse_patch_assignment(
     if let Some(index) = find_unquoted_sequence(assignment, "+=") {
         let target = parse_required_cypher_variable(&assignment[..index], "MATCH SET target")?;
         let props = parse_cypher_props_map_literal(&assignment[index + 2..], parameters)?;
-        return Ok(PatchAssignment { target, props });
+        return Ok(PatchAssignment {
+            target,
+            kind: PatchAssignmentKind::Props(props),
+        });
     }
     let Some(index) = find_unquoted(assignment, '=') else {
         return Err(cypher_syntax(
@@ -1361,11 +1427,89 @@ fn parse_patch_assignment(
         ));
     };
     let (target, key) = parse_property_ref(&assignment[..index], "MATCH SET target")?;
-    let value = parse_cypher_literal(&assignment[index + 1..], parameters)?;
+    let rhs = &assignment[index + 1..];
+    if let Some(expression) = parse_numeric_expression(rhs, parameters)? {
+        return Ok(PatchAssignment {
+            target,
+            kind: PatchAssignmentKind::NumericExpression {
+                key,
+                source_target: expression.source_target,
+                source_key: expression.source_key,
+                op: expression.op,
+                operand: expression.operand,
+            },
+        });
+    }
+    let value = parse_cypher_literal(rhs, parameters)?;
     Ok(PatchAssignment {
         target,
-        props: Props::from([(key, value)]),
+        kind: PatchAssignmentKind::Props(Props::from([(key, value)])),
     })
+}
+
+struct NumericExpression {
+    source_target: String,
+    source_key: String,
+    op: GraphNumericOp,
+    operand: Value,
+}
+
+fn parse_numeric_expression(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<NumericExpression>> {
+    for (index, op) in find_numeric_operator_candidates(expression) {
+        let lhs = expression[..index].trim();
+        let rhs = expression[index + 1..].trim();
+        let Ok((source_target, source_key)) = parse_property_ref(lhs, "MATCH SET expression")
+        else {
+            continue;
+        };
+        let operand = parse_cypher_literal(rhs, parameters)?;
+        if !matches!(operand, Value::Int(_) | Value::Float(_)) {
+            return Err(cypher_syntax(
+                "MATCH SET numeric expression operand must be an integer or float",
+            ));
+        }
+        return Ok(Some(NumericExpression {
+            source_target,
+            source_key,
+            op,
+            operand,
+        }));
+    }
+    Ok(None)
+}
+
+fn find_numeric_operator_candidates(expression: &str) -> Vec<(usize, GraphNumericOp)> {
+    let mut candidates = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in expression.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '+' => candidates.push((index, GraphNumericOp::Add)),
+            '-' if index > 0 => candidates.push((index, GraphNumericOp::Subtract)),
+            '*' => candidates.push((index, GraphNumericOp::Multiply)),
+            '/' => candidates.push((index, GraphNumericOp::Divide)),
+            _ => {}
+        }
+    }
+    candidates
 }
 
 fn parse_property_ref(value: &str, context: &str) -> Result<(String, String)> {
@@ -1870,6 +2014,26 @@ impl SailGraphStore {
                     self.apply_patch_matching_nodes(label.as_ref(), props, patch, report)
                         .await?;
                 }
+                GraphMutationPlanOp::UpdateMatchingNodeProperty {
+                    label,
+                    props,
+                    target_key,
+                    source_key,
+                    op,
+                    operand,
+                    ..
+                } => {
+                    self.apply_update_matching_node_property(
+                        label.as_ref(),
+                        props,
+                        target_key,
+                        source_key,
+                        *op,
+                        operand,
+                        report,
+                    )
+                    .await?;
+                }
                 GraphMutationPlanOp::RemoveMatchingNodeProps {
                     label, props, keys, ..
                 } => {
@@ -1928,6 +2092,43 @@ impl SailGraphStore {
             for (key, value) in patch {
                 node.props.insert(key.clone(), value.clone());
             }
+        }
+        let schema = self.current_schema();
+        if let Some(schema) = schema.as_ref() {
+            for node in &nodes {
+                schema.validate_node(node)?;
+            }
+        }
+        self.load_nodes(schema.as_ref(), &nodes).await
+    }
+
+    async fn apply_update_matching_node_property(
+        &self,
+        label: Option<&Label>,
+        props: &Props,
+        target_key: &str,
+        source_key: &str,
+        op: GraphNumericOp,
+        operand: &Value,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let (sql, args) = matching_nodes_sql(label, props)?;
+        let mut nodes = self.run_query(&sql, args).await?;
+        report.matched_rows += nodes.len();
+        report.node_patches += nodes.len();
+        report.changed_nodes += nodes.len();
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        for node in &mut nodes {
+            let current = node.props.get(source_key).ok_or_else(|| {
+                GrustError::CypherExecution(format!(
+                    "numeric expression source property '{source_key}' is missing"
+                ))
+            })?;
+            let value = evaluate_numeric_update(current, op, operand)?;
+            node.props.insert(target_key.to_string(), value);
         }
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {

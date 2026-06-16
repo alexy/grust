@@ -1355,6 +1355,104 @@ fn cypher_match_set_property_assignment_lowers_resolved_node_and_edge() {
 }
 
 #[test]
+fn cypher_match_set_numeric_expression_lowers_node_updates() {
+    let resolved =
+        sail_cypher_mutation_plan("MATCH (n:Counter {id: 'c1'}) SET n.count = n.count + 1")
+            .unwrap();
+    assert_eq!(
+        resolved.report(),
+        GraphMutationReport {
+            patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        resolved.operations,
+        vec![GraphMutationPlanOp::UpdateMatchingNodeProperty {
+            label: None,
+            props: Props::from([("id".to_string(), Value::from("c1"))]),
+            target_key: "count".to_string(),
+            source_key: "count".to_string(),
+            op: GraphNumericOp::Add,
+            operand: Value::Int(1),
+            cardinality: GraphMutationCardinality::SingleIdentity,
+        }]
+    );
+    assert_eq!(
+        resolved.into_mutations(),
+        vec![GraphMutation::UpdateMatchingNodeProperty {
+            label: None,
+            props: Props::from([("id".to_string(), Value::from("c1"))]),
+            target_key: "count".to_string(),
+            source_key: "count".to_string(),
+            op: GraphNumericOp::Add,
+            operand: Value::Int(1),
+        }]
+    );
+
+    let broad = sail_cypher_mutation_plan_with_options(
+        "MATCH (n:Counter {active: true}) SET n.count = n.count + $delta",
+        CypherMutationOptions {
+            parameters: CypherParameters::from([("delta".to_string(), Value::Int(2))]),
+            ..CypherMutationOptions::default()
+        },
+    )
+    .unwrap()
+    .0;
+    assert_eq!(
+        broad.operations,
+        vec![GraphMutationPlanOp::UpdateMatchingNodeProperty {
+            label: Some(Label::new("Counter")),
+            props: Props::from([("active".to_string(), Value::Bool(true))]),
+            target_key: "count".to_string(),
+            source_key: "count".to_string(),
+            op: GraphNumericOp::Add,
+            operand: Value::Int(2),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+
+    let unbounded = sail_cypher_mutation_plan("MATCH (n) SET n.score = n.score / 2").unwrap();
+    assert_eq!(
+        unbounded.operations,
+        vec![GraphMutationPlanOp::UpdateMatchingNodeProperty {
+            label: None,
+            props: Props::new(),
+            target_key: "score".to_string(),
+            source_key: "score".to_string(),
+            op: GraphNumericOp::Divide,
+            operand: Value::Int(2),
+            cardinality: GraphMutationCardinality::UnboundedMany,
+        }]
+    );
+}
+
+#[test]
+fn cypher_match_set_numeric_expression_rejects_unsupported_forms() {
+    for cypher in [
+        "MATCH (n:Counter {id: 'c1'}) SET n.count = m.count + 1",
+        "MATCH (n:Counter {id: 'c1'}) SET n.count = n.count + m.delta",
+        "MATCH (n:Counter {id: 'c1'}) SET n.count = size([])",
+        "MATCH (n:Counter {id: 'c1'}) SET n.count = CASE n.count WHEN 1 THEN 2 END",
+        "MATCH (:Person {id: 'a'})-[e:KNOWS]->(:Person {id: 'b'}) SET e.weight = e.weight + 1",
+    ] {
+        let error =
+            sail_cypher_mutation_plan(cypher).expect_err("unsupported expression should fail");
+        assert!(is_cypher_planning_error(&error));
+    }
+
+    let non_numeric_parameter = sail_cypher_mutation_plan_with_options(
+        "MATCH (n:Counter {id: 'c1'}) SET n.count = n.count + $delta",
+        CypherMutationOptions {
+            parameters: CypherParameters::from([("delta".to_string(), Value::from("one"))]),
+            ..CypherMutationOptions::default()
+        },
+    )
+    .expect_err("non-numeric expression parameter should fail");
+    assert!(matches!(non_numeric_parameter, GrustError::CypherSyntax(_)));
+}
+
+#[test]
 fn cypher_match_remove_lowers_resolved_node_and_edge_properties() {
     let node =
         sail_cypher_mutation_plan("MATCH (n:Person {id: 'person-1'}) REMOVE n.nickname").unwrap();
@@ -1437,7 +1535,6 @@ fn cypher_match_remove_lowers_resolved_node_and_edge_properties() {
 fn cypher_match_set_rejects_deferred_patch_forms() {
     for cypher in [
         "MATCH (n:Person {id: 'person-1'}) SET m += {name: 'Ada'}",
-        "MATCH (n:Person {status: 'inactive'}) SET n.count = n.count + 1",
         "MATCH (:Person {id: 'person-1'})-[e:KNOWS {since: 2020}]->(:Person {id: 'person-2'}) SET e += {since: 2026}",
     ] {
         let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH SET must fail");

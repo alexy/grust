@@ -409,6 +409,10 @@ require resolved IDs before writing.
 `CypherMutationOptions::parameters` lets callers bind Grust `Value`s to
 `$name` placeholders in literal positions such as IDs, property maps, and
 literal property assignments; quoted `'$name'` remains ordinary string text.
+The first expression form is intentionally small: node property assignments can
+read the current value of another property on the same node variable and apply
+`+`, `-`, `*`, or `/` with an integer or float literal or parameter, lowering
+to an explicit read-modify-write mutation plan shared by Sail and Memory.
 Execution of resolved mutation plans is backend-neutral through
 `CypherMutationExecutor`: Sail still owns the text parser for now, but the
 resulting `GraphMutationPlan` can execute on Sail or on `MemoryGraphStore` for
@@ -432,8 +436,9 @@ Literal `SET n.key = value` / `SET e.key = value` lowers to one-key patches,
 and explicit `REMOVE n.key` / `REMOVE e.key` lowers to backend-neutral property
 remove mutations. Node forms can target either a resolved identity or a broad
 node match; edge forms can target either a resolved identity or a broad
-relationship match. Broader expression updates, relationship property
-predicates beyond explicit edge `id`, and remove-on-null remain deferred.
+relationship match. Relationship expression updates, relationship property
+predicates beyond explicit edge `id`, remove-on-null, and general computed
+expressions remain deferred.
 The mutation report includes matched-row and changed node/edge counts for
 broad Sail node and relationship deletes, patches, and property removals, and
 the parser accepts top-level mutation keywords case-insensitively while

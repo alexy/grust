@@ -126,6 +126,15 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             patch: Props::from([("archived".to_string(), Value::Bool(true))]),
             cardinality: GraphMutationCardinality::BoundedMany,
         },
+        GraphMutationPlanOp::UpdateMatchingNodeProperty {
+            label: Some(Label::new("Counter")),
+            props: Props::from([("active".to_string(), Value::Bool(true))]),
+            target_key: "count".to_string(),
+            source_key: "count".to_string(),
+            op: GraphNumericOp::Add,
+            operand: Value::Int(1),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
         GraphMutationPlanOp::PatchEdge {
             from: NodeId::new("person-1"),
             label: Label::new("KNOWS"),
@@ -183,7 +192,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             creates: 1,
             merges: 1,
             deletes: 4,
-            patches: 4,
+            patches: 5,
             property_removes: 4,
             matched_rows: 0,
             changed_nodes: 4,
@@ -211,6 +220,14 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
                 label: Some(Label::new("Person")),
                 props: Props::from([("active".to_string(), Value::Bool(false))]),
                 patch: Props::from([("archived".to_string(), Value::Bool(true))]),
+            },
+            GraphMutation::UpdateMatchingNodeProperty {
+                label: Some(Label::new("Counter")),
+                props: Props::from([("active".to_string(), Value::Bool(true))]),
+                target_key: "count".to_string(),
+                source_key: "count".to_string(),
+                op: GraphNumericOp::Add,
+                operand: Value::Int(1),
             },
             GraphMutation::PatchEdge {
                 from: NodeId::new("person-1"),
@@ -256,6 +273,49 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             GraphMutation::DeleteNode(NodeId::new("person-3")),
         ]
     );
+}
+
+#[test]
+fn numeric_update_evaluator_is_type_checked_and_overflow_safe() {
+    assert_eq!(
+        evaluate_numeric_update(&Value::Int(2), GraphNumericOp::Add, &Value::Int(3)).unwrap(),
+        Value::Int(5)
+    );
+    assert_eq!(
+        evaluate_numeric_update(&Value::Int(5), GraphNumericOp::Subtract, &Value::Int(3)).unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(
+        evaluate_numeric_update(&Value::Int(4), GraphNumericOp::Multiply, &Value::Int(3)).unwrap(),
+        Value::Int(12)
+    );
+    assert_eq!(
+        evaluate_numeric_update(&Value::Int(5), GraphNumericOp::Divide, &Value::Int(2)).unwrap(),
+        Value::Float(2.5)
+    );
+    assert_eq!(
+        evaluate_numeric_update(&Value::Float(1.5), GraphNumericOp::Add, &Value::Int(2)).unwrap(),
+        Value::Float(3.5)
+    );
+
+    let overflow =
+        evaluate_numeric_update(&Value::Int(i64::MAX), GraphNumericOp::Add, &Value::Int(1))
+            .expect_err("integer overflow should fail");
+    assert!(matches!(overflow, GrustError::CypherExecution(_)));
+    assert!(overflow.to_string().contains("overflow"));
+
+    let division_by_zero =
+        evaluate_numeric_update(&Value::Int(1), GraphNumericOp::Divide, &Value::Int(0))
+            .expect_err("division by zero should fail");
+    assert!(division_by_zero.to_string().contains("division by zero"));
+
+    let null = evaluate_numeric_update(&Value::Null, GraphNumericOp::Add, &Value::Int(1))
+        .expect_err("null should fail");
+    assert!(null.to_string().contains("null"));
+
+    let string = evaluate_numeric_update(&Value::from("1"), GraphNumericOp::Add, &Value::Int(1))
+        .expect_err("string should fail");
+    assert!(string.to_string().contains("integer or float"));
 }
 
 #[test]

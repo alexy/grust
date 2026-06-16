@@ -408,6 +408,163 @@ fn executes_matching_node_property_removal() {
 }
 
 #[test]
+fn executes_matching_node_numeric_property_updates() {
+    let store = MemoryGraphStore::new();
+    let plan = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Counter",
+                "a",
+                Props::from([
+                    ("active".to_string(), Value::Bool(true)),
+                    ("count".to_string(), Value::Int(1)),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Counter",
+                "b",
+                Props::from([
+                    ("active".to_string(), Value::Bool(true)),
+                    ("count".to_string(), Value::Int(4)),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Counter",
+                "c",
+                Props::from([
+                    ("active".to_string(), Value::Bool(false)),
+                    ("count".to_string(), Value::Int(10)),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::UpdateMatchingNodeProperty {
+            label: Some(Label::new("Counter")),
+            props: Props::from([("active".to_string(), Value::Bool(true))]),
+            target_key: "count".to_string(),
+            source_key: "count".to_string(),
+            op: GraphNumericOp::Add,
+            operand: Value::Int(2),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::UpdateMatchingNodeProperty {
+            label: None,
+            props: Props::from([("id".to_string(), Value::from("a"))]),
+            target_key: "half".to_string(),
+            source_key: "count".to_string(),
+            op: GraphNumericOp::Divide,
+            operand: Value::Int(2),
+            cardinality: GraphMutationCardinality::SingleIdentity,
+        },
+    ]);
+
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&plan)).unwrap();
+
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            creates: 3,
+            patches: 2,
+            matched_rows: 3,
+            changed_nodes: 6,
+            node_upserts: 3,
+            node_patches: 3,
+            ..GraphMutationReport::default()
+        }
+    );
+    let a = futures_executor::block_on(store.get_node(&NodeId::new("a")))
+        .unwrap()
+        .expect("counter a exists");
+    assert_eq!(a.props.get("count"), Some(&Value::Int(3)));
+    assert_eq!(a.props.get("half"), Some(&Value::Float(1.5)));
+    let b = futures_executor::block_on(store.get_node(&NodeId::new("b")))
+        .unwrap()
+        .expect("counter b exists");
+    assert_eq!(b.props.get("count"), Some(&Value::Int(6)));
+    let c = futures_executor::block_on(store.get_node(&NodeId::new("c")))
+        .unwrap()
+        .expect("counter c exists");
+    assert_eq!(c.props.get("count"), Some(&Value::Int(10)));
+
+    let zero = GraphMutationPlan::new(vec![GraphMutationPlanOp::UpdateMatchingNodeProperty {
+        label: Some(Label::new("Counter")),
+        props: Props::from([("active".to_string(), Value::from("missing"))]),
+        target_key: "count".to_string(),
+        source_key: "count".to_string(),
+        op: GraphNumericOp::Add,
+        operand: Value::Int(1),
+        cardinality: GraphMutationCardinality::BoundedMany,
+    }]);
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&zero)).unwrap();
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+}
+
+#[test]
+fn matching_node_numeric_property_updates_fail_before_writing_invalid_values() {
+    let store = MemoryGraphStore::new();
+    futures_executor::block_on(store.put_node(&Node::new("Counter", "missing", Props::new())))
+        .unwrap();
+    futures_executor::block_on(store.put_node(&Node::new(
+        "Counter",
+        "null",
+        Props::from([("count".to_string(), Value::Null)]),
+    )))
+    .unwrap();
+    futures_executor::block_on(store.put_node(&Node::new(
+        "Counter",
+        "string",
+        Props::from([("count".to_string(), Value::from("one"))]),
+    )))
+    .unwrap();
+    futures_executor::block_on(store.put_node(&Node::new(
+        "Counter",
+        "overflow",
+        Props::from([("count".to_string(), Value::Int(i64::MAX))]),
+    )))
+    .unwrap();
+
+    for (id, expected) in [
+        ("missing", "missing"),
+        ("null", "null"),
+        ("string", "integer or float"),
+        ("overflow", "overflow"),
+    ] {
+        let plan = GraphMutationPlan::new(vec![GraphMutationPlanOp::UpdateMatchingNodeProperty {
+            label: None,
+            props: Props::from([("id".to_string(), Value::from(id))]),
+            target_key: "count".to_string(),
+            source_key: "count".to_string(),
+            op: GraphNumericOp::Add,
+            operand: Value::Int(1),
+            cardinality: GraphMutationCardinality::SingleIdentity,
+        }]);
+        let error = futures_executor::block_on(store.execute_cypher_mutation_plan(&plan))
+            .expect_err("invalid numeric update should fail");
+        assert!(
+            error.to_string().contains(expected),
+            "expected error containing {expected:?}, got {error}"
+        );
+    }
+
+    let overflow = futures_executor::block_on(store.get_node(&NodeId::new("overflow")))
+        .unwrap()
+        .expect("overflow node remains");
+    assert_eq!(overflow.props.get("count"), Some(&Value::Int(i64::MAX)));
+}
+
+#[test]
 fn executes_matching_edge_mutations() {
     let store = MemoryGraphStore::new();
     let relationship = GraphRelationshipMatch {

@@ -41,6 +41,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added Sail writable Cypher parameters through
   `CypherMutationOptions::parameters`, limited to literal positions such as
   IDs, property maps, and literal property assignments.
+- Added minimal Sail writable Cypher numeric node property updates such as
+  `MATCH (n:Counter {id: 'c1'}) SET n.count = n.count + 1`, lowering through
+  backend-neutral read-modify-write mutation plans shared by Sail and Memory.
 - Added opt-in generated node IDs for Sail writable Cypher node `CREATE`
   through `CypherNodeIdPolicy::GenerateForCreate` and
   `CypherMutationResult::generated_node_ids`, while keeping explicit IDs as the

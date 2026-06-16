@@ -71,6 +71,10 @@ describe unreleased working-tree additions:
 - Parameters are available through `CypherMutationOptions::parameters` anywhere
   literal values are already accepted: explicit IDs, property maps, and literal
   property assignments. Quoted `$name` text remains an ordinary string literal.
+- `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
+  `/` numeric forms lower to an explicit matching-node read-modify-write plan
+  operation when the source is a property on the same node variable and the
+  operand is an integer or float literal or parameter.
 - Writable mutation keywords are parsed case-insensitively at the top level,
   and `// ...` plus `/* ... */` comments are stripped outside string literals.
 
@@ -80,8 +84,9 @@ The v1 implementation should reject, with clear errors:
   policy;
 - node identity derived from non-`id` properties;
 - relationship property predicates beyond explicit edge `id`;
-- remove-on-null, arithmetic updates, path expressions, or computed expression
-  evaluation;
+- remove-on-null, relationship arithmetic updates, path expressions, functions,
+  `CASE`, list/map projections, cross-variable expressions, or general
+  computed expression evaluation;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
 
@@ -130,6 +135,9 @@ to backend-neutral Grust mutation concepts:
 - ID-resolved node property assignment -> one-key `GraphMutation::PatchNode`;
 - broad node property assignment -> one-key `GraphMutation::PatchMatchingNodes`
   with cardinality metadata retained in `GraphMutationPlanOp`;
+- node numeric property update -> `GraphMutation::UpdateMatchingNodeProperty`
+  with target property, source property, numeric operation, operand, match
+  predicates, and cardinality metadata retained in `GraphMutationPlanOp`;
 - ID-resolved edge property assignment -> one-key `GraphMutation::PatchEdge`;
 - broad edge property assignment -> one-key
   `GraphMutation::PatchMatchingEdges` with a `GraphRelationshipMatch`
@@ -592,9 +600,10 @@ appears.
 The following decisions should remain out of v1:
 
 - pluggable non-UUID ID providers;
-- broad edge patching, relationship property predicates beyond explicit edge
-  `id`, broad property assignment/removal, remove-on-null, arithmetic updates,
-  parameters, path expressions, and computed values;
+- relationship property predicates beyond explicit edge `id`, remove-on-null,
+  relationship arithmetic updates, path expressions, functions, `CASE`,
+  list/map projections, cross-variable expressions, and general computed
+  values;
 - cross-backend Cypher text mutation APIs;
 - stronger transaction guarantees than the target backend documents.
 
@@ -852,7 +861,7 @@ Acceptance criteria:
   `CypherMutationExecutor`.
 - Unit tests cover bounded-many and unbounded-many planning, zero matches,
   many matches, typed-column assignment, typed-column removal, and rejection of
-  computed expressions.
+  computed expressions outside the later Batch R numeric subset.
 
 Implementation status: implemented in the working tree after `0.8.4`.
 Broad node `SET n.key = literal` lowers as a one-key
@@ -862,8 +871,8 @@ rather than treating it as removal. Broad node `REMOVE n.key` lowers to
 changed-node, and node-property-removal counts during backend execution. Sail
 executes both paths through matched-node scans and the existing node load path
 so typed node mirrors stay consistent. Memory implements the same resolved-plan
-behavior through `CypherMutationExecutor`. Computed expressions remain rejected
-until Batch R.
+behavior through `CypherMutationExecutor`. This batch kept assignments
+literal-only; Batch R adds the later limited numeric expression update path.
 
 ### Batch O: Resolved `MATCH ... CREATE`
 
@@ -982,6 +991,17 @@ Acceptance criteria:
 - Reject function calls, list/map projections, path expressions, `CASE`, and
   cross-variable expressions.
 
+Implementation status: implemented in the working tree after Batch Q. Core now
+has `GraphNumericOp`, `evaluate_numeric_update`, and
+`GraphMutationPlanOp::UpdateMatchingNodeProperty` /
+`GraphMutation::UpdateMatchingNodeProperty` for explicit read-modify-write
+numeric node updates. Sail lowers same-variable node property arithmetic with
+integer or float literal/parameter operands into that plan operation for both
+resolved and broad node matches. Memory and Sail execute the operation with the
+same missing-property, null, type-mismatch, overflow, and division-by-zero
+errors. Relationship expressions, function calls, list/map projections, path
+expressions, `CASE`, and cross-variable expressions remain rejected.
+
 ### Batch S: Shared Parser Crate Decision
 
 Revisit parser ownership only after Batch Q or R makes the hand-written Sail
@@ -999,3 +1019,201 @@ Acceptance criteria:
   every accepted mutation form.
 - Keep `sail_cypher_mutation_plan` as a stable compatibility wrapper over the
   shared parser/lowering path.
+
+## Further Cypher Feature Plan
+
+After Batch R and the parser-boundary decision, the next Cypher write work
+should still avoid becoming a second mutation engine. Each feature below should
+add one explicit Grust-owned semantic, then teach Cypher lowering to produce
+that semantic. The order intentionally starts with features that reuse the
+existing plan/report/executor shape before moving toward row-producing
+read/write queries.
+
+### Batch T: Relationship Property Predicates
+
+Allow relationship matches to filter on more than explicit relationship `id`:
+
+```cypher
+MATCH (:Person {id: 'a'})-[e:KNOWS {active: true}]->(:Person)
+SET e.seen = true;
+```
+
+Acceptance criteria:
+
+- Extend `GraphRelationshipMatch` to carry relationship property predicates
+  beyond `id`.
+- Preserve the existing single-identity ambiguity rule: resolved structural
+  edge updates still require either one matching edge or an explicit edge `id`.
+- Sail lowers relationship predicates into the same staged edge matching path
+  used by broad relationship deletes and patches.
+- Memory applies identical predicate behavior over its edge map.
+- Tests cover zero, one, and many matching edges; explicit edge `id` combined
+  with other predicates; and type-sensitive predicate comparison.
+
+### Batch U: Optional Remove-on-null Compatibility
+
+Add a caller-selected compatibility mode for treating `SET x.key = null` as a
+property removal, while preserving the current default that stores
+`Value::Null`:
+
+```cypher
+MATCH (n:Person {id: 'p1'})
+SET n.nickname = null;
+```
+
+Acceptance criteria:
+
+- Add a Cypher mutation option such as `null_assignment`.
+- Keep `StoreNull` as the default to preserve Grust's existing value model.
+- Lower remove-on-null to the same explicit property-removal plan operations
+  used by `REMOVE`, not to a hidden parser shortcut.
+- Apply the option consistently for nodes, relationships, resolved identities,
+  and broad matching operations.
+- Document the compatibility tradeoff in this file, the book, and the API
+  docs before enabling it for users.
+
+### Batch V: Small Boolean Predicate Grammar
+
+Add a bounded predicate grammar for mutating `MATCH` filters:
+
+```cypher
+MATCH (n:Person)
+WHERE n.status = 'inactive' AND n.score >= 10
+SET n.archived = true;
+```
+
+Acceptance criteria:
+
+- Support comparisons against literals or parameters for properties of the
+  matched node or relationship variable.
+- Support `AND` first; defer `OR`, `NOT`, pattern predicates, list predicates,
+  functions, and arbitrary expressions.
+- Represent predicates in a backend-neutral AST that can be evaluated by
+  Memory and lowered by Sail.
+- Keep predicate evaluation type-aware and document how missing properties and
+  `null` compare.
+- Add tests proving the same predicate selects the same graph elements in Sail
+  and Memory.
+
+### Batch W: Read-then-write `MATCH ... CREATE`
+
+Introduce the first row-producing write form only after predicate semantics are
+explicit:
+
+```cypher
+MATCH (a:Person {status: 'active'}), (b:Team {id: 'team-1'})
+CREATE (a)-[:MEMBER_OF]->(b);
+```
+
+Acceptance criteria:
+
+- Stage the matched rows before writing so the report can distinguish matched
+  rows from created or merged edges.
+- Require every created edge endpoint to come from a bound node variable.
+- Reject node creation in the trailing `CREATE` clause until generated IDs and
+  cardinality semantics are designed for row-producing writes.
+- Define duplicate edge behavior separately for `CREATE` and `MERGE`, honoring
+  strict-create mode when enabled.
+- Add Sail live tests for zero-row, one-row, and many-row edge creation.
+
+### Batch X: Row-producing `MATCH ... MERGE`
+
+Extend the previous batch to idempotent relationship upserts:
+
+```cypher
+MATCH (a:Person {status: 'active'}), (b:Team {id: 'team-1'})
+MERGE (a)-[:MEMBER_OF]->(b);
+```
+
+Acceptance criteria:
+
+- Reuse the staged row set and endpoint binding rules from Batch W.
+- Lower each row to an edge upsert plan operation or a grouped backend
+  operation with equivalent report semantics.
+- Report matched rows, attempted edge merges, inserted edges when the backend
+  can determine them, and changed typed-table mirror rows when available.
+- Preserve ordered-batch semantics when a row-producing write appears before
+  later statements in the same Cypher string.
+- Document that this is still not a general read query surface; it is a
+  restricted write-planning feature.
+
+### Batch Y: Multiple Assignments Per `SET`
+
+Support comma-separated property mutations in one `SET` clause:
+
+```cypher
+MATCH (n:Person {id: 'p1'})
+SET n.name = $name, n.updated_at = $ts, n.count = n.count + 1;
+```
+
+Acceptance criteria:
+
+- Parse comma-separated assignments quote- and bracket-aware.
+- Preserve source order when multiple assignments target the same property.
+- Lower literal assignments, map patches, removals by compatibility mode, and
+  numeric expression updates into explicit plan operations.
+- Reject mixed node and relationship assignments only when the existing
+  cardinality or identity rules cannot make the result deterministic.
+- Add tests for repeated property targets, parameters, numeric updates, and
+  unsupported expression forms inside a multi-assignment clause.
+
+### Batch Z: Lightweight Constraint Checks
+
+Add optional planning or execution checks for common graph constraints:
+
+```cypher
+CREATE CONSTRAINT person_id IF NOT EXISTS
+FOR (n:Person) REQUIRE n.id IS UNIQUE;
+```
+
+Acceptance criteria:
+
+- Start with introspection and validation hooks rather than full DDL execution
+  on every backend.
+- Represent uniqueness and required-property constraints in a Grust-owned
+  schema/constraint type, not as Sail-only SQL text.
+- Let backends advertise whether they can enforce, validate, or only document
+  a constraint.
+- Keep mutation execution honest: if a constraint is only validated
+  read-before-write, document the race window.
+- Defer index management, full Cypher DDL compatibility, and automatic table
+  migration until the constraint model is useful across more than one backend.
+
+### Batch AA: Mutation Results With Optional Element Identities
+
+Extend mutation results only where callers need concrete written identities:
+
+```cypher
+CREATE (n:Person {name: 'Ada'})
+```
+
+Acceptance criteria:
+
+- Keep count-only `CypherMutationReport` stable.
+- Add optional result payloads for generated node IDs, created edge identities,
+  or row-producing writes without turning mutation execution into `RETURN`.
+- Make result payloads opt-in so large broad writes do not accidentally retain
+  every changed element identity in memory.
+- Document which backends can provide exact inserted-versus-updated identities.
+- Defer general `RETURN` clauses until read query planning and write planning
+  share a deliberate row model.
+
+### Batch AB: General `RETURN` After Writes
+
+Support write queries that return a small, explicit projection only after the
+row model is mature:
+
+```cypher
+MATCH (n:Person {id: 'p1'})
+SET n.seen = true
+RETURN n.id, n.seen;
+```
+
+Acceptance criteria:
+
+- Define a result table type that is separate from mutation reports.
+- Permit only projections over variables already bound by the write plan.
+- Preserve mutation report counts even when a result table is returned.
+- Keep Sail and Memory results aligned for supported projections.
+- Reject aggregation, path returns, `ORDER BY`, `LIMIT`, and arbitrary read
+  query features until the read-query engine owns those semantics.

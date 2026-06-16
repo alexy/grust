@@ -1043,13 +1043,17 @@ patterns still require resolved IDs before writing.
 `CypherMutationOptions::parameters` binds Grust `Value`s to `$name`
 placeholders only where literals are already accepted: IDs, property maps, and
 literal property assignments. Quoted `'$name'` remains ordinary string text
-rather than a parameter reference. Resolved mutation-plan
-execution is backend-neutral through `CypherMutationExecutor`: Sail still owns
-text parsing, but the resulting `GraphMutationPlan` can execute on Sail or on
-the in-memory backend for deterministic tests. Backends that cannot execute a
-plan operation report a structured Cypher execution error. The Sail parser has
-an internal front-door boundary that classifies top-level mutation statements
-before lowering; a shared parser crate remains deferred until there is a second
+rather than a parameter reference. The first expression form is deliberately
+small: node property assignment can read a property on the same node variable
+and apply `+`, `-`, `*`, or `/` with an integer or float literal or parameter.
+That lowers to an explicit read-modify-write mutation plan instead of hidden
+parser-side arithmetic. Resolved mutation-plan execution is backend-neutral
+through `CypherMutationExecutor`: Sail still owns text parsing, but the
+resulting `GraphMutationPlan` can execute on Sail or on the in-memory backend
+for deterministic tests. Backends that cannot execute a plan operation report
+a structured Cypher execution error. The Sail parser has an internal
+front-door boundary that classifies top-level mutation statements before
+lowering; a shared parser crate remains deferred until there is a second
 Cypher text parser consumer. Mutation batch
 atomicity is explicit through `GraphMutationAtomicity`: the default path is
 ordered but not atomic, while pgGraph and SurrealDB report transactional batch
@@ -1063,8 +1067,9 @@ Literal `SET n.key = value` and `SET e.key = value` lower to one-key patches,
 while `REMOVE n.key` and `REMOVE e.key` lower to explicit property-remove
 mutations. Node forms can target either a resolved identity or a broad node
 match; edge forms can target either a resolved identity or a broad relationship
-match. Computed expressions, relationship property predicates beyond explicit
-edge `id`, and remove-on-null remain deferred.
+match. Relationship expression updates, relationship property predicates
+beyond explicit edge `id`, remove-on-null, and general computed expressions
+remain deferred.
 For broad node and relationship deletes, patches, and property removals, the
 report records matched rows and changed graph elements, and Sail stages matched
 IDs before using the same delete or load helpers that keep generic and typed

@@ -2125,6 +2125,14 @@ pub enum GraphMutation {
         props: Props,
         patch: Props,
     },
+    UpdateMatchingNodeProperty {
+        label: Option<Label>,
+        props: Props,
+        target_key: String,
+        source_key: String,
+        op: GraphNumericOp,
+        operand: Value,
+    },
     PatchEdge {
         from: NodeId,
         label: Label,
@@ -2191,6 +2199,66 @@ pub enum GraphMutationCardinality {
     UnboundedMany,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphNumericOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+pub fn evaluate_numeric_update(
+    current: &Value,
+    op: GraphNumericOp,
+    operand: &Value,
+) -> Result<Value> {
+    match (current, operand) {
+        (Value::Int(lhs), Value::Int(rhs)) if op != GraphNumericOp::Divide => {
+            let value = match op {
+                GraphNumericOp::Add => lhs.checked_add(*rhs),
+                GraphNumericOp::Subtract => lhs.checked_sub(*rhs),
+                GraphNumericOp::Multiply => lhs.checked_mul(*rhs),
+                GraphNumericOp::Divide => unreachable!("division handled as floating point"),
+            }
+            .ok_or_else(|| GrustError::CypherExecution("numeric expression overflow".into()))?;
+            Ok(Value::Int(value))
+        }
+        (Value::Int(lhs), Value::Int(rhs)) => numeric_float_result(*lhs as f64, op, *rhs as f64),
+        (Value::Int(lhs), Value::Float(rhs)) => numeric_float_result(*lhs as f64, op, *rhs),
+        (Value::Float(lhs), Value::Int(rhs)) => numeric_float_result(*lhs, op, *rhs as f64),
+        (Value::Float(lhs), Value::Float(rhs)) => numeric_float_result(*lhs, op, *rhs),
+        (Value::Null, _) | (_, Value::Null) => Err(GrustError::CypherExecution(
+            "numeric expression cannot read null values".into(),
+        )),
+        _ => Err(GrustError::CypherExecution(
+            "numeric expression requires integer or float values".into(),
+        )),
+    }
+}
+
+fn numeric_float_result(lhs: f64, op: GraphNumericOp, rhs: f64) -> Result<Value> {
+    let value = match op {
+        GraphNumericOp::Add => lhs + rhs,
+        GraphNumericOp::Subtract => lhs - rhs,
+        GraphNumericOp::Multiply => lhs * rhs,
+        GraphNumericOp::Divide => {
+            if rhs == 0.0 {
+                return Err(GrustError::CypherExecution(
+                    "numeric expression division by zero".into(),
+                ));
+            }
+            lhs / rhs
+        }
+    };
+    if value.is_finite() {
+        Ok(Value::Float(value))
+    } else {
+        Err(GrustError::CypherExecution(
+            "numeric expression produced a non-finite float".into(),
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GraphNodeMatch {
     pub label: Option<Label>,
@@ -2219,6 +2287,15 @@ pub enum GraphMutationPlanOp {
         label: Option<Label>,
         props: Props,
         patch: Props,
+        cardinality: GraphMutationCardinality,
+    },
+    UpdateMatchingNodeProperty {
+        label: Option<Label>,
+        props: Props,
+        target_key: String,
+        source_key: String,
+        op: GraphNumericOp,
+        operand: Value,
         cardinality: GraphMutationCardinality,
     },
     PatchEdge {
@@ -2355,6 +2432,9 @@ impl GraphMutationReport {
             GraphMutationPlanOp::PatchMatchingNodes { .. } => {
                 self.patches += 1;
             }
+            GraphMutationPlanOp::UpdateMatchingNodeProperty { .. } => {
+                self.patches += 1;
+            }
             GraphMutationPlanOp::PatchEdge { .. } => {
                 self.patches += 1;
                 self.edge_patches += 1;
@@ -2413,6 +2493,22 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 label,
                 props,
                 patch,
+            },
+            GraphMutationPlanOp::UpdateMatchingNodeProperty {
+                label,
+                props,
+                target_key,
+                source_key,
+                op,
+                operand,
+                ..
+            } => Self::UpdateMatchingNodeProperty {
+                label,
+                props,
+                target_key,
+                source_key,
+                op,
+                operand,
             },
             GraphMutationPlanOp::PatchEdge {
                 from,
@@ -2494,6 +2590,12 @@ pub trait CypherMutationExecutor: GraphMutationStore {
                         "matched node patches require backend-specific query support".to_string(),
                     ));
                 }
+                GraphMutationPlanOp::UpdateMatchingNodeProperty { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node expression updates require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
                 GraphMutationPlanOp::RemoveMatchingNodeProps { .. } => {
                     return Err(GrustError::CypherExecution(
                         "matched node property removals require backend-specific query support"
@@ -2566,6 +2668,12 @@ pub trait GraphMutationStore: GraphStore {
                 GraphMutation::PatchMatchingNodes { .. } => {
                     return Err(GrustError::Unsupported(
                         "matched node patches require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutation::UpdateMatchingNodeProperty { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched node expression updates require backend-specific query support"
+                            .to_string(),
                     ));
                 }
                 GraphMutation::PatchEdge {
@@ -2688,9 +2796,10 @@ pub mod prelude {
         EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder, GraphIndex,
         GraphMutation, GraphMutationAtomicity, GraphMutationCardinality, GraphMutationPlan,
         GraphMutationPlanKind, GraphMutationPlanOp, GraphMutationReport, GraphMutationStore,
-        GraphNodeMatch, GraphRelationshipMatch, GraphSchema, GraphSchemaBuilder, GraphStore,
-        GrustError, Label, LoadReport, Node, NodeId, NodeType, Props, PutOutcome, Result, RfcDate,
-        Start, Step, Traversal, Value, edge_key, relationship_type, schema_identifier,
+        GraphNodeMatch, GraphNumericOp, GraphRelationshipMatch, GraphSchema, GraphSchemaBuilder,
+        GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType, Props, PutOutcome,
+        Result, RfcDate, Start, Step, Traversal, Value, edge_key, evaluate_numeric_update,
+        relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]
