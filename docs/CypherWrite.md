@@ -54,12 +54,17 @@ describe unreleased working-tree additions:
   assignment values are literal-only.
 - `MATCH ... REMOVE n.key` and `MATCH ... REMOVE e.key` lower to explicit
   property-remove mutations when the node or relationship identity is resolved.
+- Opt-in generated node IDs are available for node `CREATE` through
+  `CypherNodeIdPolicy::GenerateForCreate`; explicit IDs remain the default,
+  `MERGE` still requires explicit identity, and edge endpoint IDs must resolve
+  before writing.
 - Writable mutation keywords are parsed case-insensitively at the top level,
   and `// ...` plus `/* ... */` comments are stripped outside string literals.
 
 The v1 implementation should reject, with clear errors:
 
-- generated node IDs;
+- generated node IDs unless the caller explicitly selects the generated-ID
+  policy;
 - node identity derived from non-`id` properties;
 - broad edge patching and relationship property predicates beyond explicit
   edge `id`;
@@ -145,6 +150,12 @@ impl SailGraphStore {
         &self,
         cypher: &str,
     ) -> Result<CypherMutationReport>;
+
+    pub async fn execute_cypher_mutation_result_with_options(
+        &self,
+        cypher: &str,
+        options: CypherMutationOptions,
+    ) -> Result<CypherMutationResult>;
 }
 ```
 
@@ -154,6 +165,11 @@ The report stays count-oriented rather than returning rows:
 - planned node and edge upsert/delete/patch counts when the identity is known;
 - matched row count for cardinality-aware execution;
 - changed node and edge counts when the planner or backend can determine them.
+
+Generated IDs are deliberately not folded into the count report. When callers
+opt into generated node IDs, `CypherMutationResult` returns the count-oriented
+`report` plus `generated_node_ids`, each carrying the generated `NodeId` and
+the optional Cypher variable that introduced it.
 
 The API should not promise atomicity beyond the target store. If Sail later
 proves transactional guarantees for the active table format, that can be added
@@ -525,7 +541,7 @@ deferred until the grammar grows beyond the current compact mutation subset.
 
 The following decisions should remain out of v1:
 
-- generated IDs and pluggable ID policies;
+- pluggable non-UUID ID providers;
 - broad edge patching, relationship property predicates beyond explicit edge
   `id`, broad property assignment/removal, remove-on-null, arithmetic updates,
   parameters, path expressions, and computed values;
@@ -653,6 +669,22 @@ Acceptance criteria:
   mutation reports should remain count-only or gain optional accepted element
   IDs.
 - Document race windows and backend consistency guarantees for generated IDs.
+
+Implementation status: implemented in the working tree after `0.8.4` for Sail
+execution. `CypherMutationOptions` now carries
+`CypherNodeIdPolicy::ExplicitOnly` by default or
+`CypherNodeIdPolicy::GenerateForCreate` for opt-in node `CREATE` generation.
+Generated IDs use UUID-backed `node-...` values in the Sail planner, are
+inserted into the node's ordinary `id` property through `Node::new`, and are
+returned separately in `CypherMutationResult::generated_node_ids` so
+`GraphMutationReport` remains count-oriented. Generated IDs are accepted only
+for node `CREATE`; `MERGE`, inline edge endpoint patterns without IDs, and
+property-derived identities remain rejected. A generated ID bound to a local
+node variable can be reused later in the same ordered mutation batch because
+the planner resolves it before execution. Race behavior matches ordinary Grust
+upserts: generated IDs minimize collision risk, but uniqueness is still
+enforced only by the backend's write path, and strict `CREATE` remains a
+read-before-write compatibility mode rather than a transactional guarantee.
 
 ### Batch K: Cross-backend Cypher Execution Facade
 

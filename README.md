@@ -395,6 +395,12 @@ For stricter Cypher compatibility, callers can use
 `execute_cypher_mutation_with_options` with
 `CypherCreateMode::ErrorIfExists` to make `CREATE` perform a read-before-write
 existence check instead of following the default upsert-compatible path.
+Generated node IDs are also opt-in: `CypherNodeIdPolicy::GenerateForCreate`
+allows node `CREATE` without an `id`, and
+`execute_cypher_mutation_result_with_options` returns the generated IDs in
+`CypherMutationResult::generated_node_ids` while leaving
+`CypherMutationReport` count-oriented. `MERGE` and edge endpoint patterns still
+require resolved IDs before writing.
 Writable Cypher also lowers ID-resolved and broad node
 `MATCH ... SET n += { ... }` map patches into backend-neutral node patch
 mutations; `null` is stored as a graph value rather than interpreted as

@@ -287,8 +287,9 @@ Cypher error categories.
 
 Open semantic decisions before accepting general Cypher writes:
 
-- ID policy: whether node IDs must be supplied, generated, or derived from
-  labels/properties.
+- ID policy: node IDs are explicit by default, and Sail writable Cypher now has
+  an opt-in generated-ID policy for node `CREATE`; deriving IDs from
+  labels/properties remains open.
 - `CREATE` versus `MERGE`: whether duplicate IDs are errors or replacement
   upserts.
 - Property update mode: shallow map patching, literal assignment, and explicit

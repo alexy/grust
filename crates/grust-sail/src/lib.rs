@@ -78,16 +78,42 @@ pub enum CypherCreateMode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CypherNodeIdPolicy {
+    ExplicitOnly,
+    GenerateForCreate,
+}
+
+impl Default for CypherNodeIdPolicy {
+    fn default() -> Self {
+        Self::ExplicitOnly
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CypherMutationOptions {
     pub create_mode: CypherCreateMode,
+    pub node_id_policy: CypherNodeIdPolicy,
 }
 
 impl Default for CypherMutationOptions {
     fn default() -> Self {
         Self {
             create_mode: CypherCreateMode::UpsertCompatible,
+            node_id_policy: CypherNodeIdPolicy::ExplicitOnly,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CypherGeneratedNodeId {
+    pub variable: Option<String>,
+    pub id: NodeId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CypherMutationResult {
+    pub report: CypherMutationReport,
+    pub generated_node_ids: Vec<CypherGeneratedNodeId>,
 }
 
 // ── Store ─────────────────────────────────────────────────────────────────────
@@ -292,25 +318,39 @@ where
 }
 
 pub fn sail_cypher_mutation_plan(cypher: &str) -> Result<GraphMutationPlan> {
+    let (plan, _) =
+        sail_cypher_mutation_plan_with_options(cypher, CypherMutationOptions::default())?;
+    Ok(plan)
+}
+
+fn sail_cypher_mutation_plan_with_options(
+    cypher: &str,
+    options: CypherMutationOptions,
+) -> Result<(GraphMutationPlan, Vec<CypherGeneratedNodeId>)> {
     let cypher = strip_cypher_comments(cypher)?;
     let statements = split_cypher_statements(&cypher)?;
     if statements.is_empty() {
         return Err(cypher_syntax("writable Cypher statement is empty"));
     }
 
-    let mut planner = CypherMutationPlanner::default();
+    let mut planner = CypherMutationPlanner {
+        node_id_policy: options.node_id_policy,
+        ..CypherMutationPlanner::default()
+    };
     let mut plan = GraphMutationPlan::default();
     for statement in statements {
         for operation in planner.plan_statement(statement)?.operations {
             plan.push(operation);
         }
     }
-    Ok(plan)
+    Ok((plan, planner.generated_node_ids))
 }
 
 #[derive(Default)]
 struct CypherMutationPlanner {
     node_bindings: HashMap<String, NodeId>,
+    node_id_policy: CypherNodeIdPolicy,
+    generated_node_ids: Vec<CypherGeneratedNodeId>,
 }
 
 impl CypherMutationPlanner {
@@ -367,7 +407,24 @@ impl CypherMutationPlanner {
             .label
             .clone()
             .ok_or_else(|| cypher_syntax("node CREATE/MERGE requires a label"))?;
-        let id = required_string_prop(&node.props, "id", "node CREATE/MERGE")?;
+        let id = match optional_string_prop(&node.props, "id") {
+            Some(id) => id,
+            None if kind == GraphMutationPlanKind::Create
+                && self.node_id_policy == CypherNodeIdPolicy::GenerateForCreate =>
+            {
+                let id = format!("node-{}", uuid::Uuid::new_v4());
+                self.generated_node_ids.push(CypherGeneratedNodeId {
+                    variable: node.variable.clone(),
+                    id: NodeId::new(id.clone()),
+                });
+                id
+            }
+            None => {
+                return Err(cypher_unresolved_identity(
+                    "node CREATE/MERGE requires explicit string property 'id'",
+                ));
+            }
+        };
         self.bind_node_variable(&node, &NodeId::new(id.clone()))?;
         Ok(GraphMutationPlan::new(vec![
             GraphMutationPlanOp::UpsertNode {
@@ -1244,18 +1301,6 @@ fn parse_cypher_string(value: &str) -> Result<String> {
     Ok(output)
 }
 
-fn required_string_prop(props: &Props, key: &str, context: &str) -> Result<String> {
-    props
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .ok_or_else(|| {
-            GrustError::Unsupported(format!(
-                "{context} requires explicit string property '{key}'"
-            ))
-        })
-}
-
 fn optional_string_prop(props: &Props, key: &str) -> Option<String> {
     props.get(key).and_then(Value::as_str).map(str::to_string)
 }
@@ -1556,7 +1601,20 @@ impl SailGraphStore {
         cypher: &str,
         options: CypherMutationOptions,
     ) -> Result<CypherMutationReport> {
-        let plan = sail_cypher_mutation_plan(cypher)?;
+        Ok(self
+            .execute_cypher_mutation_result_with_options(cypher, options)
+            .await?
+            .report)
+    }
+
+    /// Executes writable Cypher and returns both count-oriented mutation
+    /// reporting and any IDs accepted/generated during planning.
+    pub async fn execute_cypher_mutation_result_with_options(
+        &self,
+        cypher: &str,
+        options: CypherMutationOptions,
+    ) -> Result<CypherMutationResult> {
+        let (plan, generated_node_ids) = sail_cypher_mutation_plan_with_options(cypher, options)?;
         let mut report = plan.report();
         if options.create_mode == CypherCreateMode::ErrorIfExists {
             self.check_strict_create_conflicts(&plan)
@@ -1566,7 +1624,10 @@ impl SailGraphStore {
         self.apply_cypher_mutation_plan(&plan, &mut report)
             .await
             .map_err(cypher_execution_error)?;
-        Ok(report)
+        Ok(CypherMutationResult {
+            report,
+            generated_node_ids,
+        })
     }
 
     async fn apply_cypher_mutation_plan(

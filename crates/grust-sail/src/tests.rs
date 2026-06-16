@@ -209,6 +209,7 @@ fn cypher_mutation_options_default_to_upsert_compatible_create() {
         CypherMutationOptions::default(),
         CypherMutationOptions {
             create_mode: CypherCreateMode::UpsertCompatible,
+            node_id_policy: CypherNodeIdPolicy::ExplicitOnly,
         }
     );
 }
@@ -638,6 +639,84 @@ fn cypher_node_create_requires_explicit_id_and_lowers_to_mutation() {
             .to_string()
             .contains("requires explicit string property 'id'")
     );
+}
+
+#[test]
+fn cypher_generated_node_id_policy_is_opt_in_for_create_only() {
+    let (plan, generated) = sail_cypher_mutation_plan_with_options(
+        "CREATE (n:Person {name: 'Ada'})",
+        CypherMutationOptions {
+            node_id_policy: CypherNodeIdPolicy::GenerateForCreate,
+            ..CypherMutationOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(generated.len(), 1);
+    assert_eq!(generated[0].variable.as_deref(), Some("n"));
+    assert!(generated[0].id.as_str().starts_with("node-"));
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            creates: 1,
+            changed_nodes: 1,
+            node_upserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(plan.operations.len(), 1);
+    let GraphMutationPlanOp::UpsertNode { kind, node } = &plan.operations[0] else {
+        panic!("generated node CREATE should lower to node upsert");
+    };
+    assert_eq!(*kind, GraphMutationPlanKind::Create);
+    assert_eq!(node.id, generated[0].id);
+    assert_eq!(node.props.get("id"), Some(&Value::from(node.id.as_str())));
+    assert_eq!(node.props.get("name"), Some(&Value::from("Ada")));
+
+    let error = sail_cypher_mutation_plan_with_options(
+        "MERGE (:Person {name: 'Ada'})",
+        CypherMutationOptions {
+            node_id_policy: CypherNodeIdPolicy::GenerateForCreate,
+            ..CypherMutationOptions::default()
+        },
+    )
+    .expect_err("MERGE must still require a stable explicit id");
+    assert!(matches!(error, GrustError::CypherUnresolvedIdentity(_)));
+
+    let error = sail_cypher_mutation_plan_with_options(
+        "CREATE (:Person {name: 'Ada'})-[:KNOWS]->(:Person {id: 'person-2'})",
+        CypherMutationOptions {
+            node_id_policy: CypherNodeIdPolicy::GenerateForCreate,
+            ..CypherMutationOptions::default()
+        },
+    )
+    .expect_err("edge endpoints must still resolve before writing");
+    assert!(matches!(error, GrustError::CypherUnresolvedIdentity(_)));
+}
+
+#[test]
+fn cypher_generated_node_id_can_bind_local_create_variable() {
+    let (plan, generated) = sail_cypher_mutation_plan_with_options(
+        "
+        CREATE (a:Person {name: 'Ada'});
+        CREATE (:Person {id: 'person-2'});
+        CREATE (a)-[:KNOWS]->(:Person {id: 'person-2'});
+        ",
+        CypherMutationOptions {
+            node_id_policy: CypherNodeIdPolicy::GenerateForCreate,
+            ..CypherMutationOptions::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(generated.len(), 1);
+    assert_eq!(generated[0].variable.as_deref(), Some("a"));
+    assert_eq!(plan.operations.len(), 3);
+    let GraphMutationPlanOp::UpsertEdge { edge, .. } = &plan.operations[2] else {
+        panic!("third operation should be an edge create");
+    };
+    assert_eq!(edge.from, generated[0].id);
+    assert_eq!(edge.to, NodeId::new("person-2"));
 }
 
 #[test]
@@ -1939,6 +2018,7 @@ async fn test_execute_cypher_mutation_strict_create() {
     let store = store().await;
     let strict = CypherMutationOptions {
         create_mode: CypherCreateMode::ErrorIfExists,
+        ..CypherMutationOptions::default()
     };
 
     store
@@ -1987,6 +2067,43 @@ async fn test_execute_cypher_mutation_strict_create() {
         .await
         .expect_err("strict create should reject existing explicit edge id");
     assert!(error.to_string().contains("existing edge"));
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_mutation_generated_node_ids() {
+    let store = store().await;
+    let result = store
+        .execute_cypher_mutation_result_with_options(
+            "CREATE (n:Person {name: 'Ada'})",
+            CypherMutationOptions {
+                node_id_policy: CypherNodeIdPolicy::GenerateForCreate,
+                ..CypherMutationOptions::default()
+            },
+        )
+        .await
+        .expect("execute generated node CREATE");
+
+    assert_eq!(
+        result.report,
+        GraphMutationReport {
+            creates: 1,
+            changed_nodes: 1,
+            node_upserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(result.generated_node_ids.len(), 1);
+    assert_eq!(result.generated_node_ids[0].variable.as_deref(), Some("n"));
+
+    let node = store
+        .get_node(&result.generated_node_ids[0].id)
+        .await
+        .expect("read generated node")
+        .expect("generated node exists");
+    assert_eq!(node.label, Label::new("Person"));
+    assert_eq!(node.props.get("id"), Some(&Value::from(node.id.as_str())));
+    assert_eq!(node.props.get("name"), Some(&Value::from("Ada")));
 }
 
 #[tokio::test]

@@ -420,6 +420,9 @@ resolved identities, then lowers them into `GraphMutationPlan`; `SailGraphStore`
 executes that plan through
 `GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`, typed-table
 mirror writes, and the same delete paths as ordinary Grust mutations.
+Generated node IDs are opt-in through Sail writable-Cypher options and are
+returned in a result shape separate from the count-oriented report, while
+`MERGE` and edge endpoint writes keep requiring resolved IDs.
 Structured Cypher errors separate syntax, unresolved identity, unsupported
 cardinality, and execution failures without making every backend expose a
 Cypher execution API.

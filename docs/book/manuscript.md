@@ -1030,7 +1030,11 @@ Arrow, `MERGE INTO`, typed-table mirror, and delete paths as normal Grust
 writes. When callers need stricter Cypher compatibility, the options entrypoint
 can make `CREATE` fail if the target node or edge identity already exists. That
 mode performs a read-before-write check and therefore keeps the default
-entrypoint on the lower-friction upsert-compatible path. ID-resolved and broad
+entrypoint on the lower-friction upsert-compatible path. Generated node IDs are
+also caller-selected rather than implicit: `CypherNodeIdPolicy::GenerateForCreate`
+allows node `CREATE` without an `id`, and the result API returns generated IDs
+separately from the count-oriented mutation report. `MERGE` and edge endpoint
+patterns still require resolved IDs before writing. ID-resolved and broad
 node `MATCH ... SET n += { ... }` lower to node patch mutations; `null` in the
 patch map is stored as `Value::Null` rather than treated as property removal.
 ID-resolved edge `MATCH ... SET e += { ... }` lowers to an edge patch mutation
