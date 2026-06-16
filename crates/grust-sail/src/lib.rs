@@ -453,6 +453,9 @@ impl CypherMutationPlanner {
         if find_unquoted_keyword(statement, "MERGE").is_some() {
             return self.parse_match_merge(statement);
         }
+        if find_unquoted_keyword(statement, "CREATE").is_some() {
+            return self.parse_match_create(statement);
+        }
         if find_unquoted_keyword(statement, "SET").is_some() {
             return self.parse_match_set(statement);
         }
@@ -460,7 +463,7 @@ impl CypherMutationPlanner {
             return self.parse_match_remove(statement);
         }
         Err(cypher_syntax(
-            "only ID-resolved MATCH ... DELETE, MATCH ... MERGE edge, MATCH ... SET, and MATCH ... REMOVE forms are supported in writable Cypher".to_string(),
+            "only ID-resolved MATCH ... DELETE, MATCH ... CREATE/MERGE edge, MATCH ... SET, and MATCH ... REMOVE forms are supported in writable Cypher".to_string(),
         ))
     }
 
@@ -536,7 +539,20 @@ impl CypherMutationPlanner {
     }
 
     fn parse_match_merge(&mut self, statement: &str) -> Result<GraphMutationPlan> {
-        let (match_clause, merge_pattern) = split_match_merge(statement)?;
+        self.parse_match_edge_upsert(statement, "MERGE", GraphMutationPlanKind::Merge)
+    }
+
+    fn parse_match_create(&mut self, statement: &str) -> Result<GraphMutationPlan> {
+        self.parse_match_edge_upsert(statement, "CREATE", GraphMutationPlanKind::Create)
+    }
+
+    fn parse_match_edge_upsert(
+        &mut self,
+        statement: &str,
+        keyword: &str,
+        kind: GraphMutationPlanKind,
+    ) -> Result<GraphMutationPlan> {
+        let (match_clause, edge_pattern) = split_match_edge_upsert(statement, keyword)?;
         for pattern in split_top_level_patterns(match_clause)? {
             let (node, rest) = parse_cypher_node_pattern(pattern)?;
             if !rest.trim().is_empty() {
@@ -546,27 +562,27 @@ impl CypherMutationPlanner {
                 )));
             }
             if node.variable.is_none() {
-                return Err(cypher_syntax(
-                    "MATCH MERGE requires each matched node pattern to bind a variable".to_string(),
-                ));
+                return Err(cypher_syntax(format!(
+                    "MATCH {keyword} requires each matched node pattern to bind a variable"
+                )));
             }
-            self.resolve_node_id(&node, "MATCH MERGE node")?;
+            self.resolve_node_id(&node, &format!("MATCH {keyword} node"))?;
         }
 
-        if !merge_pattern.contains("->") {
-            return Err(cypher_syntax(
-                "MATCH MERGE currently supports one relationship pattern only".to_string(),
-            ));
+        if !edge_pattern.contains("->") {
+            return Err(cypher_syntax(format!(
+                "MATCH {keyword} currently supports one relationship pattern only",
+            )));
         }
-        let parsed = self.parse_edge_pattern(merge_pattern)?;
+        let parsed = self.parse_edge_pattern(edge_pattern)?;
         if parsed.from_variable.is_none() || parsed.to_variable.is_none() {
-            return Err(cypher_syntax(
-                "MATCH MERGE relationship endpoints must be bound variables".to_string(),
-            ));
+            return Err(cypher_syntax(format!(
+                "MATCH {keyword} relationship endpoints must be bound variables"
+            )));
         }
         Ok(GraphMutationPlan::new(vec![
             GraphMutationPlanOp::UpsertEdge {
-                kind: GraphMutationPlanKind::Merge,
+                kind,
                 edge: parsed.edge,
             },
         ]))
@@ -1109,20 +1125,20 @@ fn split_match_delete(statement: &str) -> Result<(&str, &str)> {
     ))
 }
 
-fn split_match_merge(statement: &str) -> Result<(&str, &str)> {
-    if let Some(index) = find_unquoted_keyword(statement, "MERGE") {
+fn split_match_edge_upsert<'a>(statement: &'a str, keyword: &str) -> Result<(&'a str, &'a str)> {
+    if let Some(index) = find_unquoted_keyword(statement, keyword) {
         let match_clause = statement[..index].trim();
-        let merge_pattern = statement[index + "MERGE".len()..].trim();
-        if match_clause.is_empty() || merge_pattern.is_empty() {
-            return Err(GrustError::Unsupported(
-                "MATCH MERGE requires both matched node patterns and a merge pattern".to_string(),
-            ));
+        let edge_pattern = statement[index + keyword.len()..].trim();
+        if match_clause.is_empty() || edge_pattern.is_empty() {
+            return Err(GrustError::Unsupported(format!(
+                "MATCH {keyword} requires both matched node patterns and an edge pattern"
+            )));
         }
-        return Ok((match_clause, merge_pattern));
+        return Ok((match_clause, edge_pattern));
     }
-    Err(GrustError::Unsupported(
-        "only ID-resolved MATCH ... MERGE is supported in writable Cypher".to_string(),
-    ))
+    Err(GrustError::Unsupported(format!(
+        "only ID-resolved MATCH ... {keyword} edge is supported in writable Cypher",
+    )))
 }
 
 fn split_match_set(statement: &str) -> Result<(&str, &str)> {

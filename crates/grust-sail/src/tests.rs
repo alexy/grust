@@ -966,16 +966,60 @@ fn cypher_match_merge_lowers_id_resolved_edge_pattern() {
 }
 
 #[test]
+fn cypher_match_create_lowers_id_resolved_edge_pattern() {
+    let plan = sail_cypher_mutation_plan(
+        "
+        MATCH (a:Person {id: 'person-1'}), (b:Person {id: 'person-2'})
+        CREATE (a)-[:KNOWS {since: 2026}]->(b)
+        ",
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            creates: 1,
+            changed_edges: 1,
+            edge_upserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        plan.into_mutations(),
+        vec![GraphMutation::UpsertEdge(Edge::new(
+            "KNOWS",
+            "person-1",
+            "person-2",
+            Props::from([("since".to_string(), Value::Int(2026))]),
+        ))]
+    );
+}
+
+#[test]
 fn cypher_match_merge_rejects_unresolved_or_broad_forms() {
     for cypher in [
         "MATCH (:Person {id: 'person-1'}), (b:Person {id: 'person-2'}) MERGE (:Person {id: 'person-1'})-[:KNOWS]->(b)",
         "MATCH (a:Person {id: 'person-1'}) MERGE (a)-[:KNOWS]->(b)",
         "MATCH (a:Person {name: 'Ada'}), (b:Person {id: 'person-2'}) MERGE (a)-[:KNOWS]->(b)",
         "MATCH (a:Person {id: 'person-1'}) MERGE (:Person {id: 'person-3'})",
-        "MATCH (a:Person {id: 'person-1'}) CREATE (a)-[:KNOWS]->(:Person {id: 'person-2'})",
     ] {
         let error =
             sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH MERGE must fail");
+        assert!(is_cypher_planning_error(&error));
+    }
+}
+
+#[test]
+fn cypher_match_create_rejects_unresolved_or_broad_forms() {
+    for cypher in [
+        "MATCH (:Person {id: 'person-1'}), (b:Person {id: 'person-2'}) CREATE (:Person {id: 'person-1'})-[:KNOWS]->(b)",
+        "MATCH (a:Person {id: 'person-1'}) CREATE (a)-[:KNOWS]->(b)",
+        "MATCH (a:Person {name: 'Ada'}), (b:Person {id: 'person-2'}) CREATE (a)-[:KNOWS]->(b)",
+        "MATCH (a:Person {id: 'person-1'}) CREATE (:Person {id: 'person-3'})",
+        "MATCH (a:Person {id: 'person-1'}) CREATE (a)-[:KNOWS]->(:Person {id: 'person-2'})",
+    ] {
+        let error =
+            sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH CREATE must fail");
         assert!(is_cypher_planning_error(&error));
     }
 }
@@ -1300,7 +1344,8 @@ fn sail_cypher_plan_executes_on_memory_facade() {
         CREATE (:Person {id: 'person-1', status: 'inactive'});
         CREATE (:Person {id: 'person-2', status: 'inactive'});
         CREATE (:Person {id: 'person-3', status: 'active'});
-        CREATE (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'});
+        MATCH (a:Person {id: 'person-1'}), (b:Person {id: 'person-2'})
+        CREATE (a)-[:KNOWS]->(b);
         MATCH (n:Person {status: 'inactive'}) SET n += {archived: true};
         MATCH (n:Person {archived: true}) DELETE n;
         ",

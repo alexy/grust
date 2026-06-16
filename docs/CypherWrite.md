@@ -37,8 +37,9 @@ describe unreleased working-tree additions:
 - `MATCH (:Src {id: ...})-[e:TYPE]->(:Dst {id: ...}) DELETE e` lowers to edge
   delete when both endpoints are resolved and the target variable matches the
   relationship pattern.
-- `MATCH (a:Src {id: ...}), (b:Dst {id: ...}) MERGE (a)-[:TYPE]->(b)` lowers
-  to an edge merge when both endpoint variables are resolved by explicit-ID
+- `MATCH (a:Src {id: ...}), (b:Dst {id: ...}) CREATE (a)-[:TYPE]->(b)` and
+  `MATCH (a:Src {id: ...}), (b:Dst {id: ...}) MERGE (a)-[:TYPE]->(b)` lower
+  to edge upserts when both endpoint variables are resolved by explicit-ID
   node patterns.
 - `MATCH (n:Label {...}) DELETE n` without an explicit `id` lowers to a
   cardinality-aware matched node delete in Sail. The planner marks the
@@ -311,7 +312,9 @@ feature slice should start at item 3.
    as v1 literal `DELETE`. Broad node `MATCH ... DELETE` is handled separately
    in Batch E; broad node `MATCH ... SET +=` is handled separately in Batch G.
 
-4. ID-resolved `MATCH ... MERGE` for edges. Shipped in `0.8.4`.
+4. ID-resolved `MATCH ... MERGE` for edges. Shipped in `0.8.4`; the
+   corresponding resolved edge `MATCH ... CREATE` form is implemented in the
+   working tree after Batch N.
 
    Support matching explicit endpoint IDs and merging one relationship between
    them:
@@ -323,6 +326,8 @@ feature slice should start at item 3.
 
    The matched variables must resolve to exactly the explicit IDs present in
    the match patterns. The merge still lowers to `GraphMutation::UpsertEdge`.
+   The later `MATCH ... CREATE` edge slice uses the same endpoint binding path
+   but preserves `GraphMutationPlanKind::Create`.
 
 5. Existence-checked `CREATE`.
 
@@ -430,8 +435,8 @@ Acceptance criteria:
   `GraphMutationPlanKind::Merge`.
 - Endpoint variables that are unbound, rebound to different IDs, or resolved by
   non-`id` properties are rejected.
-- General `MATCH ... CREATE`, multi-row matching, and path expansion remain
-  deferred.
+- General row-producing `MATCH ... CREATE`, trailing node creation, multi-row
+  matching, and path expansion remain deferred.
 
 Implementation notes:
 
@@ -861,6 +866,14 @@ Acceptance criteria:
 - Reject node creation in the trailing `CREATE` clause, unbound endpoint
   variables, multi-edge creates, and broad row-producing matches.
 - Add Sail planner tests and Memory facade execution tests.
+
+Implementation status: implemented in the working tree after Batch N. The
+planner reuses the strict `MATCH ... MERGE` endpoint-binding path, lowers the
+trailing relationship `CREATE` to `GraphMutationPlanOp::UpsertEdge` with
+`GraphMutationPlanKind::Create`, and keeps requiring both relationship
+endpoints to be bound variables from explicit-ID `MATCH` node patterns. Strict
+`CypherCreateMode::ErrorIfExists` continues to apply at execution time because
+the resulting plan operation carries create intent.
 
 ### Batch P: Broad Relationship Matching And Edge Mutations
 

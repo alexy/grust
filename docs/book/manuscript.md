@@ -1019,7 +1019,8 @@ accepts only a strict v1 mutation subset: explicit-ID node `CREATE` and
 `MERGE`, edge `CREATE` and `MERGE` when both endpoint IDs are resolved, and
 resolved node or edge `DELETE`. It also accepts ordered multi-statement
 batches, local node variables bound by explicit-ID node patterns, ID-resolved
-`MATCH ... DELETE`, edge `MATCH ... MERGE`, and cardinality-aware broad node
+`MATCH ... DELETE`, edge `MATCH ... CREATE` / `MATCH ... MERGE`, and
+cardinality-aware broad node
 `MATCH ... DELETE` / `MATCH ... SET n += { ... }` / `MATCH ... SET n.key = value`
 / `MATCH ... REMOVE n.key` forms, plus ID-resolved edge
 `MATCH ... SET e += { ... }`, literal property assignment, and explicit

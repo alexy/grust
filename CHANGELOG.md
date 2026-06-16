@@ -32,6 +32,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   execution for broad node `MATCH ... SET n.key = value` and
   `MATCH ... REMOVE n.key`, preserving literal-only assignment and matched-row
   reporting.
+- Added Sail writable Cypher planning for resolved edge
+  `MATCH ... CREATE`, reusing explicit-ID endpoint bindings and preserving
+  strict `CREATE` intent for execution options.
 - Added opt-in generated node IDs for Sail writable Cypher node `CREATE`
   through `CypherNodeIdPolicy::GenerateForCreate` and
   `CypherMutationResult::generated_node_ids`, while keeping explicit IDs as the

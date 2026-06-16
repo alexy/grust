@@ -385,7 +385,8 @@ Writable Cypher starts as a strict Sail-specific v1 surface:
 endpoint edge `CREATE`/`MERGE`, and resolved node/edge `DELETE` into Grust
 mutation plans. It also accepts ordered multi-statement batches and local node
 variables bound from explicit-ID node patterns, plus ID-resolved
-`MATCH ... DELETE`, edge `MATCH ... MERGE`, and cardinality-aware broad node
+`MATCH ... DELETE`, edge `MATCH ... CREATE` / `MATCH ... MERGE`, and
+cardinality-aware broad node
 `MATCH ... DELETE` / `MATCH ... SET n += { ... }` / `MATCH ... SET n.key = value`
 / `MATCH ... REMOVE n.key` forms plus ID-resolved edge
 `MATCH ... SET e += { ... }`, literal property assignment, and explicit
