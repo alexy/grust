@@ -552,8 +552,9 @@ error variants distinguish syntax, unresolved identity, unsupported
 cardinality, and execution failures. Writable Cypher text parsing remains
 Sail-specific while `GraphMutationPlan`, `GraphMutationPlanOp`,
 `GraphMutationReport`, and `CypherMutationExecutor` stay backend-neutral. A
-parser module boundary remains deferred until the grammar grows beyond the
-current compact mutation subset.
+shared parser crate boundary remains deferred until the grammar grows beyond
+the current compact mutation subset or another Cypher text parser consumer
+appears.
 
 ## Deferred Semantics
 
@@ -563,7 +564,7 @@ The following decisions should remain out of v1:
 - broad edge patching, relationship property predicates beyond explicit edge
   `id`, broad property assignment/removal, remove-on-null, arithmetic updates,
   parameters, path expressions, and computed values;
-- cross-backend Cypher mutation APIs;
+- cross-backend Cypher text mutation APIs;
 - stronger transaction guarantees than the target backend documents.
 
 These are real product semantics, not parser details. They should be added only
