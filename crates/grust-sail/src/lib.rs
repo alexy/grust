@@ -4664,6 +4664,25 @@ impl GraphStore for SailGraphStore {
             .next())
     }
 
+    /// Batched node read using a single `IN (...)` query rather than one round
+    /// trip per id. Preserves input order and duplicates and skips missing ids,
+    /// matching the [`GraphStore::get_nodes`] default contract.
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql = format!("SELECT id, label, props FROM grust_nodes WHERE id IN ({placeholders})");
+        let args = ids.iter().map(|id| lit_str(id.as_str())).collect();
+        let fetched = self.run_query(&sql, args).await?;
+        let by_id: HashMap<&str, &Node> =
+            fetched.iter().map(|node| (node.id.as_str(), node)).collect();
+        Ok(ids
+            .iter()
+            .filter_map(|id| by_id.get(id.as_str()).map(|node| (*node).clone()))
+            .collect())
+    }
+
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
         let mut conditions = Vec::new();
         let mut args = Vec::new();
