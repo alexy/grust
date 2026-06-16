@@ -171,14 +171,27 @@ opt into generated node IDs, `CypherMutationResult` returns the count-oriented
 `report` plus `generated_node_ids`, each carrying the generated `NodeId` and
 the optional Cypher variable that introduced it.
 
+Backends that can execute an already-resolved plan implement the
+backend-neutral facade:
+
+```rust
+pub trait CypherMutationExecutor {
+    async fn execute_cypher_mutation_plan(
+        &self,
+        plan: &GraphMutationPlan,
+    ) -> Result<GraphMutationReport>;
+}
+```
+
 The API should not promise atomicity beyond the target store. If Sail later
 proves transactional guarantees for the active table format, that can be added
 as documented backend behavior.
 
-Writable Cypher execution remains Sail-specific for now. The shared core
-surface is the backend-neutral mutation plan and report types; other backends
-can opt into Cypher execution later by adding their own parser/executor or by
-sharing a parser module once the grammar grows enough to justify that boundary.
+Writable Cypher text parsing remains Sail-specific for now. The shared core
+surface is the backend-neutral mutation plan, report types, and resolved-plan
+executor; other backends can opt into plan execution without owning a Cypher
+parser, or share a parser module once the grammar grows enough to justify that
+boundary.
 
 ## Sail Lowering
 
@@ -532,10 +545,11 @@ current compact mutation subset. Top-level mutation keywords are
 case-insensitive, semicolon splitting is quote-aware, and `// ...` plus
 `/* ... */` comments are stripped outside string literals. Structured Cypher
 error variants distinguish syntax, unresolved identity, unsupported
-cardinality, and execution failures. Writable Cypher execution remains
-Sail-specific while `GraphMutationPlan`, `GraphMutationPlanOp`, and
-`GraphMutationReport` stay backend-neutral. A parser module boundary remains
-deferred until the grammar grows beyond the current compact mutation subset.
+cardinality, and execution failures. Writable Cypher text parsing remains
+Sail-specific while `GraphMutationPlan`, `GraphMutationPlanOp`,
+`GraphMutationReport`, and `CypherMutationExecutor` stay backend-neutral. A
+parser module boundary remains deferred until the grammar grows beyond the
+current compact mutation subset.
 
 ## Deferred Semantics
 
@@ -700,6 +714,19 @@ Acceptance criteria:
 - Backends without native support must fail with structured execution errors,
   not silently ignore unsupported operations.
 - Facade exports in `grust-graph` should remain feature-gated and documented.
+
+Implementation status: implemented in the working tree after `0.8.4`.
+`CypherMutationExecutor` lives in `grust-core` and executes resolved
+`GraphMutationPlan` values rather than Cypher text, preserving the current
+Sail-owned parser boundary. Sail implements the trait by reusing its existing
+plan application path. `MemoryGraphStore` is the first non-Sail executor and
+supports deterministic execution of ordinary mutation operations plus
+cardinality-aware matching-node patch/delete plans with matched-row and changed
+element reporting. Unsupported matched operations in the default trait path
+return `GrustError::CypherExecution` rather than being ignored. The
+`grust-graph` facade reexports the core trait and keeps Sail text-planning
+exports behind the `sail` feature and Memory execution behind the `memory`
+feature.
 
 ### Batch L: Parser Boundary And Grammar Growth
 

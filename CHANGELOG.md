@@ -32,6 +32,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   through `CypherNodeIdPolicy::GenerateForCreate` and
   `CypherMutationResult::generated_node_ids`, while keeping explicit IDs as the
   default and preserving resolved edge endpoint requirements.
+- Added the backend-neutral `CypherMutationExecutor` plan-execution facade and
+  implemented it for Sail and Memory, allowing Sail-planned writable Cypher to
+  execute deterministically on the in-memory backend.
 
 ## 2026-06-15 - 0.8.4
 

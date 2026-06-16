@@ -30,6 +30,20 @@ impl MemoryGraphStore {
             edges: inner.edges.values().cloned().collect(),
         }
     }
+
+    fn matching_node_ids(inner: &MemoryGraph, label: Option<&Label>, props: &Props) -> Vec<NodeId> {
+        inner
+            .nodes
+            .values()
+            .filter(|node| {
+                label.is_none_or(|label| &node.label == label)
+                    && props
+                        .iter()
+                        .all(|(key, value)| node.props.get(key) == Some(value))
+            })
+            .map(|node| node.id.clone())
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -192,6 +206,77 @@ impl GraphMutationStore for MemoryGraphStore {
             .edges
             .remove(&(from.clone(), label.clone(), to.clone()));
         Ok(())
+    }
+}
+
+#[async_trait]
+impl CypherMutationExecutor for MemoryGraphStore {
+    async fn execute_cypher_mutation_plan(
+        &self,
+        plan: &GraphMutationPlan,
+    ) -> Result<GraphMutationReport> {
+        let mut report = plan.report();
+        for operation in &plan.operations {
+            match operation {
+                GraphMutationPlanOp::PatchMatchingNodes {
+                    label,
+                    props,
+                    patch,
+                    ..
+                } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props);
+                    report.matched_rows += ids.len();
+                    report.node_patches += ids.len();
+                    report.changed_nodes += ids.len();
+
+                    let mut patched = Vec::with_capacity(ids.len());
+                    for id in &ids {
+                        if let Some(node) = inner.nodes.get(id) {
+                            let mut node = node.clone();
+                            for (key, value) in patch {
+                                node.props.insert(key.clone(), value.clone());
+                            }
+                            if let Some(schema) = &inner.schema {
+                                schema.validate_node(&node)?;
+                            }
+                            patched.push(node);
+                        }
+                    }
+                    for node in patched {
+                        inner.nodes.insert(node.id.clone(), node);
+                    }
+                }
+                GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props);
+                    let incident_edges = inner
+                        .edges
+                        .keys()
+                        .filter(|(from, _, to)| ids.iter().any(|id| id == from || id == to))
+                        .count();
+
+                    report.matched_rows += ids.len();
+                    report.node_deletes += ids.len();
+                    report.changed_nodes += ids.len();
+                    report.edge_deletes += incident_edges;
+                    report.changed_edges += incident_edges;
+
+                    for id in &ids {
+                        inner.nodes.remove(id);
+                    }
+                    inner
+                        .edges
+                        .retain(|(from, _, to), _| !ids.iter().any(|id| id == from || id == to));
+                }
+                _ => {
+                    let mutation = GraphMutation::from(operation.clone());
+                    self.apply_mutations(std::slice::from_ref(&mutation))
+                        .await?;
+                }
+            }
+        }
+        Ok(report)
     }
 }
 

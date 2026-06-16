@@ -401,6 +401,11 @@ allows node `CREATE` without an `id`, and
 `CypherMutationResult::generated_node_ids` while leaving
 `CypherMutationReport` count-oriented. `MERGE` and edge endpoint patterns still
 require resolved IDs before writing.
+Execution of resolved mutation plans is backend-neutral through
+`CypherMutationExecutor`: Sail still owns the text parser for now, but the
+resulting `GraphMutationPlan` can execute on Sail or on `MemoryGraphStore` for
+deterministic tests. Backends without support for a plan operation return
+structured execution errors instead of ignoring it.
 Writable Cypher also lowers ID-resolved and broad node
 `MATCH ... SET n += { ... }` map patches into backend-neutral node patch
 mutations; `null` is stored as a graph value rather than interpreted as

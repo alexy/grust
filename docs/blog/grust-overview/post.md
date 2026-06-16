@@ -423,6 +423,9 @@ mirror writes, and the same delete paths as ordinary Grust mutations.
 Generated node IDs are opt-in through Sail writable-Cypher options and are
 returned in a result shape separate from the count-oriented report, while
 `MERGE` and edge endpoint writes keep requiring resolved IDs.
+Plan execution is no longer Sail-only: `CypherMutationExecutor` lets the
+resolved `GraphMutationPlan` run on Sail or Memory, which keeps parser growth
+separate from backend mutation semantics.
 Structured Cypher errors separate syntax, unresolved identity, unsupported
 cardinality, and execution failures without making every backend expose a
 Cypher execution API.

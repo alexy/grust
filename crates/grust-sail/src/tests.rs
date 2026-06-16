@@ -8,6 +8,7 @@ use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use arrow::ipc::reader::StreamReader;
 use grust_core::prelude::*;
+use grust_memory::MemoryGraphStore;
 use tonic::transport::Channel;
 
 use super::*;
@@ -1230,6 +1231,57 @@ fn cypher_multi_statement_batch_preserves_order_and_aggregates_report() {
             )),
             GraphMutation::DeleteNode(NodeId::new("person-2")),
         ]
+    );
+}
+
+#[test]
+fn sail_cypher_plan_executes_on_memory_facade() {
+    let plan = sail_cypher_mutation_plan(
+        "
+        CREATE (:Person {id: 'person-1', status: 'inactive'});
+        CREATE (:Person {id: 'person-2', status: 'inactive'});
+        CREATE (:Person {id: 'person-3', status: 'active'});
+        CREATE (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'});
+        MATCH (n:Person {status: 'inactive'}) SET n += {archived: true};
+        MATCH (n:Person {archived: true}) DELETE n;
+        ",
+    )
+    .unwrap();
+    let store = MemoryGraphStore::new();
+
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&plan)).unwrap();
+
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            creates: 4,
+            deletes: 1,
+            patches: 1,
+            matched_rows: 4,
+            changed_nodes: 7,
+            changed_edges: 2,
+            node_upserts: 3,
+            edge_upserts: 1,
+            node_deletes: 2,
+            edge_deletes: 1,
+            node_patches: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert!(
+        futures_executor::block_on(store.get_node(&NodeId::new("person-1")))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        futures_executor::block_on(store.get_node(&NodeId::new("person-2")))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        futures_executor::block_on(store.get_node(&NodeId::new("person-3")))
+            .unwrap()
+            .is_some()
     );
 }
 

@@ -20,3 +20,7 @@ prost = { version = "0.14" }
 prost-types = { version = "0.14" }
 arrow = { version = "58.1.0" }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+futures-executor.workspace = true
+grust-memory = { version = "0.8.4", path = "../grust-memory" }

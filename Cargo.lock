@@ -3250,7 +3250,9 @@ version = "0.8.4"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
+ "futures-executor",
  "grust-core",
+ "grust-memory",
  "prost",
  "prost-types",
  "serde_json",

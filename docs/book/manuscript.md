@@ -1034,7 +1034,11 @@ entrypoint on the lower-friction upsert-compatible path. Generated node IDs are
 also caller-selected rather than implicit: `CypherNodeIdPolicy::GenerateForCreate`
 allows node `CREATE` without an `id`, and the result API returns generated IDs
 separately from the count-oriented mutation report. `MERGE` and edge endpoint
-patterns still require resolved IDs before writing. ID-resolved and broad
+patterns still require resolved IDs before writing. Resolved mutation-plan
+execution is backend-neutral through `CypherMutationExecutor`: Sail still owns
+text parsing, but the resulting `GraphMutationPlan` can execute on Sail or on
+the in-memory backend for deterministic tests. Backends that cannot execute a
+plan operation report a structured Cypher execution error. ID-resolved and broad
 node `MATCH ... SET n += { ... }` lower to node patch mutations; `null` in the
 patch map is stored as `Value::Null` rather than treated as property removal.
 ID-resolved edge `MATCH ... SET e += { ... }` lowers to an edge patch mutation

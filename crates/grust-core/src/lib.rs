@@ -2385,6 +2385,41 @@ impl From<GraphMutationPlanOp> for GraphMutation {
     }
 }
 
+/// Executes already-resolved Cypher/graph mutation plans.
+///
+/// This trait intentionally accepts [`GraphMutationPlan`] rather than Cypher
+/// text. Parser ownership can stay with a backend or adapter until there are
+/// enough consumers to justify a shared parser crate, while stores that
+/// understand Grust mutation semantics can still share execution behavior.
+#[async_trait]
+pub trait CypherMutationExecutor: GraphMutationStore {
+    async fn execute_cypher_mutation_plan(
+        &self,
+        plan: &GraphMutationPlan,
+    ) -> Result<GraphMutationReport> {
+        for operation in &plan.operations {
+            match operation {
+                GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node deletes require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::PatchMatchingNodes { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node patches require backend-specific query support".to_string(),
+                    ));
+                }
+                _ => {
+                    let mutation = GraphMutation::from(operation.clone());
+                    self.apply_mutations(std::slice::from_ref(&mutation))
+                        .await?;
+                }
+            }
+        }
+        Ok(plan.report())
+    }
+}
+
 /// Incremental mutation support for stores that can delete elements.
 ///
 /// Deletes are idempotent: removing an element that does not exist is not an
@@ -2516,12 +2551,13 @@ pub trait GraphMutationStore: GraphStore {
 
 pub mod prelude {
     pub use crate::{
-        Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, EdgeUniqueness, Field, FieldType,
-        Graph, GraphAdminStore, GraphBuilder, GraphIndex, GraphMutation, GraphMutationCardinality,
-        GraphMutationPlan, GraphMutationPlanKind, GraphMutationPlanOp, GraphMutationReport,
-        GraphMutationStore, GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label,
-        LoadReport, Node, NodeId, NodeType, Props, PutOutcome, Result, RfcDate, Start, Step,
-        Traversal, Value, edge_key, relationship_type, schema_identifier,
+        CypherMutationExecutor, Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType,
+        EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder, GraphIndex,
+        GraphMutation, GraphMutationCardinality, GraphMutationPlan, GraphMutationPlanKind,
+        GraphMutationPlanOp, GraphMutationReport, GraphMutationStore, GraphSchema,
+        GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType,
+        Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value, edge_key,
+        relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

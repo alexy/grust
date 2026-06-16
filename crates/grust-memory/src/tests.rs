@@ -198,3 +198,89 @@ fn apply_mutations_upserts_and_deletes() {
             .is_empty()
     );
 }
+
+#[test]
+fn executes_mutation_plan_with_cardinality_aware_node_changes() {
+    let store = MemoryGraphStore::new();
+    let plan = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "a",
+                Props::from([("status".to_string(), Value::from("inactive"))]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "b",
+                Props::from([("status".to_string(), Value::from("inactive"))]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "c",
+                Props::from([("status".to_string(), Value::from("active"))]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Create,
+            edge: Edge::new("KNOWS", "a", "b", Props::new()),
+        },
+        GraphMutationPlanOp::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            patch: Props::from([("archived".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::DeleteMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("archived".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+    ]);
+
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&plan)).unwrap();
+
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            creates: 4,
+            deletes: 1,
+            patches: 1,
+            matched_rows: 4,
+            changed_nodes: 7,
+            changed_edges: 2,
+            node_upserts: 3,
+            edge_upserts: 1,
+            node_deletes: 2,
+            edge_deletes: 1,
+            node_patches: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert!(
+        futures_executor::block_on(store.get_node(&NodeId::new("a")))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        futures_executor::block_on(store.get_node(&NodeId::new("b")))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        futures_executor::block_on(store.get_node(&NodeId::new("c")))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        futures_executor::block_on(store.get_edges(EdgeQuery::default()))
+            .unwrap()
+            .is_empty()
+    );
+}

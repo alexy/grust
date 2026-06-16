@@ -2274,6 +2274,20 @@ impl GraphMutationStore for SailGraphStore {
     }
 }
 
+#[async_trait]
+impl CypherMutationExecutor for SailGraphStore {
+    async fn execute_cypher_mutation_plan(
+        &self,
+        plan: &GraphMutationPlan,
+    ) -> Result<GraphMutationReport> {
+        let mut report = plan.report();
+        self.apply_cypher_mutation_plan(plan, &mut report)
+            .await
+            .map_err(cypher_execution_error)?;
+        Ok(report)
+    }
+}
+
 // ── Arrow staging ─────────────────────────────────────────────────────────────
 
 fn nodes_record_batch(nodes: &[Node]) -> Result<RecordBatch> {
