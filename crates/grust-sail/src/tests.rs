@@ -2457,6 +2457,51 @@ fn sail_cypher_returning_executes_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_bound_edge_properties_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'ada'});
+            CREATE (:Person {id: 'bob'});
+            CREATE (:Person {id: 'ada'})-[:KNOWS {id: 'edge-1'}]->(:Person {id: 'bob'});
+            MATCH (:Person {id: 'ada'})-[e:KNOWS {id: 'edge-1'}]->(:Person {id: 'bob'})
+            SET e.weight = 2
+            RETURN e.id, e.weight, e.missing;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        result.mutation.report,
+        GraphMutationReport {
+            creates: 3,
+            patches: 1,
+            changed_nodes: 2,
+            changed_edges: 2,
+            node_upserts: 2,
+            edge_upserts: 1,
+            edge_patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        result.table,
+        CypherResultTable {
+            columns: vec![
+                "e.id".to_string(),
+                "e.weight".to_string(),
+                "e.missing".to_string()
+            ],
+            rows: vec![vec![Value::from("edge-1"), Value::Int(2), Value::Null]],
+        }
+    );
+}
+
+#[test]
 fn sail_cypher_returning_rejects_deferred_result_forms() {
     let store = MemoryGraphStore::new();
 

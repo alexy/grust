@@ -1048,11 +1048,12 @@ insert-versus-update outcomes on upsert backends. `MERGE` and edge endpoint
 patterns still require resolved IDs before writing.
 The first table-returning write path is deliberately smaller than general
 Cypher `RETURN`: `execute_cypher_mutation_returning_with_options` accepts a
-final property projection over node variables already resolved by the write
-plan and returns `CypherMutationTableResult`, which keeps mutation reporting
-separate from `CypherResultTable`. Aggregation, paths, ordering, limiting, and
-arbitrary read-query features remain rejected until a shared read/write row
-model owns those semantics.
+final property projection over node variables and concrete relationship
+variables already resolved by the write plan and returns
+`CypherMutationTableResult`, which keeps mutation reporting separate from
+`CypherResultTable`. Aggregation, paths, broad matched-row relationship
+returns, ordering, limiting, and arbitrary read-query features remain rejected
+until a shared read/write row model owns those semantics.
 `CypherMutationOptions::parameters` binds Grust `Value`s to `$name`
 placeholders only where literals are already accepted: IDs, property maps, and
 literal property assignments. Quoted `'$name'` remains ordinary string text

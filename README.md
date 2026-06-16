@@ -416,11 +416,12 @@ writes, not exact insert-versus-update outcomes on upsert backends.
 `MERGE` and edge endpoint patterns still require resolved IDs before writing.
 For the first table-returning write slice,
 `execute_cypher_mutation_returning_with_options` accepts a final `RETURN`
-containing property projections over node variables already resolved by the
-write plan, such as `RETURN n.id, n.seen`. It returns a
-`CypherMutationTableResult` with the usual mutation result plus a
-`CypherResultTable`; aggregation, paths, ordering, limiting, and arbitrary
-read-query features remain rejected.
+containing property projections over node variables and concrete relationship
+variables already resolved by the write plan, such as `RETURN n.id, n.seen` or
+`RETURN e.id, e.weight`. It returns a `CypherMutationTableResult` with the
+usual mutation result plus a `CypherResultTable`; aggregation, paths, broad
+matched-row relationship returns, ordering, limiting, and arbitrary read-query
+features remain rejected.
 `CypherMutationOptions::parameters` lets callers bind Grust `Value`s to
 `$name` placeholders in literal positions such as IDs, property maps, and
 literal property assignments; quoted `'$name'` remains ordinary string text.

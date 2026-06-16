@@ -1387,10 +1387,12 @@ defines `CypherResultTable` and `CypherMutationTableResult`, plus
 backend-neutral
 `execute_cypher_mutation_returning_with_options_on_store` helper. The first
 supported `RETURN` form must appear on the final write statement and may only
-project properties from node variables already bound to concrete node IDs by
-the write plan, for example `RETURN n.id, n.seen AS seen`. Missing node
-properties project as `Value::Null`; `n.id` projects the resolved `NodeId`.
-Sail and Memory share the same parser and result-table evaluator for this
-slice. Aggregation, path returns, relationship projections, broad matched-row
-result tables, `ORDER BY`, `LIMIT`, `SKIP`, and arbitrary read-query features
-remain deferred.
+project properties from node variables already bound to concrete node IDs, or
+relationship variables already bound to concrete edge identities by the write
+plan. Examples include `RETURN n.id, n.seen AS seen` and
+`RETURN e.id, e.weight`. Missing properties project as `Value::Null`; `n.id`
+projects the resolved `NodeId`, while `e.id` projects the explicit `EdgeId`
+when one exists. Sail and Memory share the same parser and result-table
+evaluator for this slice. Aggregation, path returns, broad matched-row result
+tables, row-producing relationship projections, `ORDER BY`, `LIMIT`, `SKIP`,
+and arbitrary read-query features remain deferred.

@@ -418,6 +418,7 @@ struct CypherPlannedMutationWithReturn {
     plan: GraphMutationPlan,
     generated_node_ids: Vec<CypherGeneratedNodeId>,
     node_bindings: HashMap<String, NodeId>,
+    edge_bindings: HashMap<String, CypherBoundEdgeIdentity>,
     return_clause: CypherReturnClause,
 }
 
@@ -463,11 +464,16 @@ fn sail_cypher_mutation_plan_with_return_options(
     for operation in planner.plan_statement(final_mutation)?.operations {
         plan.push(operation);
     }
-    let return_clause = parse_cypher_return_clause(return_clause, &planner.node_bindings)?;
+    let return_clause = parse_cypher_return_clause(
+        return_clause,
+        &planner.node_bindings,
+        &planner.edge_bindings,
+    )?;
     Ok(CypherPlannedMutationWithReturn {
         plan,
         generated_node_ids: planner.generated_node_ids,
         node_bindings: planner.node_bindings,
+        edge_bindings: planner.edge_bindings,
         return_clause,
     })
 }
@@ -475,6 +481,7 @@ fn sail_cypher_mutation_plan_with_return_options(
 #[derive(Default)]
 struct CypherMutationPlanner {
     node_bindings: HashMap<String, NodeId>,
+    edge_bindings: HashMap<String, CypherBoundEdgeIdentity>,
     node_id_policy: CypherNodeIdPolicy,
     null_assignment: CypherNullAssignment,
     parameters: CypherParameters,
@@ -876,6 +883,15 @@ impl CypherMutationPlanner {
                 {
                     let id =
                         optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
+                    self.bind_edge_variable(
+                        &parsed.relationship,
+                        CypherBoundEdgeIdentity {
+                            from: from.clone(),
+                            label: parsed.relationship.label.clone(),
+                            to: to.clone(),
+                            id: id.clone(),
+                        },
+                    )?;
                     return Ok(GraphMutationPlan::new(vec![
                         GraphMutationPlanOp::RemoveEdgeProps {
                             from,
@@ -906,6 +922,15 @@ impl CypherMutationPlanner {
                 && parsed.relationship.predicates.is_empty()
             {
                 let id = optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
+                self.bind_edge_variable(
+                    &parsed.relationship,
+                    CypherBoundEdgeIdentity {
+                        from: from.clone(),
+                        label: parsed.relationship.label.clone(),
+                        to: to.clone(),
+                        id: id.clone(),
+                    },
+                )?;
                 return Ok(GraphMutationPlan::new(vec![
                     GraphMutationPlanOp::PatchEdge {
                         from,
@@ -1076,6 +1101,15 @@ impl CypherMutationPlanner {
                 && parsed.relationship.predicates.is_empty()
             {
                 let id = optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
+                self.bind_edge_variable(
+                    &parsed.relationship,
+                    CypherBoundEdgeIdentity {
+                        from: from.clone(),
+                        label: parsed.relationship.label.clone(),
+                        to: to.clone(),
+                        id: id.clone(),
+                    },
+                )?;
                 return Ok(GraphMutationPlan::new(vec![
                     GraphMutationPlanOp::RemoveEdgeProps {
                         from,
@@ -1309,6 +1343,31 @@ impl CypherMutationPlanner {
         self.node_bindings.insert(variable.clone(), id.clone());
         Ok(())
     }
+
+    fn bind_edge_variable(
+        &mut self,
+        relationship: &ParsedCypherRelationship,
+        identity: CypherBoundEdgeIdentity,
+    ) -> Result<()> {
+        let Some(variable) = &relationship.variable else {
+            return Ok(());
+        };
+        if let Some(existing) = self.edge_bindings.get(variable) {
+            if existing != &identity {
+                return Err(cypher_unresolved_identity(format!(
+                    "Cypher relationship variable '{variable}' is already bound to a different edge identity"
+                )));
+            }
+            return Ok(());
+        }
+        if self.node_bindings.contains_key(variable) {
+            return Err(cypher_unresolved_identity(format!(
+                "Cypher variable '{variable}' is already bound to a node id"
+            )));
+        }
+        self.edge_bindings.insert(variable.clone(), identity);
+        Ok(())
+    }
 }
 
 fn cypher_syntax(message: impl Into<String>) -> GrustError {
@@ -1505,6 +1564,14 @@ struct ParsedCypherRelationship {
     label: Label,
     props: Props,
     predicates: Vec<GraphPropertyPredicate>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CypherBoundEdgeIdentity {
+    from: NodeId,
+    label: Label,
+    to: NodeId,
+    id: Option<EdgeId>,
 }
 
 struct ParsedWherePredicate {
@@ -1877,11 +1944,19 @@ struct CypherReturnProjection {
     variable: String,
     key: String,
     column: String,
+    element: CypherReturnElement,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CypherReturnElement {
+    Node,
+    Edge,
 }
 
 fn parse_cypher_return_clause(
     clause: &str,
     node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
 ) -> Result<CypherReturnClause> {
     let mut projections = Vec::new();
     for projection in split_top_level_commas(clause)? {
@@ -1896,15 +1971,28 @@ fn parse_cypher_return_clause(
         }
         let (expression, alias) = split_return_alias(projection)?;
         let (variable, key) = parse_property_ref(expression, "RETURN projection")?;
-        if !node_bindings.contains_key(&variable) {
-            return Err(cypher_unresolved_identity(format!(
-                "RETURN references variable '{variable}' that is not bound by the write plan"
-            )));
-        }
+        let element = match (
+            node_bindings.contains_key(&variable),
+            edge_bindings.contains_key(&variable),
+        ) {
+            (true, false) => CypherReturnElement::Node,
+            (false, true) => CypherReturnElement::Edge,
+            (true, true) => {
+                return Err(cypher_unresolved_identity(format!(
+                    "RETURN variable '{variable}' is ambiguously bound as both node and relationship",
+                )));
+            }
+            (false, false) => {
+                return Err(cypher_unresolved_identity(format!(
+                    "RETURN references variable '{variable}' that is not bound by the write plan"
+                )));
+            }
+        };
         projections.push(CypherReturnProjection {
             variable,
             key,
             column: alias.unwrap_or_else(|| expression.trim().to_string()),
+            element,
         });
     }
     if projections.is_empty() {
@@ -2073,6 +2161,7 @@ fn cypher_mutation_result_from_plan(
 async fn evaluate_cypher_return_table<S>(
     store: &S,
     node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
     return_clause: &CypherReturnClause,
 ) -> Result<CypherResultTable>
 where
@@ -2085,41 +2174,102 @@ where
         .collect::<Vec<_>>();
     let mut row = Vec::with_capacity(return_clause.projections.len());
     let mut nodes = HashMap::new();
+    let mut edges = HashMap::new();
     for projection in &return_clause.projections {
-        let id = node_bindings.get(&projection.variable).ok_or_else(|| {
-            cypher_unresolved_identity(format!(
-                "RETURN references variable '{}' that is not bound by the write plan",
-                projection.variable
-            ))
-        })?;
-        if projection.key == "id" {
-            row.push(Value::from(id.as_str()));
-            continue;
+        match projection.element {
+            CypherReturnElement::Node => {
+                let id = node_bindings.get(&projection.variable).ok_or_else(|| {
+                    cypher_unresolved_identity(format!(
+                        "RETURN references variable '{}' that is not bound by the write plan",
+                        projection.variable
+                    ))
+                })?;
+                if projection.key == "id" {
+                    row.push(Value::from(id.as_str()));
+                    continue;
+                }
+                if !nodes.contains_key(&projection.variable) {
+                    let node = store.get_node(id).await?.ok_or_else(|| {
+                        GrustError::CypherExecution(format!(
+                            "RETURN variable '{}' resolved to node '{}' but the node does not exist after the write",
+                            projection.variable,
+                            id.as_str()
+                        ))
+                    })?;
+                    nodes.insert(projection.variable.clone(), node);
+                }
+                let node = nodes
+                    .get(&projection.variable)
+                    .expect("node inserted before projection evaluation");
+                row.push(
+                    node.props
+                        .get(&projection.key)
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+            }
+            CypherReturnElement::Edge => {
+                let identity = edge_bindings.get(&projection.variable).ok_or_else(|| {
+                    cypher_unresolved_identity(format!(
+                        "RETURN references relationship variable '{}' that is not bound by the write plan",
+                        projection.variable
+                    ))
+                })?;
+                if projection.key == "id" {
+                    row.push(
+                        identity
+                            .id
+                            .as_ref()
+                            .map(|id| Value::from(id.as_str()))
+                            .unwrap_or(Value::Null),
+                    );
+                    continue;
+                }
+                if !edges.contains_key(&projection.variable) {
+                    let edge = resolve_bound_edge(store, identity, &projection.variable).await?;
+                    edges.insert(projection.variable.clone(), edge);
+                }
+                let edge = edges
+                    .get(&projection.variable)
+                    .expect("edge inserted before projection evaluation");
+                row.push(
+                    edge.props
+                        .get(&projection.key)
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                );
+            }
         }
-        if !nodes.contains_key(&projection.variable) {
-            let node = store.get_node(id).await?.ok_or_else(|| {
-                GrustError::CypherExecution(format!(
-                    "RETURN variable '{}' resolved to node '{}' but the node does not exist after the write",
-                    projection.variable,
-                    id.as_str()
-                ))
-            })?;
-            nodes.insert(projection.variable.clone(), node);
-        }
-        let node = nodes
-            .get(&projection.variable)
-            .expect("node inserted before projection evaluation");
-        row.push(
-            node.props
-                .get(&projection.key)
-                .cloned()
-                .unwrap_or(Value::Null),
-        );
     }
     Ok(CypherResultTable {
         columns,
         rows: vec![row],
     })
+}
+
+async fn resolve_bound_edge<S>(
+    store: &S,
+    identity: &CypherBoundEdgeIdentity,
+    variable: &str,
+) -> Result<Edge>
+where
+    S: GraphStore + Sync,
+{
+    let edges = store
+        .get_edges(EdgeQuery {
+            from: Some(identity.from.clone()),
+            to: Some(identity.to.clone()),
+            label: Some(identity.label.clone()),
+        })
+        .await?;
+    edges
+        .into_iter()
+        .find(|edge| identity.id.as_ref().is_none_or(|id| edge.id.as_ref() == Some(id)))
+        .ok_or_else(|| {
+            GrustError::CypherExecution(format!(
+                "RETURN relationship variable '{variable}' resolved to an edge that does not exist after the write"
+            ))
+        })
 }
 
 pub async fn execute_cypher_mutation_returning_with_options_on_store<S>(
@@ -2140,9 +2290,14 @@ where
         .execute_cypher_mutation_plan(&planned.plan)
         .await
         .map_err(cypher_execution_error)?;
-    let table = evaluate_cypher_return_table(store, &planned.node_bindings, &planned.return_clause)
-        .await
-        .map_err(cypher_execution_error)?;
+    let table = evaluate_cypher_return_table(
+        store,
+        &planned.node_bindings,
+        &planned.edge_bindings,
+        &planned.return_clause,
+    )
+    .await
+    .map_err(cypher_execution_error)?;
     let mutation = cypher_mutation_result_from_plan(
         report,
         planned.generated_node_ids,
@@ -2794,10 +2949,14 @@ impl SailGraphStore {
         )
         .await
         .map_err(cypher_execution_error)?;
-        let table =
-            evaluate_cypher_return_table(self, &planned.node_bindings, &planned.return_clause)
-                .await
-                .map_err(cypher_execution_error)?;
+        let table = evaluate_cypher_return_table(
+            self,
+            &planned.node_bindings,
+            &planned.edge_bindings,
+            &planned.return_clause,
+        )
+        .await
+        .map_err(cypher_execution_error)?;
         Ok(CypherMutationTableResult {
             mutation: CypherMutationResult {
                 report,
