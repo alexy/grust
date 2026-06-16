@@ -436,6 +436,11 @@ when callers opt in. Node payloads cover explicit and generated node writes;
 edge payloads cover resolved and row-producing edge writes. These payloads
 describe accepted writes, not exact insert-versus-update outcomes on upsert
 backends, and `MERGE` and edge endpoint writes keep requiring resolved IDs.
+The first `RETURN` support for writes stays similarly narrow: a final property
+projection over node variables already resolved by the write plan returns a
+`CypherMutationTableResult`, keeping the count-oriented mutation report
+separate from the table rows while rejecting aggregation, paths, ordering, and
+limiting.
 Parameters are option-driven too: callers can bind Grust `Value`s to `$name`
 placeholders in literal positions such as IDs, property maps, and literal
 property assignments. The first expression form is deliberately narrow:

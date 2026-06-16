@@ -170,6 +170,18 @@ pub struct CypherMutationResult {
     pub written_edge_identities: Vec<CypherWrittenEdgeIdentity>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CypherResultTable {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<Value>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CypherMutationTableResult {
+    pub mutation: CypherMutationResult,
+    pub table: CypherResultTable,
+}
+
 // ── Store ─────────────────────────────────────────────────────────────────────
 
 /// Session-scoped temp views used to stage Arrow batches before MERGE.
@@ -400,6 +412,64 @@ fn sail_cypher_mutation_plan_with_options(
         }
     }
     Ok((plan, planner.generated_node_ids))
+}
+
+struct CypherPlannedMutationWithReturn {
+    plan: GraphMutationPlan,
+    generated_node_ids: Vec<CypherGeneratedNodeId>,
+    node_bindings: HashMap<String, NodeId>,
+    return_clause: CypherReturnClause,
+}
+
+fn sail_cypher_mutation_plan_with_return_options(
+    cypher: &str,
+    options: CypherMutationOptions,
+) -> Result<CypherPlannedMutationWithReturn> {
+    let cypher = strip_cypher_comments(cypher)?;
+    let mut statements = split_cypher_statements(&cypher)?;
+    if statements.is_empty() {
+        return Err(cypher_syntax("writable Cypher statement is empty"));
+    }
+
+    let final_statement = statements
+        .pop()
+        .expect("checked non-empty statement collection");
+    for statement in &statements {
+        if find_unquoted_keyword(statement, "RETURN").is_some() {
+            return Err(cypher_syntax(
+                "writable Cypher only supports RETURN on the final statement",
+            ));
+        }
+    }
+    let (final_mutation, return_clause) = split_final_return(final_statement)?;
+    if final_mutation.trim().is_empty() {
+        return Err(cypher_syntax(
+            "writable Cypher RETURN requires a preceding mutation statement",
+        ));
+    }
+
+    let mut planner = CypherMutationPlanner {
+        node_id_policy: options.node_id_policy,
+        null_assignment: options.null_assignment,
+        parameters: options.parameters,
+        ..CypherMutationPlanner::default()
+    };
+    let mut plan = GraphMutationPlan::default();
+    for statement in statements {
+        for operation in planner.plan_statement(statement)?.operations {
+            plan.push(operation);
+        }
+    }
+    for operation in planner.plan_statement(final_mutation)?.operations {
+        plan.push(operation);
+    }
+    let return_clause = parse_cypher_return_clause(return_clause, &planner.node_bindings)?;
+    Ok(CypherPlannedMutationWithReturn {
+        plan,
+        generated_node_ids: planner.generated_node_ids,
+        node_bindings: planner.node_bindings,
+        return_clause,
+    })
 }
 
 #[derive(Default)]
@@ -1750,6 +1820,114 @@ fn split_match_remove(statement: &str) -> Result<(&str, &str)> {
     ))
 }
 
+fn split_final_return(statement: &str) -> Result<(&str, &str)> {
+    let Some(index) = find_unquoted_keyword(statement, "RETURN") else {
+        return Err(cypher_syntax(
+            "writable Cypher returning execution requires a final RETURN clause",
+        ));
+    };
+    let mutation = statement[..index].trim();
+    let return_clause = statement[index + "RETURN".len()..].trim();
+    if return_clause.is_empty() {
+        return Err(cypher_syntax("RETURN requires at least one projection"));
+    }
+    if find_return_control_clause(return_clause).is_some() {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN does not support ORDER BY, LIMIT, or SKIP",
+        ));
+    }
+    Ok((mutation, return_clause))
+}
+
+fn find_return_control_clause(return_clause: &str) -> Option<usize> {
+    for keyword in ["ORDER", "LIMIT", "SKIP"] {
+        let mut offset = 0usize;
+        let mut rest = return_clause;
+        while let Some(index) = find_unquoted_keyword(rest, keyword) {
+            let absolute = offset + index;
+            let previous = return_clause[..absolute]
+                .chars()
+                .rev()
+                .find(|ch| !ch.is_whitespace());
+            if previous != Some('.') {
+                if keyword != "ORDER"
+                    || rest[index + keyword.len()..]
+                        .trim_start()
+                        .get(..2)
+                        .is_some_and(|value| value.eq_ignore_ascii_case("BY"))
+                {
+                    return Some(absolute);
+                }
+            }
+            let next = index + keyword.len();
+            offset += next;
+            rest = &rest[next..];
+        }
+    }
+    None
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CypherReturnClause {
+    projections: Vec<CypherReturnProjection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CypherReturnProjection {
+    variable: String,
+    key: String,
+    column: String,
+}
+
+fn parse_cypher_return_clause(
+    clause: &str,
+    node_bindings: &HashMap<String, NodeId>,
+) -> Result<CypherReturnClause> {
+    let mut projections = Vec::new();
+    for projection in split_top_level_commas(clause)? {
+        let projection = projection.trim();
+        if projection.is_empty() {
+            return Err(cypher_syntax("RETURN contains an empty projection"));
+        }
+        if projection == "*" || projection.contains('(') || projection.contains(')') {
+            return Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN only supports property projections",
+            ));
+        }
+        let (expression, alias) = split_return_alias(projection)?;
+        let (variable, key) = parse_property_ref(expression, "RETURN projection")?;
+        if !node_bindings.contains_key(&variable) {
+            return Err(cypher_unresolved_identity(format!(
+                "RETURN references variable '{variable}' that is not bound by the write plan"
+            )));
+        }
+        projections.push(CypherReturnProjection {
+            variable,
+            key,
+            column: alias.unwrap_or_else(|| expression.trim().to_string()),
+        });
+    }
+    if projections.is_empty() {
+        return Err(cypher_syntax("RETURN requires at least one projection"));
+    }
+    Ok(CypherReturnClause { projections })
+}
+
+fn split_return_alias(projection: &str) -> Result<(&str, Option<String>)> {
+    let Some(index) = find_unquoted_keyword(projection, "AS") else {
+        return Ok((projection, None));
+    };
+    let expression = projection[..index].trim();
+    let alias = projection[index + "AS".len()..].trim();
+    if expression.is_empty() || alias.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN aliases require both an expression and an alias",
+        ));
+    }
+    let alias = parse_required_cypher_variable(alias, "RETURN alias")?;
+    Ok((expression, Some(alias)))
+}
+
 struct PatchAssignment {
     target: String,
     kind: PatchAssignmentKind,
@@ -1854,6 +2032,124 @@ fn cypher_written_node_identity(
         label: node.label.clone(),
         id: node.id.clone(),
     }
+}
+
+fn cypher_mutation_result_from_plan(
+    report: CypherMutationReport,
+    generated_node_ids: Vec<CypherGeneratedNodeId>,
+    plan: &GraphMutationPlan,
+    options: &CypherMutationOptions,
+) -> Result<CypherMutationResult> {
+    let mut written_node_identities = Vec::new();
+    let mut written_edge_identities = Vec::new();
+    for operation in &plan.operations {
+        if options.collect_written_node_identities
+            && let GraphMutationPlanOp::UpsertNode { kind, node } = operation
+        {
+            written_node_identities.push(cypher_written_node_identity(*kind, node));
+        }
+        if options.collect_written_edge_identities {
+            match operation {
+                GraphMutationPlanOp::UpsertEdge { kind, edge } => {
+                    written_edge_identities.push(cypher_written_edge_identity(*kind, edge));
+                }
+                GraphMutationPlanOp::UpsertEdgesFromNodeMatches { .. } => {
+                    return Err(cypher_unsupported_cardinality(
+                        "generic writable Cypher RETURN execution cannot collect row-producing edge identities",
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(CypherMutationResult {
+        report,
+        generated_node_ids,
+        written_node_identities,
+        written_edge_identities,
+    })
+}
+
+async fn evaluate_cypher_return_table<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    return_clause: &CypherReturnClause,
+) -> Result<CypherResultTable>
+where
+    S: GraphStore + Sync,
+{
+    let columns = return_clause
+        .projections
+        .iter()
+        .map(|projection| projection.column.clone())
+        .collect::<Vec<_>>();
+    let mut row = Vec::with_capacity(return_clause.projections.len());
+    let mut nodes = HashMap::new();
+    for projection in &return_clause.projections {
+        let id = node_bindings.get(&projection.variable).ok_or_else(|| {
+            cypher_unresolved_identity(format!(
+                "RETURN references variable '{}' that is not bound by the write plan",
+                projection.variable
+            ))
+        })?;
+        if projection.key == "id" {
+            row.push(Value::from(id.as_str()));
+            continue;
+        }
+        if !nodes.contains_key(&projection.variable) {
+            let node = store.get_node(id).await?.ok_or_else(|| {
+                GrustError::CypherExecution(format!(
+                    "RETURN variable '{}' resolved to node '{}' but the node does not exist after the write",
+                    projection.variable,
+                    id.as_str()
+                ))
+            })?;
+            nodes.insert(projection.variable.clone(), node);
+        }
+        let node = nodes
+            .get(&projection.variable)
+            .expect("node inserted before projection evaluation");
+        row.push(
+            node.props
+                .get(&projection.key)
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+    }
+    Ok(CypherResultTable {
+        columns,
+        rows: vec![row],
+    })
+}
+
+pub async fn execute_cypher_mutation_returning_with_options_on_store<S>(
+    store: &S,
+    cypher: &str,
+    options: CypherMutationOptions,
+) -> Result<CypherMutationTableResult>
+where
+    S: CypherMutationExecutor + Sync,
+{
+    if options.create_mode == CypherCreateMode::ErrorIfExists {
+        return Err(cypher_unsupported_cardinality(
+            "generic writable Cypher RETURN execution does not support strict CREATE conflict checks",
+        ));
+    }
+    let planned = sail_cypher_mutation_plan_with_return_options(cypher, options.clone())?;
+    let report = store
+        .execute_cypher_mutation_plan(&planned.plan)
+        .await
+        .map_err(cypher_execution_error)?;
+    let table = evaluate_cypher_return_table(store, &planned.node_bindings, &planned.return_clause)
+        .await
+        .map_err(cypher_execution_error)?;
+    let mutation = cypher_mutation_result_from_plan(
+        report,
+        planned.generated_node_ids,
+        &planned.plan,
+        &options,
+    )?;
+    Ok(CypherMutationTableResult { mutation, table })
 }
 
 struct NumericExpression {
@@ -2448,6 +2744,68 @@ impl SailGraphStore {
             generated_node_ids,
             written_node_identities,
             written_edge_identities,
+        })
+    }
+
+    /// Executes writable Cypher with a final, strict property-projection RETURN.
+    pub async fn execute_cypher_mutation_returning(
+        &self,
+        cypher: &str,
+    ) -> Result<CypherMutationTableResult> {
+        self.execute_cypher_mutation_returning_with_options(
+            cypher,
+            CypherMutationOptions::default(),
+        )
+        .await
+    }
+
+    /// Executes writable Cypher with a final, strict property-projection RETURN.
+    ///
+    /// This intentionally supports only a small write-result slice: the final
+    /// statement may project properties from node variables whose IDs were
+    /// resolved by the mutation plan. Aggregation, ordering, limiting, paths,
+    /// and arbitrary read-query features remain deferred.
+    pub async fn execute_cypher_mutation_returning_with_options(
+        &self,
+        cypher: &str,
+        options: CypherMutationOptions,
+    ) -> Result<CypherMutationTableResult> {
+        let create_mode = options.create_mode;
+        let collect_written_node_identities = options.collect_written_node_identities;
+        let collect_written_edge_identities = options.collect_written_edge_identities;
+        let planned = sail_cypher_mutation_plan_with_return_options(cypher, options)?;
+        let mut report = planned.plan.report();
+        if create_mode == CypherCreateMode::ErrorIfExists {
+            self.check_strict_create_conflicts(&planned.plan)
+                .await
+                .map_err(cypher_execution_error)?;
+        }
+        let mut written_node_identities = Vec::new();
+        let mut written_edge_identities = Vec::new();
+        let node_identity_collector =
+            collect_written_node_identities.then_some(&mut written_node_identities);
+        let identity_collector =
+            collect_written_edge_identities.then_some(&mut written_edge_identities);
+        self.apply_cypher_mutation_plan(
+            &planned.plan,
+            &mut report,
+            node_identity_collector,
+            identity_collector,
+        )
+        .await
+        .map_err(cypher_execution_error)?;
+        let table =
+            evaluate_cypher_return_table(self, &planned.node_bindings, &planned.return_clause)
+                .await
+                .map_err(cypher_execution_error)?;
+        Ok(CypherMutationTableResult {
+            mutation: CypherMutationResult {
+                report,
+                generated_node_ids: planned.generated_node_ids,
+                written_node_identities,
+                written_edge_identities,
+            },
+            table,
         })
     }
 

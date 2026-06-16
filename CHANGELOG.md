@@ -6,6 +6,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added a strict first writable Cypher `RETURN` slice for Sail through
+  `CypherMutationTableResult` and `CypherResultTable`, allowing final
+  property projections over node variables already resolved by the write plan
+  while keeping mutation reports count-oriented and rejecting aggregation,
+  paths, ordering, limiting, and arbitrary read-query features.
 - Added backend-neutral graph constraint metadata for required and unique node
   or edge properties, plus constraint capability reporting so backends can
   distinguish metadata-only constraints from validate-before-write behavior.

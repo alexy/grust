@@ -1359,8 +1359,7 @@ writes and `CypherMutationResult::written_edge_identities` for resolved edge
 writes plus row-producing `MATCH ... CREATE` / `MATCH ... MERGE` edge writes.
 The payloads carry accepted write intent and structural identities, but they do
 not promise inserted-versus-updated status on upsert-compatible backends.
-General returned rows, aggregation, projections, and exact insert/update
-classification remain deferred.
+Exact insert/update classification remains deferred.
 
 ### Batch AB: General `RETURN` After Writes
 
@@ -1381,3 +1380,17 @@ Acceptance criteria:
 - Keep Sail and Memory results aligned for supported projections.
 - Reject aggregation, path returns, `ORDER BY`, `LIMIT`, and arbitrary read
   query features until the read-query engine owns those semantics.
+
+Implementation status: partially implemented after Batch AA. `grust-sail` now
+defines `CypherResultTable` and `CypherMutationTableResult`, plus
+`SailGraphStore::execute_cypher_mutation_returning_with_options` and the
+backend-neutral
+`execute_cypher_mutation_returning_with_options_on_store` helper. The first
+supported `RETURN` form must appear on the final write statement and may only
+project properties from node variables already bound to concrete node IDs by
+the write plan, for example `RETURN n.id, n.seen AS seen`. Missing node
+properties project as `Value::Null`; `n.id` projects the resolved `NodeId`.
+Sail and Memory share the same parser and result-table evaluator for this
+slice. Aggregation, path returns, relationship projections, broad matched-row
+result tables, `ORDER BY`, `LIMIT`, `SKIP`, and arbitrary read-query features
+remain deferred.

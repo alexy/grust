@@ -2397,6 +2397,89 @@ fn sail_cypher_multiple_set_assignments_execute_in_order_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_executes_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'ada', name: 'Ada', order: 'first', limit: 3});
+            MATCH (n:Person {id: 'ada'})
+            SET n.seen = true, n.count = 1
+            RETURN n.id, n.seen AS seen, n.order, n.limit, n.missing;
+            ",
+            CypherMutationOptions {
+                collect_written_node_identities: true,
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .unwrap();
+
+    assert_eq!(
+        result.mutation.report,
+        GraphMutationReport {
+            creates: 1,
+            patches: 2,
+            changed_nodes: 3,
+            node_upserts: 1,
+            node_patches: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        result.mutation.written_node_identities,
+        vec![CypherWrittenNodeIdentity {
+            kind: GraphMutationPlanKind::Create,
+            label: Label::new("Person"),
+            id: NodeId::new("ada"),
+        }]
+    );
+    assert_eq!(
+        result.table,
+        CypherResultTable {
+            columns: vec![
+                "n.id".to_string(),
+                "seen".to_string(),
+                "n.order".to_string(),
+                "n.limit".to_string(),
+                "n.missing".to_string()
+            ],
+            rows: vec![vec![
+                Value::from("ada"),
+                Value::Bool(true),
+                Value::from("first"),
+                Value::Int(3),
+                Value::Null,
+            ]],
+        }
+    );
+}
+
+#[test]
+fn sail_cypher_returning_rejects_deferred_result_forms() {
+    let store = MemoryGraphStore::new();
+
+    let error =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (:Person {id: 'ada'}) RETURN count(*);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("aggregation should be rejected");
+    assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
+
+    let error =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (:Person {id: 'ada'}) RETURN n.id;",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("unbound variable should be rejected");
+    assert!(matches!(error, GrustError::CypherUnresolvedIdentity(_)));
+}
+
+#[test]
 fn sail_row_producing_match_create_and_merge_execute_on_memory_facade() {
     let plan = sail_cypher_mutation_plan(
         "
