@@ -2661,6 +2661,21 @@ pub struct GraphMutationReport {
     pub edge_patches: usize,
     pub node_property_removes: usize,
     pub edge_property_removes: usize,
+    /// Upserts the executor could classify as inserting a new node, i.e. no
+    /// element with the same identity existed before the write.
+    ///
+    /// Only backends that can cheaply distinguish insert from update populate
+    /// these (for example the in-memory store). Upsert-oriented backends that
+    /// return [`PutOutcome::Upserted`] leave them at `0` and report the totals
+    /// through `node_upserts` / `edge_upserts` instead, so a zero here does not
+    /// mean "no inserts" — check the backend's classification ability first.
+    pub node_inserts: usize,
+    /// Upserts the executor could classify as updating an existing node.
+    pub node_updates: usize,
+    /// Upserts the executor could classify as inserting a new edge.
+    pub edge_inserts: usize,
+    /// Upserts the executor could classify as updating an existing edge.
+    pub edge_updates: usize,
 }
 
 impl GraphMutationReport {
@@ -2876,6 +2891,7 @@ pub trait CypherMutationExecutor: GraphMutationStore {
         &self,
         plan: &GraphMutationPlan,
     ) -> Result<GraphMutationReport> {
+        let mut report = plan.report();
         for operation in &plan.operations {
             match operation {
                 GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
@@ -2922,6 +2938,12 @@ pub trait CypherMutationExecutor: GraphMutationStore {
                             .to_string(),
                     ));
                 }
+                GraphMutationPlanOp::UpsertNode { node, .. } => {
+                    classify_node_upsert(self.put_node(node).await?, &mut report);
+                }
+                GraphMutationPlanOp::UpsertEdge { edge, .. } => {
+                    classify_edge_upsert(self.put_edge(edge).await?, &mut report);
+                }
                 _ => {
                     let mutation = GraphMutation::from(operation.clone());
                     self.apply_mutations(std::slice::from_ref(&mutation))
@@ -2929,7 +2951,28 @@ pub trait CypherMutationExecutor: GraphMutationStore {
                 }
             }
         }
-        Ok(plan.report())
+        Ok(report)
+    }
+}
+
+/// Records a single-node upsert outcome into a report's precise insert/update
+/// counters. [`PutOutcome::Upserted`] and [`PutOutcome::Deduped`] carry no
+/// insert-vs-update information and leave the counters unchanged.
+pub fn classify_node_upsert(outcome: PutOutcome, report: &mut GraphMutationReport) {
+    match outcome {
+        PutOutcome::Inserted => report.node_inserts += 1,
+        PutOutcome::Updated => report.node_updates += 1,
+        PutOutcome::Upserted | PutOutcome::Deduped => {}
+    }
+}
+
+/// Records a single-edge upsert outcome into a report's precise insert/update
+/// counters. See [`classify_node_upsert`].
+pub fn classify_edge_upsert(outcome: PutOutcome, report: &mut GraphMutationReport) {
+    match outcome {
+        PutOutcome::Inserted => report.edge_inserts += 1,
+        PutOutcome::Updated => report.edge_updates += 1,
+        PutOutcome::Upserted | PutOutcome::Deduped => {}
     }
 }
 
@@ -3109,8 +3152,8 @@ pub mod prelude {
         GraphMutationReport, GraphMutationStore, GraphNodeMatch, GraphNumericOp, GraphPredicateOp,
         GraphPropertyPredicate, GraphRelationshipMatch, GraphSchema, GraphSchemaBuilder,
         GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType, Props, PutOutcome,
-        Result, RfcDate, Start, Step, Traversal, Value, edge_key, evaluate_numeric_update,
-        relationship_type, schema_identifier,
+        Result, RfcDate, Start, Step, Traversal, Value, classify_edge_upsert, classify_node_upsert,
+        edge_key, evaluate_numeric_update, relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

@@ -2457,6 +2457,8 @@ fn sail_cypher_plan_executes_on_memory_facade() {
             node_deletes: 2,
             edge_deletes: 1,
             node_patches: 2,
+            node_inserts: 3,
+            edge_inserts: 1,
             ..GraphMutationReport::default()
         }
     );
@@ -2499,6 +2501,7 @@ fn sail_cypher_multiple_set_assignments_execute_in_order_on_memory_facade() {
             changed_nodes: 3,
             node_upserts: 1,
             node_patches: 2,
+            node_inserts: 1,
             ..GraphMutationReport::default()
         }
     );
@@ -3221,22 +3224,14 @@ fn sail_cypher_returning_rejects_deferred_result_forms() {
         .expect_err("unbound variable should be rejected");
     assert!(matches!(error, GrustError::CypherUnresolvedIdentity(_)));
 
+    // ORDER BY a column that was not returned is still rejected.
     let error =
         futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
             &store,
-            "CREATE (:Person {id: 'ada'}) RETURN n.id LIMIT 1;",
+            "MATCH (n:Person {id: 'ada'}) SET n.seen = true RETURN n.id ORDER BY n.missing;",
             CypherMutationOptions::default(),
         ))
-        .expect_err("LIMIT should be rejected");
-    assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
-
-    let error =
-        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
-            &store,
-            "CREATE (:Person {id: 'ada'}) RETURN n.id SKIP 1;",
-            CypherMutationOptions::default(),
-        ))
-        .expect_err("SKIP should be rejected");
+        .expect_err("ORDER BY on a non-projected column should be rejected");
     assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
 }
 
@@ -3325,6 +3320,9 @@ fn sail_row_producing_match_create_and_merge_execute_on_memory_facade() {
             changed_edges: 2,
             node_upserts: 3,
             edge_upserts: 2,
+            node_inserts: 3,
+            edge_inserts: 1,
+            edge_updates: 1,
             ..GraphMutationReport::default()
         }
     );
@@ -4965,5 +4963,63 @@ fn unique_edge_conflict_uses_structural_identity() {
     assert_eq!(
         unique_edge_conflict(&existing, &update, &Label::new("RATED"), "token"),
         None
+    );
+}
+
+#[test]
+fn sail_cypher_returning_orders_skips_and_limits_rows() {
+    let store = MemoryGraphStore::new();
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'a', age: 30});
+            CREATE (:Person {id: 'b', age: 20});
+            CREATE (:Person {id: 'c', age: 40});
+            MATCH (n:Person) SET n.seen = true
+            RETURN n.id, n.age ORDER BY n.age DESC SKIP 1 LIMIT 1;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+    assert_eq!(
+        result.table.columns,
+        vec!["n.id".to_string(), "n.age".to_string()]
+    );
+    // ages descending: c(40), a(30), b(20); SKIP 1 drops c; LIMIT 1 keeps a.
+    assert_eq!(
+        result.table.rows,
+        vec![vec![Value::from("a"), Value::Int(30)]]
+    );
+}
+
+#[test]
+fn sail_cypher_returning_orders_ascending_with_alias() {
+    let store = MemoryGraphStore::new();
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'a', age: 30});
+            CREATE (:Person {id: 'b', age: 20});
+            CREATE (:Person {id: 'c', age: 40});
+            MATCH (n:Person) SET n.seen = true
+            RETURN n.id AS id, n.age AS age ORDER BY age;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+    assert_eq!(
+        result.table.columns,
+        vec!["id".to_string(), "age".to_string()]
+    );
+    // Ascending by age: b(20), a(30), c(40).
+    assert_eq!(
+        result.table.rows,
+        vec![
+            vec![Value::from("b"), Value::Int(20)],
+            vec![Value::from("a"), Value::Int(30)],
+            vec![Value::from("c"), Value::Int(40)],
+        ]
     );
 }

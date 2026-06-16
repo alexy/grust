@@ -523,6 +523,8 @@ fn executes_mutation_plan_with_cardinality_aware_node_changes() {
             node_deletes: 2,
             edge_deletes: 1,
             node_patches: 2,
+            node_inserts: 3,
+            edge_inserts: 1,
             ..GraphMutationReport::default()
         }
     );
@@ -605,6 +607,7 @@ fn executes_matching_node_property_removal() {
             changed_nodes: 5,
             node_upserts: 3,
             node_property_removes: 2,
+            node_inserts: 3,
             ..GraphMutationReport::default()
         }
     );
@@ -708,6 +711,7 @@ fn matching_node_mutations_filter_property_predicates() {
             changed_nodes: 4,
             node_upserts: 3,
             node_patches: 1,
+            node_inserts: 3,
             ..GraphMutationReport::default()
         }
     );
@@ -786,6 +790,8 @@ fn row_producing_edge_create_matches_endpoint_nodes() {
             changed_edges: 1,
             node_upserts: 3,
             edge_upserts: 1,
+            node_inserts: 3,
+            edge_inserts: 1,
             ..GraphMutationReport::default()
         }
     );
@@ -835,6 +841,9 @@ fn row_producing_edge_create_matches_endpoint_nodes() {
             matched_rows: 1,
             changed_edges: 1,
             edge_upserts: 1,
+            // The MEMBER_OF edge already exists from the earlier CREATE, so the
+            // row-producing MERGE updates rather than inserts it.
+            edge_updates: 1,
             ..GraphMutationReport::default()
         }
     );
@@ -918,6 +927,7 @@ fn executes_matching_node_numeric_property_updates() {
             changed_nodes: 6,
             node_upserts: 3,
             node_patches: 3,
+            node_inserts: 3,
             ..GraphMutationReport::default()
         }
     );
@@ -1094,6 +1104,8 @@ fn executes_matching_edge_mutations() {
             edge_upserts: 2,
             edge_patches: 1,
             edge_property_removes: 1,
+            node_inserts: 3,
+            edge_inserts: 2,
             ..GraphMutationReport::default()
         }
     );
@@ -1325,4 +1337,46 @@ fn matching_edge_mutations_filter_relationship_properties() {
             ..GraphMutationReport::default()
         }
     );
+}
+
+#[test]
+fn executor_classifies_inserts_and_updates_precisely() {
+    let store = MemoryGraphStore::new();
+    // First write inserts the node and the edge.
+    let insert = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new("Person", "p1", Props::new()),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new("Person", "p2", Props::new()),
+        },
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Create,
+            edge: Edge::new("KNOWS", "p1", "p2", Props::new()),
+        },
+    ]);
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&insert)).unwrap();
+    assert_eq!(report.node_inserts, 2);
+    assert_eq!(report.node_updates, 0);
+    assert_eq!(report.edge_inserts, 1);
+    assert_eq!(report.edge_updates, 0);
+
+    // A MERGE over the same identities updates rather than inserts.
+    let merge = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Merge,
+            node: Node::new("Person", "p1", Props::from([("seen".to_string(), Value::Bool(true))])),
+        },
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Merge,
+            edge: Edge::new("KNOWS", "p1", "p2", Props::from([("weight".to_string(), Value::Int(1))])),
+        },
+    ]);
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&merge)).unwrap();
+    assert_eq!(report.node_inserts, 0);
+    assert_eq!(report.node_updates, 1);
+    assert_eq!(report.edge_inserts, 0);
+    assert_eq!(report.edge_updates, 1);
 }

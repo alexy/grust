@@ -229,6 +229,12 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             edge_patches: 1,
             node_property_removes: 1,
             edge_property_removes: 1,
+            // Precise insert/update counts are filled in only at execution
+            // time; a plan-derived report leaves them at zero.
+            node_inserts: 0,
+            node_updates: 0,
+            edge_inserts: 0,
+            edge_updates: 0,
         }
     );
     assert_eq!(

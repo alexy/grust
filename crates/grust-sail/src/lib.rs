@@ -2321,15 +2321,11 @@ fn split_final_return(statement: &str) -> Result<(&str, &str)> {
     if return_clause.is_empty() {
         return Err(cypher_syntax("RETURN requires at least one projection"));
     }
-    if find_return_control_clause(return_clause).is_some() {
-        return Err(cypher_unsupported_cardinality(
-            "writable Cypher RETURN does not support ORDER BY, LIMIT, or SKIP",
-        ));
-    }
     Ok((mutation, return_clause))
 }
 
 fn find_return_control_clause(return_clause: &str) -> Option<usize> {
+    let mut earliest: Option<usize> = None;
     for keyword in ["ORDER", "LIMIT", "SKIP"] {
         let mut offset = 0usize;
         let mut rest = return_clause;
@@ -2347,7 +2343,11 @@ fn find_return_control_clause(return_clause: &str) -> Option<usize> {
                         .get(..2)
                         .is_some_and(|value| value.eq_ignore_ascii_case("BY"))
                 {
-                    return Some(absolute);
+                    // Keep the earliest control keyword across all three so the
+                    // projection/control split point is correct regardless of
+                    // the order the keywords appear in the clause.
+                    earliest = Some(earliest.map_or(absolute, |current| current.min(absolute)));
+                    break;
                 }
             }
             let next = index + keyword.len();
@@ -2355,7 +2355,7 @@ fn find_return_control_clause(return_clause: &str) -> Option<usize> {
             rest = &rest[next..];
         }
     }
-    None
+    earliest
 }
 
 fn is_return_alias_keyword_prefix(prefix: &str) -> bool {
@@ -2368,6 +2368,17 @@ fn is_return_alias_keyword_prefix(prefix: &str) -> bool {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CypherReturnClause {
     projections: Vec<CypherReturnProjection>,
+    order_by: Vec<CypherOrderItem>,
+    skip: Option<usize>,
+    limit: Option<usize>,
+}
+
+/// One `ORDER BY` term, resolved to the index of a returned column. Ordering by
+/// expressions that are not part of the projection is not supported.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CypherOrderItem {
+    column: usize,
+    descending: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2400,8 +2411,9 @@ fn parse_cypher_return_clause(
     row_edge_match_bindings: &HashMap<String, GraphRelationshipMatch>,
     row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
 ) -> Result<CypherReturnClause> {
+    let (projection_clause, control_clause) = split_return_control(clause);
     let mut projections = Vec::new();
-    for projection in split_top_level_commas(clause)? {
+    for projection in split_top_level_commas(projection_clause)? {
         let projection = projection.trim();
         if projection.is_empty() {
             return Err(cypher_syntax("RETURN contains an empty projection"));
@@ -2460,7 +2472,135 @@ fn parse_cypher_return_clause(
     if projections.is_empty() {
         return Err(cypher_syntax("RETURN requires at least one projection"));
     }
-    Ok(CypherReturnClause { projections })
+    let columns = projections
+        .iter()
+        .map(|projection| projection.column.clone())
+        .collect::<Vec<_>>();
+    let (order_by, skip, limit) = parse_return_control(control_clause, &columns)?;
+    Ok(CypherReturnClause {
+        projections,
+        order_by,
+        skip,
+        limit,
+    })
+}
+
+/// Splits a RETURN clause into its projection list and the optional trailing
+/// `ORDER BY` / `SKIP` / `LIMIT` control clause.
+fn split_return_control(clause: &str) -> (&str, &str) {
+    match find_return_control_clause(clause) {
+        Some(index) => (clause[..index].trim(), clause[index..].trim()),
+        None => (clause.trim(), ""),
+    }
+}
+
+/// Parses a `ORDER BY ... [SKIP n] [LIMIT n]` control clause. Cypher's canonical
+/// `ORDER BY`, then `SKIP`, then `LIMIT` ordering is required, and `ORDER BY`
+/// terms must reference returned column names or aliases.
+fn parse_return_control(
+    control: &str,
+    columns: &[String],
+) -> Result<(Vec<CypherOrderItem>, Option<usize>, Option<usize>)> {
+    let mut rest = control.trim();
+    let mut order_by = Vec::new();
+    if let Some(after_order) = strip_leading_keyword(rest, "ORDER") {
+        let after_by = strip_leading_keyword(after_order.trim_start(), "BY")
+            .ok_or_else(|| cypher_syntax("ORDER must be followed by BY"))?;
+        let (items, tail) = split_before_keywords(after_by, &["SKIP", "LIMIT"]);
+        order_by = parse_order_items(items, columns)?;
+        rest = tail.trim_start();
+    }
+    let mut skip = None;
+    if let Some(after_skip) = strip_leading_keyword(rest, "SKIP") {
+        let (count, tail) = split_before_keywords(after_skip, &["LIMIT"]);
+        skip = Some(parse_return_count(count, "SKIP")?);
+        rest = tail.trim_start();
+    }
+    let mut limit = None;
+    if let Some(after_limit) = strip_leading_keyword(rest, "LIMIT") {
+        limit = Some(parse_return_count(after_limit, "LIMIT")?);
+        rest = "";
+    }
+    if !rest.trim().is_empty() {
+        return Err(cypher_syntax(format!(
+            "unsupported RETURN clause tail; expected ORDER BY, SKIP, then LIMIT: {}",
+            rest.trim()
+        )));
+    }
+    Ok((order_by, skip, limit))
+}
+
+/// Returns the slice of `value` before the first top-level occurrence of any of
+/// `keywords`, plus the remainder starting at that keyword.
+fn split_before_keywords<'a>(value: &'a str, keywords: &[&str]) -> (&'a str, &'a str) {
+    let split = keywords
+        .iter()
+        .filter_map(|keyword| find_unquoted_keyword(value, keyword))
+        .min();
+    match split {
+        Some(index) => (value[..index].trim(), &value[index..]),
+        None => (value.trim(), ""),
+    }
+}
+
+fn parse_order_items(items: &str, columns: &[String]) -> Result<Vec<CypherOrderItem>> {
+    let mut order_by = Vec::new();
+    for item in split_top_level_commas(items)? {
+        let item = item.trim();
+        if item.is_empty() {
+            return Err(cypher_syntax("ORDER BY contains an empty term"));
+        }
+        let (expression, descending) = if let Some(prefix) = strip_trailing_keyword(item, "DESC") {
+            (prefix, true)
+        } else if let Some(prefix) = strip_trailing_keyword(item, "DESCENDING") {
+            (prefix, true)
+        } else if let Some(prefix) = strip_trailing_keyword(item, "ASC") {
+            (prefix, false)
+        } else if let Some(prefix) = strip_trailing_keyword(item, "ASCENDING") {
+            (prefix, false)
+        } else {
+            (item, false)
+        };
+        let expression = expression.trim();
+        let column = columns
+            .iter()
+            .position(|column| column == expression)
+            .ok_or_else(|| {
+                cypher_unsupported_cardinality(format!(
+                    "ORDER BY '{expression}' must reference a returned column or alias"
+                ))
+            })?;
+        order_by.push(CypherOrderItem { column, descending });
+    }
+    if order_by.is_empty() {
+        return Err(cypher_syntax("ORDER BY requires at least one term"));
+    }
+    Ok(order_by)
+}
+
+fn strip_trailing_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> {
+    let value = value.trim_end();
+    let candidate = value.get(value.len().checked_sub(keyword.len())?..)?;
+    if !candidate.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let prefix = &value[..value.len() - keyword.len()];
+    // Require a word boundary so we do not strip the tail of an identifier.
+    if prefix
+        .chars()
+        .next_back()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some(prefix.trim_end())
+}
+
+fn parse_return_count(value: &str, context: &str) -> Result<usize> {
+    let value = value.trim();
+    value
+        .parse::<usize>()
+        .map_err(|_| cypher_syntax(format!("{context} requires a non-negative integer, got '{value}'")))
 }
 
 fn split_return_alias(projection: &str) -> Result<(&str, Option<String>)> {
@@ -2759,7 +2899,75 @@ where
         }
         rows.push(row);
     }
+    apply_return_control(
+        &mut rows,
+        &return_clause.order_by,
+        return_clause.skip,
+        return_clause.limit,
+    );
     Ok(CypherResultTable { columns, rows })
+}
+
+/// Applies `ORDER BY` (stable), then `SKIP`, then `LIMIT` to materialized rows.
+fn apply_return_control(
+    rows: &mut Vec<Vec<Value>>,
+    order_by: &[CypherOrderItem],
+    skip: Option<usize>,
+    limit: Option<usize>,
+) {
+    if !order_by.is_empty() {
+        rows.sort_by(|a, b| {
+            for item in order_by {
+                let ordering = compare_return_values(&a[item.column], &b[item.column]);
+                let ordering = if item.descending {
+                    ordering.reverse()
+                } else {
+                    ordering
+                };
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+            std::cmp::Ordering::Equal
+        });
+    }
+    if let Some(skip) = skip {
+        rows.drain(0..skip.min(rows.len()));
+    }
+    if let Some(limit) = limit {
+        rows.truncate(limit);
+    }
+}
+
+/// Total ordering over result values for `ORDER BY`. Nulls sort last (ascending),
+/// numbers compare numerically, strings and bools compare naturally, and values
+/// of different kinds fall back to a stable type rank so sorting is deterministic.
+fn compare_return_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Greater,
+        (_, Value::Null) => Ordering::Less,
+        (Value::Int(x), Value::Int(y)) => x.cmp(y),
+        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y).unwrap_or(Ordering::Equal),
+        (Value::Int(x), Value::Float(y)) => (*x as f64).partial_cmp(y).unwrap_or(Ordering::Equal),
+        (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal),
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        _ => value_kind_rank(a).cmp(&value_kind_rank(b)),
+    }
+}
+
+fn value_kind_rank(value: &Value) -> u8 {
+    match value {
+        Value::Bool(_) => 0,
+        Value::Int(_) | Value::Float(_) => 1,
+        Value::String(_) => 2,
+        Value::DateTime(_) => 3,
+        Value::StringArray(_) | Value::IntArray(_) | Value::FloatArray(_) => 4,
+        Value::Json(_) => 5,
+        Value::Null => 6,
+    }
 }
 
 async fn resolve_bound_edge<S>(

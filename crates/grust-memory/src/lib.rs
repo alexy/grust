@@ -612,8 +612,19 @@ impl CypherMutationExecutor for MemoryGraphStore {
                         }
                     }
                     for edge in edges {
-                        inner.edges.insert(MemoryEdgeKey::from_edge(&edge), edge);
+                        let previous = inner.edges.insert(MemoryEdgeKey::from_edge(&edge), edge);
+                        if previous.is_some() {
+                            report.edge_updates += 1;
+                        } else {
+                            report.edge_inserts += 1;
+                        }
                     }
+                }
+                GraphMutationPlanOp::UpsertNode { node, .. } => {
+                    classify_node_upsert(self.put_node(node).await?, &mut report);
+                }
+                GraphMutationPlanOp::UpsertEdge { edge, .. } => {
+                    classify_edge_upsert(self.put_edge(edge).await?, &mut report);
                 }
                 _ => {
                     let mutation = GraphMutation::from(operation.clone());
