@@ -68,6 +68,9 @@ describe unreleased working-tree additions:
   `CypherNodeIdPolicy::GenerateForCreate`; explicit IDs remain the default,
   `MERGE` still requires explicit identity, and edge endpoint IDs must resolve
   before writing.
+- Parameters are available through `CypherMutationOptions::parameters` anywhere
+  literal values are already accepted: explicit IDs, property maps, and literal
+  property assignments. Quoted `$name` text remains an ordinary string literal.
 - Writable mutation keywords are parsed case-insensitively at the top level,
   and `// ...` plus `/* ... */` comments are stripped outside string literals.
 
@@ -77,8 +80,8 @@ The v1 implementation should reject, with clear errors:
   policy;
 - node identity derived from non-`id` properties;
 - relationship property predicates beyond explicit edge `id`;
-- remove-on-null, arithmetic updates, parameters, path expressions, or
-  computed expression evaluation;
+- remove-on-null, arithmetic updates, path expressions, or computed expression
+  evaluation;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
 
@@ -949,6 +952,14 @@ Acceptance criteria:
   deferred.
 - Add tests for string ID parameters, integer/bool/null property parameters,
   missing parameters, wrong ID types, and parameters inside quoted strings.
+
+Implementation status: implemented in the working tree after Batch P.
+`CypherMutationOptions` carries a `parameters` map keyed by parameter name and
+valued as Grust `Value`. Sail resolves `$name` only in positions that already
+accept literals: property maps and literal property assignment values, including
+node `id` and relationship `id` entries inside property maps. Missing
+parameters report `CypherUnresolvedIdentity`, non-string ID parameters fail the
+existing explicit-ID checks, and quoted `'$name'` remains a string literal.
 
 ### Batch R: Minimal Expression Updates
 

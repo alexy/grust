@@ -406,6 +406,9 @@ allows node `CREATE` without an `id`, and
 `CypherMutationResult::generated_node_ids` while leaving
 `CypherMutationReport` count-oriented. `MERGE` and edge endpoint patterns still
 require resolved IDs before writing.
+`CypherMutationOptions::parameters` lets callers bind Grust `Value`s to
+`$name` placeholders in literal positions such as IDs, property maps, and
+literal property assignments; quoted `'$name'` remains ordinary string text.
 Execution of resolved mutation plans is backend-neutral through
 `CypherMutationExecutor`: Sail still owns the text parser for now, but the
 resulting `GraphMutationPlan` can execute on Sail or on `MemoryGraphStore` for

@@ -1039,7 +1039,11 @@ entrypoint on the lower-friction upsert-compatible path. Generated node IDs are
 also caller-selected rather than implicit: `CypherNodeIdPolicy::GenerateForCreate`
 allows node `CREATE` without an `id`, and the result API returns generated IDs
 separately from the count-oriented mutation report. `MERGE` and edge endpoint
-patterns still require resolved IDs before writing. Resolved mutation-plan
+patterns still require resolved IDs before writing.
+`CypherMutationOptions::parameters` binds Grust `Value`s to `$name`
+placeholders only where literals are already accepted: IDs, property maps, and
+literal property assignments. Quoted `'$name'` remains ordinary string text
+rather than a parameter reference. Resolved mutation-plan
 execution is backend-neutral through `CypherMutationExecutor`: Sail still owns
 text parsing, but the resulting `GraphMutationPlan` can execute on Sail or on
 the in-memory backend for deterministic tests. Backends that cannot execute a

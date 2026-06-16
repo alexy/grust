@@ -89,10 +89,13 @@ impl Default for CypherNodeIdPolicy {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub type CypherParameters = BTreeMap<String, Value>;
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct CypherMutationOptions {
     pub create_mode: CypherCreateMode,
     pub node_id_policy: CypherNodeIdPolicy,
+    pub parameters: CypherParameters,
 }
 
 impl Default for CypherMutationOptions {
@@ -100,6 +103,7 @@ impl Default for CypherMutationOptions {
         Self {
             create_mode: CypherCreateMode::UpsertCompatible,
             node_id_policy: CypherNodeIdPolicy::ExplicitOnly,
+            parameters: CypherParameters::new(),
         }
     }
 }
@@ -335,6 +339,7 @@ fn sail_cypher_mutation_plan_with_options(
 
     let mut planner = CypherMutationPlanner {
         node_id_policy: options.node_id_policy,
+        parameters: options.parameters,
         ..CypherMutationPlanner::default()
     };
     let mut plan = GraphMutationPlan::default();
@@ -350,6 +355,7 @@ fn sail_cypher_mutation_plan_with_options(
 struct CypherMutationPlanner {
     node_bindings: HashMap<String, NodeId>,
     node_id_policy: CypherNodeIdPolicy,
+    parameters: CypherParameters,
     generated_node_ids: Vec<CypherGeneratedNodeId>,
 }
 
@@ -383,7 +389,7 @@ impl CypherMutationPlanner {
             ]));
         }
 
-        let (node, rest) = parse_cypher_node_pattern(pattern)?;
+        let (node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher node pattern suffix: {}",
@@ -433,7 +439,7 @@ impl CypherMutationPlanner {
             ]));
         }
 
-        let (node, rest) = parse_cypher_node_pattern(pattern)?;
+        let (node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher delete pattern suffix: {}",
@@ -515,7 +521,7 @@ impl CypherMutationPlanner {
             ]));
         }
 
-        let (node, rest) = parse_cypher_node_pattern(pattern)?;
+        let (node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher MATCH DELETE pattern suffix: {}",
@@ -576,7 +582,7 @@ impl CypherMutationPlanner {
     ) -> Result<GraphMutationPlan> {
         let (match_clause, edge_pattern) = split_match_edge_upsert(statement, keyword)?;
         for pattern in split_top_level_patterns(match_clause)? {
-            let (node, rest) = parse_cypher_node_pattern(pattern)?;
+            let (node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
             if !rest.trim().is_empty() {
                 return Err(cypher_syntax(format!(
                     "unsupported writable Cypher MATCH pattern suffix: {}",
@@ -612,7 +618,7 @@ impl CypherMutationPlanner {
 
     fn parse_match_set(&mut self, statement: &str) -> Result<GraphMutationPlan> {
         let (pattern, assignment) = split_match_set(statement)?;
-        let assignment = parse_patch_assignment(assignment)?;
+        let assignment = parse_patch_assignment(assignment, &self.parameters)?;
 
         if pattern.contains("->") {
             let parsed = self.parse_edge_match_pattern(pattern)?;
@@ -661,7 +667,7 @@ impl CypherMutationPlanner {
             ]));
         }
 
-        let (node, rest) = parse_cypher_node_pattern(pattern)?;
+        let (node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher MATCH SET pattern suffix: {}",
@@ -754,7 +760,7 @@ impl CypherMutationPlanner {
             ]));
         }
 
-        let (node, rest) = parse_cypher_node_pattern(pattern)?;
+        let (node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher MATCH REMOVE pattern suffix: {}",
@@ -797,7 +803,7 @@ impl CypherMutationPlanner {
     }
 
     fn parse_edge_pattern(&mut self, pattern: &str) -> Result<ParsedCypherEdge> {
-        let (from, rest) = parse_cypher_node_pattern(pattern)?;
+        let (from, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
         let rest = rest.trim_start();
         let rest = rest
             .strip_prefix("-[")
@@ -808,7 +814,7 @@ impl CypherMutationPlanner {
         let rest = rest
             .strip_prefix("->")
             .ok_or_else(|| cypher_syntax("edge mutation requires outgoing '->' direction"))?;
-        let (to, rest) = parse_cypher_node_pattern(rest)?;
+        let (to, rest) = parse_cypher_node_pattern(rest, &self.parameters)?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher edge pattern suffix: {}",
@@ -818,7 +824,7 @@ impl CypherMutationPlanner {
 
         let from_id = self.resolve_node_id(&from, "edge mutation source node")?;
         let to_id = self.resolve_node_id(&to, "edge mutation destination node")?;
-        let relationship = parse_cypher_relationship(rel)?;
+        let relationship = parse_cypher_relationship(rel, &self.parameters)?;
         let mut edge = Edge::new(
             relationship.label,
             from_id.clone(),
@@ -843,7 +849,7 @@ impl CypherMutationPlanner {
     }
 
     fn parse_edge_match_pattern(&self, pattern: &str) -> Result<ParsedCypherEdgeMatch> {
-        let (from, rest) = parse_cypher_node_pattern(pattern)?;
+        let (from, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
         let rest = rest.trim_start();
         let rest = rest
             .strip_prefix("-[")
@@ -854,14 +860,14 @@ impl CypherMutationPlanner {
         let rest = rest
             .strip_prefix("->")
             .ok_or_else(|| cypher_syntax("edge mutation requires outgoing '->' direction"))?;
-        let (to, rest) = parse_cypher_node_pattern(rest)?;
+        let (to, rest) = parse_cypher_node_pattern(rest, &self.parameters)?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher edge pattern suffix: {}",
                 rest.trim()
             )));
         }
-        let relationship = parse_cypher_relationship(rel)?;
+        let relationship = parse_cypher_relationship(rel, &self.parameters)?;
         Ok(ParsedCypherEdgeMatch {
             from,
             relationship,
@@ -1169,7 +1175,10 @@ struct ParsedCypherRelationship {
     props: Props,
 }
 
-fn parse_cypher_node_pattern(input: &str) -> Result<(ParsedCypherNode, &str)> {
+fn parse_cypher_node_pattern<'a>(
+    input: &'a str,
+    parameters: &CypherParameters,
+) -> Result<(ParsedCypherNode, &'a str)> {
     let input = input.trim_start();
     let input = input.strip_prefix('(').ok_or_else(|| {
         GrustError::Unsupported("writable Cypher node pattern must start with '('".to_string())
@@ -1177,7 +1186,7 @@ fn parse_cypher_node_pattern(input: &str) -> Result<(ParsedCypherNode, &str)> {
     let close = find_matching(input, '(', ')')?;
     let body = input[..close].trim();
     let rest = &input[close + 1..];
-    let (variable, label, props) = parse_cypher_node_body(body)?;
+    let (variable, label, props) = parse_cypher_node_body(body, parameters)?;
     Ok((
         ParsedCypherNode {
             variable,
@@ -1188,8 +1197,11 @@ fn parse_cypher_node_pattern(input: &str) -> Result<(ParsedCypherNode, &str)> {
     ))
 }
 
-fn parse_cypher_node_body(body: &str) -> Result<(Option<String>, Option<Label>, Props)> {
-    let (head, props) = split_cypher_body_props(body)?;
+fn parse_cypher_node_body(
+    body: &str,
+    parameters: &CypherParameters,
+) -> Result<(Option<String>, Option<Label>, Props)> {
+    let (head, props) = split_cypher_body_props(body, parameters)?;
     let head = head.trim();
     let (variable, label) = if let Some((variable, label)) = head.split_once(':') {
         let label = label.trim();
@@ -1234,8 +1246,11 @@ fn is_cypher_identifier(value: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn parse_cypher_relationship(body: &str) -> Result<ParsedCypherRelationship> {
-    let (head, props) = split_cypher_body_props(body.trim())?;
+fn parse_cypher_relationship(
+    body: &str,
+    parameters: &CypherParameters,
+) -> Result<ParsedCypherRelationship> {
+    let (head, props) = split_cypher_body_props(body.trim(), parameters)?;
     let Some((variable, label)) = head.trim().split_once(':') else {
         return Err(GrustError::Unsupported(
             "edge CREATE/MERGE/DELETE requires a relationship type".into(),
@@ -1331,10 +1346,13 @@ struct PatchAssignment {
     props: Props,
 }
 
-fn parse_patch_assignment(assignment: &str) -> Result<PatchAssignment> {
+fn parse_patch_assignment(
+    assignment: &str,
+    parameters: &CypherParameters,
+) -> Result<PatchAssignment> {
     if let Some(index) = find_unquoted_sequence(assignment, "+=") {
         let target = parse_required_cypher_variable(&assignment[..index], "MATCH SET target")?;
-        let props = parse_cypher_props_map_literal(&assignment[index + 2..])?;
+        let props = parse_cypher_props_map_literal(&assignment[index + 2..], parameters)?;
         return Ok(PatchAssignment { target, props });
     }
     let Some(index) = find_unquoted(assignment, '=') else {
@@ -1343,7 +1361,7 @@ fn parse_patch_assignment(assignment: &str) -> Result<PatchAssignment> {
         ));
     };
     let (target, key) = parse_property_ref(&assignment[..index], "MATCH SET target")?;
-    let value = parse_cypher_literal(&assignment[index + 1..])?;
+    let value = parse_cypher_literal(&assignment[index + 1..], parameters)?;
     Ok(PatchAssignment {
         target,
         props: Props::from([(key, value)]),
@@ -1362,7 +1380,7 @@ fn parse_property_ref(value: &str, context: &str) -> Result<(String, String)> {
     Ok((target, key))
 }
 
-fn parse_cypher_props_map_literal(value: &str) -> Result<Props> {
+fn parse_cypher_props_map_literal(value: &str, parameters: &CypherParameters) -> Result<Props> {
     let value = value.trim();
     let Some(body) = value.strip_prefix('{') else {
         return Err(GrustError::Unsupported(
@@ -1375,10 +1393,13 @@ fn parse_cypher_props_map_literal(value: &str) -> Result<Props> {
             "unsupported content after MATCH SET property map".to_string(),
         ));
     }
-    parse_cypher_props(&body[..close])
+    parse_cypher_props(&body[..close], parameters)
 }
 
-fn split_cypher_body_props(body: &str) -> Result<(&str, Props)> {
+fn split_cypher_body_props<'a>(
+    body: &'a str,
+    parameters: &CypherParameters,
+) -> Result<(&'a str, Props)> {
     let body = body.trim();
     if let Some(open) = body.find('{') {
         let close = find_matching(&body[open + 1..], '{', '}')? + open + 1;
@@ -1387,13 +1408,16 @@ fn split_cypher_body_props(body: &str) -> Result<(&str, Props)> {
                 "unsupported content after Cypher property map".to_string(),
             ));
         }
-        Ok((&body[..open], parse_cypher_props(&body[open + 1..close])?))
+        Ok((
+            &body[..open],
+            parse_cypher_props(&body[open + 1..close], parameters)?,
+        ))
     } else {
         Ok((body, Props::new()))
     }
 }
 
-fn parse_cypher_props(body: &str) -> Result<Props> {
+fn parse_cypher_props(body: &str, parameters: &CypherParameters) -> Result<Props> {
     let mut props = Props::new();
     for entry in split_top_level_commas(body)? {
         let entry = entry.trim();
@@ -1404,7 +1428,7 @@ fn parse_cypher_props(body: &str) -> Result<Props> {
             GrustError::Unsupported(format!("Cypher property entry is missing ':': {entry}"))
         })?;
         let key = parse_cypher_prop_key(&entry[..colon])?;
-        let value = parse_cypher_literal(&entry[colon + 1..])?;
+        let value = parse_cypher_literal(&entry[colon + 1..], parameters)?;
         props.insert(key, value);
     }
     Ok(props)
@@ -1431,7 +1455,7 @@ fn parse_cypher_prop_key(key: &str) -> Result<String> {
     }
 }
 
-fn parse_cypher_literal(value: &str) -> Result<Value> {
+fn parse_cypher_literal(value: &str, parameters: &CypherParameters) -> Result<Value> {
     let value = value.trim();
     if value.is_empty() {
         return Err(GrustError::Unsupported(
@@ -1440,6 +1464,16 @@ fn parse_cypher_literal(value: &str) -> Result<Value> {
     }
     if is_quoted(value) {
         return Ok(Value::String(parse_cypher_string(value)?));
+    }
+    if let Some(parameter) = value.strip_prefix('$') {
+        if !is_cypher_identifier(parameter) {
+            return Err(cypher_syntax(format!(
+                "unsupported Cypher parameter reference: {value}"
+            )));
+        }
+        return parameters.get(parameter).cloned().ok_or_else(|| {
+            cypher_unresolved_identity(format!("Cypher parameter '{value}' was not provided"))
+        });
     }
     match value {
         "true" | "TRUE" => return Ok(Value::Bool(true)),
@@ -1803,9 +1837,10 @@ impl SailGraphStore {
         cypher: &str,
         options: CypherMutationOptions,
     ) -> Result<CypherMutationResult> {
+        let create_mode = options.create_mode;
         let (plan, generated_node_ids) = sail_cypher_mutation_plan_with_options(cypher, options)?;
         let mut report = plan.report();
-        if options.create_mode == CypherCreateMode::ErrorIfExists {
+        if create_mode == CypherCreateMode::ErrorIfExists {
             self.check_strict_create_conflicts(&plan)
                 .await
                 .map_err(cypher_execution_error)?;

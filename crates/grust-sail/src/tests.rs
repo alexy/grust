@@ -211,6 +211,7 @@ fn cypher_mutation_options_default_to_upsert_compatible_create() {
         CypherMutationOptions {
             create_mode: CypherCreateMode::UpsertCompatible,
             node_id_policy: CypherNodeIdPolicy::ExplicitOnly,
+            parameters: CypherParameters::new(),
         }
     );
 }
@@ -669,6 +670,75 @@ fn cypher_node_create_requires_explicit_id_and_lowers_to_mutation() {
             .to_string()
             .contains("requires explicit string property 'id'")
     );
+}
+
+#[test]
+fn cypher_parameters_bind_literal_values_only() {
+    let options = CypherMutationOptions {
+        parameters: CypherParameters::from([
+            ("id".to_string(), Value::from("person-1")),
+            ("name".to_string(), Value::from("Ada")),
+            ("age".to_string(), Value::Int(36)),
+            ("active".to_string(), Value::Bool(true)),
+            ("note".to_string(), Value::Null),
+        ]),
+        ..CypherMutationOptions::default()
+    };
+    let plan = sail_cypher_mutation_plan_with_options(
+        "
+        CREATE (:Person {id: $id, name: $name, age: $age, active: $active, note: $note});
+        MATCH (n:Person {id: $id}) SET n.name = $name;
+        MATCH (n:Person {id: $id}) SET n.quoted = '$name';
+        ",
+        options,
+    )
+    .unwrap()
+    .0;
+
+    assert_eq!(
+        plan.into_mutations(),
+        vec![
+            GraphMutation::UpsertNode(Node::new(
+                "Person",
+                "person-1",
+                Props::from([
+                    ("active".to_string(), Value::Bool(true)),
+                    ("age".to_string(), Value::Int(36)),
+                    ("id".to_string(), Value::from("person-1")),
+                    ("name".to_string(), Value::from("Ada")),
+                    ("note".to_string(), Value::Null),
+                ]),
+            )),
+            GraphMutation::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([("name".to_string(), Value::from("Ada"))]),
+            },
+            GraphMutation::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([("quoted".to_string(), Value::from("$name"))]),
+            },
+        ]
+    );
+
+    let missing = sail_cypher_mutation_plan_with_options(
+        "CREATE (:Person {id: $missing})",
+        CypherMutationOptions::default(),
+    )
+    .expect_err("missing parameter should fail");
+    assert!(matches!(missing, GrustError::CypherUnresolvedIdentity(_)));
+
+    let wrong_id_type = sail_cypher_mutation_plan_with_options(
+        "CREATE (:Person {id: $id})",
+        CypherMutationOptions {
+            parameters: CypherParameters::from([("id".to_string(), Value::Int(1))]),
+            ..CypherMutationOptions::default()
+        },
+    )
+    .expect_err("non-string id parameter should fail");
+    assert!(matches!(
+        wrong_id_type,
+        GrustError::CypherUnresolvedIdentity(_)
+    ));
 }
 
 #[test]
@@ -2312,7 +2382,7 @@ async fn test_execute_cypher_mutation_strict_create() {
     let error = store
         .execute_cypher_mutation_with_options(
             "CREATE (:Person {id: 'person-1', name: 'Ada Strict'})",
-            strict,
+            strict.clone(),
         )
         .await
         .expect_err("strict create should reject existing node");
@@ -2332,7 +2402,7 @@ async fn test_execute_cypher_mutation_strict_create() {
     let error = store
         .execute_cypher_mutation_with_options(
             "CREATE (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-2'}]->(:Person {id: 'person-2'})",
-            strict,
+            strict.clone(),
         )
         .await
         .expect_err("strict create should reject existing structural edge");

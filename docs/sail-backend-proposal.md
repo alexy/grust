@@ -306,6 +306,9 @@ Open semantic decisions before accepting general Cypher writes:
   explicit property removal over endpoint predicates; relationship property
   predicates beyond explicit edge `id`, computed expressions, and
   remove-on-null remain open.
+- Parameters: Sail writable Cypher accepts `$name` placeholders only where
+  literal values are already accepted, using `CypherMutationOptions` rather
+  than expression evaluation.
 - Schema validation: mutations should validate through `GraphSchema` before
   they reach backend SQL.
 - Match cardinality: mutating `MATCH ... SET/DELETE` may affect zero, one, or

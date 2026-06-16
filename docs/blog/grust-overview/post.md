@@ -428,6 +428,9 @@ mirror writes, and the same delete paths as ordinary Grust mutations.
 Generated node IDs are opt-in through Sail writable-Cypher options and are
 returned in a result shape separate from the count-oriented report, while
 `MERGE` and edge endpoint writes keep requiring resolved IDs.
+Parameters are option-driven too: callers can bind Grust `Value`s to `$name`
+placeholders in literal positions such as IDs, property maps, and literal
+property assignments without enabling arbitrary expression evaluation.
 Plan execution is no longer Sail-only: `CypherMutationExecutor` lets the
 resolved `GraphMutationPlan` run on Sail or Memory, which keeps parser growth
 separate from backend mutation semantics.

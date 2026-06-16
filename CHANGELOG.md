@@ -38,6 +38,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added backend-neutral relationship match descriptors plus Sail and Memory
   execution for broad relationship `MATCH ... DELETE`, `SET`, and `REMOVE`
   mutations over endpoint label/property predicates and optional edge `id`.
+- Added Sail writable Cypher parameters through
+  `CypherMutationOptions::parameters`, limited to literal positions such as
+  IDs, property maps, and literal property assignments.
 - Added opt-in generated node IDs for Sail writable Cypher node `CREATE`
   through `CypherNodeIdPolicy::GenerateForCreate` and
   `CypherMutationResult::generated_node_ids`, while keeping explicit IDs as the
