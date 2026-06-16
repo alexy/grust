@@ -389,6 +389,69 @@ pub fn sail_cypher_mutation_plan(cypher: &str) -> Result<GraphMutationPlan> {
     Ok(plan)
 }
 
+/// A parsed Cypher schema (DDL) statement.
+///
+/// DDL is deliberately kept separate from the data-mutation plan: constraint
+/// statements describe schema intent that callers apply to a [`GraphSchema`]
+/// (and then to a backend through [`GraphStore::apply_schema`]), rather than
+/// flowing through [`GraphMutationStore`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CypherDdlStatement {
+    /// `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR ... REQUIRE ... IS ...`.
+    CreateConstraint {
+        name: Option<String>,
+        if_not_exists: bool,
+        constraint: GraphConstraint,
+    },
+    /// `DROP CONSTRAINT name [IF EXISTS]`.
+    DropConstraint { name: String, if_exists: bool },
+}
+
+/// Parses one or more Cypher DDL statements (currently `CREATE CONSTRAINT` and
+/// `DROP CONSTRAINT`) into backend-neutral [`CypherDdlStatement`] values.
+///
+/// Supported constraint forms:
+///
+/// ```cypher
+/// CREATE CONSTRAINT person_id IF NOT EXISTS
+/// FOR (n:Person) REQUIRE n.id IS UNIQUE;
+/// CREATE CONSTRAINT FOR (n:Person) REQUIRE n.name IS NOT NULL;
+/// CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS NOT NULL;
+/// DROP CONSTRAINT person_id IF EXISTS;
+/// ```
+///
+/// The legacy `ON ... ASSERT ...` spelling is accepted as a synonym for
+/// `FOR ... REQUIRE ...`. Composite/node-key constraints, index DDL, and
+/// property existence on multiple keys are rejected with a clear error.
+pub fn sail_cypher_ddl(cypher: &str) -> Result<Vec<CypherDdlStatement>> {
+    let cypher = strip_cypher_comments(cypher)?;
+    let statements = split_cypher_statements(&cypher)?;
+    if statements.is_empty() {
+        return Err(cypher_syntax("Cypher DDL statement is empty"));
+    }
+    statements
+        .into_iter()
+        .map(|statement| parse_cypher_ddl_statement(statement.trim()))
+        .collect()
+}
+
+/// Parses Cypher constraint DDL and returns only the resulting
+/// [`GraphConstraint`] values, discarding names and `IF [NOT] EXISTS` flags.
+///
+/// `DROP CONSTRAINT` statements are rejected because they carry no constraint
+/// body; use [`sail_cypher_ddl`] when those are needed.
+pub fn sail_cypher_constraints(cypher: &str) -> Result<Vec<GraphConstraint>> {
+    sail_cypher_ddl(cypher)?
+        .into_iter()
+        .map(|statement| match statement {
+            CypherDdlStatement::CreateConstraint { constraint, .. } => Ok(constraint),
+            CypherDdlStatement::DropConstraint { .. } => Err(cypher_syntax(
+                "sail_cypher_constraints does not accept DROP CONSTRAINT statements",
+            )),
+        })
+        .collect()
+}
+
 fn sail_cypher_mutation_plan_with_options(
     cypher: &str,
     options: CypherMutationOptions,
@@ -1557,6 +1620,181 @@ fn cypher_execution_error(error: GrustError) -> GrustError {
         | GrustError::CypherUnsupportedCardinality(_)
         | GrustError::CypherExecution(_) => error,
         other => GrustError::CypherExecution(other.to_string()),
+    }
+}
+
+fn parse_cypher_ddl_statement(statement: &str) -> Result<CypherDdlStatement> {
+    if let Some(rest) = strip_leading_keyword(statement, "CREATE") {
+        let rest = rest.trim_start();
+        if let Some(rest) = strip_leading_keyword(rest, "CONSTRAINT") {
+            return parse_create_constraint(rest.trim());
+        }
+        return Err(cypher_syntax(
+            "only CREATE CONSTRAINT is supported as Cypher CREATE DDL",
+        ));
+    }
+    if let Some(rest) = strip_leading_keyword(statement, "DROP") {
+        let rest = rest.trim_start();
+        if let Some(rest) = strip_leading_keyword(rest, "CONSTRAINT") {
+            return parse_drop_constraint(rest.trim());
+        }
+        return Err(cypher_syntax(
+            "only DROP CONSTRAINT is supported as Cypher DROP DDL",
+        ));
+    }
+    Err(cypher_syntax(format!(
+        "unsupported Cypher DDL statement; expected CREATE CONSTRAINT or DROP CONSTRAINT: {statement}"
+    )))
+}
+
+fn parse_create_constraint(rest: &str) -> Result<CypherDdlStatement> {
+    // Split the header (`[name] [IF NOT EXISTS]`) from the body, which starts
+    // at `FOR` (or the legacy `ON`).
+    let (for_index, body) = find_unquoted_keyword(rest, "FOR")
+        .map(|index| (index, &rest[index + "FOR".len()..]))
+        .or_else(|| {
+            find_unquoted_keyword(rest, "ON").map(|index| (index, &rest[index + "ON".len()..]))
+        })
+        .ok_or_else(|| {
+            cypher_syntax("CREATE CONSTRAINT requires a FOR (or ON) pattern clause")
+        })?;
+    let header = rest[..for_index].trim();
+
+    let (name, if_not_exists) = if let Some(if_index) = find_unquoted_keyword(header, "IF") {
+        let tail = header[if_index + "IF".len()..].trim();
+        if !tail.eq_ignore_ascii_case("NOT EXISTS")
+            && tail.split_whitespace().collect::<Vec<_>>() != ["NOT", "EXISTS"]
+        {
+            return Err(cypher_syntax(
+                "CREATE CONSTRAINT only supports the IF NOT EXISTS modifier",
+            ));
+        }
+        (constraint_name(header[..if_index].trim())?, true)
+    } else {
+        (constraint_name(header)?, false)
+    };
+
+    // Body: `<pattern> REQUIRE <predicate>` (or legacy `ASSERT`).
+    let (require_index, require_len) = find_unquoted_keyword(body, "REQUIRE")
+        .map(|index| (index, "REQUIRE".len()))
+        .or_else(|| find_unquoted_keyword(body, "ASSERT").map(|index| (index, "ASSERT".len())))
+        .ok_or_else(|| {
+            cypher_syntax("CREATE CONSTRAINT requires a REQUIRE (or ASSERT) predicate clause")
+        })?;
+    let pattern = body[..require_index].trim();
+    let predicate = body[require_index + require_len..].trim();
+
+    let (is_edge, pattern_variable, label) = parse_constraint_pattern(pattern)?;
+    let (unique, key) = parse_constraint_predicate(predicate, &pattern_variable)?;
+
+    let constraint = match (is_edge, unique) {
+        (false, true) => GraphConstraint::NodePropertyUnique { label, key },
+        (false, false) => GraphConstraint::NodePropertyRequired { label, key },
+        (true, true) => GraphConstraint::EdgePropertyUnique { label, key },
+        (true, false) => GraphConstraint::EdgePropertyRequired { label, key },
+    };
+    Ok(CypherDdlStatement::CreateConstraint {
+        name,
+        if_not_exists,
+        constraint,
+    })
+}
+
+fn parse_drop_constraint(rest: &str) -> Result<CypherDdlStatement> {
+    let (name, if_exists) = if let Some(if_index) = find_unquoted_keyword(rest, "IF") {
+        let tail = rest[if_index + "IF".len()..].trim();
+        if !tail.eq_ignore_ascii_case("EXISTS") {
+            return Err(cypher_syntax(
+                "DROP CONSTRAINT only supports the IF EXISTS modifier",
+            ));
+        }
+        (rest[..if_index].trim(), true)
+    } else {
+        (rest.trim(), false)
+    };
+    if !is_cypher_identifier(name) {
+        return Err(cypher_syntax(
+            "DROP CONSTRAINT requires a constraint name",
+        ));
+    }
+    Ok(CypherDdlStatement::DropConstraint {
+        name: name.to_string(),
+        if_exists,
+    })
+}
+
+/// Parses the optional constraint name in a `CREATE CONSTRAINT` header.
+fn constraint_name(header: &str) -> Result<Option<String>> {
+    let header = header.trim();
+    if header.is_empty() {
+        return Ok(None);
+    }
+    if is_cypher_identifier(header) {
+        Ok(Some(header.to_string()))
+    } else {
+        Err(cypher_syntax(format!(
+            "unsupported CREATE CONSTRAINT name: {header}"
+        )))
+    }
+}
+
+/// Parses a constraint `FOR` pattern, returning whether it is a relationship
+/// pattern, the bound variable, and the single label/type.
+fn parse_constraint_pattern(pattern: &str) -> Result<(bool, String, Label)> {
+    let pattern = pattern.trim();
+    if let Some(open) = pattern.find('[') {
+        let close = pattern[open + 1..]
+            .find(']')
+            .map(|offset| offset + open + 1)
+            .ok_or_else(|| cypher_syntax("constraint relationship pattern is missing ']'"))?;
+        let (variable, label) = parse_constraint_var_label(&pattern[open + 1..close])?;
+        return Ok((true, variable, label));
+    }
+    let open = pattern
+        .find('(')
+        .ok_or_else(|| cypher_syntax("constraint pattern must be a node or relationship pattern"))?;
+    let close = pattern[open + 1..]
+        .find(')')
+        .map(|offset| offset + open + 1)
+        .ok_or_else(|| cypher_syntax("constraint node pattern is missing ')'"))?;
+    let (variable, label) = parse_constraint_var_label(&pattern[open + 1..close])?;
+    Ok((false, variable, label))
+}
+
+/// Parses the `variable:Label` body inside a constraint pattern.
+fn parse_constraint_var_label(body: &str) -> Result<(String, Label)> {
+    let (variable, label) = body
+        .split_once(':')
+        .ok_or_else(|| cypher_syntax("constraint pattern requires variable:Label"))?;
+    let variable = parse_required_cypher_variable(variable.trim(), "constraint pattern variable")?;
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(cypher_syntax("constraint pattern requires a label or type"));
+    }
+    Ok((variable, Label::new(label.to_string())))
+}
+
+/// Parses a `variable.key IS [NOT NULL|UNIQUE]` constraint predicate, returning
+/// `(is_unique, key)`. The predicate variable must match the pattern variable.
+fn parse_constraint_predicate(predicate: &str, pattern_variable: &str) -> Result<(bool, String)> {
+    let is_index = find_unquoted_keyword(predicate, "IS")
+        .ok_or_else(|| cypher_syntax("constraint predicate requires 'IS UNIQUE' or 'IS NOT NULL'"))?;
+    let (variable, key) =
+        parse_property_ref(predicate[..is_index].trim(), "constraint predicate")?;
+    if variable != pattern_variable {
+        return Err(cypher_syntax(format!(
+            "constraint predicate variable '{variable}' does not match pattern variable '{pattern_variable}'"
+        )));
+    }
+    let kind = predicate[is_index + "IS".len()..].trim();
+    if kind.eq_ignore_ascii_case("UNIQUE") {
+        Ok((true, key))
+    } else if kind.split_whitespace().collect::<Vec<_>>() == ["NOT", "NULL"] {
+        Ok((false, key))
+    } else {
+        Err(cypher_syntax(format!(
+            "unsupported constraint predicate; expected IS UNIQUE or IS NOT NULL, got: {kind}"
+        )))
     }
 }
 

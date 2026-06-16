@@ -4745,3 +4745,131 @@ async fn test_delete_node_and_edge() {
         .expect("get_node");
     assert!(fetched.is_none(), "node should be deleted");
 }
+
+#[test]
+fn cypher_ddl_parses_node_unique_constraint() {
+    let statements = sail_cypher_ddl(
+        "CREATE CONSTRAINT person_id IF NOT EXISTS FOR (n:Person) REQUIRE n.id IS UNIQUE",
+    )
+    .expect("parse create constraint");
+    assert_eq!(
+        statements,
+        vec![CypherDdlStatement::CreateConstraint {
+            name: Some("person_id".to_string()),
+            if_not_exists: true,
+            constraint: GraphConstraint::NodePropertyUnique {
+                label: Label::new("Person"),
+                key: "id".to_string(),
+            },
+        }]
+    );
+}
+
+#[test]
+fn cypher_ddl_parses_node_required_constraint_without_name() {
+    let statements = sail_cypher_ddl("CREATE CONSTRAINT FOR (n:Person) REQUIRE n.name IS NOT NULL")
+        .expect("parse create constraint");
+    assert_eq!(
+        statements,
+        vec![CypherDdlStatement::CreateConstraint {
+            name: None,
+            if_not_exists: false,
+            constraint: GraphConstraint::NodePropertyRequired {
+                label: Label::new("Person"),
+                key: "name".to_string(),
+            },
+        }]
+    );
+}
+
+#[test]
+fn cypher_ddl_parses_relationship_constraint() {
+    let statements =
+        sail_cypher_ddl("CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS NOT NULL")
+            .expect("parse relationship constraint");
+    assert_eq!(
+        statements,
+        vec![CypherDdlStatement::CreateConstraint {
+            name: None,
+            if_not_exists: false,
+            constraint: GraphConstraint::EdgePropertyRequired {
+                label: Label::new("KNOWS"),
+                key: "since".to_string(),
+            },
+        }]
+    );
+}
+
+#[test]
+fn cypher_ddl_accepts_legacy_on_assert_spelling() {
+    let statements =
+        sail_cypher_ddl("CREATE CONSTRAINT ON (n:Person) ASSERT n.email IS UNIQUE")
+            .expect("parse legacy constraint");
+    assert_eq!(
+        statements,
+        vec![CypherDdlStatement::CreateConstraint {
+            name: None,
+            if_not_exists: false,
+            constraint: GraphConstraint::NodePropertyUnique {
+                label: Label::new("Person"),
+                key: "email".to_string(),
+            },
+        }]
+    );
+}
+
+#[test]
+fn cypher_ddl_parses_drop_constraint() {
+    let statements =
+        sail_cypher_ddl("DROP CONSTRAINT person_id IF EXISTS").expect("parse drop constraint");
+    assert_eq!(
+        statements,
+        vec![CypherDdlStatement::DropConstraint {
+            name: "person_id".to_string(),
+            if_exists: true,
+        }]
+    );
+}
+
+#[test]
+fn cypher_constraints_collects_multiple_statements() {
+    let constraints = sail_cypher_constraints(
+        "CREATE CONSTRAINT FOR (n:Person) REQUIRE n.id IS UNIQUE; \
+         CREATE CONSTRAINT FOR (n:Person) REQUIRE n.name IS NOT NULL",
+    )
+    .expect("collect constraints");
+    assert_eq!(
+        constraints,
+        vec![
+            GraphConstraint::NodePropertyUnique {
+                label: Label::new("Person"),
+                key: "id".to_string(),
+            },
+            GraphConstraint::NodePropertyRequired {
+                label: Label::new("Person"),
+                key: "name".to_string(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn cypher_ddl_rejects_predicate_variable_mismatch() {
+    let error = sail_cypher_ddl("CREATE CONSTRAINT FOR (n:Person) REQUIRE m.id IS UNIQUE")
+        .expect_err("variable mismatch must fail");
+    assert!(matches!(error, GrustError::CypherSyntax(_)), "{error:?}");
+}
+
+#[test]
+fn cypher_ddl_rejects_unknown_predicate() {
+    let error = sail_cypher_ddl("CREATE CONSTRAINT FOR (n:Person) REQUIRE n.id IS NODE KEY")
+        .expect_err("node key must be rejected");
+    assert!(matches!(error, GrustError::CypherSyntax(_)), "{error:?}");
+}
+
+#[test]
+fn cypher_constraints_rejects_drop() {
+    let error = sail_cypher_constraints("DROP CONSTRAINT person_id")
+        .expect_err("drop must be rejected by constraints collector");
+    assert!(matches!(error, GrustError::CypherSyntax(_)), "{error:?}");
+}
