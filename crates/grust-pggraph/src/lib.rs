@@ -259,6 +259,10 @@ impl GraphAdminStore for PgGraphStore {
 
 #[async_trait]
 impl GraphMutationStore for PgGraphStore {
+    fn mutation_atomicity(&self) -> GraphMutationAtomicity {
+        GraphMutationAtomicity::Transactional
+    }
+
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
         self.execute(&delete_node_sql(&self.nodes_table(), id))
             .await?;

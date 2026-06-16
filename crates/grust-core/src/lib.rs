@@ -2157,6 +2157,12 @@ pub enum GraphMutation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphMutationAtomicity {
+    OrderedNonAtomic,
+    Transactional,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GraphMutationPlanKind {
     Create,
     Merge,
@@ -2426,6 +2432,10 @@ pub trait CypherMutationExecutor: GraphMutationStore {
 /// error.
 #[async_trait]
 pub trait GraphMutationStore: GraphStore {
+    fn mutation_atomicity(&self) -> GraphMutationAtomicity {
+        GraphMutationAtomicity::OrderedNonAtomic
+    }
+
     /// Deletes a node and all edges incident to it.
     async fn delete_node(&self, id: &NodeId) -> Result<()>;
 
@@ -2553,10 +2563,10 @@ pub mod prelude {
     pub use crate::{
         CypherMutationExecutor, Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType,
         EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder, GraphIndex,
-        GraphMutation, GraphMutationCardinality, GraphMutationPlan, GraphMutationPlanKind,
-        GraphMutationPlanOp, GraphMutationReport, GraphMutationStore, GraphSchema,
-        GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType,
-        Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value, edge_key,
+        GraphMutation, GraphMutationAtomicity, GraphMutationCardinality, GraphMutationPlan,
+        GraphMutationPlanKind, GraphMutationPlanOp, GraphMutationReport, GraphMutationStore,
+        GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId,
+        NodeType, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value, edge_key,
         relationship_type, schema_identifier,
     };
 

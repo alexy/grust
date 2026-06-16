@@ -1038,7 +1038,14 @@ patterns still require resolved IDs before writing. Resolved mutation-plan
 execution is backend-neutral through `CypherMutationExecutor`: Sail still owns
 text parsing, but the resulting `GraphMutationPlan` can execute on Sail or on
 the in-memory backend for deterministic tests. Backends that cannot execute a
-plan operation report a structured Cypher execution error. ID-resolved and broad
+plan operation report a structured Cypher execution error. The Sail parser has
+an internal front-door boundary that classifies top-level mutation statements
+before lowering; a shared parser crate remains deferred until there is a second
+Cypher text parser consumer. Mutation batch
+atomicity is explicit through `GraphMutationAtomicity`: the default path is
+ordered but not atomic, while pgGraph and SurrealDB report transactional batch
+execution because they wrap mutation batches in backend transactions.
+ID-resolved and broad
 node `MATCH ... SET n += { ... }` lower to node patch mutations; `null` in the
 patch map is stored as `Value::Null` rather than treated as property removal.
 ID-resolved edge `MATCH ... SET e += { ... }` lowers to an edge patch mutation

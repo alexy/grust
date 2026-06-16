@@ -426,6 +426,12 @@ returned in a result shape separate from the count-oriented report, while
 Plan execution is no longer Sail-only: `CypherMutationExecutor` lets the
 resolved `GraphMutationPlan` run on Sail or Memory, which keeps parser growth
 separate from backend mutation semantics.
+The parser boundary is intentionally modest for now: Sail classifies top-level
+mutation statements before lowering, and a shared parser crate waits until
+there is another Cypher text parser consumer.
+Mutation atomicity is explicit too: `GraphMutationAtomicity` distinguishes the
+default ordered/non-atomic mutation path from backends that can prove
+transactional batch execution.
 Structured Cypher errors separate syntax, unresolved identity, unsupported
 cardinality, and execution failures without making every backend expose a
 Cypher execution API.

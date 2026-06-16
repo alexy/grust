@@ -186,6 +186,10 @@ pub trait CypherMutationExecutor {
 The API should not promise atomicity beyond the target store. If Sail later
 proves transactional guarantees for the active table format, that can be added
 as documented backend behavior.
+Backends report mutation-batch capability through `GraphMutationAtomicity`:
+the default is ordered/non-atomic, while pgGraph and SurrealDB report
+transactional execution because their mutation-batch overrides wrap the backend
+commands in transactions.
 
 Writable Cypher text parsing remains Sail-specific for now. The shared core
 surface is the backend-neutral mutation plan, report types, and resolved-plan
@@ -744,6 +748,18 @@ Acceptance criteria:
 - Keep lowering separate from parsing so Grust-owned mutation semantics remain
   visible and testable.
 
+Implementation status: implemented in the working tree after `0.8.4` as an
+internal Sail parser front-door boundary. The hand-written parser remains in
+`grust-sail` because there is still only one Cypher text parser consumer, but
+top-level mutation statement classification is now separated from lowering via
+an internal `cypher_parser` module. Tests cover AST-style classification for
+`MATCH`, `CREATE`, `MERGE`, and `DELETE`, plus structured syntax errors for
+bare `SET` and unsupported read queries. Existing parser tests continue to
+cover quote-aware statement splitting, comment stripping, case-insensitive
+keywords, accepted mutation forms, unresolved identity, unsupported
+cardinality, and backend execution errors. A separate parser crate remains
+deferred until expression grammar or multiple text-parser consumers justify it.
+
 ### Batch M: Transaction And Failure Semantics
 
 Make mutation atomicity explicit rather than implicit.
@@ -758,3 +774,13 @@ Acceptance criteria:
   non-transactional behavior.
 - Avoid promising Cypher-level transactional semantics until the backend
   contract can actually provide them.
+
+Implementation status: implemented in the working tree after `0.8.4`.
+`GraphMutationAtomicity` exposes `OrderedNonAtomic` and `Transactional`
+capability states through `GraphMutationStore::mutation_atomicity`. The default
+trait value remains ordered/non-atomic, and a Memory test simulates a mid-batch
+schema-validation failure to prove earlier writes remain applied after a later
+error. pgGraph and SurrealDB report `Transactional` because their
+`apply_mutations` overrides already wrap mutation batches in PostgreSQL and
+SurrealDB transactions. Sail keeps the default non-transactional capability
+until its active table mode can prove stronger guarantees.

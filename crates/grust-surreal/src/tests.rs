@@ -176,6 +176,16 @@ fn mutation_batch_query_wraps_ordered_mutations_in_transaction() {
 }
 
 #[test]
+fn http_store_reports_transactional_mutation_batches() {
+    let store = SurrealHttpGraphStore::connect(SurrealConfig::default()).unwrap();
+
+    assert_eq!(
+        store.mutation_atomicity(),
+        GraphMutationAtomicity::Transactional
+    );
+}
+
+#[test]
 fn delete_node_query_requires_relationship_config() {
     let err = surreal_delete_node_query(&NodeId::new("person-1"), &SurrealConfig::default())
         .expect_err("node deletes require configured relationships");

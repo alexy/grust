@@ -216,6 +216,35 @@ fn cypher_mutation_options_default_to_upsert_compatible_create() {
 }
 
 #[test]
+fn cypher_parser_classifies_top_level_mutation_statements() {
+    use super::cypher_parser::CypherStatement;
+
+    assert_eq!(
+        super::cypher_parser::classify_statement("MATCH (n) DELETE n").unwrap(),
+        CypherStatement::Match("(n) DELETE n")
+    );
+    assert_eq!(
+        super::cypher_parser::classify_statement("create (:Person {id: 'p'})").unwrap(),
+        CypherStatement::Create("(:Person {id: 'p'})")
+    );
+    assert_eq!(
+        super::cypher_parser::classify_statement("MERGE (:Person {id: 'p'})").unwrap(),
+        CypherStatement::Merge("(:Person {id: 'p'})")
+    );
+    assert_eq!(
+        super::cypher_parser::classify_statement("DELETE (:Person {id: 'p'})").unwrap(),
+        CypherStatement::Delete("(:Person {id: 'p'})")
+    );
+
+    let error =
+        super::cypher_parser::classify_statement("SET n.name = 'Ada'").expect_err("bare SET");
+    assert!(matches!(error, GrustError::CypherSyntax(_)));
+
+    let error = super::cypher_parser::classify_statement("RETURN 1").expect_err("read query");
+    assert!(matches!(error, GrustError::CypherSyntax(_)));
+}
+
+#[test]
 fn strict_create_edge_conflicts_on_sail_write_identity() {
     let structural = Edge::new("KNOWS", "person-1", "person-2", Props::new());
     let explicit = Edge::new("KNOWS", "person-1", "person-2", Props::new()).with_id("edge-1");

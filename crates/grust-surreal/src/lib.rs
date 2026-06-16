@@ -237,6 +237,10 @@ impl GraphAdminStore for SurrealHttpGraphStore {
 
 #[async_trait]
 impl GraphMutationStore for SurrealHttpGraphStore {
+    fn mutation_atomicity(&self) -> GraphMutationAtomicity {
+        GraphMutationAtomicity::Transactional
+    }
+
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
         self.post(&surreal_delete_node_query(id, &self.config)?)
             .await
@@ -413,6 +417,10 @@ impl GraphAdminStore for SurrealSdkGraphStore {
 
 #[async_trait]
 impl GraphMutationStore for SurrealSdkGraphStore {
+    fn mutation_atomicity(&self) -> GraphMutationAtomicity {
+        GraphMutationAtomicity::Transactional
+    }
+
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
         self.query(&surreal_delete_node_query(id, &self.config)?)
             .await

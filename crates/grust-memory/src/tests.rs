@@ -200,6 +200,42 @@ fn apply_mutations_upserts_and_deletes() {
 }
 
 #[test]
+fn default_mutation_batches_are_ordered_but_not_atomic() {
+    let schema = GraphSchema::builder()
+        .node("Person", vec![Field::required("name", FieldType::String)])
+        .build();
+    let store = MemoryGraphStore::new();
+    futures_executor::block_on(store.apply_schema(&schema)).unwrap();
+
+    let error = futures_executor::block_on(store.apply_mutations(&[
+        GraphMutation::UpsertNode(Node::new(
+            "Person",
+            "person-1",
+            Props::from([("name".to_string(), Value::from("Ada"))]),
+        )),
+        GraphMutation::UpsertNode(Node::new("Person", "person-2", Props::new())),
+    ]))
+    .expect_err("second mutation should fail schema validation");
+
+    assert!(error.to_string().contains("missing required field 'name'"));
+    assert_eq!(
+        store.mutation_atomicity(),
+        GraphMutationAtomicity::OrderedNonAtomic
+    );
+    assert!(
+        futures_executor::block_on(store.get_node(&NodeId::new("person-1")))
+            .unwrap()
+            .is_some(),
+        "first mutation remains applied after later failure"
+    );
+    assert!(
+        futures_executor::block_on(store.get_node(&NodeId::new("person-2")))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn executes_mutation_plan_with_cardinality_aware_node_changes() {
     let store = MemoryGraphStore::new();
     let plan = GraphMutationPlan::new(vec![

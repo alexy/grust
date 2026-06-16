@@ -281,10 +281,16 @@ This keeps mutation behavior portable across backends. Backends that support
 transactions can override `apply_mutations` atomically. Backends that use the
 default implementation remain ordered but not atomic, and Cypher mutation
 planning must not promise stronger behavior than the target store can provide.
+The shared `GraphMutationAtomicity` marker makes that contract inspectable:
+Sail keeps the default ordered/non-atomic capability until the active table mode
+can prove stronger guarantees.
 Writable Cypher text execution remains a Sail entrypoint at this stage; the
 shared cross-backend contract is the Grust mutation plan, report, structured
 Cypher error categories, and `CypherMutationExecutor` for resolved plans.
 Memory implements that plan executor for deterministic non-Sail tests.
+Within Sail, a small internal parser front-door classifies top-level mutation
+statements before lowering; a shared parser crate remains deferred until there
+is a second Cypher text parser consumer.
 
 Open semantic decisions before accepting general Cypher writes:
 

@@ -406,6 +406,13 @@ Execution of resolved mutation plans is backend-neutral through
 resulting `GraphMutationPlan` can execute on Sail or on `MemoryGraphStore` for
 deterministic tests. Backends without support for a plan operation return
 structured execution errors instead of ignoring it.
+The Sail parser now has a small internal front-door boundary that classifies
+top-level mutation statements before lowering, while a shared parser crate
+remains deferred until there is a second Cypher text parser consumer.
+Mutation batch atomicity is explicit through `GraphMutationAtomicity`: the
+default mutation path is ordered but not atomic, while backends with proven
+transaction wrappers, currently pgGraph and SurrealDB, can report
+`Transactional`.
 Writable Cypher also lowers ID-resolved and broad node
 `MATCH ... SET n += { ... }` map patches into backend-neutral node patch
 mutations; `null` is stored as a graph value rather than interpreted as

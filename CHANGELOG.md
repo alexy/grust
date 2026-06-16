@@ -35,6 +35,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added the backend-neutral `CypherMutationExecutor` plan-execution facade and
   implemented it for Sail and Memory, allowing Sail-planned writable Cypher to
   execute deterministically on the in-memory backend.
+- Added `GraphMutationAtomicity` as an optional mutation-batch capability marker
+  and tests documenting default ordered/non-atomic partial-failure behavior.
+- Added an internal Sail writable-Cypher parser front-door that classifies
+  top-level mutation statements before lowering while preserving the existing
+  Sail-owned parser.
 
 ## 2026-06-15 - 0.8.4
 

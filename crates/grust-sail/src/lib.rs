@@ -356,29 +356,16 @@ struct CypherMutationPlanner {
 impl CypherMutationPlanner {
     fn plan_statement(&mut self, cypher: &str) -> Result<GraphMutationPlan> {
         let cypher = cypher.trim();
-        if let Some(rest) = strip_leading_keyword(cypher, "MATCH") {
-            return self.parse_match(rest);
+        match cypher_parser::classify_statement(cypher)? {
+            cypher_parser::CypherStatement::Match(rest) => self.parse_match(rest),
+            cypher_parser::CypherStatement::Create(rest) => {
+                self.parse_upsert(rest, GraphMutationPlanKind::Create)
+            }
+            cypher_parser::CypherStatement::Merge(rest) => {
+                self.parse_upsert(rest, GraphMutationPlanKind::Merge)
+            }
+            cypher_parser::CypherStatement::Delete(rest) => self.parse_delete(rest),
         }
-        if find_unquoted_keyword(cypher, "SET").is_some() {
-            return Err(cypher_syntax("writable Cypher SET is not supported in v1"));
-        }
-        if find_unquoted_keyword(cypher, "REMOVE").is_some() {
-            return Err(cypher_syntax(
-                "writable Cypher REMOVE is not supported in v1",
-            ));
-        }
-        if let Some(rest) = strip_leading_keyword(cypher, "CREATE") {
-            return self.parse_upsert(rest, GraphMutationPlanKind::Create);
-        }
-        if let Some(rest) = strip_leading_keyword(cypher, "MERGE") {
-            return self.parse_upsert(rest, GraphMutationPlanKind::Merge);
-        }
-        if let Some(rest) = strip_leading_keyword(cypher, "DELETE") {
-            return self.parse_delete(rest);
-        }
-        Err(cypher_syntax(format!(
-            "unsupported writable Cypher statement; expected CREATE, MERGE, or DELETE: {cypher}"
-        )))
     }
 
     fn parse_upsert(
@@ -832,6 +819,44 @@ fn cypher_unresolved_identity(message: impl Into<String>) -> GrustError {
 
 fn cypher_unsupported_cardinality(message: impl Into<String>) -> GrustError {
     GrustError::CypherUnsupportedCardinality(message.into())
+}
+
+mod cypher_parser {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(super) enum CypherStatement<'a> {
+        Match(&'a str),
+        Create(&'a str),
+        Merge(&'a str),
+        Delete(&'a str),
+    }
+
+    pub(super) fn classify_statement(cypher: &str) -> Result<CypherStatement<'_>> {
+        if let Some(rest) = strip_leading_keyword(cypher, "MATCH") {
+            return Ok(CypherStatement::Match(rest));
+        }
+        if find_unquoted_keyword(cypher, "SET").is_some() {
+            return Err(cypher_syntax("writable Cypher SET is not supported in v1"));
+        }
+        if find_unquoted_keyword(cypher, "REMOVE").is_some() {
+            return Err(cypher_syntax(
+                "writable Cypher REMOVE is not supported in v1",
+            ));
+        }
+        if let Some(rest) = strip_leading_keyword(cypher, "CREATE") {
+            return Ok(CypherStatement::Create(rest));
+        }
+        if let Some(rest) = strip_leading_keyword(cypher, "MERGE") {
+            return Ok(CypherStatement::Merge(rest));
+        }
+        if let Some(rest) = strip_leading_keyword(cypher, "DELETE") {
+            return Ok(CypherStatement::Delete(rest));
+        }
+        Err(cypher_syntax(format!(
+            "unsupported writable Cypher statement; expected CREATE, MERGE, or DELETE: {cypher}"
+        )))
+    }
 }
 
 fn cypher_execution_error(error: GrustError) -> GrustError {
