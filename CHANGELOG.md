@@ -34,6 +34,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   `RETURN e.label, e.source`.
 - Added the same row-producing relationship `RETURN` support to the
   backend-neutral Memory/Sail returning helper for upsert-compatible execution.
+- Added portable writable Cypher `RETURN` rows for restricted broad node
+  `MATCH ... SET/REMOVE` writes, so the Memory/Sail returning helper can return
+  post-write projections such as `RETURN n.id, n.seen` for matched node rows.
 - Fixed writable Cypher `RETURN` parsing so aliases such as `AS limit` and
   `AS skip` no longer trip the `LIMIT` / `SKIP` clause rejection.
 - Added backend-neutral graph constraint metadata for required and unique node
