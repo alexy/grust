@@ -6,6 +6,31 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added precise insert-versus-update classification to `GraphMutationReport`
+  through `node_inserts`, `node_updates`, `edge_inserts`, and `edge_updates`,
+  populated during plan execution by backends that can distinguish create from
+  replace (the in-memory executor and row-producing MERGE/CREATE edges);
+  upsert-only backends such as Sail leave them zero and keep reporting through
+  the existing `*_upserts` totals.
+- Added `ORDER BY`, `SKIP`, and `LIMIT` support to the writable Cypher `RETURN`
+  slice, applied as a stable post-materialization step shared by Sail and the
+  backend-neutral Memory returning helper, while still rejecting aggregation and
+  path returns.
+- Changed `SailGraphStore` to validate unique-property constraints before writes
+  through a read-before-write existence check in `put_node`, `put_edge`, and
+  `put_graph`, and to report `ValidateBeforeWrite` instead of metadata-only for
+  node and edge uniqueness.
+- Added Cypher schema (DDL) parsing through `sail_cypher_ddl` and
+  `sail_cypher_constraints`, turning `CREATE CONSTRAINT` and `DROP CONSTRAINT`
+  statements into backend-neutral `CypherDdlStatement` / `GraphConstraint`
+  values for node and edge uniqueness and `IS NOT NULL`, kept separate from the
+  data-mutation plan and rejecting composite/node-key and index DDL.
+- Added a batched `GraphStore::get_nodes` override for `SailGraphStore` that
+  reads all requested ids in one `IN (...)` query instead of one round trip per
+  id, matching the input-order, duplicate, and skip-missing default contract.
+- Changed the Sail writable-Cypher scanners to share a single quote-aware
+  `scan_unquoted` helper and changed the four fully-static degree SQL builders
+  to return `&'static str` instead of allocating a `String` per call.
 - Added a strict first writable Cypher `RETURN` slice for Sail through
   `CypherMutationTableResult` and `CypherResultTable`, allowing final
   property projections over node variables and concrete relationship variables
