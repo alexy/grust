@@ -1798,6 +1798,52 @@ fn parse_constraint_predicate(predicate: &str, pattern_variable: &str) -> Result
     }
 }
 
+/// Returns the id of a persisted node that conflicts with `candidate` under a
+/// `NodePropertyUnique(label, key)` constraint, or `None` if there is no
+/// conflict. A node with the same id as `candidate` is an update, not a
+/// conflict, and nodes without the constrained property are ignored.
+fn unique_node_conflict<'a>(
+    existing: &'a [Node],
+    candidate: &Node,
+    label: &Label,
+    key: &str,
+) -> Option<&'a NodeId> {
+    if &candidate.label != label {
+        return None;
+    }
+    let value = candidate.props.get(key)?;
+    existing
+        .iter()
+        .find(|node| {
+            &node.label == label && node.id != candidate.id && node.props.get(key) == Some(value)
+        })
+        .map(|node| &node.id)
+}
+
+/// Returns the [`edge_key`] of a persisted edge that conflicts with `candidate`
+/// under an `EdgePropertyUnique(label, key)` constraint, or `None`. An edge with
+/// the same structural key as `candidate` is an update, not a conflict.
+fn unique_edge_conflict(
+    existing: &[Edge],
+    candidate: &Edge,
+    label: &Label,
+    key: &str,
+) -> Option<String> {
+    if &candidate.label != label {
+        return None;
+    }
+    let value = candidate.props.get(key)?;
+    let candidate_key = edge_key(candidate);
+    existing
+        .iter()
+        .find(|edge| {
+            &edge.label == label
+                && edge_key(edge) != candidate_key
+                && edge.props.get(key) == Some(value)
+        })
+        .map(edge_key)
+}
+
 fn split_cypher_statements(cypher: &str) -> Result<Vec<&str>> {
     let mut statements = Vec::new();
     let mut start = 0usize;
@@ -4819,6 +4865,89 @@ impl SailGraphStore {
         }
         Ok(())
     }
+
+    /// Read-before-write enforcement of node uniqueness constraints.
+    ///
+    /// For every `NodePropertyUnique` constraint touched by `nodes`, this reads
+    /// the persisted nodes of that label and rejects a write whose constrained
+    /// property value already belongs to a different node id. This is a
+    /// best-effort `ValidateBeforeWrite` check with an inherent race window:
+    /// concurrent writers are not serialized, and the label scan cost grows
+    /// with the number of persisted nodes of the label.
+    async fn enforce_unique_node_constraints(
+        &self,
+        constraints: &[GraphConstraint],
+        nodes: &[Node],
+    ) -> Result<()> {
+        for constraint in constraints {
+            let GraphConstraint::NodePropertyUnique { label, key } = constraint else {
+                continue;
+            };
+            if !nodes
+                .iter()
+                .any(|node| &node.label == label && node.props.contains_key(key))
+            {
+                continue;
+            }
+            let existing = self
+                .run_query(
+                    "SELECT id, label, props FROM grust_nodes WHERE label = ?",
+                    vec![lit_str(label.as_str())],
+                )
+                .await?;
+            for node in nodes {
+                if let Some(conflict) = unique_node_conflict(&existing, node, label, key) {
+                    return Err(GrustError::Schema(format!(
+                        "node '{}' violates unique constraint on property '{}' of label '{}' (conflicts with persisted node '{}')",
+                        node.id.as_str(),
+                        key,
+                        label.as_str(),
+                        conflict.as_str()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Read-before-write enforcement of edge uniqueness constraints. Shares the
+    /// best-effort `ValidateBeforeWrite` semantics of
+    /// [`Self::enforce_unique_node_constraints`].
+    async fn enforce_unique_edge_constraints(
+        &self,
+        constraints: &[GraphConstraint],
+        edges: &[Edge],
+    ) -> Result<()> {
+        for constraint in constraints {
+            let GraphConstraint::EdgePropertyUnique { label, key } = constraint else {
+                continue;
+            };
+            if !edges
+                .iter()
+                .any(|edge| &edge.label == label && edge.props.contains_key(key))
+            {
+                continue;
+            }
+            let existing = self
+                .get_edges(EdgeQuery {
+                    label: Some(label.clone()),
+                    ..EdgeQuery::default()
+                })
+                .await?;
+            for edge in edges {
+                if let Some(conflict) = unique_edge_conflict(&existing, edge, label, key) {
+                    return Err(GrustError::Schema(format!(
+                        "edge '{}' violates unique constraint on property '{}' of label '{}' (conflicts with persisted edge '{}')",
+                        edge_key(edge),
+                        key,
+                        label.as_str(),
+                        conflict
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 // ── GraphStore ────────────────────────────────────────────────────────────────
@@ -4835,13 +4964,17 @@ impl GraphStore for SailGraphStore {
     }
 
     fn constraint_capability(&self, constraint: &GraphConstraint) -> GraphConstraintCapability {
+        // Required and unique constraints are both validated read-before-write:
+        // required by `validate_node`/`validate_graph`, unique by an existence
+        // query against persisted rows. Neither is enforced atomically by the
+        // backend, so concurrent writers can still race.
         match constraint {
             GraphConstraint::NodePropertyRequired { .. }
-            | GraphConstraint::EdgePropertyRequired { .. } => {
+            | GraphConstraint::EdgePropertyRequired { .. }
+            | GraphConstraint::NodePropertyUnique { .. }
+            | GraphConstraint::EdgePropertyUnique { .. } => {
                 GraphConstraintCapability::ValidateBeforeWrite
             }
-            GraphConstraint::NodePropertyUnique { .. }
-            | GraphConstraint::EdgePropertyUnique { .. } => GraphConstraintCapability::MetadataOnly,
         }
     }
 
@@ -4849,6 +4982,8 @@ impl GraphStore for SailGraphStore {
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {
             schema.validate_node(node)?;
+            self.enforce_unique_node_constraints(&schema.constraints, std::slice::from_ref(node))
+                .await?;
         }
         self.load_nodes(schema.as_ref(), std::slice::from_ref(node))
             .await?;
@@ -4859,6 +4994,8 @@ impl GraphStore for SailGraphStore {
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {
             schema.validate_edge_props(edge)?;
+            self.enforce_unique_edge_constraints(&schema.constraints, std::slice::from_ref(edge))
+                .await?;
         }
         self.load_edges(
             schema.as_ref(),
@@ -4873,6 +5010,10 @@ impl GraphStore for SailGraphStore {
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {
             schema.validate_graph(graph)?;
+            self.enforce_unique_node_constraints(&schema.constraints, &graph.nodes)
+                .await?;
+            self.enforce_unique_edge_constraints(&schema.constraints, &graph.edges)
+                .await?;
         }
         let node_labels: BTreeMap<&NodeId, &Label> = graph
             .nodes

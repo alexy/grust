@@ -231,7 +231,7 @@ fn cypher_mutation_options_default_to_upsert_compatible_create() {
 }
 
 #[tokio::test]
-async fn sail_reports_constraint_capabilities_without_claiming_uniqueness_enforcement() {
+async fn sail_reports_validate_before_write_for_required_and_unique_constraints() {
     let store = request_store();
     assert_eq!(
         store.constraint_capability(&GraphConstraint::NodePropertyRequired {
@@ -245,7 +245,14 @@ async fn sail_reports_constraint_capabilities_without_claiming_uniqueness_enforc
             label: Label::new("Person"),
             key: "email".to_string(),
         }),
-        GraphConstraintCapability::MetadataOnly
+        GraphConstraintCapability::ValidateBeforeWrite
+    );
+    assert_eq!(
+        store.constraint_capability(&GraphConstraint::EdgePropertyUnique {
+            label: Label::new("RATED"),
+            key: "token".to_string(),
+        }),
+        GraphConstraintCapability::ValidateBeforeWrite
     );
 }
 
@@ -4872,4 +4879,91 @@ fn cypher_constraints_rejects_drop() {
     let error = sail_cypher_constraints("DROP CONSTRAINT person_id")
         .expect_err("drop must be rejected by constraints collector");
     assert!(matches!(error, GrustError::CypherSyntax(_)), "{error:?}");
+}
+
+#[test]
+fn unique_node_conflict_detects_persisted_duplicate() {
+    let existing = vec![
+        Node::new(
+            "Person",
+            "p1",
+            Props::from([("email".to_string(), Value::from("a@x.com"))]),
+        ),
+        Node::new(
+            "Person",
+            "p2",
+            Props::from([("email".to_string(), Value::from("b@x.com"))]),
+        ),
+    ];
+    // A different node id reusing p1's email conflicts.
+    let candidate = Node::new(
+        "Person",
+        "p3",
+        Props::from([("email".to_string(), Value::from("a@x.com"))]),
+    );
+    assert_eq!(
+        unique_node_conflict(&existing, &candidate, &Label::new("Person"), "email"),
+        Some(&NodeId::new("p1"))
+    );
+}
+
+#[test]
+fn unique_node_conflict_allows_same_id_update_and_other_labels() {
+    let existing = vec![Node::new(
+        "Person",
+        "p1",
+        Props::from([("email".to_string(), Value::from("a@x.com"))]),
+    )];
+    // Same id rewriting its own value is an update, not a conflict.
+    let update = Node::new(
+        "Person",
+        "p1",
+        Props::from([("email".to_string(), Value::from("a@x.com"))]),
+    );
+    assert_eq!(
+        unique_node_conflict(&existing, &update, &Label::new("Person"), "email"),
+        None
+    );
+    // A different label is unaffected by the Person constraint.
+    let other = Node::new(
+        "Company",
+        "c1",
+        Props::from([("email".to_string(), Value::from("a@x.com"))]),
+    );
+    assert_eq!(
+        unique_node_conflict(&existing, &other, &Label::new("Person"), "email"),
+        None
+    );
+}
+
+#[test]
+fn unique_edge_conflict_uses_structural_identity() {
+    let existing = vec![Edge::new(
+        "RATED",
+        "u1",
+        "m1",
+        Props::from([("token".to_string(), Value::from("t1"))]),
+    )];
+    // Different endpoints reusing the token conflict.
+    let candidate = Edge::new(
+        "RATED",
+        "u2",
+        "m2",
+        Props::from([("token".to_string(), Value::from("t1"))]),
+    );
+    assert_eq!(
+        unique_edge_conflict(&existing, &candidate, &Label::new("RATED"), "token"),
+        Some(edge_key(&existing[0]))
+    );
+    // The same structural edge rewriting its own token is an update.
+    let update = Edge::new(
+        "RATED",
+        "u1",
+        "m1",
+        Props::from([("token".to_string(), Value::from("t1"))]),
+    );
+    assert_eq!(
+        unique_edge_conflict(&existing, &update, &Label::new("RATED"), "token"),
+        None
+    );
 }
