@@ -270,12 +270,14 @@ fn executes_mutation_plan_with_cardinality_aware_node_changes() {
         GraphMutationPlanOp::PatchMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            predicates: Vec::new(),
             patch: Props::from([("archived".to_string(), Value::Bool(true))]),
             cardinality: GraphMutationCardinality::BoundedMany,
         },
         GraphMutationPlanOp::DeleteMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("archived".to_string(), Value::Bool(true))]),
+            predicates: Vec::new(),
             cardinality: GraphMutationCardinality::BoundedMany,
         },
     ]);
@@ -361,6 +363,7 @@ fn executes_matching_node_property_removal() {
         GraphMutationPlanOp::RemoveMatchingNodeProps {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            predicates: Vec::new(),
             keys: vec!["nickname".to_string()],
             cardinality: GraphMutationCardinality::BoundedMany,
         },
@@ -394,6 +397,7 @@ fn executes_matching_node_property_removal() {
     let zero = GraphMutationPlan::new(vec![GraphMutationPlanOp::RemoveMatchingNodeProps {
         label: Some(Label::new("Person")),
         props: Props::from([("status".to_string(), Value::from("missing"))]),
+        predicates: Vec::new(),
         keys: vec!["nickname".to_string()],
         cardinality: GraphMutationCardinality::BoundedMany,
     }]);
@@ -405,6 +409,93 @@ fn executes_matching_node_property_removal() {
             ..GraphMutationReport::default()
         }
     );
+}
+
+#[test]
+fn matching_node_mutations_filter_property_predicates() {
+    let store = MemoryGraphStore::new();
+    let plan = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "a",
+                Props::from([
+                    ("status".to_string(), Value::from("inactive")),
+                    ("score".to_string(), Value::Int(11)),
+                    ("nickname".to_string(), Value::from("ada")),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "b",
+                Props::from([
+                    ("status".to_string(), Value::from("inactive")),
+                    ("score".to_string(), Value::Int(9)),
+                    ("nickname".to_string(), Value::Null),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "c",
+                Props::from([("status".to_string(), Value::from("inactive"))]),
+            ),
+        },
+        GraphMutationPlanOp::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::new(),
+            predicates: vec![
+                GraphPropertyPredicate {
+                    key: "status".to_string(),
+                    op: GraphPredicateOp::Equal,
+                    value: Value::from("inactive"),
+                },
+                GraphPropertyPredicate {
+                    key: "score".to_string(),
+                    op: GraphPredicateOp::GreaterThanOrEqual,
+                    value: Value::Int(10),
+                },
+                GraphPropertyPredicate {
+                    key: "nickname".to_string(),
+                    op: GraphPredicateOp::NotEqual,
+                    value: Value::Null,
+                },
+            ],
+            patch: Props::from([("archived".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+    ]);
+
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&plan)).unwrap();
+
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            creates: 3,
+            patches: 1,
+            matched_rows: 1,
+            changed_nodes: 4,
+            node_upserts: 3,
+            node_patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    let archived = futures_executor::block_on(store.get_node(&NodeId::new("a")))
+        .unwrap()
+        .expect("matched node exists");
+    assert_eq!(archived.props.get("archived"), Some(&Value::Bool(true)));
+    for id in ["b", "c"] {
+        let node = futures_executor::block_on(store.get_node(&NodeId::new(id)))
+            .unwrap()
+            .expect("unmatched node exists");
+        assert_eq!(node.props.get("archived"), None);
+    }
 }
 
 #[test]
@@ -447,6 +538,7 @@ fn executes_matching_node_numeric_property_updates() {
         GraphMutationPlanOp::UpdateMatchingNodeProperty {
             label: Some(Label::new("Counter")),
             props: Props::from([("active".to_string(), Value::Bool(true))]),
+            predicates: Vec::new(),
             target_key: "count".to_string(),
             source_key: "count".to_string(),
             op: GraphNumericOp::Add,
@@ -456,6 +548,7 @@ fn executes_matching_node_numeric_property_updates() {
         GraphMutationPlanOp::UpdateMatchingNodeProperty {
             label: None,
             props: Props::from([("id".to_string(), Value::from("a"))]),
+            predicates: Vec::new(),
             target_key: "half".to_string(),
             source_key: "count".to_string(),
             op: GraphNumericOp::Divide,
@@ -495,6 +588,7 @@ fn executes_matching_node_numeric_property_updates() {
     let zero = GraphMutationPlan::new(vec![GraphMutationPlanOp::UpdateMatchingNodeProperty {
         label: Some(Label::new("Counter")),
         props: Props::from([("active".to_string(), Value::from("missing"))]),
+        predicates: Vec::new(),
         target_key: "count".to_string(),
         source_key: "count".to_string(),
         op: GraphNumericOp::Add,
@@ -544,6 +638,7 @@ fn matching_node_numeric_property_updates_fail_before_writing_invalid_values() {
         let plan = GraphMutationPlan::new(vec![GraphMutationPlanOp::UpdateMatchingNodeProperty {
             label: None,
             props: Props::from([("id".to_string(), Value::from(id))]),
+            predicates: Vec::new(),
             target_key: "count".to_string(),
             source_key: "count".to_string(),
             op: GraphNumericOp::Add,
@@ -571,14 +666,17 @@ fn executes_matching_edge_mutations() {
         from: GraphNodeMatch {
             label: Some(Label::new("Person")),
             props: Props::from([("id".to_string(), Value::from("a"))]),
+            predicates: Vec::new(),
         },
         label: Label::new("KNOWS"),
         to: GraphNodeMatch {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            predicates: Vec::new(),
         },
         id: None,
         props: Props::new(),
+        predicates: Vec::new(),
     };
     let setup = GraphMutationPlan::new(vec![
         GraphMutationPlanOp::UpsertNode {
@@ -756,17 +854,20 @@ fn matching_edge_mutations_filter_relationship_properties() {
         from: GraphNodeMatch {
             label: Some(Label::new("Person")),
             props: Props::from([("id".to_string(), Value::from("a"))]),
+            predicates: Vec::new(),
         },
         label: Label::new("KNOWS"),
         to: GraphNodeMatch {
             label: Some(Label::new("Person")),
             props: Props::new(),
+            predicates: Vec::new(),
         },
         id: None,
         props: Props::from([
             ("active".to_string(), Value::Bool(true)),
             ("since".to_string(), Value::Int(2020)),
         ]),
+        predicates: Vec::new(),
     };
     let report = futures_executor::block_on(store.execute_cypher_mutation_plan(
         &GraphMutationPlan::new(vec![GraphMutationPlanOp::PatchMatchingEdges {
@@ -806,14 +907,17 @@ fn matching_edge_mutations_filter_relationship_properties() {
         from: GraphNodeMatch {
             label: None,
             props: Props::from([("id".to_string(), Value::from("a"))]),
+            predicates: Vec::new(),
         },
         label: Label::new("KNOWS"),
         to: GraphNodeMatch {
             label: None,
             props: Props::new(),
+            predicates: Vec::new(),
         },
         id: Some(EdgeId::new("edge-c")),
         props: Props::from([("since".to_string(), Value::from("2020"))]),
+        predicates: Vec::new(),
     };
     let report = futures_executor::block_on(store.execute_cypher_mutation_plan(
         &GraphMutationPlan::new(vec![GraphMutationPlanOp::RemoveMatchingEdgeProps {
@@ -845,14 +949,17 @@ fn matching_edge_mutations_filter_relationship_properties() {
         from: GraphNodeMatch {
             label: None,
             props: Props::new(),
+            predicates: Vec::new(),
         },
         label: Label::new("KNOWS"),
         to: GraphNodeMatch {
             label: None,
             props: Props::new(),
+            predicates: Vec::new(),
         },
         id: Some(EdgeId::new("edge-c")),
         props: Props::from([("since".to_string(), Value::Int(2020))]),
+        predicates: Vec::new(),
     };
     let report = futures_executor::block_on(store.execute_cypher_mutation_plan(
         &GraphMutationPlan::new(vec![GraphMutationPlanOp::DeleteMatchingEdges {

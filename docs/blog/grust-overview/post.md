@@ -437,6 +437,10 @@ mutation plan for Sail and Memory while broader computed expressions remain
 out of scope.
 Relationship matches can also filter on relationship properties beyond `id`,
 with Sail and Memory using the same matched-edge predicate semantics.
+Mutating `MATCH` filters now have a small `WHERE` grammar too: property
+comparisons against literals or parameters joined by `AND`, with missing
+properties treated as non-matches and ordered comparisons limited to numbers
+or strings.
 Null assignment is option-driven as well: the default stores `Value::Null`,
 while `CypherNullAssignment::RemoveProperty` makes explicit
 `SET x.key = null` lower to the same mutation operations as `REMOVE`.

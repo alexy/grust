@@ -2123,11 +2123,13 @@ pub enum GraphMutation {
     PatchMatchingNodes {
         label: Option<Label>,
         props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
         patch: Props,
     },
     UpdateMatchingNodeProperty {
         label: Option<Label>,
         props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
         target_key: String,
         source_key: String,
         op: GraphNumericOp,
@@ -2151,6 +2153,7 @@ pub enum GraphMutation {
     RemoveMatchingNodeProps {
         label: Option<Label>,
         props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
         keys: Vec<String>,
     },
     RemoveEdgeProps {
@@ -2167,6 +2170,7 @@ pub enum GraphMutation {
     DeleteMatchingNodes {
         label: Option<Label>,
         props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
     },
     DeleteNode(NodeId),
     UpsertEdge(Edge),
@@ -2259,10 +2263,62 @@ fn numeric_float_result(lhs: f64, op: GraphNumericOp, rhs: f64) -> Result<Value>
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphPredicateOp {
+    Equal,
+    NotEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphPropertyPredicate {
+    pub key: String,
+    pub op: GraphPredicateOp,
+    pub value: Value,
+}
+
+impl GraphPropertyPredicate {
+    pub fn matches(&self, actual: Option<&Value>) -> bool {
+        let Some(actual) = actual else {
+            return false;
+        };
+        match self.op {
+            GraphPredicateOp::Equal => actual == &self.value,
+            GraphPredicateOp::NotEqual => actual != &self.value,
+            GraphPredicateOp::GreaterThan
+            | GraphPredicateOp::GreaterThanOrEqual
+            | GraphPredicateOp::LessThan
+            | GraphPredicateOp::LessThanOrEqual => compare_ordered_values(actual, &self.value)
+                .is_some_and(|ordering| match self.op {
+                    GraphPredicateOp::GreaterThan => ordering.is_gt(),
+                    GraphPredicateOp::GreaterThanOrEqual => ordering.is_gt() || ordering.is_eq(),
+                    GraphPredicateOp::LessThan => ordering.is_lt(),
+                    GraphPredicateOp::LessThanOrEqual => ordering.is_lt() || ordering.is_eq(),
+                    GraphPredicateOp::Equal | GraphPredicateOp::NotEqual => unreachable!(),
+                }),
+        }
+    }
+}
+
+fn compare_ordered_values(lhs: &Value, rhs: &Value) -> Option<std::cmp::Ordering> {
+    match (lhs, rhs) {
+        (Value::Int(lhs), Value::Int(rhs)) => Some(lhs.cmp(rhs)),
+        (Value::Int(lhs), Value::Float(rhs)) => (*lhs as f64).partial_cmp(rhs),
+        (Value::Float(lhs), Value::Int(rhs)) => lhs.partial_cmp(&(*rhs as f64)),
+        (Value::Float(lhs), Value::Float(rhs)) => lhs.partial_cmp(rhs),
+        (Value::String(lhs), Value::String(rhs)) => Some(lhs.cmp(rhs)),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct GraphNodeMatch {
     pub label: Option<Label>,
     pub props: Props,
+    pub predicates: Vec<GraphPropertyPredicate>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2272,6 +2328,7 @@ pub struct GraphRelationshipMatch {
     pub to: GraphNodeMatch,
     pub id: Option<EdgeId>,
     pub props: Props,
+    pub predicates: Vec<GraphPropertyPredicate>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2287,12 +2344,14 @@ pub enum GraphMutationPlanOp {
     PatchMatchingNodes {
         label: Option<Label>,
         props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
         patch: Props,
         cardinality: GraphMutationCardinality,
     },
     UpdateMatchingNodeProperty {
         label: Option<Label>,
         props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
         target_key: String,
         source_key: String,
         op: GraphNumericOp,
@@ -2318,6 +2377,7 @@ pub enum GraphMutationPlanOp {
     RemoveMatchingNodeProps {
         label: Option<Label>,
         props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
         keys: Vec<String>,
         cardinality: GraphMutationCardinality,
     },
@@ -2336,6 +2396,7 @@ pub enum GraphMutationPlanOp {
     DeleteMatchingNodes {
         label: Option<Label>,
         props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
         cardinality: GraphMutationCardinality,
     },
     UpsertEdge {
@@ -2488,16 +2549,19 @@ impl From<GraphMutationPlanOp> for GraphMutation {
             GraphMutationPlanOp::PatchMatchingNodes {
                 label,
                 props,
+                predicates,
                 patch,
                 ..
             } => Self::PatchMatchingNodes {
                 label,
                 props,
+                predicates,
                 patch,
             },
             GraphMutationPlanOp::UpdateMatchingNodeProperty {
                 label,
                 props,
+                predicates,
                 target_key,
                 source_key,
                 op,
@@ -2506,6 +2570,7 @@ impl From<GraphMutationPlanOp> for GraphMutation {
             } => Self::UpdateMatchingNodeProperty {
                 label,
                 props,
+                predicates,
                 target_key,
                 source_key,
                 op,
@@ -2550,11 +2615,27 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 relationship, keys, ..
             } => Self::RemoveMatchingEdgeProps { relationship, keys },
             GraphMutationPlanOp::RemoveMatchingNodeProps {
-                label, props, keys, ..
-            } => Self::RemoveMatchingNodeProps { label, props, keys },
-            GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
-                Self::DeleteMatchingNodes { label, props }
-            }
+                label,
+                props,
+                predicates,
+                keys,
+                ..
+            } => Self::RemoveMatchingNodeProps {
+                label,
+                props,
+                predicates,
+                keys,
+            },
+            GraphMutationPlanOp::DeleteMatchingNodes {
+                label,
+                props,
+                predicates,
+                ..
+            } => Self::DeleteMatchingNodes {
+                label,
+                props,
+                predicates,
+            },
             GraphMutationPlanOp::UpsertEdge { edge, .. } => Self::UpsertEdge(edge),
             GraphMutationPlanOp::DeleteNode(id) => Self::DeleteNode(id),
             GraphMutationPlanOp::DeleteEdge { from, label, to } => {
@@ -2797,10 +2878,10 @@ pub mod prelude {
         EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder, GraphIndex,
         GraphMutation, GraphMutationAtomicity, GraphMutationCardinality, GraphMutationPlan,
         GraphMutationPlanKind, GraphMutationPlanOp, GraphMutationReport, GraphMutationStore,
-        GraphNodeMatch, GraphNumericOp, GraphRelationshipMatch, GraphSchema, GraphSchemaBuilder,
-        GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType, Props, PutOutcome,
-        Result, RfcDate, Start, Step, Traversal, Value, edge_key, evaluate_numeric_update,
-        relationship_type, schema_identifier,
+        GraphNodeMatch, GraphNumericOp, GraphPredicateOp, GraphPropertyPredicate,
+        GraphRelationshipMatch, GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label,
+        LoadReport, Node, NodeId, NodeType, Props, PutOutcome, Result, RfcDate, Start, Step,
+        Traversal, Value, edge_key, evaluate_numeric_update, relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

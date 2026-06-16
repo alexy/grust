@@ -409,6 +409,13 @@ require resolved IDs before writing.
 `CypherMutationOptions::parameters` lets callers bind Grust `Value`s to
 `$name` placeholders in literal positions such as IDs, property maps, and
 literal property assignments; quoted `'$name'` remains ordinary string text.
+Mutating `MATCH` clauses can also use a small `WHERE` predicate grammar:
+property comparisons against literals or parameters joined with `AND`, such as
+`WHERE n.status = 'inactive' AND n.score >= $min`. Predicates lower to
+backend-neutral `GraphPropertyPredicate` values, so Memory evaluates the same
+plan that Sail lowers to SQL. Missing properties never match; `null` only
+matches equality or inequality against `Value::Null`, and ordered comparisons
+are limited to numbers or strings.
 `CypherMutationOptions::null_assignment` defaults to storing
 `SET x.key = null` as `Value::Null`, but callers can select
 `CypherNullAssignment::RemoveProperty` to lower explicit null assignment to

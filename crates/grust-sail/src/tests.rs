@@ -929,14 +929,17 @@ fn cypher_match_delete_lowers_id_resolved_patterns() {
         from: GraphNodeMatch {
             label: Some(Label::new("Person")),
             props: Props::from([("id".to_string(), Value::from("person-1"))]),
+            predicates: Vec::new(),
         },
         label: Label::new("KNOWS"),
         to: GraphNodeMatch {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            predicates: Vec::new(),
         },
         id: None,
         props: Props::new(),
+        predicates: Vec::new(),
     };
     assert_eq!(
         broad_edge.report(),
@@ -966,6 +969,7 @@ fn cypher_match_delete_lowers_broad_node_patterns_with_cardinality() {
         vec![GraphMutationPlanOp::DeleteMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("active".to_string(), Value::Bool(false))]),
+            predicates: Vec::new(),
             cardinality: GraphMutationCardinality::BoundedMany,
         }]
     );
@@ -974,6 +978,7 @@ fn cypher_match_delete_lowers_broad_node_patterns_with_cardinality() {
         vec![GraphMutation::DeleteMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("active".to_string(), Value::Bool(false))]),
+            predicates: Vec::new(),
         }]
     );
 
@@ -983,6 +988,7 @@ fn cypher_match_delete_lowers_broad_node_patterns_with_cardinality() {
         vec![GraphMutationPlanOp::DeleteMatchingNodes {
             label: None,
             props: Props::new(),
+            predicates: Vec::new(),
             cardinality: GraphMutationCardinality::UnboundedMany,
         }]
     );
@@ -1009,6 +1015,7 @@ fn matching_nodes_sql_filters_by_label_and_properties() {
             ("age".to_string(), Value::Int(36)),
             ("name".to_string(), Value::from("Ada")),
         ]),
+        &[],
     )
     .unwrap();
 
@@ -1036,22 +1043,54 @@ fn matching_nodes_sql_filters_by_label_and_properties() {
 }
 
 #[test]
+fn matching_nodes_sql_filters_by_property_predicates() {
+    let predicates = vec![
+        GraphPropertyPredicate {
+            key: "status".to_string(),
+            op: GraphPredicateOp::Equal,
+            value: Value::from("inactive"),
+        },
+        GraphPropertyPredicate {
+            key: "score".to_string(),
+            op: GraphPredicateOp::GreaterThanOrEqual,
+            value: Value::Int(10),
+        },
+        GraphPropertyPredicate {
+            key: "nickname".to_string(),
+            op: GraphPredicateOp::NotEqual,
+            value: Value::Null,
+        },
+    ];
+    let (sql, args) =
+        matching_nodes_sql(Some(&Label::new("Person")), &Props::new(), &predicates).unwrap();
+
+    assert!(sql.contains("label = ?"));
+    assert!(sql.contains("GET_JSON_OBJECT(props, '$.status') = ?"));
+    assert!(sql.contains("CAST(GET_JSON_OBJECT(props, '$.score') AS BIGINT) >= ?"));
+    assert!(sql.contains("GET_JSON_OBJECT(props, '$.nickname') IS NOT NULL"));
+    assert_eq!(args.len(), 3);
+}
+
+#[test]
 fn matching_edges_sql_filters_by_relationship_properties() {
     let relationship = GraphRelationshipMatch {
         from: GraphNodeMatch {
             label: Some(Label::new("Person")),
             props: Props::from([("id".to_string(), Value::from("person-1"))]),
+            predicates: Vec::new(),
         },
         label: Label::new("KNOWS"),
         to: GraphNodeMatch {
             label: Some(Label::new("Person")),
             props: Props::new(),
+            predicates: Vec::new(),
         },
         id: Some(EdgeId::new("edge-1")),
         props: Props::from([
             ("active".to_string(), Value::Bool(true)),
             ("since".to_string(), Value::Int(2020)),
         ]),
+        predicates: Vec::new(),
     };
 
     let (sql, args) = matching_edges_sql(&relationship).unwrap();
@@ -1062,6 +1101,119 @@ fn matching_edges_sql_filters_by_relationship_properties() {
     assert!(sql.contains("CAST(GET_JSON_OBJECT(e.props, '$.since') AS BIGINT) = ?"));
     assert!(sql.contains("src.id = ?"));
     assert_eq!(args.len(), 7);
+}
+
+#[test]
+fn cypher_match_where_lowers_node_predicates() {
+    let plan = sail_cypher_mutation_plan_with_options(
+        "MATCH (n:Person) WHERE n.status = 'inactive' AND n.score >= $min SET n.archived = true",
+        CypherMutationOptions {
+            parameters: CypherParameters::from([("min".to_string(), Value::Int(10))]),
+            ..CypherMutationOptions::default()
+        },
+    )
+    .unwrap()
+    .0;
+
+    assert_eq!(
+        plan.operations,
+        vec![GraphMutationPlanOp::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::new(),
+            predicates: vec![
+                GraphPropertyPredicate {
+                    key: "status".to_string(),
+                    op: GraphPredicateOp::Equal,
+                    value: Value::from("inactive"),
+                },
+                GraphPropertyPredicate {
+                    key: "score".to_string(),
+                    op: GraphPredicateOp::GreaterThanOrEqual,
+                    value: Value::Int(10),
+                },
+            ],
+            patch: Props::from([("archived".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+}
+
+#[test]
+fn cypher_match_where_keeps_predicated_identity_matches_on_matching_path() {
+    let plan = sail_cypher_mutation_plan(
+        "MATCH (n:Person {id: 'person-1'}) WHERE n.status <> 'deleted' REMOVE n.nickname",
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.operations,
+        vec![GraphMutationPlanOp::RemoveMatchingNodeProps {
+            label: Some(Label::new("Person")),
+            props: Props::from([("id".to_string(), Value::from("person-1"))]),
+            predicates: vec![GraphPropertyPredicate {
+                key: "status".to_string(),
+                op: GraphPredicateOp::NotEqual,
+                value: Value::from("deleted"),
+            }],
+            keys: vec!["nickname".to_string()],
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+}
+
+#[test]
+fn cypher_match_where_lowers_edge_and_endpoint_predicates() {
+    let plan = sail_cypher_mutation_plan(
+        "MATCH (a:Person {id: 'a'})-[e:KNOWS]->(b:Person) WHERE e.since >= 2020 AND b.status <> 'blocked' SET e.seen = true",
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.operations,
+        vec![GraphMutationPlanOp::PatchMatchingEdges {
+            relationship: GraphRelationshipMatch {
+                from: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("id".to_string(), Value::from("a"))]),
+                    predicates: Vec::new(),
+                },
+                label: Label::new("KNOWS"),
+                to: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::new(),
+                    predicates: vec![GraphPropertyPredicate {
+                        key: "status".to_string(),
+                        op: GraphPredicateOp::NotEqual,
+                        value: Value::from("blocked"),
+                    }],
+                },
+                id: None,
+                props: Props::new(),
+                predicates: vec![GraphPropertyPredicate {
+                    key: "since".to_string(),
+                    op: GraphPredicateOp::GreaterThanOrEqual,
+                    value: Value::Int(2020),
+                }],
+            },
+            patch: Props::from([("seen".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+}
+
+#[test]
+fn cypher_match_where_rejects_deferred_predicate_forms() {
+    for cypher in [
+        "MATCH (n:Person) WHERE n.status = 'inactive' OR n.score >= 10 SET n.archived = true",
+        "MATCH (n:Person) WHERE NOT n.active = true SET n.archived = true",
+        "MATCH (n:Person) WHERE size(n.tags) = 2 SET n.archived = true",
+        "MATCH (n:Person) WHERE n.active > true SET n.archived = true",
+        "MATCH (n:Person) WHERE m.status = 'inactive' SET n.archived = true",
+    ] {
+        let error =
+            sail_cypher_mutation_plan(cypher).expect_err("unsupported WHERE predicate should fail");
+        assert!(is_cypher_planning_error(&error) || matches!(error, GrustError::CypherSyntax(_)));
+    }
 }
 
 #[test]
@@ -1210,6 +1362,7 @@ fn cypher_match_set_map_patch_lowers_broad_nodes_with_cardinality() {
         vec![GraphMutationPlanOp::PatchMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            predicates: Vec::new(),
             patch: Props::from([
                 ("archived".to_string(), Value::Bool(true)),
                 ("note".to_string(), Value::Null),
@@ -1222,6 +1375,7 @@ fn cypher_match_set_map_patch_lowers_broad_nodes_with_cardinality() {
         vec![GraphMutation::PatchMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            predicates: Vec::new(),
             patch: Props::from([
                 ("archived".to_string(), Value::Bool(true)),
                 ("note".to_string(), Value::Null),
@@ -1235,6 +1389,7 @@ fn cypher_match_set_map_patch_lowers_broad_nodes_with_cardinality() {
         vec![GraphMutationPlanOp::PatchMatchingNodes {
             label: None,
             props: Props::new(),
+            predicates: Vec::new(),
             patch: Props::from([("touched".to_string(), Value::Bool(true))]),
             cardinality: GraphMutationCardinality::UnboundedMany,
         }]
@@ -1300,14 +1455,17 @@ fn cypher_match_set_map_patch_lowers_id_resolved_edge() {
                 from: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                    predicates: Vec::new(),
                 },
                 label: Label::new("KNOWS"),
                 to: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("status".to_string(), Value::from("inactive"))]),
+                    predicates: Vec::new(),
                 },
                 id: None,
                 props: Props::new(),
+                predicates: Vec::new(),
             },
             patch: Props::from([("seen".to_string(), Value::Bool(true))]),
         }]
@@ -1327,17 +1485,20 @@ fn cypher_match_edge_mutations_accept_relationship_property_predicates() {
                 from: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                    predicates: Vec::new(),
                 },
                 label: Label::new("KNOWS"),
                 to: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("id".to_string(), Value::from("person-2"))]),
+                    predicates: Vec::new(),
                 },
                 id: None,
                 props: Props::from([
                     ("active".to_string(), Value::Bool(true)),
                     ("since".to_string(), Value::Int(2020)),
                 ]),
+                predicates: Vec::new(),
             },
             patch: Props::from([("seen".to_string(), Value::Bool(true))]),
             cardinality: GraphMutationCardinality::BoundedMany,
@@ -1355,14 +1516,17 @@ fn cypher_match_edge_mutations_accept_relationship_property_predicates() {
                 from: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                    predicates: Vec::new(),
                 },
                 label: Label::new("KNOWS"),
                 to: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("id".to_string(), Value::from("person-2"))]),
+                    predicates: Vec::new(),
                 },
                 id: Some(EdgeId::new("edge-1")),
                 props: Props::from([("since".to_string(), Value::Int(2020))]),
+                predicates: Vec::new(),
             },
             keys: vec!["note".to_string()],
             cardinality: GraphMutationCardinality::BoundedMany,
@@ -1380,14 +1544,17 @@ fn cypher_match_edge_mutations_accept_relationship_property_predicates() {
                 from: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                    predicates: Vec::new(),
                 },
                 label: Label::new("KNOWS"),
                 to: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("status".to_string(), Value::from("inactive"))]),
+                    predicates: Vec::new(),
                 },
                 id: None,
                 props: Props::from([("active".to_string(), Value::Bool(false))]),
+                predicates: Vec::new(),
             },
             cardinality: GraphMutationCardinality::BoundedMany,
         }]
@@ -1441,14 +1608,17 @@ fn cypher_match_set_property_assignment_lowers_resolved_node_and_edge() {
                 from: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                    predicates: Vec::new(),
                 },
                 label: Label::new("KNOWS"),
                 to: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("status".to_string(), Value::from("inactive"))]),
+                    predicates: Vec::new(),
                 },
                 id: None,
                 props: Props::new(),
+                predicates: Vec::new(),
             },
             patch: Props::from([("seen".to_string(), Value::Bool(true))]),
         }]
@@ -1462,6 +1632,7 @@ fn cypher_match_set_property_assignment_lowers_resolved_node_and_edge() {
         vec![GraphMutation::PatchMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            predicates: Vec::new(),
             patch: Props::from([("archived".to_string(), Value::Bool(true))]),
         }]
     );
@@ -1499,6 +1670,7 @@ fn cypher_null_assignment_option_removes_properties() {
         vec![GraphMutationPlanOp::RemoveMatchingNodeProps {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            predicates: Vec::new(),
             keys: vec!["nickname".to_string()],
             cardinality: GraphMutationCardinality::BoundedMany,
         }]
@@ -1534,14 +1706,17 @@ fn cypher_null_assignment_option_removes_properties() {
                 from: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                    predicates: Vec::new(),
                 },
                 label: Label::new("KNOWS"),
                 to: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("status".to_string(), Value::from("inactive"))]),
+                    predicates: Vec::new(),
                 },
                 id: None,
                 props: Props::from([("active".to_string(), Value::Bool(true))]),
+                predicates: Vec::new(),
             },
             keys: vec!["note".to_string()],
             cardinality: GraphMutationCardinality::BoundedMany,
@@ -1596,6 +1771,7 @@ fn cypher_match_set_numeric_expression_lowers_node_updates() {
         vec![GraphMutationPlanOp::UpdateMatchingNodeProperty {
             label: None,
             props: Props::from([("id".to_string(), Value::from("c1"))]),
+            predicates: Vec::new(),
             target_key: "count".to_string(),
             source_key: "count".to_string(),
             op: GraphNumericOp::Add,
@@ -1608,6 +1784,7 @@ fn cypher_match_set_numeric_expression_lowers_node_updates() {
         vec![GraphMutation::UpdateMatchingNodeProperty {
             label: None,
             props: Props::from([("id".to_string(), Value::from("c1"))]),
+            predicates: Vec::new(),
             target_key: "count".to_string(),
             source_key: "count".to_string(),
             op: GraphNumericOp::Add,
@@ -1629,6 +1806,7 @@ fn cypher_match_set_numeric_expression_lowers_node_updates() {
         vec![GraphMutationPlanOp::UpdateMatchingNodeProperty {
             label: Some(Label::new("Counter")),
             props: Props::from([("active".to_string(), Value::Bool(true))]),
+            predicates: Vec::new(),
             target_key: "count".to_string(),
             source_key: "count".to_string(),
             op: GraphNumericOp::Add,
@@ -1643,6 +1821,7 @@ fn cypher_match_set_numeric_expression_lowers_node_updates() {
         vec![GraphMutationPlanOp::UpdateMatchingNodeProperty {
             label: None,
             props: Props::new(),
+            predicates: Vec::new(),
             target_key: "score".to_string(),
             source_key: "score".to_string(),
             op: GraphNumericOp::Divide,
@@ -1724,14 +1903,17 @@ fn cypher_match_remove_lowers_resolved_node_and_edge_properties() {
                 from: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                    predicates: Vec::new(),
                 },
                 label: Label::new("KNOWS"),
                 to: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::from([("status".to_string(), Value::from("inactive"))]),
+                    predicates: Vec::new(),
                 },
                 id: None,
                 props: Props::new(),
+                predicates: Vec::new(),
             },
             keys: vec!["note".to_string()],
         }]
@@ -1752,6 +1934,7 @@ fn cypher_match_remove_lowers_resolved_node_and_edge_properties() {
         vec![GraphMutation::RemoveMatchingNodeProps {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            predicates: Vec::new(),
             keys: vec!["nickname".to_string()],
         }]
     );
@@ -1828,13 +2011,13 @@ fn cypher_multi_statement_batch_preserves_order_and_aggregates_report() {
 fn sail_cypher_plan_executes_on_memory_facade() {
     let plan = sail_cypher_mutation_plan(
         "
-        CREATE (:Person {id: 'person-1', status: 'inactive'});
-        CREATE (:Person {id: 'person-2', status: 'inactive'});
-        CREATE (:Person {id: 'person-3', status: 'active'});
+        CREATE (:Person {id: 'person-1', status: 'inactive', score: 11});
+        CREATE (:Person {id: 'person-2', status: 'inactive', score: 12});
+        CREATE (:Person {id: 'person-3', status: 'active', score: 20});
         MATCH (a:Person {id: 'person-1'}), (b:Person {id: 'person-2'})
         CREATE (a)-[:KNOWS]->(b);
-        MATCH (n:Person {status: 'inactive'}) SET n += {archived: true};
-        MATCH (n:Person {archived: true}) DELETE n;
+        MATCH (n:Person) WHERE n.status = 'inactive' AND n.score >= 10 SET n += {archived: true};
+        MATCH (n:Person) WHERE n.archived = true DELETE n;
         ",
     )
     .unwrap();

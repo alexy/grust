@@ -498,9 +498,11 @@ impl CypherMutationPlanner {
     fn parse_match_delete(&mut self, statement: &str) -> Result<GraphMutationPlan> {
         let (pattern, target) = split_match_delete(statement)?;
         let target = parse_required_cypher_variable(target.trim(), "MATCH DELETE target")?;
+        let (pattern, where_predicates) = split_match_where(pattern, &self.parameters)?;
 
         if pattern.contains("->") {
-            let parsed = self.parse_edge_match_pattern(pattern)?;
+            let mut parsed = self.parse_edge_match_pattern(pattern)?;
+            apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge DELETE")?;
             let Some(edge_variable) = parsed.relationship.variable.clone() else {
                 return Err(cypher_syntax(
                     "MATCH edge DELETE requires the relationship pattern to bind the DELETE target"
@@ -517,6 +519,9 @@ impl CypherMutationPlanner {
             let edge_id = optional_string_prop(&parsed.relationship.props, "id");
             if let (Some(from), Some(to), None) = (from_id, to_id, edge_id)
                 && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
+                && parsed.from.predicates.is_empty()
+                && parsed.to.predicates.is_empty()
+                && parsed.relationship.predicates.is_empty()
             {
                 return Ok(GraphMutationPlan::new(vec![
                     GraphMutationPlanOp::DeleteEdge {
@@ -535,7 +540,8 @@ impl CypherMutationPlanner {
             ]));
         }
 
-        let (node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
+        let (mut node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
+        apply_node_where_predicates(&mut node, where_predicates, "MATCH node DELETE")?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher MATCH DELETE pattern suffix: {}",
@@ -552,7 +558,9 @@ impl CypherMutationPlanner {
                 "MATCH node DELETE target '{target}' does not match node variable '{node_variable}'"
             )));
         }
-        if let Some(id) = optional_string_prop(&node.props, "id") {
+        if let Some(id) = optional_string_prop(&node.props, "id")
+            && node.predicates.is_empty()
+        {
             self.bind_node_variable(&node, &NodeId::new(id.clone()))?;
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::DeleteNode(NodeId::new(id)),
@@ -564,6 +572,7 @@ impl CypherMutationPlanner {
                 .as_ref()
                 .and_then(|variable| self.node_bindings.get(variable))
                 .is_some()
+            && node.predicates.is_empty()
         {
             let id = self.resolve_node_id(&node, "MATCH node DELETE")?;
             return Ok(GraphMutationPlan::new(vec![
@@ -575,6 +584,7 @@ impl CypherMutationPlanner {
             GraphMutationPlanOp::DeleteMatchingNodes {
                 label: node.label,
                 props: node.props,
+                predicates: node.predicates,
                 cardinality,
             },
         ]))
@@ -632,11 +642,13 @@ impl CypherMutationPlanner {
 
     fn parse_match_set(&mut self, statement: &str) -> Result<GraphMutationPlan> {
         let (pattern, assignment) = split_match_set(statement)?;
+        let (pattern, where_predicates) = split_match_where(pattern, &self.parameters)?;
         let assignment =
             parse_patch_assignment(assignment, &self.parameters, self.null_assignment)?;
 
         if pattern.contains("->") {
-            let parsed = self.parse_edge_match_pattern(pattern)?;
+            let mut parsed = self.parse_edge_match_pattern(pattern)?;
+            apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge SET")?;
             let Some(edge_variable) = parsed.relationship.variable.clone() else {
                 return Err(cypher_syntax(
                     "MATCH edge SET requires the relationship pattern to bind the patch target",
@@ -659,6 +671,9 @@ impl CypherMutationPlanner {
             if let PatchAssignmentKind::RemoveProperty { key } = kind {
                 if let (Some(from), Some(to)) = (from_id, to_id)
                     && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
+                    && parsed.from.predicates.is_empty()
+                    && parsed.to.predicates.is_empty()
+                    && parsed.relationship.predicates.is_empty()
                 {
                     let id =
                         optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
@@ -687,6 +702,9 @@ impl CypherMutationPlanner {
             };
             if let (Some(from), Some(to)) = (from_id, to_id)
                 && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
+                && parsed.from.predicates.is_empty()
+                && parsed.to.predicates.is_empty()
+                && parsed.relationship.predicates.is_empty()
             {
                 let id = optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
                 return Ok(GraphMutationPlan::new(vec![
@@ -709,7 +727,8 @@ impl CypherMutationPlanner {
             ]));
         }
 
-        let (node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
+        let (mut node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
+        apply_node_where_predicates(&mut node, where_predicates, "MATCH node SET")?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher MATCH SET pattern suffix: {}",
@@ -743,17 +762,19 @@ impl CypherMutationPlanner {
                 Some((key, source_key, op, operand))
             }
             PatchAssignmentKind::RemoveProperty { key } => {
-                if optional_string_prop(&node.props, "id").is_none()
+                if (optional_string_prop(&node.props, "id").is_none()
                     && node
                         .variable
                         .as_ref()
-                        .is_none_or(|variable| !self.node_bindings.contains_key(variable))
+                        .is_none_or(|variable| !self.node_bindings.contains_key(variable)))
+                    || !node.predicates.is_empty()
                 {
                     let cardinality = match_node_cardinality(&node);
                     return Ok(GraphMutationPlan::new(vec![
                         GraphMutationPlanOp::RemoveMatchingNodeProps {
                             label: node.label,
                             props: node.props,
+                            predicates: node.predicates,
                             keys: vec![key],
                             cardinality,
                         },
@@ -768,17 +789,19 @@ impl CypherMutationPlanner {
                 ]));
             }
             PatchAssignmentKind::Props(props) => {
-                if optional_string_prop(&node.props, "id").is_none()
+                if (optional_string_prop(&node.props, "id").is_none()
                     && node
                         .variable
                         .as_ref()
-                        .is_none_or(|variable| !self.node_bindings.contains_key(variable))
+                        .is_none_or(|variable| !self.node_bindings.contains_key(variable)))
+                    || !node.predicates.is_empty()
                 {
                     let cardinality = match_node_cardinality(&node);
                     return Ok(GraphMutationPlan::new(vec![
                         GraphMutationPlanOp::PatchMatchingNodes {
                             label: node.label,
                             props: node.props,
+                            predicates: node.predicates,
                             patch: props,
                             cardinality,
                         },
@@ -791,17 +814,19 @@ impl CypherMutationPlanner {
             }
         };
         let (target_key, source_key, op, operand) = numeric_expression.expect("expression checked");
-        if optional_string_prop(&node.props, "id").is_none()
+        if (optional_string_prop(&node.props, "id").is_none()
             && node
                 .variable
                 .as_ref()
-                .is_none_or(|variable| !self.node_bindings.contains_key(variable))
+                .is_none_or(|variable| !self.node_bindings.contains_key(variable)))
+            || !node.predicates.is_empty()
         {
             let cardinality = match_node_cardinality(&node);
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::UpdateMatchingNodeProperty {
                     label: node.label,
                     props: node.props,
+                    predicates: node.predicates,
                     target_key,
                     source_key,
                     op,
@@ -815,6 +840,7 @@ impl CypherMutationPlanner {
             GraphMutationPlanOp::UpdateMatchingNodeProperty {
                 label: None,
                 props: Props::from([("id".to_string(), Value::from(id.as_str()))]),
+                predicates: Vec::new(),
                 target_key,
                 source_key,
                 op,
@@ -826,10 +852,12 @@ impl CypherMutationPlanner {
 
     fn parse_match_remove(&mut self, statement: &str) -> Result<GraphMutationPlan> {
         let (pattern, target) = split_match_remove(statement)?;
+        let (pattern, where_predicates) = split_match_where(pattern, &self.parameters)?;
         let (target, key) = parse_property_ref(target, "MATCH REMOVE target")?;
 
         if pattern.contains("->") {
-            let parsed = self.parse_edge_match_pattern(pattern)?;
+            let mut parsed = self.parse_edge_match_pattern(pattern)?;
+            apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge REMOVE")?;
             let Some(edge_variable) = parsed.relationship.variable.clone() else {
                 return Err(cypher_syntax(
                     "MATCH edge REMOVE requires the relationship pattern to bind the remove target",
@@ -844,6 +872,9 @@ impl CypherMutationPlanner {
             let to_id = self.resolved_endpoint_id(&parsed.to)?;
             if let (Some(from), Some(to)) = (from_id, to_id)
                 && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
+                && parsed.from.predicates.is_empty()
+                && parsed.to.predicates.is_empty()
+                && parsed.relationship.predicates.is_empty()
             {
                 let id = optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
                 return Ok(GraphMutationPlan::new(vec![
@@ -866,7 +897,8 @@ impl CypherMutationPlanner {
             ]));
         }
 
-        let (node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
+        let (mut node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
+        apply_node_where_predicates(&mut node, where_predicates, "MATCH node REMOVE")?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher MATCH REMOVE pattern suffix: {}",
@@ -883,17 +915,19 @@ impl CypherMutationPlanner {
                 "MATCH REMOVE target '{target}' does not match node variable '{node_variable}'"
             )));
         }
-        if optional_string_prop(&node.props, "id").is_none()
+        if (optional_string_prop(&node.props, "id").is_none()
             && node
                 .variable
                 .as_ref()
-                .is_none_or(|variable| !self.node_bindings.contains_key(variable))
+                .is_none_or(|variable| !self.node_bindings.contains_key(variable)))
+            || !node.predicates.is_empty()
         {
             let cardinality = match_node_cardinality(&node);
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::RemoveMatchingNodeProps {
                     label: node.label,
                     props: node.props,
+                    predicates: node.predicates,
                     keys: vec![key],
                     cardinality,
                 },
@@ -997,6 +1031,7 @@ impl CypherMutationPlanner {
             to,
             id,
             props,
+            predicates: parsed.relationship.predicates,
         })
     }
 
@@ -1019,6 +1054,7 @@ impl CypherMutationPlanner {
         Ok(GraphNodeMatch {
             label: node.label,
             props,
+            predicates: node.predicates,
         })
     }
 
@@ -1249,6 +1285,7 @@ struct ParsedCypherNode {
     variable: Option<String>,
     label: Option<Label>,
     props: Props,
+    predicates: Vec<GraphPropertyPredicate>,
 }
 
 #[derive(Debug)]
@@ -1272,6 +1309,12 @@ struct ParsedCypherRelationship {
     variable: Option<String>,
     label: Label,
     props: Props,
+    predicates: Vec<GraphPropertyPredicate>,
+}
+
+struct ParsedWherePredicate {
+    target: String,
+    predicate: GraphPropertyPredicate,
 }
 
 fn parse_cypher_node_pattern<'a>(
@@ -1291,6 +1334,7 @@ fn parse_cypher_node_pattern<'a>(
             variable,
             label,
             props,
+            predicates: Vec::new(),
         },
         rest,
     ))
@@ -1365,15 +1409,139 @@ fn parse_cypher_relationship(
         variable: parse_optional_cypher_variable(variable.trim())?,
         label: Label::new(label.to_string()),
         props,
+        predicates: Vec::new(),
     })
 }
 
 fn match_node_cardinality(node: &ParsedCypherNode) -> GraphMutationCardinality {
-    if node.label.is_some() || !node.props.is_empty() {
+    if node.label.is_some() || !node.props.is_empty() || !node.predicates.is_empty() {
         GraphMutationCardinality::BoundedMany
     } else {
         GraphMutationCardinality::UnboundedMany
     }
+}
+
+fn split_match_where<'a>(
+    pattern: &'a str,
+    parameters: &CypherParameters,
+) -> Result<(&'a str, Vec<ParsedWherePredicate>)> {
+    let Some(index) = find_unquoted_keyword(pattern, "WHERE") else {
+        return Ok((pattern.trim(), Vec::new()));
+    };
+    let match_pattern = pattern[..index].trim();
+    let where_clause = pattern[index + "WHERE".len()..].trim();
+    if match_pattern.is_empty() || where_clause.is_empty() {
+        return Err(cypher_syntax(
+            "MATCH WHERE requires both a pattern and predicate".to_string(),
+        ));
+    }
+    let predicates = split_top_level_and(where_clause)?
+        .into_iter()
+        .map(|predicate| parse_where_predicate(predicate, parameters))
+        .collect::<Result<Vec<_>>>()?;
+    Ok((match_pattern, predicates))
+}
+
+fn split_top_level_and(value: &str) -> Result<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut rest = value.trim();
+    while let Some(index) = find_unquoted_keyword(rest, "AND") {
+        let part = rest[..index].trim();
+        if part.is_empty() {
+            return Err(cypher_syntax("empty predicate before AND".to_string()));
+        }
+        parts.push(part);
+        rest = rest[index + "AND".len()..].trim();
+    }
+    if rest.is_empty() {
+        return Err(cypher_syntax("empty predicate after AND".to_string()));
+    }
+    parts.push(rest);
+    Ok(parts)
+}
+
+fn parse_where_predicate(
+    predicate: &str,
+    parameters: &CypherParameters,
+) -> Result<ParsedWherePredicate> {
+    for (token, op) in [
+        (">=", GraphPredicateOp::GreaterThanOrEqual),
+        ("<=", GraphPredicateOp::LessThanOrEqual),
+        ("<>", GraphPredicateOp::NotEqual),
+        ("!=", GraphPredicateOp::NotEqual),
+        ("=", GraphPredicateOp::Equal),
+        (">", GraphPredicateOp::GreaterThan),
+        ("<", GraphPredicateOp::LessThan),
+    ] {
+        let index = if token.len() == 1 {
+            find_unquoted(predicate, token.chars().next().expect("operator"))
+        } else {
+            find_unquoted_sequence(predicate, token)
+        };
+        if let Some(index) = index {
+            let (target, key) = parse_property_ref(&predicate[..index], "MATCH WHERE predicate")?;
+            let value = parse_cypher_literal(&predicate[index + token.len()..], parameters)?;
+            if matches!(
+                op,
+                GraphPredicateOp::GreaterThan
+                    | GraphPredicateOp::GreaterThanOrEqual
+                    | GraphPredicateOp::LessThan
+                    | GraphPredicateOp::LessThanOrEqual
+            ) && !matches!(value, Value::Int(_) | Value::Float(_) | Value::String(_))
+            {
+                return Err(cypher_syntax(
+                    "MATCH WHERE ordered comparisons require integer, float, or string literals",
+                ));
+            }
+            return Ok(ParsedWherePredicate {
+                target,
+                predicate: GraphPropertyPredicate { key, op, value },
+            });
+        }
+    }
+    Err(cypher_syntax(
+        "MATCH WHERE only supports property comparisons against literals or parameters",
+    ))
+}
+
+fn apply_node_where_predicates(
+    node: &mut ParsedCypherNode,
+    predicates: Vec<ParsedWherePredicate>,
+    context: &str,
+) -> Result<()> {
+    for predicate in predicates {
+        if node.variable.as_deref() == Some(predicate.target.as_str()) {
+            node.predicates.push(predicate.predicate);
+        } else {
+            return Err(cypher_unresolved_identity(format!(
+                "{context} WHERE references unknown variable '{}'",
+                predicate.target
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn apply_edge_where_predicates(
+    edge: &mut ParsedCypherEdgeMatch,
+    predicates: Vec<ParsedWherePredicate>,
+    context: &str,
+) -> Result<()> {
+    for predicate in predicates {
+        if edge.from.variable.as_deref() == Some(predicate.target.as_str()) {
+            edge.from.predicates.push(predicate.predicate);
+        } else if edge.to.variable.as_deref() == Some(predicate.target.as_str()) {
+            edge.to.predicates.push(predicate.predicate);
+        } else if edge.relationship.variable.as_deref() == Some(predicate.target.as_str()) {
+            edge.relationship.predicates.push(predicate.predicate);
+        } else {
+            return Err(cypher_unresolved_identity(format!(
+                "{context} WHERE references unknown variable '{}'",
+                predicate.target
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn split_match_delete(statement: &str) -> Result<(&str, &str)> {
@@ -2069,15 +2237,23 @@ impl SailGraphStore {
                 GraphMutationPlanOp::PatchMatchingNodes {
                     label,
                     props,
+                    predicates,
                     patch,
                     ..
                 } => {
-                    self.apply_patch_matching_nodes(label.as_ref(), props, patch, report)
-                        .await?;
+                    self.apply_patch_matching_nodes(
+                        label.as_ref(),
+                        props,
+                        predicates,
+                        patch,
+                        report,
+                    )
+                    .await?;
                 }
                 GraphMutationPlanOp::UpdateMatchingNodeProperty {
                     label,
                     props,
+                    predicates,
                     target_key,
                     source_key,
                     op,
@@ -2087,6 +2263,7 @@ impl SailGraphStore {
                     self.apply_update_matching_node_property(
                         label.as_ref(),
                         props,
+                        predicates,
                         target_key,
                         source_key,
                         *op,
@@ -2096,13 +2273,28 @@ impl SailGraphStore {
                     .await?;
                 }
                 GraphMutationPlanOp::RemoveMatchingNodeProps {
-                    label, props, keys, ..
+                    label,
+                    props,
+                    predicates,
+                    keys,
+                    ..
                 } => {
-                    self.apply_remove_matching_node_props(label.as_ref(), props, keys, report)
-                        .await?;
+                    self.apply_remove_matching_node_props(
+                        label.as_ref(),
+                        props,
+                        predicates,
+                        keys,
+                        report,
+                    )
+                    .await?;
                 }
-                GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
-                    self.apply_delete_matching_nodes(label.as_ref(), props, report)
+                GraphMutationPlanOp::DeleteMatchingNodes {
+                    label,
+                    props,
+                    predicates,
+                    ..
+                } => {
+                    self.apply_delete_matching_nodes(label.as_ref(), props, predicates, report)
                         .await?;
                 }
                 GraphMutationPlanOp::PatchMatchingEdges {
@@ -2137,10 +2329,11 @@ impl SailGraphStore {
         &self,
         label: Option<&Label>,
         props: &Props,
+        predicates: &[GraphPropertyPredicate],
         patch: &Props,
         report: &mut CypherMutationReport,
     ) -> Result<()> {
-        let (sql, args) = matching_nodes_sql(label, props)?;
+        let (sql, args) = matching_nodes_sql(label, props, predicates)?;
         let mut nodes = self.run_query(&sql, args).await?;
         report.matched_rows += nodes.len();
         report.node_patches += nodes.len();
@@ -2167,13 +2360,14 @@ impl SailGraphStore {
         &self,
         label: Option<&Label>,
         props: &Props,
+        predicates: &[GraphPropertyPredicate],
         target_key: &str,
         source_key: &str,
         op: GraphNumericOp,
         operand: &Value,
         report: &mut CypherMutationReport,
     ) -> Result<()> {
-        let (sql, args) = matching_nodes_sql(label, props)?;
+        let (sql, args) = matching_nodes_sql(label, props, predicates)?;
         let mut nodes = self.run_query(&sql, args).await?;
         report.matched_rows += nodes.len();
         report.node_patches += nodes.len();
@@ -2204,10 +2398,11 @@ impl SailGraphStore {
         &self,
         label: Option<&Label>,
         props: &Props,
+        predicates: &[GraphPropertyPredicate],
         keys: &[String],
         report: &mut CypherMutationReport,
     ) -> Result<()> {
-        let (sql, args) = matching_nodes_sql(label, props)?;
+        let (sql, args) = matching_nodes_sql(label, props, predicates)?;
         let mut nodes = self.run_query(&sql, args).await?;
         report.matched_rows += nodes.len();
         report.node_property_removes += nodes.len();
@@ -2318,9 +2513,10 @@ impl SailGraphStore {
         &self,
         label: Option<&Label>,
         props: &Props,
+        predicates: &[GraphPropertyPredicate],
         report: &mut CypherMutationReport,
     ) -> Result<()> {
-        let (sql, args) = matching_nodes_sql(label, props)?;
+        let (sql, args) = matching_nodes_sql(label, props, predicates)?;
         let nodes = self.run_query(&sql, args).await?;
         report.matched_rows += nodes.len();
         report.node_deletes += nodes.len();
@@ -3349,6 +3545,7 @@ fn typed_edge_merge_from_view_sql(edge_type: &EdgeType) -> Result<String> {
 fn matching_nodes_sql(
     label: Option<&Label>,
     props: &Props,
+    predicates: &[GraphPropertyPredicate],
 ) -> Result<(String, Vec<expression::Literal>)> {
     let mut conditions = Vec::new();
     let mut args = Vec::new();
@@ -3389,6 +3586,7 @@ fn matching_nodes_sql(
             }
         }
     }
+    append_property_predicate_conditions("props", predicates, &mut conditions, &mut args)?;
     let where_clause = if conditions.is_empty() {
         String::new()
     } else {
@@ -3463,6 +3661,7 @@ fn append_relationship_prop_conditions(
             }
         }
     }
+    append_property_predicate_conditions("e.props", &relationship.predicates, conditions, args)?;
     Ok(())
 }
 
@@ -3517,6 +3716,147 @@ fn append_node_match_conditions(
                 conditions.push(format!("{json_value} = ?"));
                 args.push(lit_str(&json));
             }
+        }
+    }
+    append_property_predicate_conditions(
+        &format!("{alias}.props"),
+        &node.predicates,
+        conditions,
+        args,
+    )?;
+    Ok(())
+}
+
+fn append_property_predicate_conditions(
+    props_expr: &str,
+    predicates: &[GraphPropertyPredicate],
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    for predicate in predicates {
+        validate_json_key(&predicate.key)?;
+        let json_value = sail_json_property_expr(props_expr, &predicate.key)?;
+        match predicate.op {
+            GraphPredicateOp::Equal => {
+                append_property_equality_condition(&json_value, &predicate.value, conditions, args)?
+            }
+            GraphPredicateOp::NotEqual => append_property_inequality_condition(
+                &json_value,
+                &predicate.value,
+                conditions,
+                args,
+            )?,
+            GraphPredicateOp::GreaterThan
+            | GraphPredicateOp::GreaterThanOrEqual
+            | GraphPredicateOp::LessThan
+            | GraphPredicateOp::LessThanOrEqual => append_property_order_condition(
+                &json_value,
+                predicate.op,
+                &predicate.value,
+                conditions,
+                args,
+            )?,
+        }
+    }
+    Ok(())
+}
+
+fn append_property_equality_condition(
+    json_value: &str,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    match value {
+        Value::String(s) => {
+            conditions.push(format!("{json_value} = ?"));
+            args.push(lit_str(s));
+        }
+        Value::Int(n) => {
+            conditions.push(format!("CAST({json_value} AS BIGINT) = ?"));
+            args.push(lit_long(*n));
+        }
+        Value::Float(f) => {
+            conditions.push(format!("CAST({json_value} AS DOUBLE) = ?"));
+            args.push(lit_double(*f));
+        }
+        Value::Bool(b) => {
+            conditions.push(format!("CAST({json_value} AS BOOLEAN) = ?"));
+            args.push(lit_bool(*b));
+        }
+        Value::Null => conditions.push(format!("{json_value} IS NULL")),
+        Value::DateTime(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => {
+            let json = serde_json::to_string(&value.to_json())
+                .map_err(|err| GrustError::Serialization(err.to_string()))?;
+            conditions.push(format!("{json_value} = ?"));
+            args.push(lit_str(&json));
+        }
+    }
+    Ok(())
+}
+
+fn append_property_inequality_condition(
+    json_value: &str,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    match value {
+        Value::Null => conditions.push(format!("{json_value} IS NOT NULL")),
+        _ => {
+            let mut inner_conditions = Vec::new();
+            let mut inner_args = Vec::new();
+            append_property_equality_condition(
+                json_value,
+                value,
+                &mut inner_conditions,
+                &mut inner_args,
+            )?;
+            let Some(condition) = inner_conditions.into_iter().next() else {
+                return Ok(());
+            };
+            conditions.push(format!("{json_value} IS NOT NULL AND NOT ({condition})"));
+            args.extend(inner_args);
+        }
+    }
+    Ok(())
+}
+
+fn append_property_order_condition(
+    json_value: &str,
+    op: GraphPredicateOp,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    let sql_op = match op {
+        GraphPredicateOp::GreaterThan => ">",
+        GraphPredicateOp::GreaterThanOrEqual => ">=",
+        GraphPredicateOp::LessThan => "<",
+        GraphPredicateOp::LessThanOrEqual => "<=",
+        GraphPredicateOp::Equal | GraphPredicateOp::NotEqual => unreachable!(),
+    };
+    match value {
+        Value::Int(n) => {
+            conditions.push(format!("CAST({json_value} AS BIGINT) {sql_op} ?"));
+            args.push(lit_long(*n));
+        }
+        Value::Float(f) => {
+            conditions.push(format!("CAST({json_value} AS DOUBLE) {sql_op} ?"));
+            args.push(lit_double(*f));
+        }
+        Value::String(s) => {
+            conditions.push(format!("{json_value} {sql_op} ?"));
+            args.push(lit_str(s));
+        }
+        _ => {
+            return Err(cypher_syntax(
+                "MATCH WHERE ordered comparisons require integer, float, or string literals",
+            ));
         }
     }
     Ok(())

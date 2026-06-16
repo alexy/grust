@@ -75,6 +75,10 @@ describe unreleased working-tree additions:
 - Parameters are available through `CypherMutationOptions::parameters` anywhere
   literal values are already accepted: explicit IDs, property maps, and literal
   property assignments. Quoted `$name` text remains an ordinary string literal.
+- Mutating `MATCH` clauses accept a bounded `WHERE` predicate grammar over
+  node or relationship properties. Supported predicates compare one matched
+  variable property to a literal or parameter with `=`, `<>`, `!=`, `>`, `>=`,
+  `<`, or `<=`, and combine predicates with `AND`.
 - `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
   operation when the source is a property on the same node variable and the
@@ -93,6 +97,8 @@ The v1 implementation should reject, with clear errors:
 - relationship arithmetic updates, path expressions, functions, `CASE`,
   list/map projections, cross-variable expressions, or general computed
   expression evaluation;
+- `WHERE` forms using `OR`, `NOT`, pattern predicates, list predicates,
+  functions, arbitrary expressions, or cross-variable property comparisons;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
 
@@ -144,6 +150,9 @@ to backend-neutral Grust mutation concepts:
 - node numeric property update -> `GraphMutation::UpdateMatchingNodeProperty`
   with target property, source property, numeric operation, operand, match
   predicates, and cardinality metadata retained in `GraphMutationPlanOp`;
+- mutating `MATCH ... WHERE` property filters -> backend-neutral
+  `GraphPropertyPredicate` values carried by `GraphNodeMatch`,
+  `GraphRelationshipMatch`, and matching-node mutation plan operations;
 - ID-resolved edge property assignment -> one-key `GraphMutation::PatchEdge`;
 - broad edge property assignment -> one-key
   `GraphMutation::PatchMatchingEdges` with a `GraphRelationshipMatch`
@@ -160,6 +169,15 @@ to backend-neutral Grust mutation concepts:
 - Sail broad edge delete -> `GraphMutation::DeleteMatchingEdges` with a
   `GraphRelationshipMatch` descriptor and cardinality metadata retained in
   `GraphMutationPlanOp`.
+
+`GraphPropertyPredicate` is deliberately small and type-aware. Missing
+properties never match any predicate, including inequality. Equality and
+inequality use exact `Value` equality, so `Value::Null` only matches explicit
+`null` and `x <> null` requires a present non-null value. Ordered comparisons
+support integer/float numeric comparisons and string comparisons; booleans,
+arrays, JSON objects, datetimes, and mixed ordered types do not match in
+backend execution and are rejected by Sail planning when they appear as ordered
+literal or parameter operands.
 
 `grust-sail` should not emit independent ad hoc table edits from Cypher syntax.
 It should reuse the same persistence path used by `put_node`, `put_edge`,
@@ -268,8 +286,10 @@ Core tests should cover:
   IDs;
 - rejection of unresolved endpoint variables;
 - lowering of literal property assignment and explicit property removal;
-- rejection of unsupported expression `SET`, broad `REMOVE`, and general
-  mutating `MATCH`.
+- `GraphPropertyPredicate` matching semantics for missing properties, `null`,
+  numeric comparisons, string comparisons, and mismatched ordered types;
+- rejection of unsupported expression `SET`, row-producing `MATCH ... CREATE`,
+  and unsupported `WHERE` predicate forms.
 
 Sail unit tests should cover:
 
@@ -277,6 +297,10 @@ Sail unit tests should cover:
 - reuse of existing `MERGE INTO` node and edge paths;
 - reuse of typed-table mirror writes when schema is applied;
 - reuse of staged delete helpers for node and edge deletes;
+- `WHERE` lowering into `GraphPropertyPredicate` values on matched nodes,
+  relationships, and matching-node mutation operations;
+- equivalent predicate selection between Sail-planned mutation plans executed
+  on Memory and predicate SQL emitted by Sail helpers;
 - clear errors for unsupported writable Cypher forms.
 
 Ignored live Sail tests should cover:
@@ -1120,6 +1144,23 @@ Acceptance criteria:
   `null` compare.
 - Add tests proving the same predicate selects the same graph elements in Sail
   and Memory.
+
+Implementation status: implemented in the current working tree. `grust-core`
+now owns `GraphPredicateOp` and `GraphPropertyPredicate`, matched node and
+relationship descriptors carry predicate vectors, and matching-node mutation
+plan variants carry the same predicate vectors. `grust-memory` evaluates those
+predicates directly. `grust-sail` parses `AND`-joined property comparisons in
+mutating `MATCH ... WHERE`, binds literal or parameter right-hand sides, lowers
+them into the neutral predicate AST, and emits SQL predicates for node,
+relationship, and endpoint matching.
+
+The comparison semantics are intentionally shared: a missing property never
+matches; `null` participates only in equality or inequality with
+`Value::Null`; integer and float values compare numerically; strings compare
+lexicographically; and unsupported ordered operand types fail planning in Sail
+instead of relying on backend casts. `OR`, `NOT`, function calls, list
+predicates, pattern predicates, arbitrary expressions, and cross-variable
+comparisons remain deferred.
 
 ### Batch W: Read-then-write `MATCH ... CREATE`
 

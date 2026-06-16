@@ -31,7 +31,12 @@ impl MemoryGraphStore {
         }
     }
 
-    fn node_matches(node: &Node, label: Option<&Label>, props: &Props) -> bool {
+    fn node_matches(
+        node: &Node,
+        label: Option<&Label>,
+        props: &Props,
+        predicates: &[GraphPropertyPredicate],
+    ) -> bool {
         label.is_none_or(|label| &node.label == label)
             && props.iter().all(|(key, value)| {
                 if key == "id" {
@@ -40,13 +45,21 @@ impl MemoryGraphStore {
                     node.props.get(key) == Some(value)
                 }
             })
+            && predicates
+                .iter()
+                .all(|predicate| predicate.matches(node.props.get(&predicate.key)))
     }
 
-    fn matching_node_ids(inner: &MemoryGraph, label: Option<&Label>, props: &Props) -> Vec<NodeId> {
+    fn matching_node_ids(
+        inner: &MemoryGraph,
+        label: Option<&Label>,
+        props: &Props,
+        predicates: &[GraphPropertyPredicate],
+    ) -> Vec<NodeId> {
         inner
             .nodes
             .values()
-            .filter(|node| Self::node_matches(node, label, props))
+            .filter(|node| Self::node_matches(node, label, props, predicates))
             .map(|node| node.id.clone())
             .collect()
     }
@@ -73,6 +86,13 @@ impl MemoryGraphStore {
         {
             return false;
         }
+        if !relationship
+            .predicates
+            .iter()
+            .all(|predicate| predicate.matches(edge.props.get(&predicate.key)))
+        {
+            return false;
+        }
         let Some(from) = inner.nodes.get(&edge.from) else {
             return false;
         };
@@ -83,7 +103,13 @@ impl MemoryGraphStore {
             from,
             relationship.from.label.as_ref(),
             &relationship.from.props,
-        ) && Self::node_matches(to, relationship.to.label.as_ref(), &relationship.to.props)
+            &relationship.from.predicates,
+        ) && Self::node_matches(
+            to,
+            relationship.to.label.as_ref(),
+            &relationship.to.props,
+            &relationship.to.predicates,
+        )
     }
 
     fn matching_edges(inner: &MemoryGraph, relationship: &GraphRelationshipMatch) -> Vec<Edge> {
@@ -271,11 +297,12 @@ impl CypherMutationExecutor for MemoryGraphStore {
                 GraphMutationPlanOp::PatchMatchingNodes {
                     label,
                     props,
+                    predicates,
                     patch,
                     ..
                 } => {
                     let mut inner = self.inner.write().expect("memory graph lock poisoned");
-                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props);
+                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props, predicates);
                     report.matched_rows += ids.len();
                     report.node_patches += ids.len();
                     report.changed_nodes += ids.len();
@@ -300,6 +327,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                 GraphMutationPlanOp::UpdateMatchingNodeProperty {
                     label,
                     props,
+                    predicates,
                     target_key,
                     source_key,
                     op,
@@ -307,7 +335,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     ..
                 } => {
                     let mut inner = self.inner.write().expect("memory graph lock poisoned");
-                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props);
+                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props, predicates);
                     report.matched_rows += ids.len();
                     report.node_patches += ids.len();
                     report.changed_nodes += ids.len();
@@ -334,10 +362,14 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     }
                 }
                 GraphMutationPlanOp::RemoveMatchingNodeProps {
-                    label, props, keys, ..
+                    label,
+                    props,
+                    predicates,
+                    keys,
+                    ..
                 } => {
                     let mut inner = self.inner.write().expect("memory graph lock poisoned");
-                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props);
+                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props, predicates);
                     report.matched_rows += ids.len();
                     report.node_property_removes += ids.len();
                     report.changed_nodes += ids.len();
@@ -359,9 +391,14 @@ impl CypherMutationExecutor for MemoryGraphStore {
                         inner.nodes.insert(node.id.clone(), node);
                     }
                 }
-                GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
+                GraphMutationPlanOp::DeleteMatchingNodes {
+                    label,
+                    props,
+                    predicates,
+                    ..
+                } => {
                     let mut inner = self.inner.write().expect("memory graph lock poisoned");
-                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props);
+                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props, predicates);
                     let incident_edges = inner
                         .edges
                         .keys()

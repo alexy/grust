@@ -99,14 +99,17 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
         from: GraphNodeMatch {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("active"))]),
+            predicates: Vec::new(),
         },
         label: Label::new("KNOWS"),
         to: GraphNodeMatch {
             label: Some(Label::new("Person")),
             props: Props::new(),
+            predicates: Vec::new(),
         },
         id: None,
         props: Props::new(),
+        predicates: Vec::new(),
     };
     let plan = GraphMutationPlan::new(vec![
         GraphMutationPlanOp::UpsertNode {
@@ -124,12 +127,14 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
         GraphMutationPlanOp::PatchMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("active".to_string(), Value::Bool(false))]),
+            predicates: Vec::new(),
             patch: Props::from([("archived".to_string(), Value::Bool(true))]),
             cardinality: GraphMutationCardinality::BoundedMany,
         },
         GraphMutationPlanOp::UpdateMatchingNodeProperty {
             label: Some(Label::new("Counter")),
             props: Props::from([("active".to_string(), Value::Bool(true))]),
+            predicates: Vec::new(),
             target_key: "count".to_string(),
             source_key: "count".to_string(),
             op: GraphNumericOp::Add,
@@ -155,6 +160,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
         GraphMutationPlanOp::RemoveMatchingNodeProps {
             label: Some(Label::new("Person")),
             props: Props::from([("active".to_string(), Value::Bool(false))]),
+            predicates: Vec::new(),
             keys: vec!["nickname".to_string()],
             cardinality: GraphMutationCardinality::BoundedMany,
         },
@@ -173,6 +179,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
         GraphMutationPlanOp::DeleteMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("active".to_string(), Value::Bool(false))]),
+            predicates: Vec::new(),
             cardinality: GraphMutationCardinality::BoundedMany,
         },
         GraphMutationPlanOp::DeleteMatchingEdges {
@@ -220,11 +227,13 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             GraphMutation::PatchMatchingNodes {
                 label: Some(Label::new("Person")),
                 props: Props::from([("active".to_string(), Value::Bool(false))]),
+                predicates: Vec::new(),
                 patch: Props::from([("archived".to_string(), Value::Bool(true))]),
             },
             GraphMutation::UpdateMatchingNodeProperty {
                 label: Some(Label::new("Counter")),
                 props: Props::from([("active".to_string(), Value::Bool(true))]),
+                predicates: Vec::new(),
                 target_key: "count".to_string(),
                 source_key: "count".to_string(),
                 op: GraphNumericOp::Add,
@@ -248,6 +257,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             GraphMutation::RemoveMatchingNodeProps {
                 label: Some(Label::new("Person")),
                 props: Props::from([("active".to_string(), Value::Bool(false))]),
+                predicates: Vec::new(),
                 keys: vec!["nickname".to_string()],
             },
             GraphMutation::RemoveEdgeProps {
@@ -264,6 +274,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             GraphMutation::DeleteMatchingNodes {
                 label: Some(Label::new("Person")),
                 props: Props::from([("active".to_string(), Value::Bool(false))]),
+                predicates: Vec::new(),
             },
             GraphMutation::DeleteMatchingEdges { relationship },
             GraphMutation::DeleteEdge {
@@ -274,6 +285,45 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             GraphMutation::DeleteNode(NodeId::new("person-3")),
         ]
     );
+}
+
+#[test]
+fn property_predicates_are_type_aware_and_missing_safe() {
+    let active = GraphPropertyPredicate {
+        key: "status".to_string(),
+        op: GraphPredicateOp::Equal,
+        value: Value::from("active"),
+    };
+    assert!(active.matches(Some(&Value::from("active"))));
+    assert!(!active.matches(Some(&Value::from("inactive"))));
+    assert!(!active.matches(None));
+
+    let not_null = GraphPropertyPredicate {
+        key: "nickname".to_string(),
+        op: GraphPredicateOp::NotEqual,
+        value: Value::Null,
+    };
+    assert!(not_null.matches(Some(&Value::from("ada"))));
+    assert!(!not_null.matches(Some(&Value::Null)));
+    assert!(!not_null.matches(None));
+
+    let score_at_least = GraphPropertyPredicate {
+        key: "score".to_string(),
+        op: GraphPredicateOp::GreaterThanOrEqual,
+        value: Value::Float(10.5),
+    };
+    assert!(score_at_least.matches(Some(&Value::Int(11))));
+    assert!(score_at_least.matches(Some(&Value::Float(10.5))));
+    assert!(!score_at_least.matches(Some(&Value::Int(10))));
+    assert!(!score_at_least.matches(Some(&Value::from("11"))));
+
+    let name_before = GraphPropertyPredicate {
+        key: "name".to_string(),
+        op: GraphPredicateOp::LessThan,
+        value: Value::from("M"),
+    };
+    assert!(name_before.matches(Some(&Value::from("Ada"))));
+    assert!(!name_before.matches(Some(&Value::from("Zoe"))));
 }
 
 #[test]
