@@ -2271,6 +2271,7 @@ pub struct GraphRelationshipMatch {
     pub label: Label,
     pub to: GraphNodeMatch,
     pub id: Option<EdgeId>,
+    pub props: Props,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

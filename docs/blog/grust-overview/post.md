@@ -435,6 +435,8 @@ same-variable node property arithmetic such as
 `SET n.count = n.count + $delta` lowers to an explicit read-modify-write
 mutation plan for Sail and Memory while broader computed expressions remain
 out of scope.
+Relationship matches can also filter on relationship properties beyond `id`,
+with Sail and Memory using the same matched-edge predicate semantics.
 Plan execution is no longer Sail-only: `CypherMutationExecutor` lets the
 resolved `GraphMutationPlan` run on Sail or Memory, which keeps parser growth
 separate from backend mutation semantics.

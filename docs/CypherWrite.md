@@ -63,7 +63,11 @@ describe unreleased working-tree additions:
   relationship identity is resolved or describes a broad relationship match.
 - `MATCH ... DELETE e` can delete broad relationship matches described by
   endpoint label/property predicates, relationship type, and optional explicit
-  edge `id`; relationship property predicates beyond `id` remain rejected.
+  edge `id`.
+- Broad relationship `MATCH ... DELETE`, `SET`, and `REMOVE` can filter on
+  relationship property predicates beyond `id`; explicit `id` remains a
+  separate identity filter and can be combined with ordinary relationship
+  predicates.
 - Opt-in generated node IDs are available for node `CREATE` through
   `CypherNodeIdPolicy::GenerateForCreate`; explicit IDs remain the default,
   `MERGE` still requires explicit identity, and edge endpoint IDs must resolve
@@ -83,7 +87,6 @@ The v1 implementation should reject, with clear errors:
 - generated node IDs unless the caller explicitly selects the generated-ID
   policy;
 - node identity derived from non-`id` properties;
-- relationship property predicates beyond explicit edge `id`;
 - remove-on-null, relationship arithmetic updates, path expressions, functions,
   `CASE`, list/map projections, cross-variable expressions, or general
   computed expression evaluation;
@@ -600,10 +603,9 @@ appears.
 The following decisions should remain out of v1:
 
 - pluggable non-UUID ID providers;
-- relationship property predicates beyond explicit edge `id`, remove-on-null,
-  relationship arithmetic updates, path expressions, functions, `CASE`,
-  list/map projections, cross-variable expressions, and general computed
-  values;
+- remove-on-null, relationship arithmetic updates, path expressions, functions,
+  `CASE`, list/map projections, cross-variable expressions, and general
+  computed values;
 - cross-backend Cypher text mutation APIs;
 - stronger transaction guarantees than the target backend documents.
 
@@ -927,8 +929,9 @@ Acceptance criteria:
 - Sail stages matched edge identities before mutation and reports matched
   rows, changed edges, and patch/delete/property-remove counts.
 - Memory implements the same semantics over its edge map.
-- Keep relationship property predicates beyond explicit `id` rejected until
-  the match descriptor and Sail SQL lowering can prove consistent behavior.
+- Keep relationship property predicates beyond explicit `id` rejected in this
+  batch until the match descriptor and Sail SQL lowering can prove consistent
+  behavior; Batch T removes that restriction.
 
 Implementation status: implemented in the working tree after Batch O. Core now
 has `GraphNodeMatch` and `GraphRelationshipMatch` descriptors plus
@@ -938,7 +941,7 @@ cardinality-aware `PatchMatchingEdges`, `RemoveMatchingEdgeProps`, and
 that descriptor, joining `grust_edges` to `grust_nodes` for endpoint label and
 property predicates before reusing existing edge load/delete paths. Memory
 executes the same resolved plans over its edge map. Relationship property
-predicates beyond explicit edge `id` remain rejected.
+predicates beyond explicit edge `id` are handled separately in Batch T.
 
 ### Batch Q: Parameters And Literal Binding
 
@@ -1049,6 +1052,17 @@ Acceptance criteria:
 - Memory applies identical predicate behavior over its edge map.
 - Tests cover zero, one, and many matching edges; explicit edge `id` combined
   with other predicates; and type-sensitive predicate comparison.
+
+Implementation status: implemented in the working tree after Batch R.
+`GraphRelationshipMatch` now carries relationship property predicates in
+addition to endpoint matches, relationship type, and optional explicit edge
+`id`. Sail lowers relationship property predicates into the same staged
+matched-edge SQL path used by broad relationship delete, patch, assignment,
+and removal. Memory applies the same type-sensitive predicate comparison over
+its edge map. When endpoint IDs are resolved but relationship predicates beyond
+`id` are present, Sail uses the cardinality-aware matched-edge operation so the
+predicates are honored instead of silently applying a structural single-edge
+mutation.
 
 ### Batch U: Optional Remove-on-null Compatibility
 

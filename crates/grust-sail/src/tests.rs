@@ -935,6 +935,7 @@ fn cypher_match_delete_lowers_id_resolved_patterns() {
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
         },
         id: None,
+        props: Props::new(),
     };
     assert_eq!(
         broad_edge.report(),
@@ -1031,6 +1032,35 @@ fn matching_nodes_sql_filters_by_label_and_properties() {
         &args[3].literal_type,
         Some(expression::literal::LiteralType::String(_))
     ));
+}
+
+#[test]
+fn matching_edges_sql_filters_by_relationship_properties() {
+    let relationship = GraphRelationshipMatch {
+        from: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::from([("id".to_string(), Value::from("person-1"))]),
+        },
+        label: Label::new("KNOWS"),
+        to: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::new(),
+        },
+        id: Some(EdgeId::new("edge-1")),
+        props: Props::from([
+            ("active".to_string(), Value::Bool(true)),
+            ("since".to_string(), Value::Int(2020)),
+        ]),
+    };
+
+    let (sql, args) = matching_edges_sql(&relationship).unwrap();
+
+    assert!(sql.contains("e.edge_type = ?"));
+    assert!(sql.contains("e.id = ?"));
+    assert!(sql.contains("CAST(GET_JSON_OBJECT(e.props, '$.active') AS BOOLEAN) = ?"));
+    assert!(sql.contains("CAST(GET_JSON_OBJECT(e.props, '$.since') AS BIGINT) = ?"));
+    assert!(sql.contains("src.id = ?"));
+    assert_eq!(args.len(), 7);
 }
 
 #[test]
@@ -1276,8 +1306,89 @@ fn cypher_match_set_map_patch_lowers_id_resolved_edge() {
                     props: Props::from([("status".to_string(), Value::from("inactive"))]),
                 },
                 id: None,
+                props: Props::new(),
             },
             patch: Props::from([("seen".to_string(), Value::Bool(true))]),
+        }]
+    );
+}
+
+#[test]
+fn cypher_match_edge_mutations_accept_relationship_property_predicates() {
+    let patch = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS {since: 2020, active: true}]->(:Person {id: 'person-2'}) SET e.seen = true",
+    )
+    .unwrap();
+    assert_eq!(
+        patch.operations,
+        vec![GraphMutationPlanOp::PatchMatchingEdges {
+            relationship: GraphRelationshipMatch {
+                from: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                },
+                label: Label::new("KNOWS"),
+                to: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("id".to_string(), Value::from("person-2"))]),
+                },
+                id: None,
+                props: Props::from([
+                    ("active".to_string(), Value::Bool(true)),
+                    ("since".to_string(), Value::Int(2020)),
+                ]),
+            },
+            patch: Props::from([("seen".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+
+    let remove = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-1', since: 2020}]->(:Person {id: 'person-2'}) REMOVE e.note",
+    )
+    .unwrap();
+    assert_eq!(
+        remove.operations,
+        vec![GraphMutationPlanOp::RemoveMatchingEdgeProps {
+            relationship: GraphRelationshipMatch {
+                from: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                },
+                label: Label::new("KNOWS"),
+                to: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("id".to_string(), Value::from("person-2"))]),
+                },
+                id: Some(EdgeId::new("edge-1")),
+                props: Props::from([("since".to_string(), Value::Int(2020))]),
+            },
+            keys: vec!["note".to_string()],
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+
+    let delete = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS {active: false}]->(:Person {status: 'inactive'}) DELETE e",
+    )
+    .unwrap();
+    assert_eq!(
+        delete.operations,
+        vec![GraphMutationPlanOp::DeleteMatchingEdges {
+            relationship: GraphRelationshipMatch {
+                from: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                },
+                label: Label::new("KNOWS"),
+                to: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("status".to_string(), Value::from("inactive"))]),
+                },
+                id: None,
+                props: Props::from([("active".to_string(), Value::Bool(false))]),
+            },
+            cardinality: GraphMutationCardinality::BoundedMany,
         }]
     );
 }
@@ -1336,6 +1447,7 @@ fn cypher_match_set_property_assignment_lowers_resolved_node_and_edge() {
                     props: Props::from([("status".to_string(), Value::from("inactive"))]),
                 },
                 id: None,
+                props: Props::new(),
             },
             patch: Props::from([("seen".to_string(), Value::Bool(true))]),
         }]
@@ -1506,6 +1618,7 @@ fn cypher_match_remove_lowers_resolved_node_and_edge_properties() {
                     props: Props::from([("status".to_string(), Value::from("inactive"))]),
                 },
                 id: None,
+                props: Props::new(),
             },
             keys: vec!["note".to_string()],
         }]
@@ -1533,10 +1646,7 @@ fn cypher_match_remove_lowers_resolved_node_and_edge_properties() {
 
 #[test]
 fn cypher_match_set_rejects_deferred_patch_forms() {
-    for cypher in [
-        "MATCH (n:Person {id: 'person-1'}) SET m += {name: 'Ada'}",
-        "MATCH (:Person {id: 'person-1'})-[e:KNOWS {since: 2020}]->(:Person {id: 'person-2'}) SET e += {since: 2026}",
-    ] {
+    for cypher in ["MATCH (n:Person {id: 'person-1'}) SET m += {name: 'Ada'}"] {
         let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH SET must fail");
         assert!(is_cypher_planning_error(&error));
     }
@@ -1787,9 +1897,9 @@ fn cypher_errors_are_structured_for_callers() {
     assert!(matches!(error, GrustError::CypherUnresolvedIdentity(_)));
 
     let error = sail_cypher_mutation_plan(
-        "MATCH (:Person {id: 'a'})-[e:KNOWS {since: 2020}]->(:Person {id: 'b'}) SET e += {since: 2026}",
+        "MATCH (:Person {id: 'a'})-[e:KNOWS]->(:Person {id: 'b'}) SET e.weight = e.weight + 1",
     )
-    .expect_err("edge patch cardinality");
+    .expect_err("edge expression cardinality");
     assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
 
     let error = cypher_execution_error(GrustError::Backend("boom".to_string()));

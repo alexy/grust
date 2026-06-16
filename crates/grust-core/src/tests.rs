@@ -106,6 +106,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             props: Props::new(),
         },
         id: None,
+        props: Props::new(),
     };
     let plan = GraphMutationPlan::new(vec![
         GraphMutationPlanOp::UpsertNode {

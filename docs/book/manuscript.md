@@ -1067,9 +1067,11 @@ Literal `SET n.key = value` and `SET e.key = value` lower to one-key patches,
 while `REMOVE n.key` and `REMOVE e.key` lower to explicit property-remove
 mutations. Node forms can target either a resolved identity or a broad node
 match; edge forms can target either a resolved identity or a broad relationship
-match. Relationship expression updates, relationship property predicates
-beyond explicit edge `id`, remove-on-null, and general computed expressions
-remain deferred.
+match. Broad relationship matches can filter on relationship property
+predicates beyond `id`; explicit edge `id` remains a separate identity filter
+and can be combined with ordinary relationship predicates. Relationship
+expression updates, remove-on-null, and general computed expressions remain
+deferred.
 For broad node and relationship deletes, patches, and property removals, the
 report records matched rows and changed graph elements, and Sail stages matched
 IDs before using the same delete or load helpers that keep generic and typed

@@ -66,6 +66,13 @@ impl MemoryGraphStore {
         {
             return false;
         }
+        if !relationship
+            .props
+            .iter()
+            .all(|(key, value)| edge.props.get(key) == Some(value))
+        {
+            return false;
+        }
         let Some(from) = inner.nodes.get(&edge.from) else {
             return false;
         };

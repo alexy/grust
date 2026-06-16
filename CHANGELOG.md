@@ -38,6 +38,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added backend-neutral relationship match descriptors plus Sail and Memory
   execution for broad relationship `MATCH ... DELETE`, `SET`, and `REMOVE`
   mutations over endpoint label/property predicates and optional edge `id`.
+- Extended relationship match descriptors to carry relationship property
+  predicates beyond `id`, with Sail SQL lowering and Memory execution for
+  broad relationship delete, patch, assignment, and removal.
 - Added Sail writable Cypher parameters through
   `CypherMutationOptions::parameters`, limited to literal positions such as
   IDs, property maps, and literal property assignments.

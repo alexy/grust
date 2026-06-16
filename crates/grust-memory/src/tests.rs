@@ -578,6 +578,7 @@ fn executes_matching_edge_mutations() {
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
         },
         id: None,
+        props: Props::new(),
     };
     let setup = GraphMutationPlan::new(vec![
         GraphMutationPlanOp::UpsertNode {
@@ -688,5 +689,183 @@ fn executes_matching_edge_mutations() {
         }))
         .unwrap()
         .is_empty()
+    );
+}
+
+#[test]
+fn matching_edge_mutations_filter_relationship_properties() {
+    let store = MemoryGraphStore::new();
+    let setup = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new("Person", "a", Props::new()),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new("Person", "b", Props::new()),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new("Person", "c", Props::new()),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new("Person", "d", Props::new()),
+        },
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Create,
+            edge: Edge::new(
+                "KNOWS",
+                "a",
+                "b",
+                Props::from([
+                    ("active".to_string(), Value::Bool(true)),
+                    ("since".to_string(), Value::Int(2020)),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Create,
+            edge: Edge::new(
+                "KNOWS",
+                "a",
+                "c",
+                Props::from([
+                    ("active".to_string(), Value::Bool(true)),
+                    ("since".to_string(), Value::from("2020")),
+                ]),
+            )
+            .with_id("edge-c"),
+        },
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Create,
+            edge: Edge::new(
+                "KNOWS",
+                "a",
+                "d",
+                Props::from([
+                    ("active".to_string(), Value::Bool(false)),
+                    ("since".to_string(), Value::Int(2020)),
+                ]),
+            ),
+        },
+    ]);
+    futures_executor::block_on(store.execute_cypher_mutation_plan(&setup)).unwrap();
+
+    let one_int_match = GraphRelationshipMatch {
+        from: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::from([("id".to_string(), Value::from("a"))]),
+        },
+        label: Label::new("KNOWS"),
+        to: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::new(),
+        },
+        id: None,
+        props: Props::from([
+            ("active".to_string(), Value::Bool(true)),
+            ("since".to_string(), Value::Int(2020)),
+        ]),
+    };
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(
+        &GraphMutationPlan::new(vec![GraphMutationPlanOp::PatchMatchingEdges {
+            relationship: one_int_match,
+            patch: Props::from([("seen".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]),
+    ))
+    .unwrap();
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            patches: 1,
+            matched_rows: 1,
+            changed_edges: 1,
+            edge_patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let b_edges = futures_executor::block_on(store.get_edges(EdgeQuery {
+        from: Some(NodeId::new("a")),
+        to: Some(NodeId::new("b")),
+        label: Some(Label::new("KNOWS")),
+    }))
+    .unwrap();
+    assert_eq!(b_edges[0].props.get("seen"), Some(&Value::Bool(true)));
+    let c_edges = futures_executor::block_on(store.get_edges(EdgeQuery {
+        from: Some(NodeId::new("a")),
+        to: Some(NodeId::new("c")),
+        label: Some(Label::new("KNOWS")),
+    }))
+    .unwrap();
+    assert_eq!(c_edges[0].props.get("seen"), None);
+
+    let explicit_id_and_string_prop = GraphRelationshipMatch {
+        from: GraphNodeMatch {
+            label: None,
+            props: Props::from([("id".to_string(), Value::from("a"))]),
+        },
+        label: Label::new("KNOWS"),
+        to: GraphNodeMatch {
+            label: None,
+            props: Props::new(),
+        },
+        id: Some(EdgeId::new("edge-c")),
+        props: Props::from([("since".to_string(), Value::from("2020"))]),
+    };
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(
+        &GraphMutationPlan::new(vec![GraphMutationPlanOp::RemoveMatchingEdgeProps {
+            relationship: explicit_id_and_string_prop,
+            keys: vec!["active".to_string()],
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]),
+    ))
+    .unwrap();
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            property_removes: 1,
+            matched_rows: 1,
+            changed_edges: 1,
+            edge_property_removes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    let c_edges = futures_executor::block_on(store.get_edges(EdgeQuery {
+        from: Some(NodeId::new("a")),
+        to: Some(NodeId::new("c")),
+        label: Some(Label::new("KNOWS")),
+    }))
+    .unwrap();
+    assert_eq!(c_edges[0].props.get("active"), None);
+
+    let zero = GraphRelationshipMatch {
+        from: GraphNodeMatch {
+            label: None,
+            props: Props::new(),
+        },
+        label: Label::new("KNOWS"),
+        to: GraphNodeMatch {
+            label: None,
+            props: Props::new(),
+        },
+        id: Some(EdgeId::new("edge-c")),
+        props: Props::from([("since".to_string(), Value::Int(2020))]),
+    };
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(
+        &GraphMutationPlan::new(vec![GraphMutationPlanOp::DeleteMatchingEdges {
+            relationship: zero,
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]),
+    ))
+    .unwrap();
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            deletes: 1,
+            ..GraphMutationReport::default()
+        }
     );
 }

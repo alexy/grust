@@ -493,17 +493,9 @@ impl CypherMutationPlanner {
             let from_id = self.resolved_endpoint_id(&parsed.from)?;
             let to_id = self.resolved_endpoint_id(&parsed.to)?;
             let edge_id = optional_string_prop(&parsed.relationship.props, "id");
-            if let (Some(from), Some(to), None) = (from_id, to_id, edge_id) {
-                if parsed
-                    .relationship
-                    .props
-                    .keys()
-                    .any(|key| key.as_str() != "id")
-                {
-                    return Err(cypher_unsupported_cardinality(
-                        "MATCH edge DELETE only supports endpoint, type, and optional edge id identity",
-                    ));
-                }
+            if let (Some(from), Some(to), None) = (from_id, to_id, edge_id)
+                && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
+            {
                 return Ok(GraphMutationPlan::new(vec![
                     GraphMutationPlanOp::DeleteEdge {
                         from,
@@ -638,19 +630,11 @@ impl CypherMutationPlanner {
                     "MATCH edge SET does not support numeric expression updates",
                 ));
             };
-            if parsed
-                .relationship
-                .props
-                .keys()
-                .any(|key| key.as_str() != "id")
-            {
-                return Err(cypher_unsupported_cardinality(
-                    "MATCH edge SET only supports endpoint, type, and optional edge id identity",
-                ));
-            }
             let from_id = self.resolved_endpoint_id(&parsed.from)?;
             let to_id = self.resolved_endpoint_id(&parsed.to)?;
-            if let (Some(from), Some(to)) = (from_id, to_id) {
+            if let (Some(from), Some(to)) = (from_id, to_id)
+                && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
+            {
                 let id = optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
                 return Ok(GraphMutationPlan::new(vec![
                     GraphMutationPlanOp::PatchEdge {
@@ -778,19 +762,11 @@ impl CypherMutationPlanner {
                     "MATCH edge REMOVE target '{target}' does not match relationship variable '{edge_variable}'"
                 )));
             }
-            if parsed
-                .relationship
-                .props
-                .keys()
-                .any(|key| key.as_str() != "id")
-            {
-                return Err(cypher_unsupported_cardinality(
-                    "MATCH edge REMOVE only supports endpoint, type, and optional edge id identity",
-                ));
-            }
             let from_id = self.resolved_endpoint_id(&parsed.from)?;
             let to_id = self.resolved_endpoint_id(&parsed.to)?;
-            if let (Some(from), Some(to)) = (from_id, to_id) {
+            if let (Some(from), Some(to)) = (from_id, to_id)
+                && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
+            {
                 let id = optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
                 return Ok(GraphMutationPlan::new(vec![
                     GraphMutationPlanOp::RemoveEdgeProps {
@@ -932,17 +908,9 @@ impl CypherMutationPlanner {
         parsed: ParsedCypherEdgeMatch,
         context: &str,
     ) -> Result<GraphRelationshipMatch> {
-        if parsed
-            .relationship
-            .props
-            .keys()
-            .any(|key| key.as_str() != "id")
-        {
-            return Err(cypher_unsupported_cardinality(format!(
-                "{context} only supports endpoint, type, and optional edge id identity"
-            )));
-        }
         let id = optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
+        let mut props = parsed.relationship.props;
+        props.remove("id");
         let from = self.node_match_from_pattern(parsed.from, context)?;
         let to = self.node_match_from_pattern(parsed.to, context)?;
         Ok(GraphRelationshipMatch {
@@ -950,6 +918,7 @@ impl CypherMutationPlanner {
             label: parsed.relationship.label,
             to,
             id,
+            props,
         })
     }
 
@@ -1670,6 +1639,10 @@ fn parse_cypher_string(value: &str) -> Result<String> {
 
 fn optional_string_prop(props: &Props, key: &str) -> Option<String> {
     props.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+fn has_relationship_predicates_beyond_id(props: &Props) -> bool {
+    props.keys().any(|key| key.as_str() != "id")
 }
 
 fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
@@ -3348,6 +3321,7 @@ fn matching_edges_sql(
         conditions.push("e.id = ?".to_string());
         args.push(lit_str(id.as_str()));
     }
+    append_relationship_prop_conditions(relationship, &mut conditions, &mut args)?;
     append_node_match_conditions("src", &relationship.from, &mut conditions, &mut args)?;
     append_node_match_conditions("dst", &relationship.to, &mut conditions, &mut args)?;
     Ok((
@@ -3361,6 +3335,47 @@ fn matching_edges_sql(
         ),
         args,
     ))
+}
+
+fn append_relationship_prop_conditions(
+    relationship: &GraphRelationshipMatch,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    for (key, value) in &relationship.props {
+        validate_json_key(key)?;
+        let json_value = format!("GET_JSON_OBJECT(e.props, '$.{key}')");
+        match value {
+            Value::String(s) => {
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(s));
+            }
+            Value::Int(n) => {
+                conditions.push(format!("CAST({json_value} AS BIGINT) = ?"));
+                args.push(lit_long(*n));
+            }
+            Value::Float(f) => {
+                conditions.push(format!("CAST({json_value} AS DOUBLE) = ?"));
+                args.push(lit_double(*f));
+            }
+            Value::Bool(b) => {
+                conditions.push(format!("CAST({json_value} AS BOOLEAN) = ?"));
+                args.push(lit_bool(*b));
+            }
+            Value::Null => conditions.push(format!("{json_value} IS NULL")),
+            Value::DateTime(_)
+            | Value::StringArray(_)
+            | Value::IntArray(_)
+            | Value::FloatArray(_)
+            | Value::Json(_) => {
+                let json = serde_json::to_string(&value.to_json())
+                    .map_err(|err| GrustError::Serialization(err.to_string()))?;
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(&json));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn append_node_match_conditions(

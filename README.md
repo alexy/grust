@@ -436,8 +436,10 @@ Literal `SET n.key = value` / `SET e.key = value` lowers to one-key patches,
 and explicit `REMOVE n.key` / `REMOVE e.key` lowers to backend-neutral property
 remove mutations. Node forms can target either a resolved identity or a broad
 node match; edge forms can target either a resolved identity or a broad
-relationship match. Relationship expression updates, relationship property
-predicates beyond explicit edge `id`, remove-on-null, and general computed
+relationship match. Broad relationship matches can filter on relationship
+property predicates beyond `id`; explicit edge `id` remains a separate
+identity filter and can be combined with ordinary relationship predicates.
+Relationship expression updates, remove-on-null, and general computed
 expressions remain deferred.
 The mutation report includes matched-row and changed node/edge counts for
 broad Sail node and relationship deletes, patches, and property removals, and
