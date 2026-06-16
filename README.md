@@ -426,7 +426,9 @@ edge upserts and edge patches. Sail and the backend-neutral Memory/Sail helper
 can also return rows for relationship variables produced by restricted
 row-producing `MATCH ... CREATE/MERGE` edge writes, plus portable broad node
 rows for restricted `MATCH ... SET/REMOVE` forms such as
-`MATCH (n:Person {status: 'active'}) SET n.seen = true RETURN n.id, n.seen`.
+`MATCH (n:Person {status: 'active'}) SET n.seen = true RETURN n.id, n.seen`
+and portable broad relationship rows for restricted `MATCH ... SET/REMOVE`
+forms such as `MATCH (a)-[e:KNOWS]->(b) SET e.seen = true RETURN e.id, e.seen`.
 The physical `id` and `label` fields are supported alongside stored
 properties, and whole elements are returned as `Value::Json` in the Grust
 `Node` / `Edge` serde shape. Examples include

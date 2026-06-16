@@ -2852,6 +2852,155 @@ fn sail_cypher_returning_projects_broad_node_rows_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_broad_edge_rows_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    futures_executor::block_on(store.put_graph(&Graph::new(
+        vec![
+            Node::new(
+                "Person",
+                "ada",
+                Props::from([("status".to_string(), Value::from("active"))]),
+            ),
+            Node::new(
+                "Person",
+                "bob",
+                Props::from([("status".to_string(), Value::from("active"))]),
+            ),
+            Node::new(
+                "Person",
+                "eve",
+                Props::from([("status".to_string(), Value::from("inactive"))]),
+            ),
+        ],
+        vec![
+            Edge::new(
+                "KNOWS",
+                "ada",
+                "bob",
+                Props::from([("weight".to_string(), Value::Int(3))]),
+            )
+            .with_id("edge-1"),
+            Edge::new(
+                "KNOWS",
+                "ada",
+                "eve",
+                Props::from([("weight".to_string(), Value::Int(7))]),
+            )
+            .with_id("edge-2"),
+        ],
+    )))
+    .unwrap();
+
+    let set_result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (a:Person {status: 'active'})-[e:KNOWS]->(b:Person {status: 'active'})
+            SET e.seen = true
+            RETURN e.id, e.label, e.weight, e.seen;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        set_result.mutation.report,
+        GraphMutationReport {
+            patches: 1,
+            matched_rows: 1,
+            changed_edges: 1,
+            edge_patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        set_result.table,
+        CypherResultTable {
+            columns: vec![
+                "e.id".to_string(),
+                "e.label".to_string(),
+                "e.weight".to_string(),
+                "e.seen".to_string()
+            ],
+            rows: vec![vec![
+                Value::from("edge-1"),
+                Value::from("KNOWS"),
+                Value::Int(3),
+                Value::Bool(true)
+            ]],
+        }
+    );
+
+    let remove_result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (a:Person {status: 'active'})-[e:KNOWS]->(b:Person {status: 'active'})
+            REMOVE e.weight
+            RETURN e.id, e.weight;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        remove_result.table,
+        CypherResultTable {
+            columns: vec!["e.id".to_string(), "e.weight".to_string()],
+            rows: vec![vec![Value::from("edge-1"), Value::Null]],
+        }
+    );
+
+    let ordered_store = MemoryGraphStore::new();
+    futures_executor::block_on(ordered_store.put_graph(&Graph::new(
+        vec![
+            Node::new("Person", "ada", Props::new()),
+            Node::new("Person", "bob", Props::new()),
+        ],
+        vec![
+            Edge::new(
+                "KNOWS",
+                "ada",
+                "bob",
+                Props::from([("status".to_string(), Value::from("inactive"))]),
+            )
+            .with_id("edge-3"),
+        ],
+    )))
+    .unwrap();
+    let ordered_result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &ordered_store,
+            "
+            MATCH (:Person {id: 'ada'})-[f:KNOWS {status: 'inactive'}]->(:Person {id: 'bob'})
+            SET f.status = 'active';
+            MATCH (:Person {id: 'ada'})-[e:KNOWS {status: 'active'}]->(:Person {id: 'bob'})
+            SET e.seen = true
+            RETURN e.id, e.status, e.seen;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        ordered_result.table,
+        CypherResultTable {
+            columns: vec![
+                "e.id".to_string(),
+                "e.status".to_string(),
+                "e.seen".to_string()
+            ],
+            rows: vec![vec![
+                Value::from("edge-3"),
+                Value::from("active"),
+                Value::Bool(true)
+            ]],
+        }
+    );
+}
+
+#[test]
 fn sail_cypher_returning_evaluates_row_produced_edge_values() {
     let planned = sail_cypher_mutation_plan_with_return_options(
         "

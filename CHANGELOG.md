@@ -37,6 +37,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added portable writable Cypher `RETURN` rows for restricted broad node
   `MATCH ... SET/REMOVE` writes, so the Memory/Sail returning helper can return
   post-write projections such as `RETURN n.id, n.seen` for matched node rows.
+- Added portable writable Cypher `RETURN` rows for restricted broad
+  relationship `MATCH ... SET/REMOVE` writes, returning post-write projections
+  such as `RETURN e.id, e.seen` for matched edge rows.
 - Fixed writable Cypher `RETURN` parsing so aliases such as `AS limit` and
   `AS skip` no longer trip the `LIMIT` / `SKIP` clause rejection.
 - Added backend-neutral graph constraint metadata for required and unique node

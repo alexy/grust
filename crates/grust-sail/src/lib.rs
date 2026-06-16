@@ -420,6 +420,7 @@ struct CypherPlannedMutationWithReturn {
     node_bindings: HashMap<String, NodeId>,
     edge_bindings: HashMap<String, CypherBoundEdgeIdentity>,
     row_node_bindings: HashMap<String, GraphNodeMatch>,
+    row_edge_match_bindings: HashMap<String, GraphRelationshipMatch>,
     row_edge_bindings: HashMap<String, CypherRowProducedEdgeBinding>,
     return_clause: CypherReturnClause,
 }
@@ -471,6 +472,7 @@ fn sail_cypher_mutation_plan_with_return_options(
         &planner.node_bindings,
         &planner.edge_bindings,
         &planner.row_node_bindings,
+        &planner.row_edge_match_bindings,
         &planner.row_edge_bindings,
     )?;
     Ok(CypherPlannedMutationWithReturn {
@@ -479,6 +481,7 @@ fn sail_cypher_mutation_plan_with_return_options(
         node_bindings: planner.node_bindings,
         edge_bindings: planner.edge_bindings,
         row_node_bindings: planner.row_node_bindings,
+        row_edge_match_bindings: planner.row_edge_match_bindings,
         row_edge_bindings: planner.row_edge_bindings,
         return_clause,
     })
@@ -489,6 +492,7 @@ struct CypherMutationPlanner {
     node_bindings: HashMap<String, NodeId>,
     edge_bindings: HashMap<String, CypherBoundEdgeIdentity>,
     row_node_bindings: HashMap<String, GraphNodeMatch>,
+    row_edge_match_bindings: HashMap<String, GraphRelationshipMatch>,
     row_edge_bindings: HashMap<String, CypherRowProducedEdgeBinding>,
     node_id_policy: CypherNodeIdPolicy,
     null_assignment: CypherNullAssignment,
@@ -928,6 +932,7 @@ impl CypherMutationPlanner {
                 }
                 let relationship =
                     self.relationship_match_from_pattern(parsed, "MATCH edge SET")?;
+                self.bind_row_edge_match_variable(&edge_variable, &relationship)?;
                 return Ok(GraphMutationPlan::new(vec![
                     GraphMutationPlanOp::RemoveMatchingEdgeProps {
                         relationship,
@@ -966,6 +971,7 @@ impl CypherMutationPlanner {
                 ]));
             }
             let relationship = self.relationship_match_from_pattern(parsed, "MATCH edge SET")?;
+            self.bind_row_edge_match_variable(&edge_variable, &relationship)?;
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::PatchMatchingEdges {
                     relationship,
@@ -1148,6 +1154,7 @@ impl CypherMutationPlanner {
                 ]));
             }
             let relationship = self.relationship_match_from_pattern(parsed, "MATCH edge REMOVE")?;
+            self.bind_row_edge_match_variable(&edge_variable, &relationship)?;
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::RemoveMatchingEdgeProps {
                     relationship,
@@ -1436,6 +1443,38 @@ impl CypherMutationPlanner {
             )));
         }
         self.row_node_bindings.insert(variable.clone(), binding);
+        Ok(())
+    }
+
+    fn bind_row_edge_match_variable(
+        &mut self,
+        variable: &str,
+        binding: &GraphRelationshipMatch,
+    ) -> Result<()> {
+        if self.node_bindings.contains_key(variable)
+            || self.row_node_bindings.contains_key(variable)
+        {
+            return Err(cypher_unresolved_identity(format!(
+                "Cypher variable '{variable}' is already bound to a node"
+            )));
+        }
+        if self.edge_bindings.contains_key(variable)
+            || self.row_edge_bindings.contains_key(variable)
+        {
+            return Err(cypher_unresolved_identity(format!(
+                "Cypher relationship variable '{variable}' is already bound"
+            )));
+        }
+        if let Some(existing) = self.row_edge_match_bindings.get(variable) {
+            if existing != binding {
+                return Err(cypher_unresolved_identity(format!(
+                    "Cypher relationship variable '{variable}' is already bound to a different relationship match"
+                )));
+            }
+            return Ok(());
+        }
+        self.row_edge_match_bindings
+            .insert(variable.to_string(), binding.clone());
         Ok(())
     }
 
@@ -2074,6 +2113,7 @@ fn parse_cypher_return_clause(
     node_bindings: &HashMap<String, NodeId>,
     edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
     row_node_bindings: &HashMap<String, GraphNodeMatch>,
+    row_edge_match_bindings: &HashMap<String, GraphRelationshipMatch>,
     row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
 ) -> Result<CypherReturnClause> {
     let mut projections = Vec::new();
@@ -2101,18 +2141,26 @@ fn parse_cypher_return_clause(
             node_bindings.contains_key(&variable),
             edge_bindings.contains_key(&variable),
             row_node_bindings.contains_key(&variable),
+            row_edge_match_bindings.contains_key(&variable),
             row_edge_bindings.contains_key(&variable),
         ) {
-            (true, false, false, false) => CypherReturnElement::Node,
-            (false, true, false, false) => CypherReturnElement::Edge,
-            (false, false, true, false) => CypherReturnElement::RowNode,
-            (false, false, false, true) => CypherReturnElement::RowEdge,
-            (true, _, _, _) | (_, true, _, _) | (_, _, true, true) => {
+            (true, false, false, false, false) => CypherReturnElement::Node,
+            (false, true, false, false, false) => CypherReturnElement::Edge,
+            (false, false, true, false, false) => CypherReturnElement::RowNode,
+            (false, false, false, true, false) | (false, false, false, false, true) => {
+                CypherReturnElement::RowEdge
+            }
+            (true, _, _, _, _) | (_, true, _, _, _) | (_, _, true, _, _) => {
                 return Err(cypher_unresolved_identity(format!(
                     "RETURN variable '{variable}' is ambiguously bound",
                 )));
             }
-            (false, false, false, false) => {
+            (false, false, false, true, true) => {
+                return Err(cypher_unresolved_identity(format!(
+                    "RETURN relationship variable '{variable}' is ambiguously bound",
+                )));
+            }
+            (false, false, false, false, false) => {
                 return Err(cypher_unresolved_identity(format!(
                     "RETURN references variable '{variable}' that is not bound by the write plan"
                 )));
@@ -2561,6 +2609,31 @@ where
     Ok(())
 }
 
+async fn collect_row_edge_keys_for_operation<S>(
+    store: &S,
+    operation: &GraphMutationPlanOp,
+    bindings: &HashMap<String, GraphRelationshipMatch>,
+    values: &mut HashMap<String, Vec<String>>,
+) -> Result<()>
+where
+    S: GraphStore + Sync,
+{
+    let Some(operation_match) = operation_relationship_match(operation) else {
+        return Ok(());
+    };
+    for (variable, binding) in bindings {
+        if values.contains_key(variable) || binding != &operation_match {
+            continue;
+        }
+        let edges = matching_edges_on_store(store, binding).await?;
+        values.insert(
+            variable.clone(),
+            edges.into_iter().map(|edge| edge_key(&edge)).collect(),
+        );
+    }
+    Ok(())
+}
+
 fn operation_node_match(operation: &GraphMutationPlanOp) -> Option<GraphNodeMatch> {
     match operation {
         GraphMutationPlanOp::PatchMatchingNodes {
@@ -2589,6 +2662,16 @@ fn operation_node_match(operation: &GraphMutationPlanOp) -> Option<GraphNodeMatc
     }
 }
 
+fn operation_relationship_match(operation: &GraphMutationPlanOp) -> Option<GraphRelationshipMatch> {
+    match operation {
+        GraphMutationPlanOp::PatchMatchingEdges { relationship, .. }
+        | GraphMutationPlanOp::RemoveMatchingEdgeProps { relationship, .. } => {
+            Some(relationship.clone())
+        }
+        _ => None,
+    }
+}
+
 async fn row_node_return_values_on_store<S>(
     store: &S,
     ids: HashMap<String, Vec<NodeId>>,
@@ -2609,6 +2692,48 @@ where
     Ok(values)
 }
 
+async fn row_edge_match_return_values_on_store<S>(
+    store: &S,
+    ids: HashMap<String, Vec<String>>,
+) -> Result<HashMap<String, Vec<Edge>>>
+where
+    S: GraphStore + Sync,
+{
+    let mut values = HashMap::new();
+    for (variable, keys) in ids {
+        let mut rows = Vec::with_capacity(keys.len());
+        for key in keys {
+            let edge = edge_by_key_on_store(store, &key).await?.ok_or_else(|| {
+                GrustError::CypherExecution(format!(
+                    "RETURN matched relationship variable '{variable}' includes an edge that does not exist after the write"
+                ))
+            })?;
+            rows.push(edge);
+        }
+        values.insert(variable, rows);
+    }
+    Ok(values)
+}
+
+async fn edge_by_key_on_store<S>(store: &S, key: &str) -> Result<Option<Edge>>
+where
+    S: GraphStore + Sync,
+{
+    for edge in store
+        .get_edges(EdgeQuery {
+            from: None,
+            to: None,
+            label: None,
+        })
+        .await?
+    {
+        if edge_key(&edge) == key {
+            return Ok(Some(edge));
+        }
+    }
+    Ok(None)
+}
+
 fn merge_cypher_reports(report: &mut CypherMutationReport, next: CypherMutationReport) {
     report.creates += next.creates;
     report.merges += next.merges;
@@ -2626,6 +2751,54 @@ fn merge_cypher_reports(report: &mut CypherMutationReport, next: CypherMutationR
     report.edge_patches += next.edge_patches;
     report.node_property_removes += next.node_property_removes;
     report.edge_property_removes += next.edge_property_removes;
+}
+
+async fn matching_edges_on_store<S>(
+    store: &S,
+    relationship: &GraphRelationshipMatch,
+) -> Result<Vec<Edge>>
+where
+    S: GraphStore + Sync,
+{
+    let edges = store
+        .get_edges(EdgeQuery {
+            from: None,
+            to: None,
+            label: Some(relationship.label.clone()),
+        })
+        .await?;
+    let mut rows = Vec::new();
+    for edge in edges {
+        if relationship
+            .id
+            .as_ref()
+            .is_some_and(|id| edge.id.as_ref() != Some(id))
+        {
+            continue;
+        }
+        if !props_match(&edge.props, &relationship.props)
+            || !relationship
+                .predicates
+                .iter()
+                .all(|predicate| predicate.matches(edge.props.get(&predicate.key)))
+        {
+            continue;
+        }
+        let Some(from) = store.get_node(&edge.from).await? else {
+            continue;
+        };
+        if !node_match(&from, &relationship.from) {
+            continue;
+        }
+        let Some(to) = store.get_node(&edge.to).await? else {
+            continue;
+        };
+        if !node_match(&to, &relationship.to) {
+            continue;
+        }
+        rows.push(edge);
+    }
+    Ok(rows)
 }
 
 async fn matching_nodes_on_store<S>(
@@ -2790,6 +2963,7 @@ where
             .map_err(cypher_execution_error)?;
     }
     let mut row_node_ids = HashMap::new();
+    let mut row_edge_keys = HashMap::new();
     let mut report = CypherMutationReport::default();
     for operation in &planned.plan.operations {
         collect_row_node_ids_for_operation(
@@ -2797,6 +2971,14 @@ where
             operation,
             &planned.row_node_bindings,
             &mut row_node_ids,
+        )
+        .await
+        .map_err(cypher_execution_error)?;
+        collect_row_edge_keys_for_operation(
+            store,
+            operation,
+            &planned.row_edge_match_bindings,
+            &mut row_edge_keys,
         )
         .await
         .map_err(cypher_execution_error)?;
@@ -2810,9 +2992,14 @@ where
     let row_node_values = row_node_return_values_on_store(store, row_node_ids)
         .await
         .map_err(cypher_execution_error)?;
-    let row_edge_values = row_edge_return_values_on_store(store, &planned.row_edge_bindings)
+    let mut row_edge_values = row_edge_match_return_values_on_store(store, row_edge_keys)
         .await
         .map_err(cypher_execution_error)?;
+    row_edge_values.extend(
+        row_edge_return_values_on_store(store, &planned.row_edge_bindings)
+            .await
+            .map_err(cypher_execution_error)?,
+    );
     let table = evaluate_cypher_return_table(
         store,
         &planned.node_bindings,
@@ -3508,6 +3695,7 @@ impl SailGraphStore {
             node_identity_collector,
             identity_collector,
             None,
+            None,
         )
         .await
         .map_err(cypher_execution_error)?;
@@ -3561,22 +3749,28 @@ impl SailGraphStore {
         let identity_collector =
             collect_written_edge_identities.then_some(&mut written_edge_identities);
         let mut row_node_ids = HashMap::new();
+        let mut row_edge_keys = HashMap::new();
         self.apply_cypher_mutation_plan(
             &planned.plan,
             &mut report,
             node_identity_collector,
             identity_collector,
             Some((&planned.row_node_bindings, &mut row_node_ids)),
+            Some((&planned.row_edge_match_bindings, &mut row_edge_keys)),
         )
         .await
         .map_err(cypher_execution_error)?;
         let row_node_values = row_node_return_values_on_store(self, row_node_ids)
             .await
             .map_err(cypher_execution_error)?;
-        let row_edge_values = self
-            .row_edge_return_values(&planned.row_edge_bindings)
+        let mut row_edge_values = row_edge_match_return_values_on_store(self, row_edge_keys)
             .await
             .map_err(cypher_execution_error)?;
+        row_edge_values.extend(
+            self.row_edge_return_values(&planned.row_edge_bindings)
+                .await
+                .map_err(cypher_execution_error)?,
+        );
         let table = evaluate_cypher_return_table(
             self,
             &planned.node_bindings,
@@ -3608,10 +3802,17 @@ impl SailGraphStore {
             &HashMap<String, GraphNodeMatch>,
             &mut HashMap<String, Vec<NodeId>>,
         )>,
+        mut row_edge_capture: Option<(
+            &HashMap<String, GraphRelationshipMatch>,
+            &mut HashMap<String, Vec<String>>,
+        )>,
     ) -> Result<()> {
         for operation in &plan.operations {
             if let Some((bindings, values)) = row_node_capture.as_mut() {
                 collect_row_node_ids_for_operation(self, operation, bindings, values).await?;
+            }
+            if let Some((bindings, values)) = row_edge_capture.as_mut() {
+                collect_row_edge_keys_for_operation(self, operation, bindings, values).await?;
             }
             match operation {
                 GraphMutationPlanOp::PatchMatchingNodes {
@@ -4633,7 +4834,7 @@ impl CypherMutationExecutor for SailGraphStore {
         plan: &GraphMutationPlan,
     ) -> Result<GraphMutationReport> {
         let mut report = plan.report();
-        self.apply_cypher_mutation_plan(plan, &mut report, None, None, None)
+        self.apply_cypher_mutation_plan(plan, &mut report, None, None, None, None)
             .await
             .map_err(cypher_execution_error)?;
         Ok(report)

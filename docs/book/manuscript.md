@@ -1058,7 +1058,9 @@ edge upserts and edge patches. Sail and the backend-neutral Memory/Sail helper
 can also return one row per relationship variable produced by restricted
 row-producing `MATCH ... CREATE/MERGE` edge writes, plus portable broad node
 rows for restricted `MATCH ... SET/REMOVE` forms such as
-`MATCH (n:Person {status: 'active'}) SET n.seen = true RETURN n.id, n.seen`.
+`MATCH (n:Person {status: 'active'}) SET n.seen = true RETURN n.id, n.seen`
+and portable broad relationship rows for restricted `MATCH ... SET/REMOVE`
+forms such as `MATCH (a)-[e:KNOWS]->(b) SET e.seen = true RETURN e.id, e.seen`.
 Physical `id` and `label` fields are supported alongside stored properties, for example
 `RETURN n.id, n.label, n.seen`,
 `RETURN e.id, e.label, e.weight`, or `RETURN e.label, e.source` after a

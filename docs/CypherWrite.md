@@ -1407,7 +1407,10 @@ edge. The backend-neutral helper also supports portable broad node rows for
 restricted `MATCH ... SET/REMOVE` forms when the matched node set can be
 captured before the write through an explicit `id`, label scan, or single
 label/property start; returned rows are fetched after the mutation so
-post-write properties are projected. Examples include
+post-write properties are projected. It also supports portable broad
+relationship rows for restricted `MATCH ... SET/REMOVE` forms by capturing
+matched edge identities before the write and fetching those edges afterward.
+Examples include
 `RETURN n.id, n.label, n.seen AS seen`,
 `RETURN e.id, e.label, e.weight`, and
 `RETURN n AS node, e AS relationship`, plus
@@ -1421,7 +1424,8 @@ properties project as `Value::Null`; `n.id` projects the resolved `NodeId`,
 bound node and relationship elements project as `Value::Json` using the
 existing Grust `Node` / `Edge` serde shape. Sail and Memory share the same
 parser and result-table evaluator for the concrete-variable, portable
-broad-node, and portable row-producing relationship slices.
+broad-node, portable broad-relationship, and portable row-producing
+relationship slices.
 Aggregation, path returns, unrestricted broad matched-row result tables,
 portable generic path-style row projections, `ORDER BY`, `LIMIT`, `SKIP`, and
 arbitrary read-query features remain deferred. The generic
