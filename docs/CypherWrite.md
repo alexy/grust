@@ -1400,4 +1400,8 @@ projects the resolved `NodeId`, while `e.id` projects the explicit `EdgeId`
 when one exists. Sail and Memory share the same parser and result-table
 evaluator for this slice. Aggregation, path returns, broad matched-row result
 tables, row-producing relationship projections, `ORDER BY`, `LIMIT`, `SKIP`,
-and arbitrary read-query features remain deferred.
+and arbitrary read-query features remain deferred. The generic Memory/Sail
+returning helper now also honors `CypherCreateMode::ErrorIfExists` for
+concrete node and edge `CREATE` writes through portable `GraphStore` reads;
+strict row-producing edge conflict checks remain backend-specific because they
+need backend-owned row materialization.

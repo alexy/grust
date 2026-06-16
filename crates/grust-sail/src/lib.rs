@@ -2298,12 +2298,13 @@ pub async fn execute_cypher_mutation_returning_with_options_on_store<S>(
 where
     S: CypherMutationExecutor + Sync,
 {
-    if options.create_mode == CypherCreateMode::ErrorIfExists {
-        return Err(cypher_unsupported_cardinality(
-            "generic writable Cypher RETURN execution does not support strict CREATE conflict checks",
-        ));
-    }
+    let create_mode = options.create_mode;
     let planned = sail_cypher_mutation_plan_with_return_options(cypher, options.clone())?;
+    if create_mode == CypherCreateMode::ErrorIfExists {
+        check_strict_create_conflicts_on_store(store, &planned.plan)
+            .await
+            .map_err(cypher_execution_error)?;
+    }
     let report = store
         .execute_cypher_mutation_plan(&planned.plan)
         .await
@@ -2323,6 +2324,61 @@ where
         &options,
     )?;
     Ok(CypherMutationTableResult { mutation, table })
+}
+
+async fn check_strict_create_conflicts_on_store<S>(
+    store: &S,
+    plan: &GraphMutationPlan,
+) -> Result<()>
+where
+    S: GraphStore + Sync,
+{
+    for operation in &plan.operations {
+        match operation {
+            GraphMutationPlanOp::UpsertNode {
+                kind: GraphMutationPlanKind::Create,
+                node,
+            } => {
+                if store.get_node(&node.id).await?.is_some() {
+                    return Err(GrustError::Unsupported(format!(
+                        "Cypher CREATE would overwrite existing node '{}'",
+                        node.id.as_str()
+                    )));
+                }
+            }
+            GraphMutationPlanOp::UpsertEdge {
+                kind: GraphMutationPlanKind::Create,
+                edge,
+            } => {
+                let mut existing = store
+                    .get_edges(EdgeQuery {
+                        from: Some(edge.from.clone()),
+                        to: Some(edge.to.clone()),
+                        label: Some(edge.label.clone()),
+                    })
+                    .await?;
+                if edge.id.is_some() {
+                    existing.extend(store.get_edges(EdgeQuery::default()).await?);
+                }
+                if strict_create_edge_conflicts(edge, &existing) {
+                    return Err(GrustError::Unsupported(format!(
+                        "Cypher CREATE would overwrite existing edge '{}'",
+                        edge_key(edge)
+                    )));
+                }
+            }
+            GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+                kind: GraphMutationPlanKind::Create,
+                ..
+            } => {
+                return Err(cypher_unsupported_cardinality(
+                    "generic writable Cypher RETURN execution does not support strict CREATE checks for row-producing edge writes",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 struct NumericExpression {
@@ -2935,9 +2991,10 @@ impl SailGraphStore {
     /// Executes writable Cypher with a final, strict property-projection RETURN.
     ///
     /// This intentionally supports only a small write-result slice: the final
-    /// statement may project properties from node variables whose IDs were
-    /// resolved by the mutation plan. Aggregation, ordering, limiting, paths,
-    /// and arbitrary read-query features remain deferred.
+    /// statement may project properties from node or relationship variables
+    /// whose identities were resolved by the mutation plan. Aggregation,
+    /// ordering, limiting, paths, and arbitrary read-query features remain
+    /// deferred.
     pub async fn execute_cypher_mutation_returning_with_options(
         &self,
         cypher: &str,

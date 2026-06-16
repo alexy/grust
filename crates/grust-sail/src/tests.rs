@@ -2558,6 +2558,68 @@ fn sail_cypher_returning_projects_new_concrete_edge_properties_on_memory_facade(
 }
 
 #[test]
+fn sail_cypher_returning_generic_strict_create_checks_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'ada', name: 'Ada'}) RETURN n.id, n.name;",
+            CypherMutationOptions {
+                create_mode: CypherCreateMode::ErrorIfExists,
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        result.table,
+        CypherResultTable {
+            columns: vec!["n.id".to_string(), "n.name".to_string()],
+            rows: vec![vec![Value::from("ada"), Value::from("Ada")]],
+        }
+    );
+
+    let error =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'ada', name: 'Ada again'}) RETURN n.id;",
+            CypherMutationOptions {
+                create_mode: CypherCreateMode::ErrorIfExists,
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("strict CREATE should reject existing node");
+    assert!(matches!(error, GrustError::CypherExecution(_)));
+    assert!(error.to_string().contains("would overwrite existing node"));
+
+    futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+        &store,
+        "
+        CREATE (b:Person {id: 'bob'});
+        CREATE (a:Person {id: 'ada'})-[e:KNOWS {id: 'edge-1'}]->(b)
+        RETURN e.id;
+        ",
+        CypherMutationOptions::default(),
+    ))
+    .unwrap();
+    let error =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'ada'})-[e:LIKES {id: 'edge-1'}]->(b:Person {id: 'bob'})
+            RETURN e.id;
+            ",
+            CypherMutationOptions {
+                create_mode: CypherCreateMode::ErrorIfExists,
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("strict CREATE should reject reused explicit edge id");
+    assert!(matches!(error, GrustError::CypherExecution(_)));
+    assert!(error.to_string().contains("would overwrite existing edge"));
+}
+
+#[test]
 fn sail_cypher_returning_rejects_deferred_result_forms() {
     let store = MemoryGraphStore::new();
 
