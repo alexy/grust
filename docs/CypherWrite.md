@@ -556,8 +556,10 @@ Implementation notes:
   transaction semantics.
 
 Implementation status: implemented in the working tree after `0.8.4` with
-focused unit coverage and an ignored live Sail test; release notes and book
-prose should be finalized when this batch ships.
+focused unit coverage and ignored live Sail tests. Strict preflight checks the
+store and also rejects duplicate concrete node or edge `CREATE` identities
+inside one planned batch before any writes run. Release notes and book prose
+should be finalized when this batch ships.
 
 ### Batch D: Backend-neutral patch mutations and `SET +=`
 
@@ -1405,5 +1407,6 @@ matched-row result tables, row-producing relationship projections, `ORDER BY`,
 `LIMIT`, `SKIP`, and arbitrary read-query features remain deferred. The generic
 Memory/Sail returning helper now also honors `CypherCreateMode::ErrorIfExists`
 for concrete node and edge `CREATE` writes through portable `GraphStore` reads;
-strict row-producing edge conflict checks remain backend-specific because they
-need backend-owned row materialization.
+that helper shares the same intra-plan duplicate concrete identity preflight as
+Sail. Strict row-producing edge conflict checks remain backend-specific because
+they need backend-owned row materialization.

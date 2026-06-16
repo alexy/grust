@@ -435,7 +435,10 @@ written node and edge identities can be collected through the same result path
 when callers opt in. Node payloads cover explicit and generated node writes;
 edge payloads cover resolved and row-producing edge writes. These payloads
 describe accepted writes, not exact insert-versus-update outcomes on upsert
-backends, and `MERGE` and edge endpoint writes keep requiring resolved IDs.
+backends. Strict `CREATE` mode performs read-before-write conflict checks and
+also rejects duplicate concrete create identities inside one planned batch
+before any writes run. `MERGE` and edge endpoint writes keep requiring resolved
+IDs.
 The first `RETURN` support for writes stays similarly narrow: a final property
 projection over node variables and concrete relationship variables already
 resolved by the write plan, including concrete edge upserts and edge patches,

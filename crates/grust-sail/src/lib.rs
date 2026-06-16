@@ -2341,6 +2341,7 @@ async fn check_strict_create_conflicts_on_store<S>(
 where
     S: GraphStore + Sync,
 {
+    check_strict_create_plan_conflicts(plan)?;
     for operation in &plan.operations {
         match operation {
             GraphMutationPlanOp::UpsertNode {
@@ -2382,6 +2383,41 @@ where
                 return Err(cypher_unsupported_cardinality(
                     "generic writable Cypher RETURN execution does not support strict CREATE checks for row-producing edge writes",
                 ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn check_strict_create_plan_conflicts(plan: &GraphMutationPlan) -> Result<()> {
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    for operation in &plan.operations {
+        match operation {
+            GraphMutationPlanOp::UpsertNode {
+                kind: GraphMutationPlanKind::Create,
+                node,
+            } => {
+                if nodes.iter().any(|id| id == &node.id) {
+                    return Err(GrustError::Unsupported(format!(
+                        "Cypher CREATE batch contains duplicate node '{}'",
+                        node.id.as_str()
+                    )));
+                }
+                nodes.push(node.id.clone());
+            }
+            GraphMutationPlanOp::UpsertEdge {
+                kind: GraphMutationPlanKind::Create,
+                edge,
+            } => {
+                if strict_create_edge_conflicts(edge, &edges) {
+                    return Err(GrustError::Unsupported(format!(
+                        "Cypher CREATE batch contains duplicate edge '{}'",
+                        edge_key(edge)
+                    )));
+                }
+                edges.push(edge.clone());
             }
             _ => {}
         }
@@ -3468,6 +3504,7 @@ impl SailGraphStore {
     }
 
     async fn check_strict_create_conflicts(&self, plan: &GraphMutationPlan) -> Result<()> {
+        check_strict_create_plan_conflicts(plan)?;
         for operation in &plan.operations {
             match operation {
                 GraphMutationPlanOp::UpsertNode {

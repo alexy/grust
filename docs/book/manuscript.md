@@ -1038,9 +1038,11 @@ mutations through `GraphMutationStore`, so Cypher writes use the same staged
 Arrow, `MERGE INTO`, typed-table mirror, and delete paths as normal Grust
 writes. When callers need stricter Cypher compatibility, the options entrypoint
 can make `CREATE` fail if the target node or edge identity already exists. That
-mode performs a read-before-write check and therefore keeps the default
-entrypoint on the lower-friction upsert-compatible path. Generated node IDs are
-also caller-selected rather than implicit: `CypherNodeIdPolicy::GenerateForCreate`
+mode performs a read-before-write check, rejects duplicate concrete node or
+edge `CREATE` identities inside one planned batch before any writes run, and
+therefore keeps the default entrypoint on the lower-friction upsert-compatible
+path. Generated node IDs are also caller-selected rather than implicit:
+`CypherNodeIdPolicy::GenerateForCreate`
 allows node `CREATE` without an `id`, and the result API returns generated IDs
 separately from the count-oriented mutation report. Callers can also opt into
 written node and edge identity payloads. Node payloads cover explicit and

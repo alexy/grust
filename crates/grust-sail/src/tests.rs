@@ -303,6 +303,51 @@ fn strict_create_edge_conflicts_on_sail_write_identity() {
 }
 
 #[test]
+fn strict_create_plan_conflicts_reject_duplicate_concrete_create_targets() {
+    let duplicate_nodes = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new("Person", "ada", Props::new()),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new("Person", "ada", Props::new()),
+        },
+    ]);
+    let error = check_strict_create_plan_conflicts(&duplicate_nodes)
+        .expect_err("duplicate CREATE node should fail");
+    assert!(error.to_string().contains("duplicate node 'ada'"));
+
+    let duplicate_structural_edges = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Create,
+            edge: Edge::new("KNOWS", "ada", "bob", Props::new()).with_id("edge-1"),
+        },
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Create,
+            edge: Edge::new("KNOWS", "ada", "bob", Props::new()).with_id("edge-2"),
+        },
+    ]);
+    let error = check_strict_create_plan_conflicts(&duplicate_structural_edges)
+        .expect_err("duplicate CREATE structural edge should fail");
+    assert!(error.to_string().contains("duplicate edge 'edge-2'"));
+
+    let duplicate_explicit_edges = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Create,
+            edge: Edge::new("KNOWS", "ada", "bob", Props::new()).with_id("edge-1"),
+        },
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Create,
+            edge: Edge::new("LIKES", "ada", "carol", Props::new()).with_id("edge-1"),
+        },
+    ]);
+    let error = check_strict_create_plan_conflicts(&duplicate_explicit_edges)
+        .expect_err("duplicate CREATE explicit edge id should fail");
+    assert!(error.to_string().contains("duplicate edge 'edge-1'"));
+}
+
+#[test]
 fn staged_node_batch_round_trips_through_arrow_ipc() {
     let graph = sample_graph();
     let batch = nodes_record_batch(&graph.nodes).unwrap();
@@ -2616,6 +2661,30 @@ fn sail_cypher_returning_generic_strict_create_checks_memory_facade() {
     assert!(matches!(error, GrustError::CypherExecution(_)));
     assert!(error.to_string().contains("would overwrite existing node"));
 
+    let fresh = MemoryGraphStore::new();
+    let error =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &fresh,
+            "
+            CREATE (n:Person {id: 'ada', name: 'Ada'});
+            CREATE (n:Person {id: 'ada', name: 'Ada again'})
+            RETURN n.id;
+            ",
+            CypherMutationOptions {
+                create_mode: CypherCreateMode::ErrorIfExists,
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("strict CREATE should reject duplicate node target in the same batch");
+    assert!(matches!(error, GrustError::CypherExecution(_)));
+    assert!(error.to_string().contains("duplicate node 'ada'"));
+    assert!(
+        futures_executor::block_on(fresh.get_node(&NodeId::new("ada")))
+            .unwrap()
+            .is_none(),
+        "failed strict preflight must not partially write the first CREATE"
+    );
+
     futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
         &store,
         "
@@ -2641,6 +2710,32 @@ fn sail_cypher_returning_generic_strict_create_checks_memory_facade() {
         .expect_err("strict CREATE should reject reused explicit edge id");
     assert!(matches!(error, GrustError::CypherExecution(_)));
     assert!(error.to_string().contains("would overwrite existing edge"));
+
+    let fresh = MemoryGraphStore::new();
+    let error =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &fresh,
+            "
+            CREATE (a:Person {id: 'ada'});
+            CREATE (b:Person {id: 'bob'});
+            CREATE (a)-[:KNOWS {id: 'edge-1'}]->(b);
+            CREATE (a)-[e:LIKES {id: 'edge-1'}]->(b)
+            RETURN e.id;
+            ",
+            CypherMutationOptions {
+                create_mode: CypherCreateMode::ErrorIfExists,
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("strict CREATE should reject duplicate edge id in the same batch");
+    assert!(matches!(error, GrustError::CypherExecution(_)));
+    assert!(error.to_string().contains("duplicate edge 'edge-1'"));
+    assert!(
+        futures_executor::block_on(fresh.get_edges(EdgeQuery::default()))
+            .unwrap()
+            .is_empty(),
+        "failed strict preflight must not partially write earlier CREATE operations"
+    );
 }
 
 #[test]

@@ -402,7 +402,9 @@ predicates, while
 For stricter Cypher compatibility, callers can use
 `execute_cypher_mutation_with_options` with
 `CypherCreateMode::ErrorIfExists` to make `CREATE` perform a read-before-write
-existence check instead of following the default upsert-compatible path.
+existence check instead of following the default upsert-compatible path; it
+also rejects duplicate concrete node or edge `CREATE` identities inside the
+same planned batch before any writes run.
 Generated node IDs are also opt-in: `CypherNodeIdPolicy::GenerateForCreate`
 allows node `CREATE` without an `id`, and
 `execute_cypher_mutation_result_with_options` returns the generated IDs in
