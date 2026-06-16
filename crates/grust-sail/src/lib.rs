@@ -1968,9 +1968,15 @@ struct CypherReturnClause {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CypherReturnProjection {
     variable: String,
-    key: String,
+    target: CypherReturnTarget,
     column: String,
     element: CypherReturnElement,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CypherReturnTarget {
+    Element,
+    Property(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1992,11 +1998,19 @@ fn parse_cypher_return_clause(
         }
         if projection == "*" || projection.contains('(') || projection.contains(')') {
             return Err(cypher_unsupported_cardinality(
-                "writable Cypher RETURN only supports property projections",
+                "writable Cypher RETURN only supports bound element and property projections",
             ));
         }
         let (expression, alias) = split_return_alias(projection)?;
-        let (variable, key) = parse_property_ref(expression, "RETURN projection")?;
+        let (variable, target) =
+            if let Ok((variable, key)) = parse_property_ref(expression, "RETURN projection") {
+                (variable, CypherReturnTarget::Property(key))
+            } else {
+                (
+                    parse_required_cypher_variable(expression, "RETURN projection")?,
+                    CypherReturnTarget::Element,
+                )
+            };
         let element = match (
             node_bindings.contains_key(&variable),
             edge_bindings.contains_key(&variable),
@@ -2016,7 +2030,7 @@ fn parse_cypher_return_clause(
         };
         projections.push(CypherReturnProjection {
             variable,
-            key,
+            target,
             column: alias.unwrap_or_else(|| expression.trim().to_string()),
             element,
         });
@@ -2210,7 +2224,24 @@ where
                         projection.variable
                     ))
                 })?;
-                if projection.key == "id" {
+                let CypherReturnTarget::Property(key) = &projection.target else {
+                    if !nodes.contains_key(&projection.variable) {
+                        let node = store.get_node(id).await?.ok_or_else(|| {
+                            GrustError::CypherExecution(format!(
+                                "RETURN variable '{}' resolved to node '{}' but the node does not exist after the write",
+                                projection.variable,
+                                id.as_str()
+                            ))
+                        })?;
+                        nodes.insert(projection.variable.clone(), node);
+                    }
+                    let node = nodes
+                        .get(&projection.variable)
+                        .expect("node inserted before projection evaluation");
+                    row.push(graph_node_value(node)?);
+                    continue;
+                };
+                if key == "id" {
                     row.push(Value::from(id.as_str()));
                     continue;
                 }
@@ -2227,12 +2258,11 @@ where
                 let node = nodes
                     .get(&projection.variable)
                     .expect("node inserted before projection evaluation");
-                row.push(
-                    node.props
-                        .get(&projection.key)
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                );
+                if key == "label" {
+                    row.push(Value::from(node.label.as_str()));
+                } else {
+                    row.push(node.props.get(key).cloned().unwrap_or(Value::Null));
+                }
             }
             CypherReturnElement::Edge => {
                 let identity = edge_bindings.get(&projection.variable).ok_or_else(|| {
@@ -2241,7 +2271,19 @@ where
                         projection.variable
                     ))
                 })?;
-                if projection.key == "id" {
+                let CypherReturnTarget::Property(key) = &projection.target else {
+                    if !edges.contains_key(&projection.variable) {
+                        let edge =
+                            resolve_bound_edge(store, identity, &projection.variable).await?;
+                        edges.insert(projection.variable.clone(), edge);
+                    }
+                    let edge = edges
+                        .get(&projection.variable)
+                        .expect("edge inserted before projection evaluation");
+                    row.push(graph_edge_value(edge)?);
+                    continue;
+                };
+                if key == "id" {
                     row.push(
                         identity
                             .id
@@ -2251,6 +2293,10 @@ where
                     );
                     continue;
                 }
+                if key == "label" {
+                    row.push(Value::from(identity.label.as_str()));
+                    continue;
+                }
                 if !edges.contains_key(&projection.variable) {
                     let edge = resolve_bound_edge(store, identity, &projection.variable).await?;
                     edges.insert(projection.variable.clone(), edge);
@@ -2258,12 +2304,7 @@ where
                 let edge = edges
                     .get(&projection.variable)
                     .expect("edge inserted before projection evaluation");
-                row.push(
-                    edge.props
-                        .get(&projection.key)
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                );
+                row.push(edge.props.get(key).cloned().unwrap_or(Value::Null));
             }
         }
     }
@@ -2295,7 +2336,19 @@ where
             GrustError::CypherExecution(format!(
                 "RETURN relationship variable '{variable}' resolved to an edge that does not exist after the write"
             ))
-        })
+    })
+}
+
+fn graph_node_value(node: &Node) -> Result<Value> {
+    serde_json::to_value(node).map(Value::from).map_err(|err| {
+        GrustError::CypherExecution(format!("RETURN node serialization failed: {err}"))
+    })
+}
+
+fn graph_edge_value(edge: &Edge) -> Result<Value> {
+    serde_json::to_value(edge).map(Value::from).map_err(|err| {
+        GrustError::CypherExecution(format!("RETURN relationship serialization failed: {err}"))
+    })
 }
 
 pub async fn execute_cypher_mutation_returning_with_options_on_store<S>(

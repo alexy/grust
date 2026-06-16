@@ -2462,7 +2462,7 @@ fn sail_cypher_returning_executes_on_memory_facade() {
             CREATE (:Person {id: 'ada', name: 'Ada', order: 'first', limit: 3});
             MATCH (n:Person {id: 'ada'})
             SET n.seen = true, n.count = 1
-            RETURN n.id, n.seen AS seen, n.order, n.limit, n.missing;
+            RETURN n.id, n.label, n.seen AS seen, n.order, n.limit, n.missing;
             ",
             CypherMutationOptions {
                 collect_written_node_identities: true,
@@ -2495,6 +2495,7 @@ fn sail_cypher_returning_executes_on_memory_facade() {
         CypherResultTable {
             columns: vec![
                 "n.id".to_string(),
+                "n.label".to_string(),
                 "seen".to_string(),
                 "n.order".to_string(),
                 "n.limit".to_string(),
@@ -2502,6 +2503,7 @@ fn sail_cypher_returning_executes_on_memory_facade() {
             ],
             rows: vec![vec![
                 Value::from("ada"),
+                Value::from("Person"),
                 Value::Bool(true),
                 Value::from("first"),
                 Value::Int(3),
@@ -2524,7 +2526,7 @@ fn sail_cypher_returning_projects_bound_edge_properties_on_memory_facade() {
             CREATE (:Person {id: 'ada'})-[:KNOWS {id: 'edge-1'}]->(:Person {id: 'bob'});
             MATCH (:Person {id: 'ada'})-[e:KNOWS {id: 'edge-1'}]->(:Person {id: 'bob'})
             SET e.weight = 2
-            RETURN e.id, e.weight, e.missing;
+            RETURN e.id, e.label, e.weight, e.missing;
             ",
             CypherMutationOptions::default(),
         ))
@@ -2548,10 +2550,16 @@ fn sail_cypher_returning_projects_bound_edge_properties_on_memory_facade() {
         CypherResultTable {
             columns: vec![
                 "e.id".to_string(),
+                "e.label".to_string(),
                 "e.weight".to_string(),
                 "e.missing".to_string()
             ],
-            rows: vec![vec![Value::from("edge-1"), Value::Int(2), Value::Null]],
+            rows: vec![vec![
+                Value::from("edge-1"),
+                Value::from("KNOWS"),
+                Value::Int(2),
+                Value::Null
+            ]],
         }
     );
 }
@@ -2598,6 +2606,51 @@ fn sail_cypher_returning_projects_new_concrete_edge_properties_on_memory_facade(
         CypherResultTable {
             columns: vec!["e.id".to_string(), "e.weight".to_string()],
             rows: vec![vec![Value::from("edge-2"), Value::Int(4)]],
+        }
+    );
+}
+
+#[test]
+fn sail_cypher_returning_projects_bound_elements_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'ada', name: 'Ada'});
+            CREATE (b:Person {id: 'bob'});
+            CREATE (a)-[e:KNOWS {id: 'edge-1', since: 2026}]->(b)
+            RETURN a AS node, e AS relationship;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        result.table,
+        CypherResultTable {
+            columns: vec!["node".to_string(), "relationship".to_string()],
+            rows: vec![vec![
+                Value::from(serde_json::json!({
+                    "id": "ada",
+                    "label": "Person",
+                    "props": {
+                        "id": {"type": "string", "value": "ada"},
+                        "name": {"type": "string", "value": "Ada"}
+                    }
+                })),
+                Value::from(serde_json::json!({
+                    "id": "edge-1",
+                    "from": "ada",
+                    "to": "bob",
+                    "label": "KNOWS",
+                    "props": {
+                        "id": {"type": "string", "value": "edge-1"},
+                        "since": {"type": "int", "value": 2026}
+                    }
+                }))
+            ]],
         }
     );
 }

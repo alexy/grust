@@ -1052,13 +1052,17 @@ insert-versus-update outcomes on upsert backends. `MERGE` and edge endpoint
 patterns still require resolved IDs before writing.
 The first table-returning write path is deliberately smaller than general
 Cypher `RETURN`: `execute_cypher_mutation_returning_with_options` accepts a
-final property projection over node variables and concrete relationship
-variables already resolved by the write plan, including concrete edge upserts
-and edge patches. It returns `CypherMutationTableResult`, which keeps mutation
-reporting separate from `CypherResultTable`. Aggregation, paths, broad
-matched-row relationship returns, ordering, limiting, and arbitrary read-query
-features remain rejected until a shared read/write row model owns those
-semantics.
+final element or property projection over node variables and concrete
+relationship variables already resolved by the write plan, including concrete
+edge upserts and edge patches. Physical `id` and `label` fields are supported
+alongside stored properties, for example `RETURN n.id, n.label, n.seen` or
+`RETURN e.id, e.label, e.weight`; whole elements can also be returned as
+`Value::Json` in the Grust `Node` / `Edge` serde shape with
+`RETURN n AS node, e AS relationship`. It returns
+`CypherMutationTableResult`, which keeps mutation reporting separate from
+`CypherResultTable`. Aggregation, paths, broad matched-row relationship
+returns, ordering, limiting, and arbitrary read-query features remain rejected
+until a shared read/write row model owns those semantics.
 `CypherMutationOptions::parameters` binds Grust `Value`s to `$name`
 placeholders only where literals are already accepted: IDs, property maps, and
 literal property assignments. Quoted `'$name'` remains ordinary string text

@@ -1392,19 +1392,25 @@ defines `CypherResultTable` and `CypherMutationTableResult`, plus
 backend-neutral
 `execute_cypher_mutation_returning_with_options_on_store` helper. The first
 supported `RETURN` form must appear on the final write statement and may only
-project properties from node variables already bound to concrete node IDs, or
-relationship variables already bound to concrete edge identities by the write
-plan. Concrete relationship variables can come from edge upserts or edge
-patch/remove operations; row-producing relationship upserts still do not bind
-relationship variables. Examples include `RETURN n.id, n.seen AS seen` and
-`RETURN e.id, e.weight`. Aliases are allowed for supported projections,
-including aliases that happen to be named `limit` or `skip`; actual `ORDER BY`,
-`LIMIT`, and `SKIP` clauses remain rejected. Missing properties project as
-`Value::Null`; `n.id` projects the resolved `NodeId`, while `e.id` projects the
-explicit `EdgeId` when one exists. Sail and Memory share the same parser and
-result-table evaluator for this slice. Aggregation, path returns, broad
-matched-row result tables, row-producing relationship projections, `ORDER BY`,
-`LIMIT`, `SKIP`, and arbitrary read-query features remain deferred. The generic
+project elements or properties from node variables already bound to concrete
+node IDs, or relationship variables already bound to concrete edge identities
+by the write plan. Concrete relationship variables can come from edge upserts
+or edge patch/remove operations; row-producing relationship upserts still do
+not bind relationship variables. Examples include
+`RETURN n.id, n.label, n.seen AS seen`,
+`RETURN e.id, e.label, e.weight`, and
+`RETURN n AS node, e AS relationship`. Aliases are allowed for supported
+projections, including aliases that happen to be named `limit` or `skip`;
+actual `ORDER BY`, `LIMIT`, and `SKIP` clauses remain rejected. Missing
+properties project as `Value::Null`; `n.id` projects the resolved `NodeId`,
+`n.label` projects the persisted node label, `e.id` projects the explicit
+`EdgeId` when one exists, and `e.label` projects the relationship label. Whole
+bound node and relationship elements project as `Value::Json` using the
+existing Grust `Node` / `Edge` serde shape. Sail and Memory share the same
+parser and result-table evaluator for this slice.
+Aggregation, path returns, broad matched-row result tables, row-producing
+relationship projections, `ORDER BY`, `LIMIT`, `SKIP`, and arbitrary read-query
+features remain deferred. The generic
 Memory/Sail returning helper now also honors `CypherCreateMode::ErrorIfExists`
 for concrete node and edge `CREATE` writes through portable `GraphStore` reads;
 that helper shares the same intra-plan duplicate concrete identity preflight as
