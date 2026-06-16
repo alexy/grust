@@ -25,6 +25,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added backend-neutral edge patch mutations and Sail lowering for ID-resolved
   `MATCH ... SET e += { ... }`, with typed-edge mirror updates through the
   existing edge load path.
+- Added Sail writable Cypher lowering for literal property assignment and
+  explicit `REMOVE` on resolved node and edge identities, backed by
+  backend-neutral property remove mutations and existing patch/load paths.
 
 ## 2026-06-15 - 0.8.4
 

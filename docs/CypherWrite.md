@@ -49,6 +49,11 @@ describe unreleased working-tree additions:
   patch in Sail; `null` is stored as `Value::Null`.
 - `MATCH ... SET e += { ... }` lowers when the relationship identity is
   resolved by endpoint IDs, relationship type, and optional explicit edge `id`.
+- `MATCH ... SET n.key = value` and `MATCH ... SET e.key = value` lower to
+  one-key patch mutations when the node or relationship identity is resolved;
+  assignment values are literal-only.
+- `MATCH ... REMOVE n.key` and `MATCH ... REMOVE e.key` lower to explicit
+  property-remove mutations when the node or relationship identity is resolved.
 - Writable mutation keywords are parsed case-insensitively at the top level,
   and `// ...` plus `/* ... */` comments are stripped outside string literals.
 
@@ -58,7 +63,8 @@ The v1 implementation should reject, with clear errors:
 - node identity derived from non-`id` properties;
 - broad edge patching and relationship property predicates beyond explicit
   edge `id`;
-- `SET n.name = ...`, `REMOVE`, remove-on-null, arithmetic updates, or
+- broad node property assignment/removal, broad edge property assignment/removal,
+  remove-on-null, arithmetic updates, parameters, path expressions, or computed
   expression evaluation;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
@@ -102,6 +108,10 @@ to backend-neutral Grust mutation concepts:
 - broad node map patch -> `GraphMutation::PatchMatchingNodes` with cardinality
   metadata retained in `GraphMutationPlanOp`;
 - ID-resolved edge map patch -> `GraphMutation::PatchEdge`;
+- ID-resolved node property assignment -> one-key `GraphMutation::PatchNode`;
+- ID-resolved edge property assignment -> one-key `GraphMutation::PatchEdge`;
+- ID-resolved node property removal -> `GraphMutation::RemoveNodeProps`;
+- ID-resolved edge property removal -> `GraphMutation::RemoveEdgeProps`;
 - Sail broad node delete -> `GraphMutation::DeleteMatchingNodes` with
   cardinality metadata retained in `GraphMutationPlanOp`.
 
@@ -183,7 +193,9 @@ Core tests should cover:
 - lowering edge `CREATE` and `MERGE` into edge upserts with resolved endpoint
   IDs;
 - rejection of unresolved endpoint variables;
-- rejection of unsupported `SET`, `REMOVE`, and general mutating `MATCH`.
+- lowering of literal property assignment and explicit property removal;
+- rejection of unsupported expression `SET`, broad `REMOVE`, and general
+  mutating `MATCH`.
 
 Sail unit tests should cover:
 
@@ -200,6 +212,8 @@ Ignored live Sail tests should cover:
 - create edge between existing IDs;
 - delete edge;
 - delete node with incident-edge cascade;
+- property assignment on a resolved node and resolved edge;
+- property removal on a resolved node and resolved edge;
 - mixed ordered mutation batch, with documentation that it follows the target
   store's `apply_mutations` atomicity behavior.
 
@@ -287,18 +301,25 @@ feature slice should start at item 3.
 
 6. Property patch semantics.
 
-   Defer general `SET` until Grust has explicit backend-neutral patch
-   operations. The first acceptable form should be map patching, not arbitrary
-   property assignment:
+   General `SET` should grow only through explicit backend-neutral property
+   semantics. Map patching came first, followed by literal property assignment
+   and explicit property removal for resolved identities:
 
    ```cypher
    MATCH (n:Person {id: 'person-1'})
    SET n += {name: 'Ada'};
+
+   MATCH (n:Person {id: 'person-1'})
+   SET n.name = 'Ada';
+
+   MATCH (n:Person {id: 'person-1'})
+   REMOVE n.nickname;
    ```
 
-   This requires new mutation variants for node patch operations, plus clear
-   semantics for null values and missing properties. Edge map patching is
-   handled separately in Batch H.
+   This requires mutation variants with clear semantics for null values,
+   missing properties, and property removal. Edge map patching is handled
+   separately in Batch H, and resolved node/edge property assignment/removal is
+   handled in Batch I.
 
 7. Cardinality-aware mutating `MATCH`.
 
@@ -429,7 +450,8 @@ Acceptance criteria:
 - `MATCH ... SET n += {...}` lowers only when `n` resolves to one explicit node
   ID.
 - Edge patching lands only after the edge identity policy is equally explicit.
-- `SET n.name = ...`, `REMOVE`, arithmetic updates, and expression evaluation
+- Property assignment and explicit `REMOVE` land only after map patching is
+  stable; arithmetic updates, parameters, path expressions, and computed values
   remain deferred.
 
 Implementation notes:
@@ -505,7 +527,8 @@ The following decisions should remain out of v1:
 
 - generated IDs and pluggable ID policies;
 - broad edge patching, relationship property predicates beyond explicit edge
-  `id`, remove-on-null, `SET n.name = ...`, arithmetic updates, and `REMOVE`;
+  `id`, broad property assignment/removal, remove-on-null, arithmetic updates,
+  parameters, path expressions, and computed values;
 - cross-backend Cypher mutation APIs;
 - stronger transaction guarantees than the target backend documents.
 
@@ -601,6 +624,19 @@ Acceptance criteria:
 - Make report counts match patch/delete-property intent clearly.
 - Add parser tests that reject unsupported expression forms with
   `CypherSyntax` or `CypherUnsupportedCardinality` as appropriate.
+
+Implementation status: implemented in the working tree after `0.8.4` for
+resolved node and edge identities. Literal property assignment lowers to the
+existing backend-neutral patch operations as one-key patches:
+`GraphMutation::PatchNode` for nodes and `GraphMutation::PatchEdge` for edges.
+Explicit property removal lowers to `GraphMutation::RemoveNodeProps` or
+`GraphMutation::RemoveEdgeProps`; the default mutation executor performs the
+same read-modify-write path as patches and rejects ambiguous structural edge
+matches without an explicit edge `id`. Sail executes these operations through
+`GraphMutationStore`, so generic rows and typed-table mirrors are updated by
+the existing node and edge load helpers. Unit tests cover lowering and
+unsupported broad forms; ignored live Sail tests cover assignment and removal
+for resolved nodes and edges.
 
 ### Batch J: ID Policy And Generated IDs
 

@@ -1009,12 +1009,86 @@ fn cypher_match_set_map_patch_lowers_id_resolved_edge() {
 }
 
 #[test]
+fn cypher_match_set_property_assignment_lowers_resolved_node_and_edge() {
+    let node =
+        sail_cypher_mutation_plan("MATCH (n:Person {id: 'person-1'}) SET n.name = 'Ada'").unwrap();
+    assert_eq!(
+        node.into_mutations(),
+        vec![GraphMutation::PatchNode {
+            id: NodeId::new("person-1"),
+            props: Props::from([("name".to_string(), Value::from("Ada"))]),
+        }]
+    );
+
+    let edge = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-1'}]->(:Person {id: 'person-2'}) SET e.since = 2026",
+    )
+    .unwrap();
+    assert_eq!(
+        edge.report(),
+        GraphMutationReport {
+            patches: 1,
+            changed_edges: 1,
+            edge_patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        edge.into_mutations(),
+        vec![GraphMutation::PatchEdge {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+            id: Some(EdgeId::new("edge-1")),
+            props: Props::from([("since".to_string(), Value::Int(2026))]),
+        }]
+    );
+}
+
+#[test]
+fn cypher_match_remove_lowers_resolved_node_and_edge_properties() {
+    let node =
+        sail_cypher_mutation_plan("MATCH (n:Person {id: 'person-1'}) REMOVE n.nickname").unwrap();
+    assert_eq!(
+        node.report(),
+        GraphMutationReport {
+            property_removes: 1,
+            changed_nodes: 1,
+            node_property_removes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        node.into_mutations(),
+        vec![GraphMutation::RemoveNodeProps {
+            id: NodeId::new("person-1"),
+            keys: vec!["nickname".to_string()],
+        }]
+    );
+
+    let edge = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-1'}]->(:Person {id: 'person-2'}) REMOVE e.note",
+    )
+    .unwrap();
+    assert_eq!(
+        edge.into_mutations(),
+        vec![GraphMutation::RemoveEdgeProps {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+            id: Some(EdgeId::new("edge-1")),
+            keys: vec!["note".to_string()],
+        }]
+    );
+}
+
+#[test]
 fn cypher_match_set_rejects_deferred_patch_forms() {
     for cypher in [
         "MATCH (n:Person {id: 'person-1'}) SET m += {name: 'Ada'}",
-        "MATCH (n:Person {id: 'person-1'}) SET n.name = 'Ada'",
+        "MATCH (n:Person {name: 'Ada'}) SET n.name = 'Ada'",
         "MATCH (:Person {id: 'person-1'})-[e:KNOWS {since: 2020}]->(:Person {id: 'person-2'}) SET e += {since: 2026}",
-        "MATCH (n:Person {id: 'person-1'}) REMOVE n.name",
+        "MATCH (n:Person {name: 'Ada'}) REMOVE n.name",
     ] {
         let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH SET must fail");
         assert!(is_cypher_planning_error(&error));
@@ -1720,6 +1794,143 @@ async fn test_execute_cypher_match_set_edge_patch_updates_typed_edges() {
         2,
     );
     assert_eq!(rows, vec![vec!["edge-1".to_string(), "final".to_string()]]);
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_match_set_and_remove_node_properties() {
+    let store = store().await;
+    store
+        .apply_schema(&person_schema())
+        .await
+        .expect("apply Person schema");
+    store
+        .execute_cypher_mutation("CREATE (:Person {id: 'person-1', name: 'Ada', age: 36})")
+        .await
+        .expect("seed typed Person row");
+
+    let report = store
+        .execute_cypher_mutation("MATCH (n:Person {id: 'person-1'}) SET n.age = 37")
+        .await
+        .expect("assign node property");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            patches: 1,
+            changed_nodes: 1,
+            node_patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let rows = query_string_rows(
+        store
+            .query_arrow_ipc(
+                "SELECT id, CAST(age AS STRING) AS age FROM grust_node_person ORDER BY id",
+            )
+            .await
+            .expect("query typed Person table after assignment"),
+        2,
+    );
+    assert_eq!(rows, vec![vec!["person-1".to_string(), "37".to_string()]]);
+
+    let report = store
+        .execute_cypher_mutation("MATCH (n:Person {id: 'person-1'}) REMOVE n.age")
+        .await
+        .expect("remove node property");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            property_removes: 1,
+            changed_nodes: 1,
+            node_property_removes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let node = store
+        .get_node(&NodeId::new("person-1"))
+        .await
+        .expect("read node after property remove")
+        .expect("node still exists");
+    assert_eq!(node.props.get("age"), None);
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_match_set_and_remove_edge_properties() {
+    let store = store().await;
+    store
+        .apply_schema(&person_schema())
+        .await
+        .expect("apply Person schema");
+    store
+        .execute_cypher_mutation(
+            "
+            CREATE (:Person {id: 'person-1'})-[e:presents {id: 'edge-1', source: 'draft', note: 'tmp'}]->(:Talk {id: 'talk-1'});
+            ",
+        )
+        .await
+        .expect("seed typed edge row");
+
+    let report = store
+        .execute_cypher_mutation(
+            "
+            MATCH (:Person {id: 'person-1'})-[e:presents {id: 'edge-1'}]->(:Talk {id: 'talk-1'})
+            SET e.source = 'final'
+            ",
+        )
+        .await
+        .expect("assign edge property");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            patches: 1,
+            changed_edges: 1,
+            edge_patches: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let rows = query_string_rows(
+        store
+            .query_arrow_ipc("SELECT id, source FROM grust_edge_presents ORDER BY id")
+            .await
+            .expect("query typed presents edge table after assignment"),
+        2,
+    );
+    assert_eq!(rows, vec![vec!["edge-1".to_string(), "final".to_string()]]);
+
+    let report = store
+        .execute_cypher_mutation(
+            "
+            MATCH (:Person {id: 'person-1'})-[e:presents {id: 'edge-1'}]->(:Talk {id: 'talk-1'})
+            REMOVE e.note
+            ",
+        )
+        .await
+        .expect("remove edge property");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            property_removes: 1,
+            changed_edges: 1,
+            edge_property_removes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let edges = store
+        .get_edges(EdgeQuery {
+            from: Some(NodeId::new("person-1")),
+            to: Some(NodeId::new("talk-1")),
+            label: Some(Label::new("presents")),
+        })
+        .await
+        .expect("read edge after property remove");
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].props.get("source"), Some(&Value::from("final")));
+    assert_eq!(edges[0].props.get("note"), None);
 }
 
 #[tokio::test]

@@ -121,6 +121,17 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             id: Some(EdgeId::new("edge-1")),
             props: Props::from([("since".to_string(), Value::Int(2026))]),
         },
+        GraphMutationPlanOp::RemoveNodeProps {
+            id: NodeId::new("person-1"),
+            keys: vec!["nickname".to_string()],
+        },
+        GraphMutationPlanOp::RemoveEdgeProps {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+            id: Some(EdgeId::new("edge-1")),
+            keys: vec!["note".to_string()],
+        },
         GraphMutationPlanOp::DeleteMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("active".to_string(), Value::Bool(false))]),
@@ -141,15 +152,18 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             merges: 1,
             deletes: 3,
             patches: 3,
+            property_removes: 2,
             matched_rows: 0,
-            changed_nodes: 3,
-            changed_edges: 3,
+            changed_nodes: 4,
+            changed_edges: 4,
             node_upserts: 1,
             edge_upserts: 1,
             node_deletes: 1,
             edge_deletes: 1,
             node_patches: 1,
             edge_patches: 1,
+            node_property_removes: 1,
+            edge_property_removes: 1,
         }
     );
     assert_eq!(
@@ -172,6 +186,17 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
                 to: NodeId::new("person-2"),
                 id: Some(EdgeId::new("edge-1")),
                 props: Props::from([("since".to_string(), Value::Int(2026))]),
+            },
+            GraphMutation::RemoveNodeProps {
+                id: NodeId::new("person-1"),
+                keys: vec!["nickname".to_string()],
+            },
+            GraphMutation::RemoveEdgeProps {
+                from: NodeId::new("person-1"),
+                label: Label::new("KNOWS"),
+                to: NodeId::new("person-2"),
+                id: Some(EdgeId::new("edge-1")),
+                keys: vec!["note".to_string()],
             },
             GraphMutation::DeleteMatchingNodes {
                 label: Some(Label::new("Person")),

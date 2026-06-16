@@ -291,8 +291,9 @@ Open semantic decisions before accepting general Cypher writes:
   labels/properties.
 - `CREATE` versus `MERGE`: whether duplicate IDs are errors or replacement
   upserts.
-- Property update mode: replacement, shallow patch, remove-on-null, or explicit
-  `REMOVE` support.
+- Property update mode: shallow map patching, literal assignment, and explicit
+  `REMOVE` exist for resolved identities; broad relationship updates,
+  computed expressions, and remove-on-null remain open.
 - Schema validation: mutations should validate through `GraphSchema` before
   they reach backend SQL.
 - Match cardinality: mutating `MATCH ... SET/DELETE` may affect zero, one, or

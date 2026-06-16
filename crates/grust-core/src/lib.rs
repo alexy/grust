@@ -2132,6 +2132,17 @@ pub enum GraphMutation {
         id: Option<EdgeId>,
         props: Props,
     },
+    RemoveNodeProps {
+        id: NodeId,
+        keys: Vec<String>,
+    },
+    RemoveEdgeProps {
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+        id: Option<EdgeId>,
+        keys: Vec<String>,
+    },
     DeleteMatchingNodes {
         label: Option<Label>,
         props: Props,
@@ -2180,6 +2191,17 @@ pub enum GraphMutationPlanOp {
         to: NodeId,
         id: Option<EdgeId>,
         props: Props,
+    },
+    RemoveNodeProps {
+        id: NodeId,
+        keys: Vec<String>,
+    },
+    RemoveEdgeProps {
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+        id: Option<EdgeId>,
+        keys: Vec<String>,
     },
     DeleteMatchingNodes {
         label: Option<Label>,
@@ -2234,6 +2256,7 @@ pub struct GraphMutationReport {
     pub merges: usize,
     pub deletes: usize,
     pub patches: usize,
+    pub property_removes: usize,
     pub matched_rows: usize,
     pub changed_nodes: usize,
     pub changed_edges: usize,
@@ -2243,6 +2266,8 @@ pub struct GraphMutationReport {
     pub edge_deletes: usize,
     pub node_patches: usize,
     pub edge_patches: usize,
+    pub node_property_removes: usize,
+    pub edge_property_removes: usize,
 }
 
 impl GraphMutationReport {
@@ -2277,6 +2302,16 @@ impl GraphMutationReport {
             GraphMutationPlanOp::PatchEdge { .. } => {
                 self.patches += 1;
                 self.edge_patches += 1;
+                self.changed_edges += 1;
+            }
+            GraphMutationPlanOp::RemoveNodeProps { .. } => {
+                self.property_removes += 1;
+                self.node_property_removes += 1;
+                self.changed_nodes += 1;
+            }
+            GraphMutationPlanOp::RemoveEdgeProps { .. } => {
+                self.property_removes += 1;
+                self.edge_property_removes += 1;
                 self.changed_edges += 1;
             }
             GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
@@ -2323,6 +2358,20 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 to,
                 id,
                 props,
+            },
+            GraphMutationPlanOp::RemoveNodeProps { id, keys } => Self::RemoveNodeProps { id, keys },
+            GraphMutationPlanOp::RemoveEdgeProps {
+                from,
+                label,
+                to,
+                id,
+                keys,
+            } => Self::RemoveEdgeProps {
+                from,
+                label,
+                to,
+                id,
+                keys,
             },
             GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
                 Self::DeleteMatchingNodes { label, props }
@@ -2402,6 +2451,47 @@ pub trait GraphMutationStore: GraphStore {
                         count => {
                             return Err(GrustError::CypherUnsupportedCardinality(format!(
                                 "edge patch matched {count} edges; add an explicit edge id"
+                            )));
+                        }
+                    }
+                }
+                GraphMutation::RemoveNodeProps { id, keys } => {
+                    if let Some(mut node) = self.get_node(id).await? {
+                        for key in keys {
+                            node.props.remove(key);
+                        }
+                        self.put_node(&node).await?;
+                    }
+                }
+                GraphMutation::RemoveEdgeProps {
+                    from,
+                    label,
+                    to,
+                    id,
+                    keys,
+                } => {
+                    let mut edges = self
+                        .get_edges(EdgeQuery {
+                            from: Some(from.clone()),
+                            to: Some(to.clone()),
+                            label: Some(label.clone()),
+                        })
+                        .await?;
+                    if let Some(id) = id {
+                        edges.retain(|edge| edge.id.as_ref() == Some(id));
+                    }
+                    match edges.len() {
+                        0 => {}
+                        1 => {
+                            let mut edge = edges.remove(0);
+                            for key in keys {
+                                edge.props.remove(key);
+                            }
+                            self.put_edge(&edge).await?;
+                        }
+                        count => {
+                            return Err(GrustError::CypherUnsupportedCardinality(format!(
+                                "edge property removal matched {count} edges; add an explicit edge id"
                             )));
                         }
                     }

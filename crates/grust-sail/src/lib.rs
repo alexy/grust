@@ -412,8 +412,11 @@ impl CypherMutationPlanner {
         if find_unquoted_keyword(statement, "SET").is_some() {
             return self.parse_match_set(statement);
         }
+        if find_unquoted_keyword(statement, "REMOVE").is_some() {
+            return self.parse_match_remove(statement);
+        }
         Err(cypher_syntax(
-            "only ID-resolved MATCH ... DELETE, MATCH ... MERGE edge, and MATCH ... SET += node forms are supported in writable Cypher".to_string(),
+            "only ID-resolved MATCH ... DELETE, MATCH ... MERGE edge, MATCH ... SET, and MATCH ... REMOVE forms are supported in writable Cypher".to_string(),
         ))
     }
 
@@ -527,7 +530,7 @@ impl CypherMutationPlanner {
 
     fn parse_match_set(&mut self, statement: &str) -> Result<GraphMutationPlan> {
         let (pattern, assignment) = split_match_set(statement)?;
-        let (target, props) = parse_map_patch_assignment(assignment)?;
+        let assignment = parse_patch_assignment(assignment)?;
 
         if pattern.contains("->") {
             let parsed = self.parse_edge_pattern(pattern)?;
@@ -536,9 +539,10 @@ impl CypherMutationPlanner {
                     "MATCH edge SET requires the relationship pattern to bind the patch target",
                 ));
             };
-            if edge_variable != target {
+            if edge_variable != assignment.target {
                 return Err(cypher_syntax(format!(
-                    "MATCH edge SET target '{target}' does not match relationship variable '{edge_variable}'"
+                    "MATCH edge SET target '{}' does not match relationship variable '{edge_variable}'",
+                    assignment.target
                 )));
             }
             let id = parsed.edge.id.clone();
@@ -554,7 +558,7 @@ impl CypherMutationPlanner {
                     label: parsed.edge.label,
                     to: parsed.to_id,
                     id,
-                    props,
+                    props: assignment.props,
                 },
             ]));
         }
@@ -571,9 +575,10 @@ impl CypherMutationPlanner {
                 "MATCH SET requires the node pattern to bind the patch target".to_string(),
             ));
         };
-        if node_variable != &target {
+        if node_variable != &assignment.target {
             return Err(cypher_syntax(format!(
-                "MATCH SET target '{target}' does not match node variable '{node_variable}'"
+                "MATCH SET target '{}' does not match node variable '{node_variable}'",
+                assignment.target
             )));
         }
         if optional_string_prop(&node.props, "id").is_none()
@@ -582,19 +587,97 @@ impl CypherMutationPlanner {
                 .as_ref()
                 .is_none_or(|variable| !self.node_bindings.contains_key(variable))
         {
+            if !assignment.is_map_patch {
+                return Err(cypher_unsupported_cardinality(
+                    "MATCH SET property assignment requires one resolved node identity",
+                ));
+            }
             let cardinality = match_node_cardinality(&node);
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::PatchMatchingNodes {
                     label: node.label,
                     props: node.props,
-                    patch: props,
+                    patch: assignment.props,
                     cardinality,
                 },
             ]));
         }
         let id = self.resolve_node_id(&node, "MATCH node SET")?;
         Ok(GraphMutationPlan::new(vec![
-            GraphMutationPlanOp::PatchNode { id, props },
+            GraphMutationPlanOp::PatchNode {
+                id,
+                props: assignment.props,
+            },
+        ]))
+    }
+
+    fn parse_match_remove(&mut self, statement: &str) -> Result<GraphMutationPlan> {
+        let (pattern, target) = split_match_remove(statement)?;
+        let (target, key) = parse_property_ref(target, "MATCH REMOVE target")?;
+
+        if pattern.contains("->") {
+            let parsed = self.parse_edge_pattern(pattern)?;
+            let Some(edge_variable) = parsed.edge_variable else {
+                return Err(cypher_syntax(
+                    "MATCH edge REMOVE requires the relationship pattern to bind the remove target",
+                ));
+            };
+            if edge_variable != target {
+                return Err(cypher_syntax(format!(
+                    "MATCH edge REMOVE target '{target}' does not match relationship variable '{edge_variable}'"
+                )));
+            }
+            let id = parsed.edge.id.clone();
+            let non_identity_props = parsed.edge.props.keys().any(|key| key.as_str() != "id");
+            if non_identity_props {
+                return Err(cypher_unsupported_cardinality(
+                    "MATCH edge REMOVE only supports endpoint, type, and optional edge id identity",
+                ));
+            }
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::RemoveEdgeProps {
+                    from: parsed.from_id,
+                    label: parsed.edge.label,
+                    to: parsed.to_id,
+                    id,
+                    keys: vec![key],
+                },
+            ]));
+        }
+
+        let (node, rest) = parse_cypher_node_pattern(pattern)?;
+        if !rest.trim().is_empty() {
+            return Err(cypher_syntax(format!(
+                "unsupported writable Cypher MATCH REMOVE pattern suffix: {}",
+                rest.trim()
+            )));
+        }
+        let Some(node_variable) = &node.variable else {
+            return Err(cypher_syntax(
+                "MATCH REMOVE requires the node pattern to bind the remove target",
+            ));
+        };
+        if node_variable != &target {
+            return Err(cypher_syntax(format!(
+                "MATCH REMOVE target '{target}' does not match node variable '{node_variable}'"
+            )));
+        }
+        if optional_string_prop(&node.props, "id").is_none()
+            && node
+                .variable
+                .as_ref()
+                .is_none_or(|variable| !self.node_bindings.contains_key(variable))
+        {
+            return Err(cypher_unsupported_cardinality(
+                "MATCH REMOVE requires one resolved node identity",
+            ));
+        }
+        let id = self.resolve_node_id(&node, "MATCH node REMOVE")?;
+        Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::RemoveNodeProps {
+                id,
+                keys: vec![key],
+            },
         ]))
     }
 
@@ -975,15 +1058,62 @@ fn split_match_set(statement: &str) -> Result<(&str, &str)> {
     ))
 }
 
-fn parse_map_patch_assignment(assignment: &str) -> Result<(String, Props)> {
-    let Some(index) = find_unquoted_sequence(assignment, "+=") else {
-        return Err(GrustError::Unsupported(
-            "MATCH SET only supports map patch syntax: target += { ... }".to_string(),
+fn split_match_remove(statement: &str) -> Result<(&str, &str)> {
+    if let Some(index) = find_unquoted_keyword(statement, "REMOVE") {
+        let pattern = statement[..index].trim();
+        let target = statement[index + "REMOVE".len()..].trim();
+        if pattern.is_empty() || target.is_empty() {
+            return Err(cypher_syntax(
+                "MATCH REMOVE requires both a pattern and a property target",
+            ));
+        }
+        return Ok((pattern, target));
+    }
+    Err(cypher_syntax(
+        "only ID-resolved MATCH ... REMOVE property is supported in writable Cypher",
+    ))
+}
+
+struct PatchAssignment {
+    target: String,
+    props: Props,
+    is_map_patch: bool,
+}
+
+fn parse_patch_assignment(assignment: &str) -> Result<PatchAssignment> {
+    if let Some(index) = find_unquoted_sequence(assignment, "+=") {
+        let target = parse_required_cypher_variable(&assignment[..index], "MATCH SET target")?;
+        let props = parse_cypher_props_map_literal(&assignment[index + 2..])?;
+        return Ok(PatchAssignment {
+            target,
+            props,
+            is_map_patch: true,
+        });
+    }
+    let Some(index) = find_unquoted(assignment, '=') else {
+        return Err(cypher_syntax(
+            "MATCH SET only supports map patch or literal property assignment",
         ));
     };
-    let target = parse_required_cypher_variable(&assignment[..index], "MATCH SET target")?;
-    let props = parse_cypher_props_map_literal(&assignment[index + 2..])?;
-    Ok((target, props))
+    let (target, key) = parse_property_ref(&assignment[..index], "MATCH SET target")?;
+    let value = parse_cypher_literal(&assignment[index + 1..])?;
+    Ok(PatchAssignment {
+        target,
+        props: Props::from([(key, value)]),
+        is_map_patch: false,
+    })
+}
+
+fn parse_property_ref(value: &str, context: &str) -> Result<(String, String)> {
+    let value = value.trim();
+    let Some(index) = find_unquoted(value, '.') else {
+        return Err(cypher_syntax(format!(
+            "{context} requires property syntax target.key"
+        )));
+    };
+    let target = parse_required_cypher_variable(&value[..index], context)?;
+    let key = parse_cypher_prop_key(&value[index + 1..])?;
+    Ok((target, key))
 }
 
 fn parse_cypher_props_map_literal(value: &str) -> Result<Props> {
