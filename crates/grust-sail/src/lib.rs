@@ -3485,7 +3485,10 @@ fn find_matching(value: &str, _open: char, close: char) -> Result<usize> {
     )))
 }
 
-fn find_unquoted(value: &str, target: char) -> Option<usize> {
+/// Scans `value` left to right, skipping single- and double-quoted spans (with
+/// backslash escapes inside them), and returns the first unquoted byte offset
+/// where `at_unquoted(index, rest)` returns true. `rest` is `&value[index..]`.
+fn scan_unquoted(value: &str, mut at_unquoted: impl FnMut(usize, &str) -> bool) -> Option<usize> {
     let mut quote = None;
     let mut escaped = false;
     for (index, ch) in value.char_indices() {
@@ -3503,75 +3506,32 @@ fn find_unquoted(value: &str, target: char) -> Option<usize> {
             }
             continue;
         }
-        match ch {
-            '\'' | '"' => quote = Some(ch),
-            ch if ch == target => return Some(index),
-            _ => {}
+        if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            continue;
+        }
+        if at_unquoted(index, &value[index..]) {
+            return Some(index);
         }
     }
     None
 }
 
-fn find_unquoted_keyword(value: &str, keyword: &str) -> Option<usize> {
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in value.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && quote.is_some() {
-            escaped = true;
-            continue;
-        }
-        if let Some(active_quote) = quote {
-            if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => quote = Some(ch),
-            _ => {
-                if value[index..]
-                    .get(..keyword.len())
-                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(keyword))
-                    && keyword_boundary(value[..index].chars().next_back())
-                    && keyword_boundary(value[index + keyword.len()..].chars().next())
-                {
-                    return Some(index);
-                }
-            }
-        }
-    }
-    None
+fn find_unquoted(value: &str, target: char) -> Option<usize> {
+    scan_unquoted(value, |_, rest| rest.starts_with(target))
 }
 
 fn find_unquoted_sequence(value: &str, target: &str) -> Option<usize> {
-    let mut quote = None;
-    let mut escaped = false;
-    for (index, ch) in value.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        if ch == '\\' && quote.is_some() {
-            escaped = true;
-            continue;
-        }
-        if let Some(active_quote) = quote {
-            if ch == active_quote {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '\'' | '"' => quote = Some(ch),
-            _ if value[index..].starts_with(target) => return Some(index),
-            _ => {}
-        }
-    }
-    None
+    scan_unquoted(value, |_, rest| rest.starts_with(target))
+}
+
+fn find_unquoted_keyword(value: &str, keyword: &str) -> Option<usize> {
+    scan_unquoted(value, |index, rest| {
+        rest.get(..keyword.len())
+            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(keyword))
+            && keyword_boundary(value[..index].chars().next_back())
+            && keyword_boundary(rest[keyword.len()..].chars().next())
+    })
 }
 
 fn keyword_boundary(ch: Option<char>) -> bool {
@@ -4372,18 +4332,18 @@ impl SailGraphStore {
 
     /// Computes out-degrees over the generic persisted Sail edge table.
     pub async fn out_degrees(&self) -> Result<Vec<SailDegreeRow>> {
-        self.run_degree_query(&sail_out_degrees_sql()).await
+        self.run_degree_query(sail_out_degrees_sql()).await
     }
 
     /// Computes in-degrees over the generic persisted Sail edge table.
     pub async fn in_degrees(&self) -> Result<Vec<SailDegreeRow>> {
-        self.run_degree_query(&sail_in_degrees_sql()).await
+        self.run_degree_query(sail_in_degrees_sql()).await
     }
 
     /// Computes total degree for each non-isolated vertex over the generic
     /// persisted Sail edge table.
     pub async fn degrees(&self) -> Result<Vec<SailDegreeRow>> {
-        self.run_degree_query(&sail_degrees_sql()).await
+        self.run_degree_query(sail_degrees_sql()).await
     }
 
     /// Computes both directed degree components for every persisted vertex.
@@ -5068,24 +5028,23 @@ fn delete_edge_keys_from_view_sql(table: &str) -> Result<String> {
     ))
 }
 
-pub fn sail_out_degrees_sql() -> String {
-    "SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id".to_string()
+pub fn sail_out_degrees_sql() -> &'static str {
+    "SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id"
 }
 
-pub fn sail_in_degrees_sql() -> String {
-    "SELECT dst_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY dst_id".to_string()
+pub fn sail_in_degrees_sql() -> &'static str {
+    "SELECT dst_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY dst_id"
 }
 
-pub fn sail_degrees_sql() -> String {
+pub fn sail_degrees_sql() -> &'static str {
     "SELECT id, SUM(degree) AS degree FROM (\
        SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id \
        UNION ALL \
        SELECT dst_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY dst_id\
      ) degree_events GROUP BY id"
-        .to_string()
 }
 
-pub fn sail_degree_pairs_sql() -> String {
+pub fn sail_degree_pairs_sql() -> &'static str {
     "SELECT n.id AS id, \
             COALESCE(in_degrees.degree, 0) AS in_degree, \
             COALESCE(out_degrees.degree, 0) AS out_degree \
@@ -5094,7 +5053,6 @@ pub fn sail_degree_pairs_sql() -> String {
          ON n.id = in_degrees.id \
        LEFT JOIN (SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id) out_degrees \
          ON n.id = out_degrees.id"
-        .to_string()
 }
 
 pub fn sail_triplets_sql() -> String {
