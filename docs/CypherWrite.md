@@ -1389,7 +1389,9 @@ backend-neutral
 supported `RETURN` form must appear on the final write statement and may only
 project properties from node variables already bound to concrete node IDs, or
 relationship variables already bound to concrete edge identities by the write
-plan. Examples include `RETURN n.id, n.seen AS seen` and
+plan. Concrete relationship variables can come from edge upserts or edge
+patch/remove operations; row-producing relationship upserts still do not bind
+relationship variables. Examples include `RETURN n.id, n.seen AS seen` and
 `RETURN e.id, e.weight`. Missing properties project as `Value::Null`; `n.id`
 projects the resolved `NodeId`, while `e.id` projects the explicit `EdgeId`
 when one exists. Sail and Memory share the same parser and result-table

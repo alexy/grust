@@ -851,9 +851,11 @@ project, and the trait makes the maturity boundary explicit.
 ## Memory
 
 `grust-memory` is the deterministic local backend. It stores nodes in a
-`BTreeMap<NodeId, Node>` and edges in a `BTreeMap<(NodeId, Label, NodeId), Edge>`.
-Reads and traversals scan those maps. It is the best backend for tests, examples,
-and local workflows that need no external service.
+`BTreeMap<NodeId, Node>` and stores edges by source, label, destination, and
+optional explicit edge ID. That means structural edges still behave
+deterministically, while id-bearing parallel edges between the same endpoints
+can coexist. Reads and traversals scan those maps. It is the best backend for
+tests, examples, and local workflows that need no external service.
 When a `GraphSchema` is applied, the memory backend validates writes against it,
 which makes it a useful conformance harness for typed storage behavior before a
 database enters the picture.
@@ -1049,11 +1051,12 @@ patterns still require resolved IDs before writing.
 The first table-returning write path is deliberately smaller than general
 Cypher `RETURN`: `execute_cypher_mutation_returning_with_options` accepts a
 final property projection over node variables and concrete relationship
-variables already resolved by the write plan and returns
-`CypherMutationTableResult`, which keeps mutation reporting separate from
-`CypherResultTable`. Aggregation, paths, broad matched-row relationship
-returns, ordering, limiting, and arbitrary read-query features remain rejected
-until a shared read/write row model owns those semantics.
+variables already resolved by the write plan, including concrete edge upserts
+and edge patches. It returns `CypherMutationTableResult`, which keeps mutation
+reporting separate from `CypherResultTable`. Aggregation, paths, broad
+matched-row relationship returns, ordering, limiting, and arbitrary read-query
+features remain rejected until a shared read/write row model owns those
+semantics.
 `CypherMutationOptions::parameters` binds Grust `Value`s to `$name`
 placeholders only where literals are already accepted: IDs, property maps, and
 literal property assignments. Quoted `'$name'` remains ordinary string text

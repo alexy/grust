@@ -145,6 +145,81 @@ fn put_reports_insert_vs_update() {
 }
 
 #[test]
+fn preserves_parallel_edges_with_distinct_explicit_ids() {
+    let store = MemoryGraphStore::new();
+    futures_executor::block_on(store.put_node(&Node::new("Person", "a", Props::new()))).unwrap();
+    futures_executor::block_on(store.put_node(&Node::new("Person", "b", Props::new()))).unwrap();
+
+    let edge_1 = Edge::new(
+        "KNOWS",
+        "a",
+        "b",
+        Props::from([("since".to_string(), Value::Int(2020))]),
+    )
+    .with_id("edge-1");
+    let edge_2 = Edge::new(
+        "KNOWS",
+        "a",
+        "b",
+        Props::from([("since".to_string(), Value::Int(2021))]),
+    )
+    .with_id("edge-2");
+
+    assert_eq!(
+        futures_executor::block_on(store.put_edge(&edge_1)).unwrap(),
+        PutOutcome::Inserted
+    );
+    assert_eq!(
+        futures_executor::block_on(store.put_edge(&edge_2)).unwrap(),
+        PutOutcome::Inserted
+    );
+
+    let edges = futures_executor::block_on(store.get_edges(EdgeQuery {
+        from: Some(NodeId::new("a")),
+        to: Some(NodeId::new("b")),
+        label: Some(Label::new("KNOWS")),
+    }))
+    .unwrap();
+    assert_eq!(edges.len(), 2);
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge.id == Some(EdgeId::new("edge-1")))
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|edge| edge.id == Some(EdgeId::new("edge-2")))
+    );
+
+    futures_executor::block_on(store.apply_mutations(&[GraphMutation::PatchEdge {
+        from: NodeId::new("a"),
+        label: Label::new("KNOWS"),
+        to: NodeId::new("b"),
+        id: Some(EdgeId::new("edge-2")),
+        props: Props::from([("seen".to_string(), Value::Bool(true))]),
+    }]))
+    .unwrap();
+
+    let edges = futures_executor::block_on(store.get_edges(EdgeQuery {
+        from: Some(NodeId::new("a")),
+        to: Some(NodeId::new("b")),
+        label: Some(Label::new("KNOWS")),
+    }))
+    .unwrap();
+    let edge_1 = edges
+        .iter()
+        .find(|edge| edge.id == Some(EdgeId::new("edge-1")))
+        .expect("first edge remains");
+    let edge_2 = edges
+        .iter()
+        .find(|edge| edge.id == Some(EdgeId::new("edge-2")))
+        .expect("second edge remains");
+    assert_eq!(edge_1.props.get("seen"), None);
+    assert_eq!(edge_2.props.get("seen"), Some(&Value::Bool(true)));
+}
+
+#[test]
 fn get_nodes_reads_multiple_ids() {
     let store = MemoryGraphStore::new();
     let nodes = vec![

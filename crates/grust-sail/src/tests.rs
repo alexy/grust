@@ -2502,6 +2502,52 @@ fn sail_cypher_returning_projects_bound_edge_properties_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_new_concrete_edge_properties_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let top_level =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'ada'});
+            CREATE (b:Person {id: 'bob'});
+            CREATE (a)-[e:KNOWS {id: 'edge-1', since: 2026}]->(b)
+            RETURN e.id, e.since;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        top_level.table,
+        CypherResultTable {
+            columns: vec!["e.id".to_string(), "e.since".to_string()],
+            rows: vec![vec![Value::from("edge-1"), Value::Int(2026)]],
+        }
+    );
+
+    let match_create =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (a:Person {id: 'ada'}), (b:Person {id: 'bob'})
+            CREATE (a)-[e:WORKS_WITH {id: 'edge-2', weight: 4}]->(b)
+            RETURN e.id, e.weight;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        match_create.table,
+        CypherResultTable {
+            columns: vec!["e.id".to_string(), "e.weight".to_string()],
+            rows: vec![vec![Value::from("edge-2"), Value::Int(4)]],
+        }
+    );
+}
+
+#[test]
 fn sail_cypher_returning_rejects_deferred_result_forms() {
     let store = MemoryGraphStore::new();
 
@@ -2522,6 +2568,21 @@ fn sail_cypher_returning_rejects_deferred_result_forms() {
         ))
         .expect_err("unbound variable should be rejected");
     assert!(matches!(error, GrustError::CypherUnresolvedIdentity(_)));
+
+    let error =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'ada', status: 'active'});
+            CREATE (:Team {id: 'eng'});
+            MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
+            CREATE (a)-[e:MEMBER_OF]->(b)
+            RETURN e.id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("row-producing relationship variables should be rejected");
+    assert!(matches!(error, GrustError::CypherSyntax(_)));
 }
 
 #[test]

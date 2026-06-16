@@ -14,8 +14,36 @@ pub struct MemoryGraphStore {
 #[derive(Clone, Debug, Default)]
 struct MemoryGraph {
     nodes: BTreeMap<NodeId, Node>,
-    edges: BTreeMap<(NodeId, Label, NodeId), Edge>,
+    edges: BTreeMap<MemoryEdgeKey, Edge>,
     schema: Option<GraphSchema>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct MemoryEdgeKey {
+    from: NodeId,
+    label: Label,
+    to: NodeId,
+    id: Option<EdgeId>,
+}
+
+impl MemoryEdgeKey {
+    fn new(from: NodeId, label: Label, to: NodeId, id: Option<EdgeId>) -> Self {
+        Self {
+            from,
+            label,
+            to,
+            id,
+        }
+    }
+
+    fn from_edge(edge: &Edge) -> Self {
+        Self::new(
+            edge.from.clone(),
+            edge.label.clone(),
+            edge.to.clone(),
+            edge.id.clone(),
+        )
+    }
 }
 
 impl MemoryGraphStore {
@@ -158,10 +186,9 @@ impl GraphStore for MemoryGraphStore {
         if let Some(schema) = &inner.schema {
             schema.validate_edge_with(edge, |id| inner.nodes.get(id).map(|node| &node.label))?;
         }
-        let previous = inner.edges.insert(
-            (edge.from.clone(), edge.label.clone(), edge.to.clone()),
-            edge.clone(),
-        );
+        let previous = inner
+            .edges
+            .insert(MemoryEdgeKey::from_edge(edge), edge.clone());
         Ok(match previous {
             Some(_) => PutOutcome::Updated,
             None => PutOutcome::Inserted,
@@ -179,10 +206,9 @@ impl GraphStore for MemoryGraphStore {
             report.nodes += 1;
         }
         for edge in &graph.edges {
-            inner.edges.insert(
-                (edge.from.clone(), edge.label.clone(), edge.to.clone()),
-                edge.clone(),
-            );
+            inner
+                .edges
+                .insert(MemoryEdgeKey::from_edge(edge), edge.clone());
             report.edges += 1;
         }
         Ok(report)
@@ -283,7 +309,7 @@ impl GraphMutationStore for MemoryGraphStore {
         inner.nodes.remove(id);
         inner
             .edges
-            .retain(|(from, _, to), _| from != id && to != id);
+            .retain(|key, _| key.from != *id && key.to != *id);
         Ok(())
     }
 
@@ -291,7 +317,7 @@ impl GraphMutationStore for MemoryGraphStore {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
         inner
             .edges
-            .remove(&(from.clone(), label.clone(), to.clone()));
+            .retain(|key, _| key.from != *from || key.label != *label || key.to != *to);
         Ok(())
     }
 }
@@ -413,7 +439,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     let incident_edges = inner
                         .edges
                         .keys()
-                        .filter(|(from, _, to)| ids.iter().any(|id| id == from || id == to))
+                        .filter(|key| ids.iter().any(|id| id == &key.from || id == &key.to))
                         .count();
 
                     report.matched_rows += ids.len();
@@ -427,7 +453,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     }
                     inner
                         .edges
-                        .retain(|(from, _, to), _| !ids.iter().any(|id| id == from || id == to));
+                        .retain(|key, _| !ids.iter().any(|id| id == &key.from || id == &key.to));
                 }
                 GraphMutationPlanOp::PatchMatchingEdges {
                     relationship,
@@ -453,10 +479,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                         patched.push(edge);
                     }
                     for edge in patched {
-                        inner.edges.insert(
-                            (edge.from.clone(), edge.label.clone(), edge.to.clone()),
-                            edge,
-                        );
+                        inner.edges.insert(MemoryEdgeKey::from_edge(&edge), edge);
                     }
                 }
                 GraphMutationPlanOp::RemoveMatchingEdgeProps {
@@ -481,10 +504,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                         updated.push(edge);
                     }
                     for edge in updated {
-                        inner.edges.insert(
-                            (edge.from.clone(), edge.label.clone(), edge.to.clone()),
-                            edge,
-                        );
+                        inner.edges.insert(MemoryEdgeKey::from_edge(&edge), edge);
                     }
                 }
                 GraphMutationPlanOp::DeleteMatchingEdges { relationship, .. } => {
@@ -494,11 +514,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     report.edge_deletes += edges.len();
                     report.changed_edges += edges.len();
                     for edge in edges {
-                        inner.edges.remove(&(
-                            edge.from.clone(),
-                            edge.label.clone(),
-                            edge.to.clone(),
-                        ));
+                        inner.edges.remove(&MemoryEdgeKey::from_edge(&edge));
                     }
                 }
                 GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
@@ -544,10 +560,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                         }
                     }
                     for edge in edges {
-                        inner.edges.insert(
-                            (edge.from.clone(), edge.label.clone(), edge.to.clone()),
-                            edge,
-                        );
+                        inner.edges.insert(MemoryEdgeKey::from_edge(&edge), edge);
                     }
                 }
                 _ => {

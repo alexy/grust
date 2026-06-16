@@ -777,11 +777,6 @@ impl CypherMutationPlanner {
                 "MATCH {keyword} relationship destination variable '{to_variable}' is not bound"
             )));
         };
-        if parsed.relationship.variable.is_some() {
-            return Err(cypher_syntax(format!(
-                "MATCH {keyword} row-producing relationship creation does not bind relationship variables yet"
-            )));
-        }
         if !parsed.relationship.predicates.is_empty() {
             return Err(cypher_syntax(format!(
                 "MATCH {keyword} relationship creation does not accept relationship WHERE predicates"
@@ -808,9 +803,23 @@ impl CypherMutationPlanner {
             {
                 edge = edge.with_id(id);
             }
+            self.bind_edge_variable(
+                &parsed.relationship,
+                CypherBoundEdgeIdentity {
+                    from: edge.from.clone(),
+                    label: edge.label.clone(),
+                    to: edge.to.clone(),
+                    id: edge.id.clone(),
+                },
+            )?;
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::UpsertEdge { kind, edge },
             ]));
+        }
+        if parsed.relationship.variable.is_some() {
+            return Err(cypher_syntax(format!(
+                "MATCH {keyword} row-producing relationship creation does not bind relationship variables yet"
+            )));
         }
         if parsed.relationship.props.contains_key("id") {
             return Err(cypher_unsupported_cardinality(
@@ -1199,10 +1208,10 @@ impl CypherMutationPlanner {
         let to_id = self.resolve_node_id(&to, "edge mutation destination node")?;
         let relationship = parse_cypher_relationship(rel, &self.parameters)?;
         let mut edge = Edge::new(
-            relationship.label,
+            relationship.label.clone(),
             from_id.clone(),
             to_id.clone(),
-            relationship.props,
+            relationship.props.clone(),
         );
         if let Some(id) = edge
             .props
@@ -1212,6 +1221,15 @@ impl CypherMutationPlanner {
         {
             edge = edge.with_id(id);
         }
+        self.bind_edge_variable(
+            &relationship,
+            CypherBoundEdgeIdentity {
+                from: edge.from.clone(),
+                label: edge.label.clone(),
+                to: edge.to.clone(),
+                id: edge.id.clone(),
+            },
+        )?;
         Ok(ParsedCypherEdge {
             from_id,
             to_id,

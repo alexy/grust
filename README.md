@@ -213,7 +213,9 @@ let graph = graph.build();
 
 The builder deduplicates nodes by `NodeId` and, by default, deduplicates edges
 by `(from, label, to)`. If your domain needs multi-edges, use
-`EdgePolicy::AllowDuplicates`.
+`EdgePolicy::AllowDuplicates`. Backends that support explicit edge IDs, such as
+`MemoryGraphStore`, can preserve id-bearing parallel edges between the same
+endpoints.
 
 ```rust
 let mut graph = GraphBuilder::new().edge_policy(EdgePolicy::AllowDuplicates);
@@ -417,7 +419,8 @@ writes, not exact insert-versus-update outcomes on upsert backends.
 For the first table-returning write slice,
 `execute_cypher_mutation_returning_with_options` accepts a final `RETURN`
 containing property projections over node variables and concrete relationship
-variables already resolved by the write plan, such as `RETURN n.id, n.seen` or
+variables already resolved by the write plan, including concrete edge upserts
+and edge patches. Examples include `RETURN n.id, n.seen` and
 `RETURN e.id, e.weight`. It returns a `CypherMutationTableResult` with the
 usual mutation result plus a `CypherResultTable`; aggregation, paths, broad
 matched-row relationship returns, ordering, limiting, and arbitrary read-query

@@ -371,7 +371,7 @@ flowchart LR
 Grust has several backend and integration crates. They are not meant to erase
 the identity of each backend. They give each backend a Grust-shaped doorway:
 
-- `grust-memory` is the deterministic local store for tests, examples, and no-service workflows.
+- `grust-memory` is the deterministic local store for tests, examples, and no-service workflows, including id-bearing parallel edges.
 - `grust-lancedb` stores universal nodes and edges in LanceDB tables, supports backend-neutral reads and bounded traversal, batches traversal target-node reads, matches property starts exactly after decoding Grust props, and mirrors schema-labeled writes into typed Arrow tables.
 - `grust-ladybug` embeds LadybugDB through the Rust `lbug` crate, supports untyped dynamic graphs and typed schema-applied graphs without a daemon, and can register Arrow IPC node, relationship, and CSR tables for direct Cypher queries.
 - `grust-pggraph` stores universal graph tables in PostgreSQL, registers them with pgGraph, lowers traversal to SQL joins, wraps mutation batches in PostgreSQL transactions, and exposes typed label views and expression indexes from `GraphSchema`.
@@ -438,10 +438,10 @@ describe accepted writes, not exact insert-versus-update outcomes on upsert
 backends, and `MERGE` and edge endpoint writes keep requiring resolved IDs.
 The first `RETURN` support for writes stays similarly narrow: a final property
 projection over node variables and concrete relationship variables already
-resolved by the write plan returns a `CypherMutationTableResult`, keeping the
-count-oriented mutation report separate from the table rows while rejecting
-aggregation, paths, broad matched-row relationship returns, ordering, and
-limiting.
+resolved by the write plan, including concrete edge upserts and edge patches,
+returns a `CypherMutationTableResult`, keeping the count-oriented mutation
+report separate from the table rows while rejecting aggregation, paths, broad
+matched-row relationship returns, ordering, and limiting.
 Parameters are option-driven too: callers can bind Grust `Value`s to `$name`
 placeholders in literal positions such as IDs, property maps, and literal
 property assignments. The first expression form is deliberately narrow:
