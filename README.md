@@ -409,6 +409,11 @@ require resolved IDs before writing.
 `CypherMutationOptions::parameters` lets callers bind Grust `Value`s to
 `$name` placeholders in literal positions such as IDs, property maps, and
 literal property assignments; quoted `'$name'` remains ordinary string text.
+`CypherMutationOptions::null_assignment` defaults to storing
+`SET x.key = null` as `Value::Null`, but callers can select
+`CypherNullAssignment::RemoveProperty` to lower explicit null assignment to
+the same property-removal operations used by `REMOVE`. Map patches such as
+`SET x += {key: null}` always store `Value::Null`.
 The first expression form is intentionally small: node property assignments can
 read the current value of another property on the same node variable and apply
 `+`, `-`, `*`, or `/` with an integer or float literal or parameter, lowering
@@ -439,8 +444,8 @@ node match; edge forms can target either a resolved identity or a broad
 relationship match. Broad relationship matches can filter on relationship
 property predicates beyond `id`; explicit edge `id` remains a separate
 identity filter and can be combined with ordinary relationship predicates.
-Relationship expression updates, remove-on-null, and general computed
-expressions remain deferred.
+Relationship expression updates and general computed expressions remain
+deferred.
 The mutation report includes matched-row and changed node/edge counts for
 broad Sail node and relationship deletes, patches, and property removals, and
 the parser accepts top-level mutation keywords case-insensitively while

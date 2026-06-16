@@ -211,6 +211,7 @@ fn cypher_mutation_options_default_to_upsert_compatible_create() {
         CypherMutationOptions {
             create_mode: CypherCreateMode::UpsertCompatible,
             node_id_policy: CypherNodeIdPolicy::ExplicitOnly,
+            null_assignment: CypherNullAssignment::StoreNull,
             parameters: CypherParameters::new(),
         }
     );
@@ -1462,6 +1463,118 @@ fn cypher_match_set_property_assignment_lowers_resolved_node_and_edge() {
             label: Some(Label::new("Person")),
             props: Props::from([("status".to_string(), Value::from("inactive"))]),
             patch: Props::from([("archived".to_string(), Value::Bool(true))]),
+        }]
+    );
+}
+
+#[test]
+fn cypher_null_assignment_option_removes_properties() {
+    let options = CypherMutationOptions {
+        null_assignment: CypherNullAssignment::RemoveProperty,
+        ..CypherMutationOptions::default()
+    };
+
+    let resolved_node = sail_cypher_mutation_plan_with_options(
+        "MATCH (n:Person {id: 'person-1'}) SET n.nickname = null",
+        options.clone(),
+    )
+    .unwrap()
+    .0;
+    assert_eq!(
+        resolved_node.operations,
+        vec![GraphMutationPlanOp::RemoveNodeProps {
+            id: NodeId::new("person-1"),
+            keys: vec!["nickname".to_string()],
+        }]
+    );
+
+    let broad_node = sail_cypher_mutation_plan_with_options(
+        "MATCH (n:Person {status: 'inactive'}) SET n.nickname = null",
+        options.clone(),
+    )
+    .unwrap()
+    .0;
+    assert_eq!(
+        broad_node.operations,
+        vec![GraphMutationPlanOp::RemoveMatchingNodeProps {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            keys: vec!["nickname".to_string()],
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+
+    let resolved_edge = sail_cypher_mutation_plan_with_options(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS {id: 'edge-1'}]->(:Person {id: 'person-2'}) SET e.note = null",
+        options.clone(),
+    )
+    .unwrap()
+    .0;
+    assert_eq!(
+        resolved_edge.operations,
+        vec![GraphMutationPlanOp::RemoveEdgeProps {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+            id: Some(EdgeId::new("edge-1")),
+            keys: vec!["note".to_string()],
+        }]
+    );
+
+    let broad_edge = sail_cypher_mutation_plan_with_options(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS {active: true}]->(:Person {status: 'inactive'}) SET e.note = null",
+        options,
+    )
+    .unwrap()
+    .0;
+    assert_eq!(
+        broad_edge.operations,
+        vec![GraphMutationPlanOp::RemoveMatchingEdgeProps {
+            relationship: GraphRelationshipMatch {
+                from: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                },
+                label: Label::new("KNOWS"),
+                to: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("status".to_string(), Value::from("inactive"))]),
+                },
+                id: None,
+                props: Props::from([("active".to_string(), Value::Bool(true))]),
+            },
+            keys: vec!["note".to_string()],
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+}
+
+#[test]
+fn cypher_null_assignment_defaults_to_storing_null() {
+    let node = sail_cypher_mutation_plan("MATCH (n:Person {id: 'person-1'}) SET n.nickname = null")
+        .unwrap();
+    assert_eq!(
+        node.operations,
+        vec![GraphMutationPlanOp::PatchNode {
+            id: NodeId::new("person-1"),
+            props: Props::from([("nickname".to_string(), Value::Null)]),
+        }]
+    );
+
+    let map_patch = sail_cypher_mutation_plan_with_options(
+        "MATCH (n:Person {id: 'person-1'}) SET n += {nickname: null}",
+        CypherMutationOptions {
+            null_assignment: CypherNullAssignment::RemoveProperty,
+            ..CypherMutationOptions::default()
+        },
+    )
+    .unwrap()
+    .0;
+    assert_eq!(
+        map_patch.operations,
+        vec![GraphMutationPlanOp::PatchNode {
+            id: NodeId::new("person-1"),
+            props: Props::from([("nickname".to_string(), Value::Null)]),
         }]
     );
 }

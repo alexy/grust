@@ -1043,12 +1043,16 @@ patterns still require resolved IDs before writing.
 `CypherMutationOptions::parameters` binds Grust `Value`s to `$name`
 placeholders only where literals are already accepted: IDs, property maps, and
 literal property assignments. Quoted `'$name'` remains ordinary string text
-rather than a parameter reference. The first expression form is deliberately
-small: node property assignment can read a property on the same node variable
-and apply `+`, `-`, `*`, or `/` with an integer or float literal or parameter.
-That lowers to an explicit read-modify-write mutation plan instead of hidden
-parser-side arithmetic. Resolved mutation-plan execution is backend-neutral
-through `CypherMutationExecutor`: Sail still owns text parsing, but the
+rather than a parameter reference. `CypherMutationOptions::null_assignment`
+defaults to storing `SET x.key = null` as `Value::Null`, but callers can choose
+`CypherNullAssignment::RemoveProperty` to lower explicit null assignment to the
+same property-removal operations used by `REMOVE`; map patches such as
+`SET x += {key: null}` always store `Value::Null`. The first expression form
+is deliberately small: node property assignment can read a property on the same
+node variable and apply `+`, `-`, `*`, or `/` with an integer or float literal
+or parameter. That lowers to an explicit read-modify-write mutation plan
+instead of hidden parser-side arithmetic. Resolved mutation-plan execution is
+backend-neutral through `CypherMutationExecutor`: Sail still owns text parsing, but the
 resulting `GraphMutationPlan` can execute on Sail or on the in-memory backend
 for deterministic tests. Backends that cannot execute a plan operation report
 a structured Cypher execution error. The Sail parser has an internal
@@ -1070,8 +1074,7 @@ match; edge forms can target either a resolved identity or a broad relationship
 match. Broad relationship matches can filter on relationship property
 predicates beyond `id`; explicit edge `id` remains a separate identity filter
 and can be combined with ordinary relationship predicates. Relationship
-expression updates, remove-on-null, and general computed expressions remain
-deferred.
+expression updates and general computed expressions remain deferred.
 For broad node and relationship deletes, patches, and property removals, the
 report records matched rows and changed graph elements, and Sail stages matched
 IDs before using the same delete or load helpers that keep generic and typed

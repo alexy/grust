@@ -91,10 +91,29 @@ impl Default for CypherNodeIdPolicy {
 
 pub type CypherParameters = BTreeMap<String, Value>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CypherNullAssignment {
+    /// Preserve Grust's value model: `SET n.key = null` stores `Value::Null`.
+    StoreNull,
+    /// Cypher-compatibility mode: `SET n.key = null` lowers to `REMOVE n.key`.
+    RemoveProperty,
+}
+
+impl Default for CypherNullAssignment {
+    fn default() -> Self {
+        Self::StoreNull
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CypherMutationOptions {
     pub create_mode: CypherCreateMode,
     pub node_id_policy: CypherNodeIdPolicy,
+    /// Controls how explicit property assignment to `null` is planned.
+    ///
+    /// This applies to `SET n.key = null` and `SET e.key = null`; map patches
+    /// such as `SET n += {key: null}` always store `Value::Null`.
+    pub null_assignment: CypherNullAssignment,
     pub parameters: CypherParameters,
 }
 
@@ -103,6 +122,7 @@ impl Default for CypherMutationOptions {
         Self {
             create_mode: CypherCreateMode::UpsertCompatible,
             node_id_policy: CypherNodeIdPolicy::ExplicitOnly,
+            null_assignment: CypherNullAssignment::StoreNull,
             parameters: CypherParameters::new(),
         }
     }
@@ -339,6 +359,7 @@ fn sail_cypher_mutation_plan_with_options(
 
     let mut planner = CypherMutationPlanner {
         node_id_policy: options.node_id_policy,
+        null_assignment: options.null_assignment,
         parameters: options.parameters,
         ..CypherMutationPlanner::default()
     };
@@ -355,6 +376,7 @@ fn sail_cypher_mutation_plan_with_options(
 struct CypherMutationPlanner {
     node_bindings: HashMap<String, NodeId>,
     node_id_policy: CypherNodeIdPolicy,
+    null_assignment: CypherNullAssignment,
     parameters: CypherParameters,
     generated_node_ids: Vec<CypherGeneratedNodeId>,
 }
@@ -610,7 +632,8 @@ impl CypherMutationPlanner {
 
     fn parse_match_set(&mut self, statement: &str) -> Result<GraphMutationPlan> {
         let (pattern, assignment) = split_match_set(statement)?;
-        let assignment = parse_patch_assignment(assignment, &self.parameters)?;
+        let assignment =
+            parse_patch_assignment(assignment, &self.parameters, self.null_assignment)?;
 
         if pattern.contains("->") {
             let parsed = self.parse_edge_match_pattern(pattern)?;
@@ -625,13 +648,43 @@ impl CypherMutationPlanner {
                     assignment.target
                 )));
             }
-            let PatchAssignmentKind::Props(props) = assignment.kind else {
+            let kind = assignment.kind;
+            if let PatchAssignmentKind::NumericExpression { .. } = kind {
                 return Err(cypher_unsupported_cardinality(
                     "MATCH edge SET does not support numeric expression updates",
                 ));
-            };
+            }
             let from_id = self.resolved_endpoint_id(&parsed.from)?;
             let to_id = self.resolved_endpoint_id(&parsed.to)?;
+            if let PatchAssignmentKind::RemoveProperty { key } = kind {
+                if let (Some(from), Some(to)) = (from_id, to_id)
+                    && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
+                {
+                    let id =
+                        optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
+                    return Ok(GraphMutationPlan::new(vec![
+                        GraphMutationPlanOp::RemoveEdgeProps {
+                            from,
+                            label: parsed.relationship.label,
+                            to,
+                            id,
+                            keys: vec![key],
+                        },
+                    ]));
+                }
+                let relationship =
+                    self.relationship_match_from_pattern(parsed, "MATCH edge SET")?;
+                return Ok(GraphMutationPlan::new(vec![
+                    GraphMutationPlanOp::RemoveMatchingEdgeProps {
+                        relationship,
+                        keys: vec![key],
+                        cardinality: GraphMutationCardinality::BoundedMany,
+                    },
+                ]));
+            };
+            let PatchAssignmentKind::Props(props) = kind else {
+                unreachable!("numeric expression handled above");
+            };
             if let (Some(from), Some(to)) = (from_id, to_id)
                 && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
             {
@@ -688,6 +741,31 @@ impl CypherMutationPlanner {
                     ));
                 }
                 Some((key, source_key, op, operand))
+            }
+            PatchAssignmentKind::RemoveProperty { key } => {
+                if optional_string_prop(&node.props, "id").is_none()
+                    && node
+                        .variable
+                        .as_ref()
+                        .is_none_or(|variable| !self.node_bindings.contains_key(variable))
+                {
+                    let cardinality = match_node_cardinality(&node);
+                    return Ok(GraphMutationPlan::new(vec![
+                        GraphMutationPlanOp::RemoveMatchingNodeProps {
+                            label: node.label,
+                            props: node.props,
+                            keys: vec![key],
+                            cardinality,
+                        },
+                    ]));
+                }
+                let id = self.resolve_node_id(&node, "MATCH node SET")?;
+                return Ok(GraphMutationPlan::new(vec![
+                    GraphMutationPlanOp::RemoveNodeProps {
+                        id,
+                        keys: vec![key],
+                    },
+                ]));
             }
             PatchAssignmentKind::Props(props) => {
                 if optional_string_prop(&node.props, "id").is_none()
@@ -1369,6 +1447,9 @@ struct PatchAssignment {
 
 enum PatchAssignmentKind {
     Props(Props),
+    RemoveProperty {
+        key: String,
+    },
     NumericExpression {
         key: String,
         source_target: String,
@@ -1381,6 +1462,7 @@ enum PatchAssignmentKind {
 fn parse_patch_assignment(
     assignment: &str,
     parameters: &CypherParameters,
+    null_assignment: CypherNullAssignment,
 ) -> Result<PatchAssignment> {
     if let Some(index) = find_unquoted_sequence(assignment, "+=") {
         let target = parse_required_cypher_variable(&assignment[..index], "MATCH SET target")?;
@@ -1410,6 +1492,12 @@ fn parse_patch_assignment(
         });
     }
     let value = parse_cypher_literal(rhs, parameters)?;
+    if value == Value::Null && null_assignment == CypherNullAssignment::RemoveProperty {
+        return Ok(PatchAssignment {
+            target,
+            kind: PatchAssignmentKind::RemoveProperty { key },
+        });
+    }
     Ok(PatchAssignment {
         target,
         kind: PatchAssignmentKind::Props(Props::from([(key, value)])),

@@ -79,6 +79,9 @@ describe unreleased working-tree additions:
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
   operation when the source is a property on the same node variable and the
   operand is an integer or float literal or parameter.
+- `CypherMutationOptions::null_assignment` can opt into Cypher-compatible
+  `SET x.key = null` property removal. The default remains `StoreNull`, and
+  `SET x += {key: null}` always stores `Value::Null`.
 - Writable mutation keywords are parsed case-insensitively at the top level,
   and `// ...` plus `/* ... */` comments are stripped outside string literals.
 
@@ -87,9 +90,9 @@ The v1 implementation should reject, with clear errors:
 - generated node IDs unless the caller explicitly selects the generated-ID
   policy;
 - node identity derived from non-`id` properties;
-- remove-on-null, relationship arithmetic updates, path expressions, functions,
-  `CASE`, list/map projections, cross-variable expressions, or general
-  computed expression evaluation;
+- relationship arithmetic updates, path expressions, functions, `CASE`,
+  list/map projections, cross-variable expressions, or general computed
+  expression evaluation;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
 
@@ -603,9 +606,9 @@ appears.
 The following decisions should remain out of v1:
 
 - pluggable non-UUID ID providers;
-- remove-on-null, relationship arithmetic updates, path expressions, functions,
-  `CASE`, list/map projections, cross-variable expressions, and general
-  computed values;
+- relationship arithmetic updates, path expressions, functions, `CASE`,
+  list/map projections, cross-variable expressions, and general computed
+  values;
 - cross-backend Cypher text mutation APIs;
 - stronger transaction guarantees than the target backend documents.
 
@@ -1085,6 +1088,15 @@ Acceptance criteria:
   and broad matching operations.
 - Document the compatibility tradeoff in this file, the book, and the API
   docs before enabling it for users.
+
+Implementation status: implemented in the working tree after Batch T.
+`CypherNullAssignment` and `CypherMutationOptions::null_assignment` now let
+callers choose between default `StoreNull` behavior and `RemoveProperty`
+compatibility behavior. In `RemoveProperty` mode, explicit `SET n.key = null`
+and `SET e.key = null` lower to the same `RemoveNodeProps`,
+`RemoveMatchingNodeProps`, `RemoveEdgeProps`, or `RemoveMatchingEdgeProps`
+operations used by `REMOVE`, preserving resolved versus broad cardinality.
+Map patches such as `SET n += {key: null}` continue to store `Value::Null`.
 
 ### Batch V: Small Boolean Predicate Grammar
 
