@@ -1934,7 +1934,8 @@ fn find_return_control_clause(return_clause: &str) -> Option<usize> {
                 .chars()
                 .rev()
                 .find(|ch| !ch.is_whitespace());
-            if previous != Some('.') {
+            if previous != Some('.') && !is_return_alias_keyword_prefix(&return_clause[..absolute])
+            {
                 if keyword != "ORDER"
                     || rest[index + keyword.len()..]
                         .trim_start()
@@ -1950,6 +1951,13 @@ fn find_return_control_clause(return_clause: &str) -> Option<usize> {
         }
     }
     None
+}
+
+fn is_return_alias_keyword_prefix(prefix: &str) -> bool {
+    let mut words = prefix.split_whitespace().rev();
+    words
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("AS"))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

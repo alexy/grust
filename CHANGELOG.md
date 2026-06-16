@@ -22,6 +22,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added strict `CREATE` conflict checks to the generic writable Cypher
   `RETURN` helper for concrete node and edge writes, keeping row-producing
   edge strict checks backend-specific.
+- Fixed writable Cypher `RETURN` parsing so aliases such as `AS limit` and
+  `AS skip` no longer trip the `LIMIT` / `SKIP` clause rejection.
 - Added backend-neutral graph constraint metadata for required and unique node
   or edge properties, plus constraint capability reporting so backends can
   distinguish metadata-only constraints from validate-before-write behavior.

@@ -1395,13 +1395,15 @@ relationship variables already bound to concrete edge identities by the write
 plan. Concrete relationship variables can come from edge upserts or edge
 patch/remove operations; row-producing relationship upserts still do not bind
 relationship variables. Examples include `RETURN n.id, n.seen AS seen` and
-`RETURN e.id, e.weight`. Missing properties project as `Value::Null`; `n.id`
-projects the resolved `NodeId`, while `e.id` projects the explicit `EdgeId`
-when one exists. Sail and Memory share the same parser and result-table
-evaluator for this slice. Aggregation, path returns, broad matched-row result
-tables, row-producing relationship projections, `ORDER BY`, `LIMIT`, `SKIP`,
-and arbitrary read-query features remain deferred. The generic Memory/Sail
-returning helper now also honors `CypherCreateMode::ErrorIfExists` for
-concrete node and edge `CREATE` writes through portable `GraphStore` reads;
+`RETURN e.id, e.weight`. Aliases are allowed for supported projections,
+including aliases that happen to be named `limit` or `skip`; actual `ORDER BY`,
+`LIMIT`, and `SKIP` clauses remain rejected. Missing properties project as
+`Value::Null`; `n.id` projects the resolved `NodeId`, while `e.id` projects the
+explicit `EdgeId` when one exists. Sail and Memory share the same parser and
+result-table evaluator for this slice. Aggregation, path returns, broad
+matched-row result tables, row-producing relationship projections, `ORDER BY`,
+`LIMIT`, `SKIP`, and arbitrary read-query features remain deferred. The generic
+Memory/Sail returning helper now also honors `CypherCreateMode::ErrorIfExists`
+for concrete node and edge `CREATE` writes through portable `GraphStore` reads;
 strict row-producing edge conflict checks remain backend-specific because they
 need backend-owned row materialization.

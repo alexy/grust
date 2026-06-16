@@ -2558,6 +2558,30 @@ fn sail_cypher_returning_projects_new_concrete_edge_properties_on_memory_facade(
 }
 
 #[test]
+fn sail_cypher_returning_allows_control_words_as_aliases() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (n:Person {id: 'ada', name: 'Ada'})
+            RETURN n.id AS limit, n.name AS skip;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        result.table,
+        CypherResultTable {
+            columns: vec!["limit".to_string(), "skip".to_string()],
+            rows: vec![vec![Value::from("ada"), Value::from("Ada")]],
+        }
+    );
+}
+
+#[test]
 fn sail_cypher_returning_generic_strict_create_checks_memory_facade() {
     let store = MemoryGraphStore::new();
 
@@ -2655,6 +2679,24 @@ fn sail_cypher_returning_rejects_deferred_result_forms() {
         ))
         .expect_err("row-producing relationship variables should be rejected");
     assert!(matches!(error, GrustError::CypherSyntax(_)));
+
+    let error =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (:Person {id: 'ada'}) RETURN n.id LIMIT 1;",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("LIMIT should be rejected");
+    assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
+
+    let error =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (:Person {id: 'ada'}) RETURN n.id SKIP 1;",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("SKIP should be rejected");
+    assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
 }
 
 #[test]
