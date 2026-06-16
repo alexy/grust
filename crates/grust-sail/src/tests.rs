@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -1444,6 +1445,57 @@ fn cypher_match_create_lowers_row_producing_edge_pattern() {
 }
 
 #[test]
+fn cypher_match_create_lowers_row_producing_edge_variable() {
+    let planned = sail_cypher_mutation_plan_with_return_options(
+        "
+        MATCH (a:Person {status: 'active'}), (b:Team {id: 'team-1'})
+        CREATE (a)-[e:MEMBER_OF {source: 'cypher'}]->(b)
+        RETURN e.label;
+        ",
+        CypherMutationOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        planned.plan.operations,
+        vec![GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+            kind: GraphMutationPlanKind::Create,
+            from: GraphNodeMatch {
+                label: Some(Label::new("Person")),
+                props: Props::from([("status".to_string(), Value::from("active"))]),
+                predicates: Vec::new(),
+            },
+            to: GraphNodeMatch {
+                label: Some(Label::new("Team")),
+                props: Props::from([("id".to_string(), Value::from("team-1"))]),
+                predicates: Vec::new(),
+            },
+            label: Label::new("MEMBER_OF"),
+            props: Props::from([("source".to_string(), Value::from("cypher"))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+    assert_eq!(
+        planned.row_edge_bindings.get("e"),
+        Some(&CypherRowProducedEdgeBinding {
+            kind: GraphMutationPlanKind::Create,
+            from: GraphNodeMatch {
+                label: Some(Label::new("Person")),
+                props: Props::from([("status".to_string(), Value::from("active"))]),
+                predicates: Vec::new(),
+            },
+            to: GraphNodeMatch {
+                label: Some(Label::new("Team")),
+                props: Props::from([("id".to_string(), Value::from("team-1"))]),
+                predicates: Vec::new(),
+            },
+            label: Label::new("MEMBER_OF"),
+            props: Props::from([("source".to_string(), Value::from("cypher"))]),
+        })
+    );
+}
+
+#[test]
 fn cypher_match_merge_lowers_row_producing_edge_pattern() {
     let plan = sail_cypher_mutation_plan_with_options(
         "
@@ -1497,7 +1549,6 @@ fn cypher_match_merge_rejects_unresolved_or_broad_forms() {
         "MATCH (:Person {id: 'person-1'}), (b:Person {id: 'person-2'}) MERGE (:Person {id: 'person-1'})-[:KNOWS]->(b)",
         "MATCH (a:Person {id: 'person-1'}) MERGE (a)-[:KNOWS]->(b)",
         "MATCH (a:Person {id: 'person-1'}) MERGE (:Person {id: 'person-3'})",
-        "MATCH (a:Person {name: 'Ada'}), (b:Person {id: 'person-2'}) MERGE (a)-[e:KNOWS]->(b)",
         "MATCH (a:Person {name: 'Ada'}), (b:Person {id: 'person-2'}) MERGE (a)-[:KNOWS {id: 'edge-1'}]->(b)",
     ] {
         let error =
@@ -1513,7 +1564,6 @@ fn cypher_match_create_rejects_unresolved_or_broad_forms() {
         "MATCH (a:Person {id: 'person-1'}) CREATE (a)-[:KNOWS]->(b)",
         "MATCH (a:Person {id: 'person-1'}) CREATE (:Person {id: 'person-3'})",
         "MATCH (a:Person {id: 'person-1'}) CREATE (a)-[:KNOWS]->(:Person {id: 'person-2'})",
-        "MATCH (a:Person {name: 'Ada'}), (b:Person {id: 'person-2'}) CREATE (a)-[e:KNOWS]->(b)",
         "MATCH (a:Person {name: 'Ada'}), (b:Person {id: 'person-2'}) CREATE (a)-[:KNOWS {id: 'edge-1'}]->(b)",
     ] {
         let error =
@@ -2656,6 +2706,61 @@ fn sail_cypher_returning_projects_bound_elements_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_evaluates_row_produced_edge_values() {
+    let planned = sail_cypher_mutation_plan_with_return_options(
+        "
+        MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
+        CREATE (a)-[e:MEMBER_OF {source: 'cypher'}]->(b)
+        RETURN e.label, e.source, e.id;
+        ",
+        CypherMutationOptions::default(),
+    )
+    .unwrap();
+    let mut row_edge_values = HashMap::new();
+    row_edge_values.insert(
+        "e".to_string(),
+        vec![
+            Edge::new(
+                "MEMBER_OF",
+                "ada",
+                "eng",
+                Props::from([("source".to_string(), Value::from("cypher"))]),
+            ),
+            Edge::new(
+                "MEMBER_OF",
+                "bob",
+                "eng",
+                Props::from([("source".to_string(), Value::from("cypher"))]),
+            ),
+        ],
+    );
+
+    let table = futures_executor::block_on(evaluate_cypher_return_table(
+        &MemoryGraphStore::new(),
+        &planned.node_bindings,
+        &planned.edge_bindings,
+        &row_edge_values,
+        &planned.return_clause,
+    ))
+    .unwrap();
+
+    assert_eq!(
+        table,
+        CypherResultTable {
+            columns: vec![
+                "e.label".to_string(),
+                "e.source".to_string(),
+                "e.id".to_string()
+            ],
+            rows: vec![
+                vec![Value::from("MEMBER_OF"), Value::from("cypher"), Value::Null],
+                vec![Value::from("MEMBER_OF"), Value::from("cypher"), Value::Null]
+            ],
+        }
+    );
+}
+
+#[test]
 fn sail_cypher_returning_allows_control_words_as_aliases() {
     let store = MemoryGraphStore::new();
 
@@ -2825,8 +2930,18 @@ fn sail_cypher_returning_rejects_deferred_result_forms() {
             ",
             CypherMutationOptions::default(),
         ))
-        .expect_err("row-producing relationship variables should be rejected");
-    assert!(matches!(error, GrustError::CypherSyntax(_)));
+        .expect_err("generic helper should reject row-producing relationship returns");
+    assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
+    assert!(
+        futures_executor::block_on(store.get_edges(EdgeQuery {
+            from: Some(NodeId::new("ada")),
+            to: Some(NodeId::new("eng")),
+            label: Some(Label::new("MEMBER_OF")),
+        }))
+        .unwrap()
+        .is_empty(),
+        "generic helper should reject row-producing RETURN before writing"
+    );
 
     let error =
         futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
@@ -3407,6 +3522,67 @@ async fn test_execute_cypher_row_producing_match_create_and_merge_edges() {
         assigned
             .iter()
             .all(|edge| edge.props.get("source") == Some(&Value::from("many-merge")))
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_returning_row_producing_edges() {
+    let store = store().await;
+
+    store
+        .execute_cypher_mutation(
+            "
+            CREATE (:Person {id: 'ada', status: 'active'});
+            CREATE (:Person {id: 'bob', status: 'active'});
+            CREATE (:Team {id: 'eng'});
+            ",
+        )
+        .await
+        .expect("seed row-producing return graph");
+
+    let result = store
+        .execute_cypher_mutation_returning(
+            "
+            MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
+            CREATE (a)-[e:MEMBER_OF {source: 'returning'}]->(b)
+            RETURN e.label, e.source, e.id;
+            ",
+        )
+        .await
+        .expect("row-producing RETURN");
+
+    assert_eq!(
+        result.mutation.report,
+        GraphMutationReport {
+            creates: 1,
+            matched_rows: 2,
+            changed_edges: 2,
+            edge_upserts: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        result.table,
+        CypherResultTable {
+            columns: vec![
+                "e.label".to_string(),
+                "e.source".to_string(),
+                "e.id".to_string()
+            ],
+            rows: vec![
+                vec![
+                    Value::from("MEMBER_OF"),
+                    Value::from("returning"),
+                    Value::Null
+                ],
+                vec![
+                    Value::from("MEMBER_OF"),
+                    Value::from("returning"),
+                    Value::Null
+                ],
+            ],
+        }
     );
 }
 

@@ -422,14 +422,18 @@ For the first table-returning write slice,
 `execute_cypher_mutation_returning_with_options` accepts a final `RETURN`
 containing element or property projections over node variables and concrete
 relationship variables already resolved by the write plan, including concrete
-edge upserts and edge patches. The physical `id` and `label` fields are
-supported alongside stored properties, and whole elements are returned as
-`Value::Json` in the Grust `Node` / `Edge` serde shape. Examples include
-`RETURN n.id, n.label, n.seen`, `RETURN e.id, e.label, e.weight`, and
-`RETURN n AS node, e AS relationship`. It returns a
+edge upserts and edge patches. Sail can also return rows for relationship
+variables produced by restricted row-producing `MATCH ... CREATE/MERGE` edge
+writes. The physical `id` and `label` fields are supported alongside stored
+properties, and whole elements are returned as `Value::Json` in the Grust
+`Node` / `Edge` serde shape. Examples include
+`RETURN n.id, n.label, n.seen`, `RETURN e.id, e.label, e.weight`,
+`RETURN n AS node, e AS relationship`, and `RETURN e.label, e.source` after a
+row-producing edge write. It returns a
 `CypherMutationTableResult` with the usual mutation result plus a
-`CypherResultTable`; aggregation, paths, broad matched-row relationship
-returns, ordering, limiting, and arbitrary read-query features remain rejected.
+`CypherResultTable`; aggregation, paths, ordering, limiting, arbitrary
+read-query features, and portable generic row-producing `RETURN` remain
+rejected.
 `CypherMutationOptions::parameters` lets callers bind Grust `Value`s to
 `$name` placeholders in literal positions such as IDs, property maps, and
 literal property assignments; quoted `'$name'` remains ordinary string text.

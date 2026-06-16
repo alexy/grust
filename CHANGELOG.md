@@ -29,6 +29,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added concrete bound node and relationship element projections such as
   `RETURN n AS node, e AS relationship`, returned as `Value::Json` using the
   existing Grust `Node` / `Edge` serde shape.
+- Added Sail writable Cypher `RETURN` rows for row-producing
+  `MATCH ... CREATE/MERGE` relationship variables such as
+  `RETURN e.label, e.source`.
 - Fixed writable Cypher `RETURN` parsing so aliases such as `AS limit` and
   `AS skip` no longer trip the `LIMIT` / `SKIP` clause rejection.
 - Added backend-neutral graph constraint metadata for required and unique node

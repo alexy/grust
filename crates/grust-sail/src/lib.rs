@@ -419,6 +419,7 @@ struct CypherPlannedMutationWithReturn {
     generated_node_ids: Vec<CypherGeneratedNodeId>,
     node_bindings: HashMap<String, NodeId>,
     edge_bindings: HashMap<String, CypherBoundEdgeIdentity>,
+    row_edge_bindings: HashMap<String, CypherRowProducedEdgeBinding>,
     return_clause: CypherReturnClause,
 }
 
@@ -468,12 +469,14 @@ fn sail_cypher_mutation_plan_with_return_options(
         return_clause,
         &planner.node_bindings,
         &planner.edge_bindings,
+        &planner.row_edge_bindings,
     )?;
     Ok(CypherPlannedMutationWithReturn {
         plan,
         generated_node_ids: planner.generated_node_ids,
         node_bindings: planner.node_bindings,
         edge_bindings: planner.edge_bindings,
+        row_edge_bindings: planner.row_edge_bindings,
         return_clause,
     })
 }
@@ -482,6 +485,7 @@ fn sail_cypher_mutation_plan_with_return_options(
 struct CypherMutationPlanner {
     node_bindings: HashMap<String, NodeId>,
     edge_bindings: HashMap<String, CypherBoundEdgeIdentity>,
+    row_edge_bindings: HashMap<String, CypherRowProducedEdgeBinding>,
     node_id_policy: CypherNodeIdPolicy,
     null_assignment: CypherNullAssignment,
     parameters: CypherParameters,
@@ -816,11 +820,6 @@ impl CypherMutationPlanner {
                 GraphMutationPlanOp::UpsertEdge { kind, edge },
             ]));
         }
-        if parsed.relationship.variable.is_some() {
-            return Err(cypher_syntax(format!(
-                "MATCH {keyword} row-producing relationship creation does not bind relationship variables yet"
-            )));
-        }
         if parsed.relationship.props.contains_key("id") {
             return Err(cypher_unsupported_cardinality(
                 "row-producing MATCH ... CREATE/MERGE does not support explicit relationship id properties",
@@ -828,6 +827,18 @@ impl CypherMutationPlanner {
         }
         let from = self.node_match_from_pattern(from_node, "MATCH CREATE source")?;
         let to = self.node_match_from_pattern(to_node, "MATCH CREATE destination")?;
+        if let Some(variable) = &parsed.relationship.variable {
+            self.bind_row_edge_variable(
+                variable,
+                CypherRowProducedEdgeBinding {
+                    kind,
+                    from: from.clone(),
+                    to: to.clone(),
+                    label: parsed.relationship.label.clone(),
+                    props: parsed.relationship.props.clone(),
+                },
+            )?;
+        }
         Ok(GraphMutationPlan::new(vec![
             GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
                 kind,
@@ -1386,6 +1397,27 @@ impl CypherMutationPlanner {
         self.edge_bindings.insert(variable.clone(), identity);
         Ok(())
     }
+
+    fn bind_row_edge_variable(
+        &mut self,
+        variable: &str,
+        binding: CypherRowProducedEdgeBinding,
+    ) -> Result<()> {
+        if self.node_bindings.contains_key(variable) {
+            return Err(cypher_unresolved_identity(format!(
+                "Cypher variable '{variable}' is already bound to a node id"
+            )));
+        }
+        if self.edge_bindings.contains_key(variable)
+            || self.row_edge_bindings.contains_key(variable)
+        {
+            return Err(cypher_unresolved_identity(format!(
+                "Cypher relationship variable '{variable}' is already bound"
+            )));
+        }
+        self.row_edge_bindings.insert(variable.to_string(), binding);
+        Ok(())
+    }
 }
 
 fn cypher_syntax(message: impl Into<String>) -> GrustError {
@@ -1590,6 +1622,15 @@ struct CypherBoundEdgeIdentity {
     label: Label,
     to: NodeId,
     id: Option<EdgeId>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherRowProducedEdgeBinding {
+    kind: GraphMutationPlanKind,
+    from: GraphNodeMatch,
+    to: GraphNodeMatch,
+    label: Label,
+    props: Props,
 }
 
 struct ParsedWherePredicate {
@@ -1983,12 +2024,14 @@ enum CypherReturnTarget {
 enum CypherReturnElement {
     Node,
     Edge,
+    RowEdge,
 }
 
 fn parse_cypher_return_clause(
     clause: &str,
     node_bindings: &HashMap<String, NodeId>,
     edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
 ) -> Result<CypherReturnClause> {
     let mut projections = Vec::new();
     for projection in split_top_level_commas(clause)? {
@@ -2014,15 +2057,17 @@ fn parse_cypher_return_clause(
         let element = match (
             node_bindings.contains_key(&variable),
             edge_bindings.contains_key(&variable),
+            row_edge_bindings.contains_key(&variable),
         ) {
-            (true, false) => CypherReturnElement::Node,
-            (false, true) => CypherReturnElement::Edge,
-            (true, true) => {
+            (true, false, false) => CypherReturnElement::Node,
+            (false, true, false) => CypherReturnElement::Edge,
+            (false, false, true) => CypherReturnElement::RowEdge,
+            (true, _, _) | (_, true, true) => {
                 return Err(cypher_unresolved_identity(format!(
-                    "RETURN variable '{variable}' is ambiguously bound as both node and relationship",
+                    "RETURN variable '{variable}' is ambiguously bound",
                 )));
             }
-            (false, false) => {
+            (false, false, false) => {
                 return Err(cypher_unresolved_identity(format!(
                     "RETURN references variable '{variable}' that is not bound by the write plan"
                 )));
@@ -2202,6 +2247,7 @@ async fn evaluate_cypher_return_table<S>(
     store: &S,
     node_bindings: &HashMap<String, NodeId>,
     edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
     return_clause: &CypherReturnClause,
 ) -> Result<CypherResultTable>
 where
@@ -2212,106 +2258,108 @@ where
         .iter()
         .map(|projection| projection.column.clone())
         .collect::<Vec<_>>();
-    let mut row = Vec::with_capacity(return_clause.projections.len());
+    let row_count = cypher_return_row_count(return_clause, row_edge_values)?;
+    let mut rows = Vec::with_capacity(row_count);
     let mut nodes = HashMap::new();
     let mut edges = HashMap::new();
-    for projection in &return_clause.projections {
-        match projection.element {
-            CypherReturnElement::Node => {
-                let id = node_bindings.get(&projection.variable).ok_or_else(|| {
-                    cypher_unresolved_identity(format!(
-                        "RETURN references variable '{}' that is not bound by the write plan",
-                        projection.variable
-                    ))
-                })?;
-                let CypherReturnTarget::Property(key) = &projection.target else {
-                    if !nodes.contains_key(&projection.variable) {
-                        let node = store.get_node(id).await?.ok_or_else(|| {
-                            GrustError::CypherExecution(format!(
-                                "RETURN variable '{}' resolved to node '{}' but the node does not exist after the write",
-                                projection.variable,
-                                id.as_str()
-                            ))
-                        })?;
-                        nodes.insert(projection.variable.clone(), node);
-                    }
-                    let node = nodes
-                        .get(&projection.variable)
-                        .expect("node inserted before projection evaluation");
-                    row.push(graph_node_value(node)?);
-                    continue;
-                };
-                if key == "id" {
-                    row.push(Value::from(id.as_str()));
-                    continue;
-                }
-                if !nodes.contains_key(&projection.variable) {
-                    let node = store.get_node(id).await?.ok_or_else(|| {
-                        GrustError::CypherExecution(format!(
-                            "RETURN variable '{}' resolved to node '{}' but the node does not exist after the write",
-                            projection.variable,
-                            id.as_str()
+    for row_index in 0..row_count {
+        let mut row = Vec::with_capacity(return_clause.projections.len());
+        for projection in &return_clause.projections {
+            match projection.element {
+                CypherReturnElement::Node => {
+                    let id = node_bindings.get(&projection.variable).ok_or_else(|| {
+                        cypher_unresolved_identity(format!(
+                            "RETURN references variable '{}' that is not bound by the write plan",
+                            projection.variable
                         ))
                     })?;
-                    nodes.insert(projection.variable.clone(), node);
-                }
-                let node = nodes
-                    .get(&projection.variable)
-                    .expect("node inserted before projection evaluation");
-                if key == "label" {
-                    row.push(Value::from(node.label.as_str()));
-                } else {
-                    row.push(node.props.get(key).cloned().unwrap_or(Value::Null));
-                }
-            }
-            CypherReturnElement::Edge => {
-                let identity = edge_bindings.get(&projection.variable).ok_or_else(|| {
-                    cypher_unresolved_identity(format!(
-                        "RETURN references relationship variable '{}' that is not bound by the write plan",
-                        projection.variable
-                    ))
-                })?;
-                let CypherReturnTarget::Property(key) = &projection.target else {
-                    if !edges.contains_key(&projection.variable) {
-                        let edge =
-                            resolve_bound_edge(store, identity, &projection.variable).await?;
-                        edges.insert(projection.variable.clone(), edge);
+                    let CypherReturnTarget::Property(key) = &projection.target else {
+                        let node =
+                            resolve_bound_node(store, &mut nodes, &projection.variable, id).await?;
+                        row.push(graph_node_value(node)?);
+                        continue;
+                    };
+                    if key == "id" {
+                        row.push(Value::from(id.as_str()));
+                        continue;
                     }
-                    let edge = edges
+                    let node =
+                        resolve_bound_node(store, &mut nodes, &projection.variable, id).await?;
+                    row.push(project_node_value(node, key));
+                }
+                CypherReturnElement::Edge => {
+                    let identity = edge_bindings.get(&projection.variable).ok_or_else(|| {
+                        cypher_unresolved_identity(format!(
+                            "RETURN references relationship variable '{}' that is not bound by the write plan",
+                            projection.variable
+                        ))
+                    })?;
+                    let CypherReturnTarget::Property(key) = &projection.target else {
+                        let edge = resolve_bound_edge_cached(
+                            store,
+                            &mut edges,
+                            identity,
+                            &projection.variable,
+                        )
+                        .await?;
+                        row.push(graph_edge_value(edge)?);
+                        continue;
+                    };
+                    if key == "id" {
+                        row.push(
+                            identity
+                                .id
+                                .as_ref()
+                                .map(|id| Value::from(id.as_str()))
+                                .unwrap_or(Value::Null),
+                        );
+                        continue;
+                    }
+                    if key == "label" {
+                        row.push(Value::from(identity.label.as_str()));
+                        continue;
+                    }
+                    let edge = resolve_bound_edge_cached(
+                        store,
+                        &mut edges,
+                        identity,
+                        &projection.variable,
+                    )
+                    .await?;
+                    row.push(project_edge_value(edge, key));
+                }
+                CypherReturnElement::RowEdge => {
+                    let edge = row_edge_values
                         .get(&projection.variable)
-                        .expect("edge inserted before projection evaluation");
-                    row.push(graph_edge_value(edge)?);
-                    continue;
-                };
-                if key == "id" {
-                    row.push(
-                        identity
-                            .id
-                            .as_ref()
-                            .map(|id| Value::from(id.as_str()))
-                            .unwrap_or(Value::Null),
-                    );
-                    continue;
+                        .and_then(|edges| edges.get(row_index))
+                        .ok_or_else(|| {
+                            cypher_unsupported_cardinality(format!(
+                                "writable Cypher RETURN cannot materialize row-producing relationship variable '{}'",
+                                projection.variable
+                            ))
+                        })?;
+                    let value = match &projection.target {
+                        CypherReturnTarget::Element => graph_edge_value(edge)?,
+                        CypherReturnTarget::Property(key) => {
+                            if key == "id" {
+                                edge.id
+                                    .as_ref()
+                                    .map(|id| Value::from(id.as_str()))
+                                    .unwrap_or(Value::Null)
+                            } else if key == "label" {
+                                Value::from(edge.label.as_str())
+                            } else {
+                                project_edge_value(edge, key)
+                            }
+                        }
+                    };
+                    row.push(value);
                 }
-                if key == "label" {
-                    row.push(Value::from(identity.label.as_str()));
-                    continue;
-                }
-                if !edges.contains_key(&projection.variable) {
-                    let edge = resolve_bound_edge(store, identity, &projection.variable).await?;
-                    edges.insert(projection.variable.clone(), edge);
-                }
-                let edge = edges
-                    .get(&projection.variable)
-                    .expect("edge inserted before projection evaluation");
-                row.push(edge.props.get(key).cloned().unwrap_or(Value::Null));
             }
         }
+        rows.push(row);
     }
-    Ok(CypherResultTable {
-        columns,
-        rows: vec![row],
-    })
+    Ok(CypherResultTable { columns, rows })
 }
 
 async fn resolve_bound_edge<S>(
@@ -2336,7 +2384,95 @@ where
             GrustError::CypherExecution(format!(
                 "RETURN relationship variable '{variable}' resolved to an edge that does not exist after the write"
             ))
-    })
+        })
+}
+
+fn cypher_return_row_count(
+    return_clause: &CypherReturnClause,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+) -> Result<usize> {
+    let mut row_count = None;
+    for projection in &return_clause.projections {
+        if projection.element != CypherReturnElement::RowEdge {
+            continue;
+        }
+        let count = row_edge_values
+            .get(&projection.variable)
+            .map(Vec::len)
+            .ok_or_else(|| {
+                cypher_unsupported_cardinality(format!(
+                    "writable Cypher RETURN cannot materialize row-producing relationship variable '{}'",
+                    projection.variable
+                ))
+            })?;
+        if row_count.is_some_and(|current| current != count) {
+            return Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN does not support mixing row-producing relationship variables with different row counts",
+            ));
+        }
+        row_count = Some(count);
+    }
+    Ok(row_count.unwrap_or(1))
+}
+
+fn return_clause_has_row_edges(return_clause: &CypherReturnClause) -> bool {
+    return_clause
+        .projections
+        .iter()
+        .any(|projection| projection.element == CypherReturnElement::RowEdge)
+}
+
+async fn resolve_bound_node<'a, S>(
+    store: &S,
+    nodes: &'a mut HashMap<String, Node>,
+    variable: &str,
+    id: &NodeId,
+) -> Result<&'a Node>
+where
+    S: GraphStore + Sync,
+{
+    if !nodes.contains_key(variable) {
+        let node = store.get_node(id).await?.ok_or_else(|| {
+            GrustError::CypherExecution(format!(
+                "RETURN variable '{variable}' resolved to node '{}' but the node does not exist after the write",
+                id.as_str()
+            ))
+        })?;
+        nodes.insert(variable.to_string(), node);
+    }
+    Ok(nodes
+        .get(variable)
+        .expect("node inserted before projection evaluation"))
+}
+
+async fn resolve_bound_edge_cached<'a, S>(
+    store: &S,
+    edges: &'a mut HashMap<String, Edge>,
+    identity: &CypherBoundEdgeIdentity,
+    variable: &str,
+) -> Result<&'a Edge>
+where
+    S: GraphStore + Sync,
+{
+    if !edges.contains_key(variable) {
+        let edge = resolve_bound_edge(store, identity, variable).await?;
+        edges.insert(variable.to_string(), edge);
+    }
+    Ok(edges
+        .get(variable)
+        .expect("edge inserted before projection evaluation"))
+}
+
+fn project_node_value(node: &Node, key: &str) -> Value {
+    if key == "label" {
+        Value::from(node.label.as_str())
+    } else {
+        node.props.get(key).cloned().unwrap_or(Value::Null)
+    }
+}
+
+fn project_edge_value(edge: &Edge, key: &str) -> Value {
+    edge.props.get(key).cloned().unwrap_or(Value::Null)
 }
 
 fn graph_node_value(node: &Node) -> Result<Value> {
@@ -2361,6 +2497,11 @@ where
 {
     let create_mode = options.create_mode;
     let planned = sail_cypher_mutation_plan_with_return_options(cypher, options.clone())?;
+    if return_clause_has_row_edges(&planned.return_clause) {
+        return Err(cypher_unsupported_cardinality(
+            "generic writable Cypher RETURN execution cannot materialize row-producing relationship variables",
+        ));
+    }
     if create_mode == CypherCreateMode::ErrorIfExists {
         check_strict_create_conflicts_on_store(store, &planned.plan)
             .await
@@ -2374,6 +2515,7 @@ where
         store,
         &planned.node_bindings,
         &planned.edge_bindings,
+        &HashMap::new(),
         &planned.return_clause,
     )
     .await
@@ -3073,7 +3215,7 @@ impl SailGraphStore {
         })
     }
 
-    /// Executes writable Cypher with a final, strict property-projection RETURN.
+    /// Executes writable Cypher with a final, strict RETURN projection.
     pub async fn execute_cypher_mutation_returning(
         &self,
         cypher: &str,
@@ -3088,10 +3230,11 @@ impl SailGraphStore {
     /// Executes writable Cypher with a final, strict property-projection RETURN.
     ///
     /// This intentionally supports only a small write-result slice: the final
-    /// statement may project properties from node or relationship variables
-    /// whose identities were resolved by the mutation plan. Aggregation,
-    /// ordering, limiting, paths, and arbitrary read-query features remain
-    /// deferred.
+    /// statement may project elements or properties from node or relationship
+    /// variables whose identities were resolved by the mutation plan, plus Sail
+    /// row-producing relationship variables from restricted
+    /// `MATCH ... CREATE/MERGE` edge writes. Aggregation, ordering, limiting,
+    /// paths, and arbitrary read-query features remain deferred.
     pub async fn execute_cypher_mutation_returning_with_options(
         &self,
         cypher: &str,
@@ -3121,10 +3264,15 @@ impl SailGraphStore {
         )
         .await
         .map_err(cypher_execution_error)?;
+        let row_edge_values = self
+            .row_edge_return_values(&planned.row_edge_bindings)
+            .await
+            .map_err(cypher_execution_error)?;
         let table = evaluate_cypher_return_table(
             self,
             &planned.node_bindings,
             &planned.edge_bindings,
+            &row_edge_values,
             &planned.return_clause,
         )
         .await
@@ -3452,6 +3600,23 @@ impl SailGraphStore {
     async fn matching_edges(&self, relationship: &GraphRelationshipMatch) -> Result<Vec<Edge>> {
         let (sql, args) = matching_edges_sql(relationship)?;
         self.run_edge_query(&sql, args).await
+    }
+
+    async fn row_edge_return_values(
+        &self,
+        bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
+    ) -> Result<HashMap<String, Vec<Edge>>> {
+        let mut values = HashMap::new();
+        for (variable, binding) in bindings {
+            let edges = self
+                .edges_from_node_matches(&binding.from, &binding.to, &binding.label, &binding.props)
+                .await?;
+            match binding.kind {
+                GraphMutationPlanKind::Create | GraphMutationPlanKind::Merge => {}
+            }
+            values.insert(variable.clone(), edges);
+        }
+        Ok(values)
     }
 
     async fn apply_upsert_edges_from_node_matches(
