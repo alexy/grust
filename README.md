@@ -523,6 +523,7 @@ declarations, type generation, indexes, or validation:
 pub struct GraphSchema {
     pub nodes: Vec<NodeType>,
     pub edges: Vec<EdgeType>,
+    pub constraints: Vec<GraphConstraint>,
 }
 
 pub struct NodeType {
@@ -562,8 +563,15 @@ let schema = GraphSchema::builder()
         vec![Label::new("Project")],
         vec![Field::required("role", FieldType::String)],
     )
+    .required_node_property("Person", "email")
+    .unique_node_property("Person", "email")
     .build();
 ```
+
+Constraint metadata is portable but enforcement is explicit. Required-property
+constraints validate through `GraphSchema` before writes on backends that keep
+an applied schema, while uniqueness constraints are currently metadata unless a
+backend reports stronger behavior through `GraphStore::constraint_capability`.
 
 The current backends use schema differently:
 

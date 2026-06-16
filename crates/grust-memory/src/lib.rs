@@ -130,6 +130,17 @@ impl GraphStore for MemoryGraphStore {
         Ok(())
     }
 
+    fn constraint_capability(&self, constraint: &GraphConstraint) -> GraphConstraintCapability {
+        match constraint {
+            GraphConstraint::NodePropertyRequired { .. }
+            | GraphConstraint::EdgePropertyRequired { .. } => {
+                GraphConstraintCapability::ValidateBeforeWrite
+            }
+            GraphConstraint::NodePropertyUnique { .. }
+            | GraphConstraint::EdgePropertyUnique { .. } => GraphConstraintCapability::MetadataOnly,
+        }
+    }
+
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
         if let Some(schema) = &inner.schema {

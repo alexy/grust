@@ -1317,6 +1317,18 @@ Acceptance criteria:
 - Defer index management, full Cypher DDL compatibility, and automatic table
   migration until the constraint model is useful across more than one backend.
 
+Implementation status: partially implemented in the working tree after Batch
+AA. `grust-core` now has backend-neutral `GraphConstraint` descriptors for
+required and unique node or edge properties, stores them on `GraphSchema`, and
+exposes builder helpers such as `required_node_property` and
+`unique_node_property`. `GraphStore::constraint_capability` lets a backend
+report `MetadataOnly`, `ValidateBeforeWrite`, or `EnforcedByBackend`. The
+default remains metadata-only; Memory and Sail report validate-before-write
+for required-property constraints and metadata-only for uniqueness. Required
+constraints validate through the existing `GraphSchema` write-validation path.
+Cypher DDL parsing, native backend index/constraint creation, migrations, and
+portable uniqueness enforcement remain deferred.
+
 ### Batch AA: Mutation Results With Optional Element Identities
 
 Extend mutation results only where callers need concrete written identities:

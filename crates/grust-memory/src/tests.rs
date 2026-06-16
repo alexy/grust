@@ -92,6 +92,44 @@ fn applied_schema_validates_memory_graph_writes() {
 }
 
 #[test]
+fn memory_reports_constraint_capabilities_and_validates_required_constraints() {
+    let required = GraphConstraint::NodePropertyRequired {
+        label: Label::new("Person"),
+        key: "email".to_string(),
+    };
+    let unique = GraphConstraint::NodePropertyUnique {
+        label: Label::new("Person"),
+        key: "email".to_string(),
+    };
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .required_node_property("Person", "email")
+        .unique_node_property("Person", "email")
+        .build();
+    let store = MemoryGraphStore::new();
+
+    assert_eq!(
+        store.constraint_capability(&required),
+        GraphConstraintCapability::ValidateBeforeWrite
+    );
+    assert_eq!(
+        store.constraint_capability(&unique),
+        GraphConstraintCapability::MetadataOnly
+    );
+
+    futures_executor::block_on(store.apply_schema(&schema)).unwrap();
+    let error =
+        futures_executor::block_on(store.put_node(&Node::new("Person", "person-1", Props::new())))
+            .expect_err("missing required constrained property should fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("missing required constrained property 'email'")
+    );
+}
+
+#[test]
 fn put_reports_insert_vs_update() {
     let store = MemoryGraphStore::new();
     let node = Node::new("Person", "a", Props::new());

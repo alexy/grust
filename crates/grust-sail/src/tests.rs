@@ -218,6 +218,25 @@ fn cypher_mutation_options_default_to_upsert_compatible_create() {
     );
 }
 
+#[tokio::test]
+async fn sail_reports_constraint_capabilities_without_claiming_uniqueness_enforcement() {
+    let store = request_store();
+    assert_eq!(
+        store.constraint_capability(&GraphConstraint::NodePropertyRequired {
+            label: Label::new("Person"),
+            key: "email".to_string(),
+        }),
+        GraphConstraintCapability::ValidateBeforeWrite
+    );
+    assert_eq!(
+        store.constraint_capability(&GraphConstraint::NodePropertyUnique {
+            label: Label::new("Person"),
+            key: "email".to_string(),
+        }),
+        GraphConstraintCapability::MetadataOnly
+    );
+}
+
 #[test]
 fn cypher_parser_classifies_top_level_mutation_statements() {
     use super::cypher_parser::CypherStatement;

@@ -1578,6 +1578,7 @@ impl<'a> EdgeBuilder<'a> {
 pub struct GraphSchema {
     pub nodes: Vec<NodeType>,
     pub edges: Vec<EdgeType>,
+    pub constraints: Vec<GraphConstraint>,
 }
 
 impl GraphSchema {
@@ -1595,6 +1596,13 @@ impl GraphSchema {
         self.edges
             .iter()
             .find(|edge_type| &edge_type.label == label)
+    }
+
+    pub fn constraints_for_label(&self, label: &Label) -> Vec<&GraphConstraint> {
+        self.constraints
+            .iter()
+            .filter(|constraint| constraint.label() == label)
+            .collect()
     }
 
     pub fn validate_graph(&self, graph: &Graph) -> Result<()> {
@@ -1649,7 +1657,21 @@ impl GraphSchema {
             &node.props,
             &node_type.fields,
             &format!("node '{}'", node.id.as_str()),
-        )
+        )?;
+        for constraint in &self.constraints {
+            if let GraphConstraint::NodePropertyRequired { label, key } = constraint
+                && label == &node.label
+                && !node.props.contains_key(key)
+            {
+                return Err(GrustError::Schema(format!(
+                    "node '{}' with label '{}' is missing required constrained property '{}'",
+                    node.id.as_str(),
+                    node.label.as_str(),
+                    key
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn validate_edge(&self, edge: &Edge, graph: &Graph) -> Result<()> {
@@ -1714,7 +1736,8 @@ impl GraphSchema {
             &edge.props,
             &edge_type.fields,
             &format!("edge '{}'", edge.label.as_str()),
-        )
+        )?;
+        self.validate_edge_required_constraints(edge)
     }
 
     /// Validates an edge's label and props against the schema without
@@ -1728,7 +1751,26 @@ impl GraphSchema {
             &edge.props,
             &edge_type.fields,
             &format!("edge '{}'", edge.label.as_str()),
-        )
+        )?;
+        self.validate_edge_required_constraints(edge)
+    }
+
+    fn validate_edge_required_constraints(&self, edge: &Edge) -> Result<()> {
+        for constraint in &self.constraints {
+            if let GraphConstraint::EdgePropertyRequired { label, key } = constraint
+                && label == &edge.label
+                && !edge.props.contains_key(key)
+            {
+                return Err(GrustError::Schema(format!(
+                    "edge '{}' from '{}' to '{}' is missing required constrained property '{}'",
+                    edge.label.as_str(),
+                    edge.from.as_str(),
+                    edge.to.as_str(),
+                    key
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1746,6 +1788,42 @@ pub struct EdgeType {
     pub fields: Vec<Field>,
     pub directed: bool,
     pub uniqueness: EdgeUniqueness,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphConstraint {
+    NodePropertyUnique { label: Label, key: String },
+    NodePropertyRequired { label: Label, key: String },
+    EdgePropertyUnique { label: Label, key: String },
+    EdgePropertyRequired { label: Label, key: String },
+}
+
+impl GraphConstraint {
+    pub fn label(&self) -> &Label {
+        match self {
+            Self::NodePropertyUnique { label, .. }
+            | Self::NodePropertyRequired { label, .. }
+            | Self::EdgePropertyUnique { label, .. }
+            | Self::EdgePropertyRequired { label, .. } => label,
+        }
+    }
+
+    pub fn key(&self) -> &str {
+        match self {
+            Self::NodePropertyUnique { key, .. }
+            | Self::NodePropertyRequired { key, .. }
+            | Self::EdgePropertyUnique { key, .. }
+            | Self::EdgePropertyRequired { key, .. } => key,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphConstraintCapability {
+    #[default]
+    MetadataOnly,
+    ValidateBeforeWrite,
+    EnforcedByBackend,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1786,6 +1864,7 @@ pub enum EdgeUniqueness {
 pub struct GraphSchemaBuilder {
     nodes: Vec<NodeType>,
     edges: Vec<EdgeType>,
+    constraints: Vec<GraphConstraint>,
 }
 
 impl GraphSchemaBuilder {
@@ -1820,10 +1899,44 @@ impl GraphSchemaBuilder {
         self
     }
 
+    pub fn constraint(mut self, constraint: GraphConstraint) -> Self {
+        self.constraints.push(constraint);
+        self
+    }
+
+    pub fn unique_node_property(self, label: impl Into<Label>, key: impl Into<String>) -> Self {
+        self.constraint(GraphConstraint::NodePropertyUnique {
+            label: label.into(),
+            key: key.into(),
+        })
+    }
+
+    pub fn required_node_property(self, label: impl Into<Label>, key: impl Into<String>) -> Self {
+        self.constraint(GraphConstraint::NodePropertyRequired {
+            label: label.into(),
+            key: key.into(),
+        })
+    }
+
+    pub fn unique_edge_property(self, label: impl Into<Label>, key: impl Into<String>) -> Self {
+        self.constraint(GraphConstraint::EdgePropertyUnique {
+            label: label.into(),
+            key: key.into(),
+        })
+    }
+
+    pub fn required_edge_property(self, label: impl Into<Label>, key: impl Into<String>) -> Self {
+        self.constraint(GraphConstraint::EdgePropertyRequired {
+            label: label.into(),
+            key: key.into(),
+        })
+    }
+
     pub fn build(self) -> GraphSchema {
         GraphSchema {
             nodes: self.nodes,
             edges: self.edges,
+            constraints: self.constraints,
         }
     }
 }
@@ -2044,6 +2157,18 @@ pub trait GraphStore: Send + Sync {
     /// document whether they also validate each subsequent write at runtime.
     async fn apply_schema(&self, _schema: &GraphSchema) -> Result<()> {
         Ok(())
+    }
+
+    /// Reports how this backend treats a portable graph constraint.
+    ///
+    /// The default is metadata-only: the backend may remember or lower the
+    /// constraint as schema metadata, but callers should not assume runtime
+    /// enforcement. Backends that validate through [`GraphSchema`] before each
+    /// write can report [`GraphConstraintCapability::ValidateBeforeWrite`].
+    /// Backends with database-native guarantees can report
+    /// [`GraphConstraintCapability::EnforcedByBackend`].
+    fn constraint_capability(&self, _constraint: &GraphConstraint) -> GraphConstraintCapability {
+        GraphConstraintCapability::MetadataOnly
     }
 
     /// Writes one node.
@@ -2928,13 +3053,14 @@ pub trait GraphMutationStore: GraphStore {
 pub mod prelude {
     pub use crate::{
         CypherMutationExecutor, Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType,
-        EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder, GraphIndex,
-        GraphMutation, GraphMutationAtomicity, GraphMutationCardinality, GraphMutationPlan,
-        GraphMutationPlanKind, GraphMutationPlanOp, GraphMutationReport, GraphMutationStore,
-        GraphNodeMatch, GraphNumericOp, GraphPredicateOp, GraphPropertyPredicate,
-        GraphRelationshipMatch, GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label,
-        LoadReport, Node, NodeId, NodeType, Props, PutOutcome, Result, RfcDate, Start, Step,
-        Traversal, Value, edge_key, evaluate_numeric_update, relationship_type, schema_identifier,
+        EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder, GraphConstraint,
+        GraphConstraintCapability, GraphIndex, GraphMutation, GraphMutationAtomicity,
+        GraphMutationCardinality, GraphMutationPlan, GraphMutationPlanKind, GraphMutationPlanOp,
+        GraphMutationReport, GraphMutationStore, GraphNodeMatch, GraphNumericOp, GraphPredicateOp,
+        GraphPropertyPredicate, GraphRelationshipMatch, GraphSchema, GraphSchemaBuilder,
+        GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType, Props, PutOutcome,
+        Result, RfcDate, Start, Step, Traversal, Value, edge_key, evaluate_numeric_update,
+        relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

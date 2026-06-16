@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added backend-neutral graph constraint metadata for required and unique node
+  or edge properties, plus constraint capability reporting so backends can
+  distinguish metadata-only constraints from validate-before-write behavior.
 - Added opt-in Sail writable Cypher edge identity payloads through
   `CypherMutationOptions::collect_written_edge_identities` and
   `CypherMutationResult::written_edge_identities`, covering resolved and

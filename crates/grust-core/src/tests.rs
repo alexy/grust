@@ -674,6 +674,71 @@ fn graph_schema_validates_labels_fields_and_edge_endpoints() {
 }
 
 #[test]
+fn graph_schema_carries_and_validates_required_constraints() {
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .node("Project", Vec::<Field>::new())
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            Vec::<Field>::new(),
+        )
+        .required_node_property("Person", "email")
+        .required_edge_property("WORKS_ON", "role")
+        .unique_node_property("Person", "email")
+        .build();
+
+    assert_eq!(
+        schema.constraints_for_label(&Label::new("Person")),
+        vec![
+            &GraphConstraint::NodePropertyRequired {
+                label: Label::new("Person"),
+                key: "email".to_string(),
+            },
+            &GraphConstraint::NodePropertyUnique {
+                label: Label::new("Person"),
+                key: "email".to_string(),
+            },
+        ]
+    );
+
+    let mut missing_node_prop = Graph::builder();
+    let _ = missing_node_prop.node("Person", "person:ada").finish();
+    let _ = missing_node_prop.node("Project", "project:grust").finish();
+    let _ = missing_node_prop
+        .edge("WORKS_ON", "person:ada", "project:grust")
+        .prop("role", "maintainer")
+        .finish();
+    let error = schema
+        .validate_graph(&missing_node_prop.build())
+        .expect_err("required node constraint should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("missing required constrained property 'email'")
+    );
+
+    let mut missing_edge_prop = Graph::builder();
+    let _ = missing_edge_prop
+        .node("Person", "person:ada")
+        .prop("email", "ada@example.com")
+        .finish();
+    let _ = missing_edge_prop.node("Project", "project:grust").finish();
+    let _ = missing_edge_prop
+        .edge("WORKS_ON", "person:ada", "project:grust")
+        .finish();
+    let error = schema
+        .validate_graph(&missing_edge_prop.build())
+        .expect_err("required edge constraint should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("missing required constrained property 'role'")
+    );
+}
+
+#[test]
 fn graph_schema_rejects_wrong_field_type() {
     let schema = GraphSchema::builder()
         .node("Person", vec![Field::required("age", FieldType::Int)])

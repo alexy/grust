@@ -3201,6 +3201,17 @@ impl GraphStore for SailGraphStore {
         Ok(())
     }
 
+    fn constraint_capability(&self, constraint: &GraphConstraint) -> GraphConstraintCapability {
+        match constraint {
+            GraphConstraint::NodePropertyRequired { .. }
+            | GraphConstraint::EdgePropertyRequired { .. } => {
+                GraphConstraintCapability::ValidateBeforeWrite
+            }
+            GraphConstraint::NodePropertyUnique { .. }
+            | GraphConstraint::EdgePropertyUnique { .. } => GraphConstraintCapability::MetadataOnly,
+        }
+    }
+
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {

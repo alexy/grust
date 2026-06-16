@@ -1317,14 +1317,15 @@ flowchart LR
 # 10. Schema and Validation Direction
 
 Grust has schema types: `GraphSchema`, `NodeType`, `EdgeType`, `Field`,
-`FieldType`, and `EdgeUniqueness`. `GraphSchema` validates labels, required
-fields, field value types, edge endpoint labels, edge direction, and declared
-edge uniqueness. `FieldType` includes scalar strings, integers, floats,
-booleans, RFC 3339 date-times, string/int/float arrays, and JSON. Date-time
-values use the opaque `RfcDate` type internally; construct them through
-`Value::datetime` or `RfcDate::parse` so invalid strings cannot bypass
-validation. The default `GraphStore::apply_schema` implementation remains a
-no-op, which lets schemaless or schema-later backends work without ceremony.
+`FieldType`, `EdgeUniqueness`, and `GraphConstraint`. `GraphSchema` validates
+labels, required fields, field value types, edge endpoint labels, edge
+direction, declared edge uniqueness, and required-property constraints.
+`FieldType` includes scalar strings, integers, floats, booleans, RFC 3339
+date-times, string/int/float arrays, and JSON. Date-time values use the opaque
+`RfcDate` type internally; construct them through `Value::datetime` or
+`RfcDate::parse` so invalid strings cannot bypass validation. The default
+`GraphStore::apply_schema` implementation remains a no-op, which lets
+schemaless or schema-later backends work without ceremony.
 
 Schema becomes more important for backends that want typed tables, indexes, or
 label-partitioned layouts. The current schema-capable backends use it in
@@ -1352,6 +1353,10 @@ writes. Memory and LadybugDB enforce the applied schema on subsequent local
 writes; Sail and LanceDB validate writes before mirroring them into typed
 tables. FalkorDB, Helix, pgGraph, and SurrealDB currently use schema primarily
 for indexes, query-shape validation, views, or backend-native definitions.
+Constraint handling follows the same honest-capability rule. Required-property
+constraints validate through `GraphSchema`, while uniqueness constraints are
+portable metadata until a backend reports stronger behavior through
+`GraphStore::constraint_capability`.
 
 A flexible backend can keep universal node and edge tables as the portable
 interchange surface. A typed backend can add native tables, fields, indexes, or
