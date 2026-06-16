@@ -217,6 +217,48 @@ fn preserves_parallel_edges_with_distinct_explicit_ids() {
         .expect("second edge remains");
     assert_eq!(edge_1.props.get("seen"), None);
     assert_eq!(edge_2.props.get("seen"), Some(&Value::Bool(true)));
+
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(
+        &GraphMutationPlan::new(vec![GraphMutationPlanOp::DeleteMatchingEdges {
+            relationship: GraphRelationshipMatch {
+                from: GraphNodeMatch {
+                    label: None,
+                    props: Props::from([("id".to_string(), Value::from("a"))]),
+                    predicates: Vec::new(),
+                },
+                label: Label::new("KNOWS"),
+                to: GraphNodeMatch {
+                    label: None,
+                    props: Props::from([("id".to_string(), Value::from("b"))]),
+                    predicates: Vec::new(),
+                },
+                id: Some(EdgeId::new("edge-2")),
+                props: Props::new(),
+                predicates: Vec::new(),
+            },
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]),
+    ))
+    .unwrap();
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            deletes: 1,
+            matched_rows: 1,
+            changed_edges: 1,
+            edge_deletes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let edges = futures_executor::block_on(store.get_edges(EdgeQuery {
+        from: Some(NodeId::new("a")),
+        to: Some(NodeId::new("b")),
+        label: Some(Label::new("KNOWS")),
+    }))
+    .unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].id, Some(EdgeId::new("edge-1")));
 }
 
 #[test]

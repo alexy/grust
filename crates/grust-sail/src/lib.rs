@@ -3268,8 +3268,29 @@ impl SailGraphStore {
         report.matched_rows += edges.len();
         report.edge_deletes += edges.len();
         report.changed_edges += edges.len();
-        for edge in edges {
-            self.delete_edge(&edge.from, &edge.label, &edge.to).await?;
+        let mut keys = edges.iter().map(edge_key).collect::<Vec<_>>();
+        keys.sort();
+        keys.dedup();
+        self.delete_edges_by_keys(&relationship.label, &keys).await
+    }
+
+    async fn delete_edges_by_keys(&self, edge_type: &Label, keys: &[String]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        self.stage_record_batch(DELETE_EDGE_STAGE_VIEW, edge_keys_record_batch(keys)?)
+            .await?;
+        self.run_command(&delete_edge_keys_from_view_sql("grust_edges")?, vec![])
+            .await?;
+        let typed_table = self
+            .current_schema()
+            .and_then(|schema| schema.edge_type(edge_type).cloned());
+        if let Some(edge_type) = typed_table {
+            self.run_command(
+                &delete_edge_keys_from_view_sql(&sail_edge_table(edge_type.label.as_str())?)?,
+                vec![],
+            )
+            .await?;
         }
         Ok(())
     }
@@ -4106,6 +4127,21 @@ fn delete_edges_record_batch(edges: &[(&NodeId, &Label, &NodeId)]) -> Result<Rec
     .map_err(|e| GrustError::Backend(format!("Arrow edge delete batch build failed: {e}")))
 }
 
+fn edge_keys_record_batch(keys: &[String]) -> Result<RecordBatch> {
+    let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+        "edge_key",
+        DataType::Utf8,
+        false,
+    )]));
+    RecordBatch::try_new(
+        schema,
+        vec![Arc::new(StringArray::from_iter_values(
+            keys.iter().map(String::as_str),
+        ))],
+    )
+    .map_err(|e| GrustError::Backend(format!("Arrow edge-key delete batch build failed: {e}")))
+}
+
 fn ipc_bytes(batch: &RecordBatch) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     {
@@ -4182,6 +4218,14 @@ fn delete_edges_from_view_sql(table: &str, include_label: bool) -> Result<String
         "MERGE INTO {} AS t USING {DELETE_EDGE_STAGE_VIEW} AS s \
          ON t.src_id = s.src_id AND t.dst_id = s.dst_id{label_match} \
          WHEN MATCHED THEN DELETE",
+        sql_table_ref(table)?
+    ))
+}
+
+fn delete_edge_keys_from_view_sql(table: &str) -> Result<String> {
+    Ok(format!(
+        "MERGE INTO {} AS t USING {DELETE_EDGE_STAGE_VIEW} AS s \
+         ON t.edge_key = s.edge_key WHEN MATCHED THEN DELETE",
         sql_table_ref(table)?
     ))
 }

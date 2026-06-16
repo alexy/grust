@@ -16,6 +16,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Fixed `MemoryGraphStore` to preserve parallel edges when they carry distinct
   explicit edge IDs, so the deterministic test backend matches Grust's
   identity model for id-bearing multi-edges.
+- Fixed Sail matched relationship deletes to delete by the persisted
+  `edge_key` selected by the relationship match, preserving sibling parallel
+  edges when an explicit edge ID narrows the match.
 - Added backend-neutral graph constraint metadata for required and unique node
   or edge properties, plus constraint capability reporting so backends can
   distinguish metadata-only constraints from validate-before-write behavior.

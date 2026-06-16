@@ -205,6 +205,16 @@ fn generic_edge_merge_persists_edge_identity_columns() {
 }
 
 #[test]
+fn edge_key_delete_sql_targets_persisted_edge_identity() {
+    let sql = delete_edge_keys_from_view_sql("grust_edges").unwrap();
+
+    assert!(sql.contains("MERGE INTO `grust_edges`"));
+    assert!(sql.contains("ON t.edge_key = s.edge_key"));
+    assert!(!sql.contains("t.src_id = s.src_id"));
+    assert!(!sql.contains("t.dst_id = s.dst_id"));
+}
+
+#[test]
 fn cypher_mutation_options_default_to_upsert_compatible_create() {
     assert_eq!(
         CypherMutationOptions::default(),

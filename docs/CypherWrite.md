@@ -992,9 +992,12 @@ cardinality-aware `PatchMatchingEdges`, `RemoveMatchingEdgeProps`, and
 `DeleteMatchingEdges` plan operations. Sail lowers broad relationship
 `DELETE`, `SET +=`, literal `SET e.key = value`, and `REMOVE e.key` through
 that descriptor, joining `grust_edges` to `grust_nodes` for endpoint label and
-property predicates before reusing existing edge load/delete paths. Memory
-executes the same resolved plans over its edge map. Relationship property
-predicates beyond explicit edge `id` are handled separately in Batch T.
+property predicates before reusing existing edge load/delete paths. Sail
+matched deletes now delete by the persisted `edge_key` selected by the match,
+so an explicit relationship `id` can remove one id-bearing parallel edge
+without removing sibling edges between the same endpoints. Memory executes the
+same resolved plans over its edge map. Relationship property predicates beyond
+explicit edge `id` are handled separately in Batch T.
 
 ### Batch Q: Parameters And Literal Binding
 
