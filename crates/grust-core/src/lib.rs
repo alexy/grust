@@ -2460,6 +2460,14 @@ impl GraphMutationPlan {
     }
 }
 
+/// Count-oriented mutation reporting.
+///
+/// Reports created from a [`GraphMutationPlan`] can know exact changed
+/// node/edge counts only for single-identity operations. Matched or
+/// row-producing operations increment their coarse operation counters at
+/// planning time, while executors fill in `matched_rows` and granular
+/// `changed_*` / `*_patches` / `*_deletes` / `*_upserts` counters after they
+/// materialize the backend row set.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GraphMutationReport {
     pub creates: usize,

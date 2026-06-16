@@ -6,6 +6,12 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added row-producing Sail writable Cypher `MATCH ... MERGE` for edges whose
+  endpoints come from matched node variables, reusing the row materialization
+  and backend-neutral execution path introduced for row-producing
+  `MATCH ... CREATE`.
+- Fixed Sail writable Cypher edge/node pattern classification so `->` inside a
+  string literal no longer misclassifies a node pattern as an edge pattern.
 - Added row-producing Sail writable Cypher `MATCH ... CREATE` for edges whose
   endpoints come from matched node variables, with backend-neutral planning,
   Sail and Memory execution, strict-create conflict checks, and ignored live

@@ -401,7 +401,7 @@ impl CypherMutationPlanner {
         pattern: &str,
         kind: GraphMutationPlanKind,
     ) -> Result<GraphMutationPlan> {
-        if pattern.contains("->") {
+        if find_unquoted_sequence(pattern, "->").is_some() {
             let parsed = self.parse_edge_pattern(pattern)?;
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::UpsertEdge {
@@ -450,7 +450,7 @@ impl CypherMutationPlanner {
     }
 
     fn parse_delete(&mut self, pattern: &str) -> Result<GraphMutationPlan> {
-        if pattern.contains("->") {
+        if find_unquoted_sequence(pattern, "->").is_some() {
             let parsed = self.parse_edge_pattern(pattern)?;
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::DeleteEdge {
@@ -500,7 +500,7 @@ impl CypherMutationPlanner {
         let target = parse_required_cypher_variable(target.trim(), "MATCH DELETE target")?;
         let (pattern, where_predicates) = split_match_where(pattern, &self.parameters)?;
 
-        if pattern.contains("->") {
+        if find_unquoted_sequence(pattern, "->").is_some() {
             let mut parsed = self.parse_edge_match_pattern(pattern)?;
             apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge DELETE")?;
             let Some(edge_variable) = parsed.relationship.variable.clone() else {
@@ -633,7 +633,7 @@ impl CypherMutationPlanner {
             &format!("MATCH {keyword}"),
         )?;
 
-        if !edge_pattern.contains("->") {
+        if find_unquoted_sequence(edge_pattern, "->").is_none() {
             return Err(cypher_syntax(format!(
                 "MATCH {keyword} currently supports one relationship pattern only",
             )));
@@ -705,14 +705,9 @@ impl CypherMutationPlanner {
                 GraphMutationPlanOp::UpsertEdge { kind, edge },
             ]));
         }
-        if kind == GraphMutationPlanKind::Merge {
-            return Err(cypher_unsupported_cardinality(
-                "row-producing MATCH ... MERGE is deferred; use MATCH ... CREATE or resolved endpoint IDs",
-            ));
-        }
         if parsed.relationship.props.contains_key("id") {
             return Err(cypher_unsupported_cardinality(
-                "row-producing MATCH ... CREATE does not support explicit relationship id properties",
+                "row-producing MATCH ... CREATE/MERGE does not support explicit relationship id properties",
             ));
         }
         let from = self.node_match_from_pattern(from_node, "MATCH CREATE source")?;
@@ -735,7 +730,7 @@ impl CypherMutationPlanner {
         let assignment =
             parse_patch_assignment(assignment, &self.parameters, self.null_assignment)?;
 
-        if pattern.contains("->") {
+        if find_unquoted_sequence(pattern, "->").is_some() {
             let mut parsed = self.parse_edge_match_pattern(pattern)?;
             apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge SET")?;
             let Some(edge_variable) = parsed.relationship.variable.clone() else {
@@ -944,7 +939,7 @@ impl CypherMutationPlanner {
         let (pattern, where_predicates) = split_match_where(pattern, &self.parameters)?;
         let (target, key) = parse_property_ref(target, "MATCH REMOVE target")?;
 
-        if pattern.contains("->") {
+        if find_unquoted_sequence(pattern, "->").is_some() {
             let mut parsed = self.parse_edge_match_pattern(pattern)?;
             apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge REMOVE")?;
             let Some(edge_variable) = parsed.relationship.variable.clone() else {

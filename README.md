@@ -391,8 +391,8 @@ cardinality-aware broad node
 / `MATCH ... REMOVE n.key` forms plus ID-resolved edge
 `MATCH ... SET e += { ... }`, literal property assignment, and explicit
 property `REMOVE` for resolved node or edge identities, row-producing edge
-`MATCH ... CREATE` when both endpoints come from matched node variables, plus broad
-relationship `MATCH ... DELETE` / `MATCH ... SET e += { ... }` /
+`MATCH ... CREATE` and `MATCH ... MERGE` when both endpoints come from matched
+node variables, plus broad relationship `MATCH ... DELETE` / `MATCH ... SET e += { ... }` /
 `MATCH ... SET e.key = value` / `MATCH ... REMOVE e.key` over endpoint
 predicates, while
 `SailGraphStore::execute_cypher_mutation` executes those plans through
@@ -445,10 +445,11 @@ property removal.
 ID-resolved edge `MATCH ... SET e += { ... }` lowers to backend-neutral edge
 patch mutations and reuses the same typed-edge mirror writes as ordinary edge
 upserts.
-Row-producing edge `MATCH ... CREATE` materializes the matched endpoint node
-pairs before writing, reports the matched row count separately from edge
-upserts, and rejects trailing node creation or explicit relationship IDs in the
-row-producing form. Broad `MATCH ... MERGE` remains deferred.
+Row-producing edge `MATCH ... CREATE` and `MATCH ... MERGE` materialize the
+matched endpoint node pairs before writing, report the matched row count
+separately from attempted edge upserts, and reject trailing node creation or
+explicit relationship IDs in the row-producing form. The current report does
+not distinguish newly inserted merge rows from rows that already existed.
 Literal `SET n.key = value` / `SET e.key = value` lowers to one-key patches,
 and explicit `REMOVE n.key` / `REMOVE e.key` lowers to backend-neutral property
 remove mutations. Node forms can target either a resolved identity or a broad
