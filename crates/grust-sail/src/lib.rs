@@ -472,8 +472,8 @@ impl CypherMutationPlanner {
         let target = parse_required_cypher_variable(target.trim(), "MATCH DELETE target")?;
 
         if pattern.contains("->") {
-            let parsed = self.parse_edge_pattern(pattern)?;
-            let Some(edge_variable) = parsed.edge_variable else {
+            let parsed = self.parse_edge_match_pattern(pattern)?;
+            let Some(edge_variable) = parsed.relationship.variable.clone() else {
                 return Err(cypher_syntax(
                     "MATCH edge DELETE requires the relationship pattern to bind the DELETE target"
                         .to_string(),
@@ -484,11 +484,33 @@ impl CypherMutationPlanner {
                     "MATCH edge DELETE target '{target}' does not match relationship variable '{edge_variable}'"
                 )));
             }
+            let from_id = self.resolved_endpoint_id(&parsed.from)?;
+            let to_id = self.resolved_endpoint_id(&parsed.to)?;
+            let edge_id = optional_string_prop(&parsed.relationship.props, "id");
+            if let (Some(from), Some(to), None) = (from_id, to_id, edge_id) {
+                if parsed
+                    .relationship
+                    .props
+                    .keys()
+                    .any(|key| key.as_str() != "id")
+                {
+                    return Err(cypher_unsupported_cardinality(
+                        "MATCH edge DELETE only supports endpoint, type, and optional edge id identity",
+                    ));
+                }
+                return Ok(GraphMutationPlan::new(vec![
+                    GraphMutationPlanOp::DeleteEdge {
+                        from,
+                        label: parsed.relationship.label,
+                        to,
+                    },
+                ]));
+            }
+            let relationship = self.relationship_match_from_pattern(parsed, "MATCH edge DELETE")?;
             return Ok(GraphMutationPlan::new(vec![
-                GraphMutationPlanOp::DeleteEdge {
-                    from: parsed.from_id,
-                    label: parsed.edge.label,
-                    to: parsed.to_id,
+                GraphMutationPlanOp::DeleteMatchingEdges {
+                    relationship,
+                    cardinality: GraphMutationCardinality::BoundedMany,
                 },
             ]));
         }
@@ -593,8 +615,8 @@ impl CypherMutationPlanner {
         let assignment = parse_patch_assignment(assignment)?;
 
         if pattern.contains("->") {
-            let parsed = self.parse_edge_pattern(pattern)?;
-            let Some(edge_variable) = parsed.edge_variable else {
+            let parsed = self.parse_edge_match_pattern(pattern)?;
+            let Some(edge_variable) = parsed.relationship.variable.clone() else {
                 return Err(cypher_syntax(
                     "MATCH edge SET requires the relationship pattern to bind the patch target",
                 ));
@@ -605,20 +627,36 @@ impl CypherMutationPlanner {
                     assignment.target
                 )));
             }
-            let id = parsed.edge.id.clone();
-            let non_identity_props = parsed.edge.props.keys().any(|key| key.as_str() != "id");
-            if non_identity_props {
+            if parsed
+                .relationship
+                .props
+                .keys()
+                .any(|key| key.as_str() != "id")
+            {
                 return Err(cypher_unsupported_cardinality(
                     "MATCH edge SET only supports endpoint, type, and optional edge id identity",
                 ));
             }
+            let from_id = self.resolved_endpoint_id(&parsed.from)?;
+            let to_id = self.resolved_endpoint_id(&parsed.to)?;
+            if let (Some(from), Some(to)) = (from_id, to_id) {
+                let id = optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
+                return Ok(GraphMutationPlan::new(vec![
+                    GraphMutationPlanOp::PatchEdge {
+                        from,
+                        label: parsed.relationship.label,
+                        to,
+                        id,
+                        props: assignment.props,
+                    },
+                ]));
+            }
+            let relationship = self.relationship_match_from_pattern(parsed, "MATCH edge SET")?;
             return Ok(GraphMutationPlan::new(vec![
-                GraphMutationPlanOp::PatchEdge {
-                    from: parsed.from_id,
-                    label: parsed.edge.label,
-                    to: parsed.to_id,
-                    id,
-                    props: assignment.props,
+                GraphMutationPlanOp::PatchMatchingEdges {
+                    relationship,
+                    patch: assignment.props,
+                    cardinality: GraphMutationCardinality::BoundedMany,
                 },
             ]));
         }
@@ -671,8 +709,8 @@ impl CypherMutationPlanner {
         let (target, key) = parse_property_ref(target, "MATCH REMOVE target")?;
 
         if pattern.contains("->") {
-            let parsed = self.parse_edge_pattern(pattern)?;
-            let Some(edge_variable) = parsed.edge_variable else {
+            let parsed = self.parse_edge_match_pattern(pattern)?;
+            let Some(edge_variable) = parsed.relationship.variable.clone() else {
                 return Err(cypher_syntax(
                     "MATCH edge REMOVE requires the relationship pattern to bind the remove target",
                 ));
@@ -682,20 +720,36 @@ impl CypherMutationPlanner {
                     "MATCH edge REMOVE target '{target}' does not match relationship variable '{edge_variable}'"
                 )));
             }
-            let id = parsed.edge.id.clone();
-            let non_identity_props = parsed.edge.props.keys().any(|key| key.as_str() != "id");
-            if non_identity_props {
+            if parsed
+                .relationship
+                .props
+                .keys()
+                .any(|key| key.as_str() != "id")
+            {
                 return Err(cypher_unsupported_cardinality(
                     "MATCH edge REMOVE only supports endpoint, type, and optional edge id identity",
                 ));
             }
+            let from_id = self.resolved_endpoint_id(&parsed.from)?;
+            let to_id = self.resolved_endpoint_id(&parsed.to)?;
+            if let (Some(from), Some(to)) = (from_id, to_id) {
+                let id = optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
+                return Ok(GraphMutationPlan::new(vec![
+                    GraphMutationPlanOp::RemoveEdgeProps {
+                        from,
+                        label: parsed.relationship.label,
+                        to,
+                        id,
+                        keys: vec![key],
+                    },
+                ]));
+            }
+            let relationship = self.relationship_match_from_pattern(parsed, "MATCH edge REMOVE")?;
             return Ok(GraphMutationPlan::new(vec![
-                GraphMutationPlanOp::RemoveEdgeProps {
-                    from: parsed.from_id,
-                    label: parsed.edge.label,
-                    to: parsed.to_id,
-                    id,
+                GraphMutationPlanOp::RemoveMatchingEdgeProps {
+                    relationship,
                     keys: vec![key],
+                    cardinality: GraphMutationCardinality::BoundedMany,
                 },
             ]));
         }
@@ -783,10 +837,103 @@ impl CypherMutationPlanner {
             from_id,
             to_id,
             edge,
-            edge_variable: relationship.variable,
             from_variable: from.variable,
             to_variable: to.variable,
         })
+    }
+
+    fn parse_edge_match_pattern(&self, pattern: &str) -> Result<ParsedCypherEdgeMatch> {
+        let (from, rest) = parse_cypher_node_pattern(pattern)?;
+        let rest = rest.trim_start();
+        let rest = rest
+            .strip_prefix("-[")
+            .ok_or_else(|| cypher_syntax("edge mutation requires a directed -[...]-> pattern"))?;
+        let rel_end = find_matching(rest, '[', ']')?;
+        let rel = &rest[..rel_end];
+        let rest = rest[rel_end + 1..].trim_start();
+        let rest = rest
+            .strip_prefix("->")
+            .ok_or_else(|| cypher_syntax("edge mutation requires outgoing '->' direction"))?;
+        let (to, rest) = parse_cypher_node_pattern(rest)?;
+        if !rest.trim().is_empty() {
+            return Err(cypher_syntax(format!(
+                "unsupported writable Cypher edge pattern suffix: {}",
+                rest.trim()
+            )));
+        }
+        let relationship = parse_cypher_relationship(rel)?;
+        Ok(ParsedCypherEdgeMatch {
+            from,
+            relationship,
+            to,
+        })
+    }
+
+    fn relationship_match_from_pattern(
+        &mut self,
+        parsed: ParsedCypherEdgeMatch,
+        context: &str,
+    ) -> Result<GraphRelationshipMatch> {
+        if parsed
+            .relationship
+            .props
+            .keys()
+            .any(|key| key.as_str() != "id")
+        {
+            return Err(cypher_unsupported_cardinality(format!(
+                "{context} only supports endpoint, type, and optional edge id identity"
+            )));
+        }
+        let id = optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
+        let from = self.node_match_from_pattern(parsed.from, context)?;
+        let to = self.node_match_from_pattern(parsed.to, context)?;
+        Ok(GraphRelationshipMatch {
+            from,
+            label: parsed.relationship.label,
+            to,
+            id,
+        })
+    }
+
+    fn node_match_from_pattern(
+        &mut self,
+        node: ParsedCypherNode,
+        context: &str,
+    ) -> Result<GraphNodeMatch> {
+        if node.props.contains_key("id") && optional_string_prop(&node.props, "id").is_none() {
+            return Err(cypher_unresolved_identity(format!(
+                "{context} endpoint id must be a string"
+            )));
+        }
+        let mut props = node.props.clone();
+        if let Some(id) = self.resolved_endpoint_id(&node)?
+            && !props.contains_key("id")
+        {
+            props.insert("id".to_string(), Value::from(id.as_str()));
+        }
+        Ok(GraphNodeMatch {
+            label: node.label,
+            props,
+        })
+    }
+
+    fn resolved_endpoint_id(&mut self, node: &ParsedCypherNode) -> Result<Option<NodeId>> {
+        if node.props.contains_key("id") && optional_string_prop(&node.props, "id").is_none() {
+            return Err(cypher_unresolved_identity(
+                "edge mutation endpoint id must be a string",
+            ));
+        }
+        if let Some(id) = optional_string_prop(&node.props, "id") {
+            let id = NodeId::new(id);
+            self.bind_node_variable(node, &id)?;
+            return Ok(Some(id));
+        }
+        if let Some(variable) = &node.variable
+            && let Some(id) = self.node_bindings.get(variable)
+        {
+            return Ok(Some(id.clone()));
+        }
+        Ok(None)
     }
 
     fn resolve_node_id(&mut self, node: &ParsedCypherNode, context: &str) -> Result<NodeId> {
@@ -1004,9 +1151,15 @@ struct ParsedCypherEdge {
     from_id: NodeId,
     to_id: NodeId,
     edge: Edge,
-    edge_variable: Option<String>,
     from_variable: Option<String>,
     to_variable: Option<String>,
+}
+
+#[derive(Debug)]
+struct ParsedCypherEdgeMatch {
+    from: ParsedCypherNode,
+    relationship: ParsedCypherRelationship,
+    to: ParsedCypherNode,
 }
 
 #[derive(Debug)]
@@ -1692,6 +1845,24 @@ impl SailGraphStore {
                     self.apply_delete_matching_nodes(label.as_ref(), props, report)
                         .await?;
                 }
+                GraphMutationPlanOp::PatchMatchingEdges {
+                    relationship,
+                    patch,
+                    ..
+                } => {
+                    self.apply_patch_matching_edges(relationship, patch, report)
+                        .await?;
+                }
+                GraphMutationPlanOp::RemoveMatchingEdgeProps {
+                    relationship, keys, ..
+                } => {
+                    self.apply_remove_matching_edge_props(relationship, keys, report)
+                        .await?;
+                }
+                GraphMutationPlanOp::DeleteMatchingEdges { relationship, .. } => {
+                    self.apply_delete_matching_edges(relationship, report)
+                        .await?;
+                }
                 _ => {
                     let mutation = GraphMutation::from(operation.clone());
                     self.apply_mutations(std::slice::from_ref(&mutation))
@@ -1760,6 +1931,90 @@ impl SailGraphStore {
             }
         }
         self.load_nodes(schema.as_ref(), &nodes).await
+    }
+
+    async fn apply_patch_matching_edges(
+        &self,
+        relationship: &GraphRelationshipMatch,
+        patch: &Props,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let mut edges = self.matching_edges(relationship).await?;
+        report.matched_rows += edges.len();
+        report.edge_patches += edges.len();
+        report.changed_edges += edges.len();
+        if edges.is_empty() {
+            return Ok(());
+        }
+
+        for edge in &mut edges {
+            for (key, value) in patch {
+                edge.props.insert(key.clone(), value.clone());
+            }
+        }
+        self.validate_and_load_edges(&edges).await
+    }
+
+    async fn apply_remove_matching_edge_props(
+        &self,
+        relationship: &GraphRelationshipMatch,
+        keys: &[String],
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let mut edges = self.matching_edges(relationship).await?;
+        report.matched_rows += edges.len();
+        report.edge_property_removes += edges.len();
+        report.changed_edges += edges.len();
+        if edges.is_empty() {
+            return Ok(());
+        }
+
+        for edge in &mut edges {
+            for key in keys {
+                edge.props.remove(key);
+            }
+        }
+        self.validate_and_load_edges(&edges).await
+    }
+
+    async fn apply_delete_matching_edges(
+        &self,
+        relationship: &GraphRelationshipMatch,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let edges = self.matching_edges(relationship).await?;
+        report.matched_rows += edges.len();
+        report.edge_deletes += edges.len();
+        report.changed_edges += edges.len();
+        for edge in edges {
+            self.delete_edge(&edge.from, &edge.label, &edge.to).await?;
+        }
+        Ok(())
+    }
+
+    async fn matching_edges(&self, relationship: &GraphRelationshipMatch) -> Result<Vec<Edge>> {
+        let (sql, args) = matching_edges_sql(relationship)?;
+        self.run_edge_query(&sql, args).await
+    }
+
+    async fn validate_and_load_edges(&self, edges: &[Edge]) -> Result<()> {
+        let schema = self.current_schema();
+        let endpoint_ids = edges
+            .iter()
+            .flat_map(|edge| [&edge.from, &edge.to])
+            .cloned()
+            .collect::<Vec<_>>();
+        let endpoint_nodes = self.get_nodes(&endpoint_ids).await?;
+        let node_labels = endpoint_nodes
+            .iter()
+            .map(|node| (&node.id, &node.label))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(schema) = schema.as_ref() {
+            for edge in edges {
+                schema.validate_edge_with(edge, |id| node_labels.get(id).copied())?;
+            }
+        }
+        self.load_edges(schema.as_ref(), edges, &node_labels).await
     }
 
     async fn apply_delete_matching_nodes(
@@ -2846,6 +3101,86 @@ fn matching_nodes_sql(
         format!("SELECT id, label, props FROM grust_nodes{where_clause}"),
         args,
     ))
+}
+
+fn matching_edges_sql(
+    relationship: &GraphRelationshipMatch,
+) -> Result<(String, Vec<expression::Literal>)> {
+    let mut conditions = vec!["e.edge_type = ?".to_string()];
+    let mut args = vec![lit_str(relationship.label.as_str())];
+    if let Some(id) = &relationship.id {
+        conditions.push("e.id = ?".to_string());
+        args.push(lit_str(id.as_str()));
+    }
+    append_node_match_conditions("src", &relationship.from, &mut conditions, &mut args)?;
+    append_node_match_conditions("dst", &relationship.to, &mut conditions, &mut args)?;
+    Ok((
+        format!(
+            "SELECT e.id, e.src_id, src.label AS src_label, e.dst_id, dst.label AS dst_label, e.edge_type, e.props \
+             FROM grust_edges e \
+             JOIN grust_nodes src ON src.id = e.src_id \
+             JOIN grust_nodes dst ON dst.id = e.dst_id \
+             WHERE {}",
+            conditions.join(" AND ")
+        ),
+        args,
+    ))
+}
+
+fn append_node_match_conditions(
+    alias: &str,
+    node: &GraphNodeMatch,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    if let Some(label) = &node.label {
+        conditions.push(format!("{alias}.label = ?"));
+        args.push(lit_str(label.as_str()));
+    }
+    for (key, value) in &node.props {
+        if key == "id" {
+            let Some(id) = value.as_str() else {
+                return Err(cypher_unresolved_identity(
+                    "relationship endpoint id predicate must be a string",
+                ));
+            };
+            conditions.push(format!("{alias}.id = ?"));
+            args.push(lit_str(id));
+            continue;
+        }
+        validate_json_key(key)?;
+        let json_value = format!("GET_JSON_OBJECT({alias}.props, '$.{key}')");
+        match value {
+            Value::String(s) => {
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(s));
+            }
+            Value::Int(n) => {
+                conditions.push(format!("CAST({json_value} AS BIGINT) = ?"));
+                args.push(lit_long(*n));
+            }
+            Value::Float(f) => {
+                conditions.push(format!("CAST({json_value} AS DOUBLE) = ?"));
+                args.push(lit_double(*f));
+            }
+            Value::Bool(b) => {
+                conditions.push(format!("CAST({json_value} AS BOOLEAN) = ?"));
+                args.push(lit_bool(*b));
+            }
+            Value::Null => conditions.push(format!("{json_value} IS NULL")),
+            Value::DateTime(_)
+            | Value::StringArray(_)
+            | Value::IntArray(_)
+            | Value::FloatArray(_)
+            | Value::Json(_) => {
+                let json = serde_json::to_string(&value.to_json())
+                    .map_err(|err| GrustError::Serialization(err.to_string()))?;
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(&json));
+            }
+        }
+    }
+    Ok(())
 }
 
 // Joins match nodes to edges by id only: node ids are globally unique (the

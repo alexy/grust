@@ -390,7 +390,10 @@ cardinality-aware broad node
 `MATCH ... DELETE` / `MATCH ... SET n += { ... }` / `MATCH ... SET n.key = value`
 / `MATCH ... REMOVE n.key` forms plus ID-resolved edge
 `MATCH ... SET e += { ... }`, literal property assignment, and explicit
-property `REMOVE` for resolved node or edge identities, while
+property `REMOVE` for resolved node or edge identities, plus broad
+relationship `MATCH ... DELETE` / `MATCH ... SET e += { ... }` /
+`MATCH ... SET e.key = value` / `MATCH ... REMOVE e.key` over endpoint
+predicates, while
 `SailGraphStore::execute_cypher_mutation` executes those plans through
 `GraphMutationStore` and the existing Sail staging and `MERGE INTO` paths.
 For stricter Cypher compatibility, callers can use
@@ -425,13 +428,13 @@ upserts.
 Literal `SET n.key = value` / `SET e.key = value` lowers to one-key patches,
 and explicit `REMOVE n.key` / `REMOVE e.key` lowers to backend-neutral property
 remove mutations. Node forms can target either a resolved identity or a broad
-node match; edge forms still require resolved relationship identity. Broader
-expression updates, broad relationship property mutation, and remove-on-null
-remain deferred.
+node match; edge forms can target either a resolved identity or a broad
+relationship match. Broader expression updates, relationship property
+predicates beyond explicit edge `id`, and remove-on-null remain deferred.
 The mutation report includes matched-row and changed node/edge counts for
-broad Sail deletes and broad Sail node patches, and the parser accepts
-top-level mutation keywords case-insensitively while stripping Cypher comments
-outside string literals.
+broad Sail node and relationship deletes, patches, and property removals, and
+the parser accepts top-level mutation keywords case-insensitively while
+stripping Cypher comments outside string literals.
 Cypher planning and execution failures use structured `GrustError` variants
 for syntax, unresolved identity, unsupported cardinality, and execution errors;
 execution remains Sail-specific over backend-neutral mutation plans.

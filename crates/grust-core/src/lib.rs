@@ -2132,6 +2132,10 @@ pub enum GraphMutation {
         id: Option<EdgeId>,
         props: Props,
     },
+    PatchMatchingEdges {
+        relationship: GraphRelationshipMatch,
+        patch: Props,
+    },
     RemoveNodeProps {
         id: NodeId,
         keys: Vec<String>,
@@ -2148,6 +2152,10 @@ pub enum GraphMutation {
         id: Option<EdgeId>,
         keys: Vec<String>,
     },
+    RemoveMatchingEdgeProps {
+        relationship: GraphRelationshipMatch,
+        keys: Vec<String>,
+    },
     DeleteMatchingNodes {
         label: Option<Label>,
         props: Props,
@@ -2158,6 +2166,9 @@ pub enum GraphMutation {
         from: NodeId,
         label: Label,
         to: NodeId,
+    },
+    DeleteMatchingEdges {
+        relationship: GraphRelationshipMatch,
     },
 }
 
@@ -2178,6 +2189,20 @@ pub enum GraphMutationCardinality {
     SingleIdentity,
     BoundedMany,
     UnboundedMany,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GraphNodeMatch {
+    pub label: Option<Label>,
+    pub props: Props,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphRelationshipMatch {
+    pub from: GraphNodeMatch,
+    pub label: Label,
+    pub to: GraphNodeMatch,
+    pub id: Option<EdgeId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -2203,6 +2228,11 @@ pub enum GraphMutationPlanOp {
         id: Option<EdgeId>,
         props: Props,
     },
+    PatchMatchingEdges {
+        relationship: GraphRelationshipMatch,
+        patch: Props,
+        cardinality: GraphMutationCardinality,
+    },
     RemoveNodeProps {
         id: NodeId,
         keys: Vec<String>,
@@ -2220,6 +2250,11 @@ pub enum GraphMutationPlanOp {
         id: Option<EdgeId>,
         keys: Vec<String>,
     },
+    RemoveMatchingEdgeProps {
+        relationship: GraphRelationshipMatch,
+        keys: Vec<String>,
+        cardinality: GraphMutationCardinality,
+    },
     DeleteMatchingNodes {
         label: Option<Label>,
         props: Props,
@@ -2234,6 +2269,10 @@ pub enum GraphMutationPlanOp {
         from: NodeId,
         label: Label,
         to: NodeId,
+    },
+    DeleteMatchingEdges {
+        relationship: GraphRelationshipMatch,
+        cardinality: GraphMutationCardinality,
     },
 }
 
@@ -2321,6 +2360,9 @@ impl GraphMutationReport {
                 self.edge_patches += 1;
                 self.changed_edges += 1;
             }
+            GraphMutationPlanOp::PatchMatchingEdges { .. } => {
+                self.patches += 1;
+            }
             GraphMutationPlanOp::RemoveNodeProps { .. } => {
                 self.property_removes += 1;
                 self.node_property_removes += 1;
@@ -2334,6 +2376,9 @@ impl GraphMutationReport {
                 self.edge_property_removes += 1;
                 self.changed_edges += 1;
             }
+            GraphMutationPlanOp::RemoveMatchingEdgeProps { .. } => {
+                self.property_removes += 1;
+            }
             GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
                 self.deletes += 1;
             }
@@ -2346,6 +2391,9 @@ impl GraphMutationReport {
                 self.deletes += 1;
                 self.edge_deletes += 1;
                 self.changed_edges += 1;
+            }
+            GraphMutationPlanOp::DeleteMatchingEdges { .. } => {
+                self.deletes += 1;
             }
         }
     }
@@ -2379,6 +2427,14 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 id,
                 props,
             },
+            GraphMutationPlanOp::PatchMatchingEdges {
+                relationship,
+                patch,
+                ..
+            } => Self::PatchMatchingEdges {
+                relationship,
+                patch,
+            },
             GraphMutationPlanOp::RemoveNodeProps { id, keys } => Self::RemoveNodeProps { id, keys },
             GraphMutationPlanOp::RemoveEdgeProps {
                 from,
@@ -2393,6 +2449,9 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 id,
                 keys,
             },
+            GraphMutationPlanOp::RemoveMatchingEdgeProps {
+                relationship, keys, ..
+            } => Self::RemoveMatchingEdgeProps { relationship, keys },
             GraphMutationPlanOp::RemoveMatchingNodeProps {
                 label, props, keys, ..
             } => Self::RemoveMatchingNodeProps { label, props, keys },
@@ -2403,6 +2462,9 @@ impl From<GraphMutationPlanOp> for GraphMutation {
             GraphMutationPlanOp::DeleteNode(id) => Self::DeleteNode(id),
             GraphMutationPlanOp::DeleteEdge { from, label, to } => {
                 Self::DeleteEdge { from, label, to }
+            }
+            GraphMutationPlanOp::DeleteMatchingEdges { relationship, .. } => {
+                Self::DeleteMatchingEdges { relationship }
             }
         }
     }
@@ -2436,6 +2498,22 @@ pub trait CypherMutationExecutor: GraphMutationStore {
                     return Err(GrustError::CypherExecution(
                         "matched node property removals require backend-specific query support"
                             .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::PatchMatchingEdges { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge patches require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::RemoveMatchingEdgeProps { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge property removals require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::DeleteMatchingEdges { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge deletes require backend-specific query support".to_string(),
                     ));
                 }
                 _ => {
@@ -2523,6 +2601,11 @@ pub trait GraphMutationStore: GraphStore {
                         }
                     }
                 }
+                GraphMutation::PatchMatchingEdges { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched edge patches require backend-specific query support".to_string(),
+                    ));
+                }
                 GraphMutation::RemoveNodeProps { id, keys } => {
                     if let Some(mut node) = self.get_node(id).await? {
                         for key in keys {
@@ -2570,6 +2653,12 @@ pub trait GraphMutationStore: GraphStore {
                         }
                     }
                 }
+                GraphMutation::RemoveMatchingEdgeProps { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched edge property removal requires backend-specific query support"
+                            .to_string(),
+                    ));
+                }
                 GraphMutation::DeleteMatchingNodes { .. } => {
                     return Err(GrustError::Unsupported(
                         "matched node deletes require backend-specific query support".to_string(),
@@ -2581,6 +2670,11 @@ pub trait GraphMutationStore: GraphStore {
                 }
                 GraphMutation::DeleteEdge { from, label, to } => {
                     self.delete_edge(from, label, to).await?
+                }
+                GraphMutation::DeleteMatchingEdges { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched edge deletes require backend-specific query support".to_string(),
+                    ));
                 }
             }
         }
@@ -2594,9 +2688,9 @@ pub mod prelude {
         EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder, GraphIndex,
         GraphMutation, GraphMutationAtomicity, GraphMutationCardinality, GraphMutationPlan,
         GraphMutationPlanKind, GraphMutationPlanOp, GraphMutationReport, GraphMutationStore,
-        GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId,
-        NodeType, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value, edge_key,
-        relationship_type, schema_identifier,
+        GraphNodeMatch, GraphRelationshipMatch, GraphSchema, GraphSchemaBuilder, GraphStore,
+        GrustError, Label, LoadReport, Node, NodeId, NodeType, Props, PutOutcome, Result, RfcDate,
+        Start, Step, Traversal, Value, edge_key, relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

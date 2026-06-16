@@ -95,6 +95,18 @@ fn edge_key_prefers_explicit_id_then_structural_identity() {
 fn mutation_plan_reports_and_lowers_to_graph_mutations() {
     let node = Node::new("Person", "person-1", Props::new());
     let edge = Edge::new("KNOWS", "person-1", "person-2", Props::new()).with_id("edge-1");
+    let relationship = GraphRelationshipMatch {
+        from: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("active"))]),
+        },
+        label: Label::new("KNOWS"),
+        to: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::new(),
+        },
+        id: None,
+    };
     let plan = GraphMutationPlan::new(vec![
         GraphMutationPlanOp::UpsertNode {
             kind: GraphMutationPlanKind::Create,
@@ -121,6 +133,11 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             id: Some(EdgeId::new("edge-1")),
             props: Props::from([("since".to_string(), Value::Int(2026))]),
         },
+        GraphMutationPlanOp::PatchMatchingEdges {
+            relationship: relationship.clone(),
+            patch: Props::from([("seen".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
         GraphMutationPlanOp::RemoveNodeProps {
             id: NodeId::new("person-1"),
             keys: vec!["nickname".to_string()],
@@ -138,9 +155,18 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             id: Some(EdgeId::new("edge-1")),
             keys: vec!["note".to_string()],
         },
+        GraphMutationPlanOp::RemoveMatchingEdgeProps {
+            relationship: relationship.clone(),
+            keys: vec!["note".to_string()],
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
         GraphMutationPlanOp::DeleteMatchingNodes {
             label: Some(Label::new("Person")),
             props: Props::from([("active".to_string(), Value::Bool(false))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::DeleteMatchingEdges {
+            relationship: relationship.clone(),
             cardinality: GraphMutationCardinality::BoundedMany,
         },
         GraphMutationPlanOp::DeleteEdge {
@@ -156,9 +182,9 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
         GraphMutationReport {
             creates: 1,
             merges: 1,
-            deletes: 3,
-            patches: 3,
-            property_removes: 3,
+            deletes: 4,
+            patches: 4,
+            property_removes: 4,
             matched_rows: 0,
             changed_nodes: 4,
             changed_edges: 4,
@@ -193,6 +219,10 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
                 id: Some(EdgeId::new("edge-1")),
                 props: Props::from([("since".to_string(), Value::Int(2026))]),
             },
+            GraphMutation::PatchMatchingEdges {
+                relationship: relationship.clone(),
+                patch: Props::from([("seen".to_string(), Value::Bool(true))]),
+            },
             GraphMutation::RemoveNodeProps {
                 id: NodeId::new("person-1"),
                 keys: vec!["nickname".to_string()],
@@ -209,10 +239,15 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
                 id: Some(EdgeId::new("edge-1")),
                 keys: vec!["note".to_string()],
             },
+            GraphMutation::RemoveMatchingEdgeProps {
+                relationship: relationship.clone(),
+                keys: vec!["note".to_string()],
+            },
             GraphMutation::DeleteMatchingNodes {
                 label: Some(Label::new("Person")),
                 props: Props::from([("active".to_string(), Value::Bool(false))]),
             },
+            GraphMutation::DeleteMatchingEdges { relationship },
             GraphMutation::DeleteEdge {
                 from: NodeId::new("person-1"),
                 label: Label::new("KNOWS"),

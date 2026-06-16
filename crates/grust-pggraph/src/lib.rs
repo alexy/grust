@@ -557,6 +557,11 @@ fn mutation_sql(nodes_table: &str, edges_table: &str, mutation: &GraphMutation) 
                 "pgGraph edge patches are not implemented yet".to_string(),
             ));
         }
+        GraphMutation::PatchMatchingEdges { .. } => {
+            return Err(GrustError::Unsupported(
+                "pgGraph matched edge patches are not implemented yet".to_string(),
+            ));
+        }
         GraphMutation::RemoveNodeProps { .. } => {
             return Err(GrustError::Unsupported(
                 "pgGraph node property removals are not implemented yet".to_string(),
@@ -572,6 +577,11 @@ fn mutation_sql(nodes_table: &str, edges_table: &str, mutation: &GraphMutation) 
                 "pgGraph edge property removals are not implemented yet".to_string(),
             ));
         }
+        GraphMutation::RemoveMatchingEdgeProps { .. } => {
+            return Err(GrustError::Unsupported(
+                "pgGraph matched edge property removals are not implemented yet".to_string(),
+            ));
+        }
         GraphMutation::DeleteMatchingNodes { .. } => {
             return Err(GrustError::Unsupported(
                 "pgGraph matched node deletes are not implemented yet".to_string(),
@@ -583,6 +593,11 @@ fn mutation_sql(nodes_table: &str, edges_table: &str, mutation: &GraphMutation) 
         }
         GraphMutation::DeleteEdge { from, label, to } => {
             delete_edge_sql(edges_table, from, label, to)
+        }
+        GraphMutation::DeleteMatchingEdges { .. } => {
+            return Err(GrustError::Unsupported(
+                "pgGraph matched edge deletes are not implemented yet".to_string(),
+            ));
         }
     })
 }

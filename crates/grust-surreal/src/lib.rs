@@ -919,6 +919,9 @@ fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> R
         GraphMutation::PatchEdge { .. } => Err(GrustError::Unsupported(
             "SurrealDB edge patches are not implemented yet".to_string(),
         )),
+        GraphMutation::PatchMatchingEdges { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched edge patches are not implemented yet".to_string(),
+        )),
         GraphMutation::RemoveNodeProps { .. } => Err(GrustError::Unsupported(
             "SurrealDB node property removals are not implemented yet".to_string(),
         )),
@@ -927,6 +930,9 @@ fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> R
         )),
         GraphMutation::RemoveEdgeProps { .. } => Err(GrustError::Unsupported(
             "SurrealDB edge property removals are not implemented yet".to_string(),
+        )),
+        GraphMutation::RemoveMatchingEdgeProps { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched edge property removals are not implemented yet".to_string(),
         )),
         GraphMutation::DeleteMatchingNodes { .. } => Err(GrustError::Unsupported(
             "SurrealDB matched node deletes are not implemented yet".to_string(),
@@ -938,6 +944,9 @@ fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> R
         GraphMutation::DeleteEdge { from, label, to } => {
             Ok(surreal_delete_edge_query(from, label, to, config))
         }
+        GraphMutation::DeleteMatchingEdges { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched edge deletes are not implemented yet".to_string(),
+        )),
     }
 }
 

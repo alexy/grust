@@ -849,6 +849,34 @@ fn cypher_match_delete_lowers_id_resolved_patterns() {
             to: NodeId::new("person-2"),
         }]
     );
+
+    let broad_edge = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {status: 'inactive'}) DELETE e",
+    )
+    .unwrap();
+    let relationship = GraphRelationshipMatch {
+        from: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::from([("id".to_string(), Value::from("person-1"))]),
+        },
+        label: Label::new("KNOWS"),
+        to: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("inactive"))]),
+        },
+        id: None,
+    };
+    assert_eq!(
+        broad_edge.report(),
+        GraphMutationReport {
+            deletes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        broad_edge.into_mutations(),
+        vec![GraphMutation::DeleteMatchingEdges { relationship }]
+    );
 }
 
 #[test]
@@ -1159,6 +1187,29 @@ fn cypher_match_set_map_patch_lowers_id_resolved_edge() {
             props: Props::from([("since".to_string(), Value::Int(2026))]),
         }]
     );
+
+    let broad = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {status: 'inactive'}) SET e += {seen: true}",
+    )
+    .unwrap();
+    assert_eq!(
+        broad.into_mutations(),
+        vec![GraphMutation::PatchMatchingEdges {
+            relationship: GraphRelationshipMatch {
+                from: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                },
+                label: Label::new("KNOWS"),
+                to: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("status".to_string(), Value::from("inactive"))]),
+                },
+                id: None,
+            },
+            patch: Props::from([("seen".to_string(), Value::Bool(true))]),
+        }]
+    );
 }
 
 #[test]
@@ -1194,6 +1245,29 @@ fn cypher_match_set_property_assignment_lowers_resolved_node_and_edge() {
             to: NodeId::new("person-2"),
             id: Some(EdgeId::new("edge-1")),
             props: Props::from([("since".to_string(), Value::Int(2026))]),
+        }]
+    );
+
+    let broad_edge = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {status: 'inactive'}) SET e.seen = true",
+    )
+    .unwrap();
+    assert_eq!(
+        broad_edge.into_mutations(),
+        vec![GraphMutation::PatchMatchingEdges {
+            relationship: GraphRelationshipMatch {
+                from: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                },
+                label: Label::new("KNOWS"),
+                to: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("status".to_string(), Value::from("inactive"))]),
+                },
+                id: None,
+            },
+            patch: Props::from([("seen".to_string(), Value::Bool(true))]),
         }]
     );
 
@@ -1242,6 +1316,29 @@ fn cypher_match_remove_lowers_resolved_node_and_edge_properties() {
             label: Label::new("KNOWS"),
             to: NodeId::new("person-2"),
             id: Some(EdgeId::new("edge-1")),
+            keys: vec!["note".to_string()],
+        }]
+    );
+
+    let broad_edge = sail_cypher_mutation_plan(
+        "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {status: 'inactive'}) REMOVE e.note",
+    )
+    .unwrap();
+    assert_eq!(
+        broad_edge.into_mutations(),
+        vec![GraphMutation::RemoveMatchingEdgeProps {
+            relationship: GraphRelationshipMatch {
+                from: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                },
+                label: Label::new("KNOWS"),
+                to: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("status".to_string(), Value::from("inactive"))]),
+                },
+                id: None,
+            },
             keys: vec!["note".to_string()],
         }]
     );

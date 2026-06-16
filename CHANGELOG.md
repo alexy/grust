@@ -35,6 +35,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added Sail writable Cypher planning for resolved edge
   `MATCH ... CREATE`, reusing explicit-ID endpoint bindings and preserving
   strict `CREATE` intent for execution options.
+- Added backend-neutral relationship match descriptors plus Sail and Memory
+  execution for broad relationship `MATCH ... DELETE`, `SET`, and `REMOVE`
+  mutations over endpoint label/property predicates and optional edge `id`.
 - Added opt-in generated node IDs for Sail writable Cypher node `CREATE`
   through `CypherNodeIdPolicy::GenerateForCreate` and
   `CypherMutationResult::generated_node_ids`, while keeping explicit IDs as the

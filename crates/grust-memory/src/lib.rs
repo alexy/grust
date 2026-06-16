@@ -31,17 +31,60 @@ impl MemoryGraphStore {
         }
     }
 
+    fn node_matches(node: &Node, label: Option<&Label>, props: &Props) -> bool {
+        label.is_none_or(|label| &node.label == label)
+            && props.iter().all(|(key, value)| {
+                if key == "id" {
+                    value.as_str().is_some_and(|id| node.id.as_str() == id)
+                } else {
+                    node.props.get(key) == Some(value)
+                }
+            })
+    }
+
     fn matching_node_ids(inner: &MemoryGraph, label: Option<&Label>, props: &Props) -> Vec<NodeId> {
         inner
             .nodes
             .values()
-            .filter(|node| {
-                label.is_none_or(|label| &node.label == label)
-                    && props
-                        .iter()
-                        .all(|(key, value)| node.props.get(key) == Some(value))
-            })
+            .filter(|node| Self::node_matches(node, label, props))
             .map(|node| node.id.clone())
+            .collect()
+    }
+
+    fn relationship_matches(
+        inner: &MemoryGraph,
+        edge: &Edge,
+        relationship: &GraphRelationshipMatch,
+    ) -> bool {
+        if edge.label != relationship.label {
+            return false;
+        }
+        if relationship
+            .id
+            .as_ref()
+            .is_some_and(|id| edge.id.as_ref() != Some(id))
+        {
+            return false;
+        }
+        let Some(from) = inner.nodes.get(&edge.from) else {
+            return false;
+        };
+        let Some(to) = inner.nodes.get(&edge.to) else {
+            return false;
+        };
+        Self::node_matches(
+            from,
+            relationship.from.label.as_ref(),
+            &relationship.from.props,
+        ) && Self::node_matches(to, relationship.to.label.as_ref(), &relationship.to.props)
+    }
+
+    fn matching_edges(inner: &MemoryGraph, relationship: &GraphRelationshipMatch) -> Vec<Edge> {
+        inner
+            .edges
+            .values()
+            .filter(|edge| Self::relationship_matches(inner, edge, relationship))
+            .cloned()
             .collect()
     }
 }
@@ -294,6 +337,78 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     inner
                         .edges
                         .retain(|(from, _, to), _| !ids.iter().any(|id| id == from || id == to));
+                }
+                GraphMutationPlanOp::PatchMatchingEdges {
+                    relationship,
+                    patch,
+                    ..
+                } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let edges = Self::matching_edges(&inner, relationship);
+                    report.matched_rows += edges.len();
+                    report.edge_patches += edges.len();
+                    report.changed_edges += edges.len();
+
+                    let mut patched = Vec::with_capacity(edges.len());
+                    for mut edge in edges {
+                        for (key, value) in patch {
+                            edge.props.insert(key.clone(), value.clone());
+                        }
+                        if let Some(schema) = &inner.schema {
+                            schema.validate_edge_with(&edge, |id| {
+                                inner.nodes.get(id).map(|node| &node.label)
+                            })?;
+                        }
+                        patched.push(edge);
+                    }
+                    for edge in patched {
+                        inner.edges.insert(
+                            (edge.from.clone(), edge.label.clone(), edge.to.clone()),
+                            edge,
+                        );
+                    }
+                }
+                GraphMutationPlanOp::RemoveMatchingEdgeProps {
+                    relationship, keys, ..
+                } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let edges = Self::matching_edges(&inner, relationship);
+                    report.matched_rows += edges.len();
+                    report.edge_property_removes += edges.len();
+                    report.changed_edges += edges.len();
+
+                    let mut updated = Vec::with_capacity(edges.len());
+                    for mut edge in edges {
+                        for key in keys {
+                            edge.props.remove(key);
+                        }
+                        if let Some(schema) = &inner.schema {
+                            schema.validate_edge_with(&edge, |id| {
+                                inner.nodes.get(id).map(|node| &node.label)
+                            })?;
+                        }
+                        updated.push(edge);
+                    }
+                    for edge in updated {
+                        inner.edges.insert(
+                            (edge.from.clone(), edge.label.clone(), edge.to.clone()),
+                            edge,
+                        );
+                    }
+                }
+                GraphMutationPlanOp::DeleteMatchingEdges { relationship, .. } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let edges = Self::matching_edges(&inner, relationship);
+                    report.matched_rows += edges.len();
+                    report.edge_deletes += edges.len();
+                    report.changed_edges += edges.len();
+                    for edge in edges {
+                        inner.edges.remove(&(
+                            edge.from.clone(),
+                            edge.label.clone(),
+                            edge.to.clone(),
+                        ));
+                    }
                 }
                 _ => {
                     let mutation = GraphMutation::from(operation.clone());

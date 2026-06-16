@@ -49,16 +49,21 @@ describe unreleased working-tree additions:
   node ID or, for broad node matches, to a cardinality-aware matching-node
   patch in Sail; `null` is stored as `Value::Null`.
 - `MATCH ... SET e += { ... }` lowers when the relationship identity is
-  resolved by endpoint IDs, relationship type, and optional explicit edge `id`.
+  resolved by endpoint IDs, relationship type, and optional explicit edge `id`,
+  or, for broad relationship matches, to a cardinality-aware matching-edge
+  patch in Sail.
 - `MATCH ... SET n.key = value` lowers to a one-key patch mutation when `n`
   either resolves to one explicit node identity or describes a broad node
   match; assignment values are literal-only.
 - `MATCH ... SET e.key = value` lowers to a one-key patch mutation when the
-  relationship identity is resolved.
+  relationship identity is resolved or describes a broad relationship match.
 - `MATCH ... REMOVE n.key` lowers to explicit property removal when `n` either
   resolves to one explicit node identity or describes a broad node match.
 - `MATCH ... REMOVE e.key` lowers to explicit property removal when the
-  relationship identity is resolved.
+  relationship identity is resolved or describes a broad relationship match.
+- `MATCH ... DELETE e` can delete broad relationship matches described by
+  endpoint label/property predicates, relationship type, and optional explicit
+  edge `id`; relationship property predicates beyond `id` remain rejected.
 - Opt-in generated node IDs are available for node `CREATE` through
   `CypherNodeIdPolicy::GenerateForCreate`; explicit IDs remain the default,
   `MERGE` still requires explicit identity, and edge endpoint IDs must resolve
@@ -71,10 +76,9 @@ The v1 implementation should reject, with clear errors:
 - generated node IDs unless the caller explicitly selects the generated-ID
   policy;
 - node identity derived from non-`id` properties;
-- broad edge patching and relationship property predicates beyond explicit
-  edge `id`;
-- broad relationship property assignment/removal, remove-on-null, arithmetic
-  updates, parameters, path expressions, or computed expression evaluation;
+- relationship property predicates beyond explicit edge `id`;
+- remove-on-null, arithmetic updates, parameters, path expressions, or
+  computed expression evaluation;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
 
@@ -117,16 +121,28 @@ to backend-neutral Grust mutation concepts:
 - broad node map patch -> `GraphMutation::PatchMatchingNodes` with cardinality
   metadata retained in `GraphMutationPlanOp`;
 - ID-resolved edge map patch -> `GraphMutation::PatchEdge`;
+- broad edge map patch -> `GraphMutation::PatchMatchingEdges` with a
+  `GraphRelationshipMatch` descriptor and cardinality metadata retained in
+  `GraphMutationPlanOp`;
 - ID-resolved node property assignment -> one-key `GraphMutation::PatchNode`;
 - broad node property assignment -> one-key `GraphMutation::PatchMatchingNodes`
   with cardinality metadata retained in `GraphMutationPlanOp`;
 - ID-resolved edge property assignment -> one-key `GraphMutation::PatchEdge`;
+- broad edge property assignment -> one-key
+  `GraphMutation::PatchMatchingEdges` with a `GraphRelationshipMatch`
+  descriptor and cardinality metadata retained in `GraphMutationPlanOp`;
 - ID-resolved node property removal -> `GraphMutation::RemoveNodeProps`;
 - broad node property removal -> `GraphMutation::RemoveMatchingNodeProps` with
   cardinality metadata retained in `GraphMutationPlanOp`;
 - ID-resolved edge property removal -> `GraphMutation::RemoveEdgeProps`;
+- broad edge property removal -> `GraphMutation::RemoveMatchingEdgeProps` with
+  a `GraphRelationshipMatch` descriptor and cardinality metadata retained in
+  `GraphMutationPlanOp`;
 - Sail broad node delete -> `GraphMutation::DeleteMatchingNodes` with
   cardinality metadata retained in `GraphMutationPlanOp`.
+- Sail broad edge delete -> `GraphMutation::DeleteMatchingEdges` with a
+  `GraphRelationshipMatch` descriptor and cardinality metadata retained in
+  `GraphMutationPlanOp`.
 
 `grust-sail` should not emit independent ad hoc table edits from Cypher syntax.
 It should reuse the same persistence path used by `put_node`, `put_edge`,
@@ -901,6 +917,16 @@ Acceptance criteria:
 - Memory implements the same semantics over its edge map.
 - Keep relationship property predicates beyond explicit `id` rejected until
   the match descriptor and Sail SQL lowering can prove consistent behavior.
+
+Implementation status: implemented in the working tree after Batch O. Core now
+has `GraphNodeMatch` and `GraphRelationshipMatch` descriptors plus
+cardinality-aware `PatchMatchingEdges`, `RemoveMatchingEdgeProps`, and
+`DeleteMatchingEdges` plan operations. Sail lowers broad relationship
+`DELETE`, `SET +=`, literal `SET e.key = value`, and `REMOVE e.key` through
+that descriptor, joining `grust_edges` to `grust_nodes` for endpoint label and
+property predicates before reusing existing edge load/delete paths. Memory
+executes the same resolved plans over its edge map. Relationship property
+predicates beyond explicit edge `id` remain rejected.
 
 ### Batch Q: Parameters And Literal Binding
 

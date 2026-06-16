@@ -330,7 +330,8 @@ batches, local node variables bound from explicit IDs, ID-resolved
 `MATCH ... SET n.key = value` / `MATCH ... REMOVE n.key` with matched-row and
 changed-element reporting, plus ID-resolved edge `MATCH ... SET e += { ... }`,
 literal property assignment, and explicit property `REMOVE` for resolved
-identities.
+identities, plus broad relationship delete, patch, assignment, and removal
+over endpoint predicates.
 
 The book chapter **The Store Contract** gives this trait the attention it
 deserves. It is the piece that lets a memory store, a LanceDB table layout, a
@@ -417,9 +418,10 @@ subset, ordered mutation batches, local explicit-ID node variables,
 ID-resolved `MATCH ... DELETE`, edge `MATCH ... CREATE` / `MATCH ... MERGE`,
 broad node
 `MATCH ... DELETE`, ID-resolved or broad node map patches, broad node literal
-property assignment/removal, and ID-resolved edge map patches, literal property
-assignment, and explicit property removal for resolved identities, then lowers
-them into `GraphMutationPlan`; `SailGraphStore`
+property assignment/removal, ID-resolved edge map patches, literal property
+assignment, explicit property removal for resolved identities, and broad
+relationship delete, patch, assignment, and removal over endpoint predicates,
+then lowers them into `GraphMutationPlan`; `SailGraphStore`
 executes that plan through
 `GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`, typed-table
 mirror writes, and the same delete paths as ordinary Grust mutations.
