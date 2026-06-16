@@ -2415,11 +2415,71 @@ fn cypher_return_row_count(
     Ok(row_count.unwrap_or(1))
 }
 
-fn return_clause_has_row_edges(return_clause: &CypherReturnClause) -> bool {
-    return_clause
-        .projections
+async fn row_edge_return_values_on_store<S>(
+    store: &S,
+    bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
+) -> Result<HashMap<String, Vec<Edge>>>
+where
+    S: GraphStore + Sync,
+{
+    let mut values = HashMap::new();
+    for (variable, binding) in bindings {
+        let edges = store
+            .get_edges(EdgeQuery {
+                from: None,
+                to: None,
+                label: Some(binding.label.clone()),
+            })
+            .await?;
+        let mut rows = Vec::new();
+        for edge in edges {
+            if !props_match(&edge.props, &binding.props) {
+                continue;
+            }
+            let Some(from) = store.get_node(&edge.from).await? else {
+                continue;
+            };
+            if !node_match(&from, &binding.from) {
+                continue;
+            }
+            let Some(to) = store.get_node(&edge.to).await? else {
+                continue;
+            };
+            if !node_match(&to, &binding.to) {
+                continue;
+            }
+            rows.push(edge);
+        }
+        match binding.kind {
+            GraphMutationPlanKind::Create | GraphMutationPlanKind::Merge => {}
+        }
+        values.insert(variable.clone(), rows);
+    }
+    Ok(values)
+}
+
+fn props_match(actual: &Props, expected: &Props) -> bool {
+    expected
         .iter()
-        .any(|projection| projection.element == CypherReturnElement::RowEdge)
+        .all(|(key, value)| actual.get(key) == Some(value))
+}
+
+fn node_match(node: &Node, expected: &GraphNodeMatch) -> bool {
+    expected
+        .label
+        .as_ref()
+        .is_none_or(|label| &node.label == label)
+        && expected.props.iter().all(|(key, value)| {
+            if key == "id" {
+                value.as_str().is_some_and(|id| node.id.as_str() == id)
+            } else {
+                node.props.get(key) == Some(value)
+            }
+        })
+        && expected
+            .predicates
+            .iter()
+            .all(|predicate| predicate.matches(node.props.get(&predicate.key)))
 }
 
 async fn resolve_bound_node<'a, S>(
@@ -2497,11 +2557,6 @@ where
 {
     let create_mode = options.create_mode;
     let planned = sail_cypher_mutation_plan_with_return_options(cypher, options.clone())?;
-    if return_clause_has_row_edges(&planned.return_clause) {
-        return Err(cypher_unsupported_cardinality(
-            "generic writable Cypher RETURN execution cannot materialize row-producing relationship variables",
-        ));
-    }
     if create_mode == CypherCreateMode::ErrorIfExists {
         check_strict_create_conflicts_on_store(store, &planned.plan)
             .await
@@ -2511,11 +2566,14 @@ where
         .execute_cypher_mutation_plan(&planned.plan)
         .await
         .map_err(cypher_execution_error)?;
+    let row_edge_values = row_edge_return_values_on_store(store, &planned.row_edge_bindings)
+        .await
+        .map_err(cypher_execution_error)?;
     let table = evaluate_cypher_return_table(
         store,
         &planned.node_bindings,
         &planned.edge_bindings,
-        &HashMap::new(),
+        &row_edge_values,
         &planned.return_clause,
     )
     .await

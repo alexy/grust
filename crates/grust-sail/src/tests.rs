@@ -2921,31 +2921,6 @@ fn sail_cypher_returning_rejects_deferred_result_forms() {
     let error =
         futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
             &store,
-            "
-            CREATE (:Person {id: 'ada', status: 'active'});
-            CREATE (:Team {id: 'eng'});
-            MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
-            CREATE (a)-[e:MEMBER_OF]->(b)
-            RETURN e.id;
-            ",
-            CypherMutationOptions::default(),
-        ))
-        .expect_err("generic helper should reject row-producing relationship returns");
-    assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
-    assert!(
-        futures_executor::block_on(store.get_edges(EdgeQuery {
-            from: Some(NodeId::new("ada")),
-            to: Some(NodeId::new("eng")),
-            label: Some(Label::new("MEMBER_OF")),
-        }))
-        .unwrap()
-        .is_empty(),
-        "generic helper should reject row-producing RETURN before writing"
-    );
-
-    let error =
-        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
-            &store,
             "CREATE (:Person {id: 'ada'}) RETURN n.id LIMIT 1;",
             CypherMutationOptions::default(),
         ))
@@ -2960,6 +2935,61 @@ fn sail_cypher_returning_rejects_deferred_result_forms() {
         ))
         .expect_err("SKIP should be rejected");
     assert!(matches!(error, GrustError::CypherUnsupportedCardinality(_)));
+}
+
+#[test]
+fn sail_cypher_returning_generic_row_producing_edges_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'ada', status: 'active'});
+            CREATE (:Person {id: 'bob', status: 'active'});
+            CREATE (:Team {id: 'eng'});
+            MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
+            CREATE (a)-[e:MEMBER_OF {source: 'generic'}]->(b)
+            RETURN e.label, e.source, e.id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .unwrap();
+
+    assert_eq!(
+        result.mutation.report,
+        GraphMutationReport {
+            creates: 4,
+            matched_rows: 2,
+            changed_nodes: 3,
+            changed_edges: 2,
+            node_upserts: 3,
+            edge_upserts: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        result.table,
+        CypherResultTable {
+            columns: vec![
+                "e.label".to_string(),
+                "e.source".to_string(),
+                "e.id".to_string()
+            ],
+            rows: vec![
+                vec![
+                    Value::from("MEMBER_OF"),
+                    Value::from("generic"),
+                    Value::Null
+                ],
+                vec![
+                    Value::from("MEMBER_OF"),
+                    Value::from("generic"),
+                    Value::Null
+                ],
+            ],
+        }
+    );
 }
 
 #[test]

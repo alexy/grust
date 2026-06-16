@@ -44,8 +44,9 @@ describe unreleased working-tree additions:
 - `MATCH (a:Src {...}), (b:Dst {...}) CREATE (a)-[:TYPE {...}]->(b)` can
   create one edge per matched endpoint-node pair when both edge endpoints are
   bound variables. The row-producing form materializes matched rows at
-  execution time and rejects trailing node creation, relationship variables,
-  and explicit relationship `id` properties.
+  execution time and rejects trailing node creation and explicit relationship
+  `id` properties. Relationship variables can be projected by the returning
+  APIs as one result row per produced edge.
 - `MATCH (a:Src {...}), (b:Dst {...}) MERGE (a)-[:TYPE {...}]->(b)` reuses
   the same row-producing endpoint matching and performs one idempotent edge
   upsert per matched endpoint-node pair.
@@ -112,8 +113,8 @@ The v1 implementation should reject, with clear errors:
 - `WHERE` forms using `OR`, `NOT`, pattern predicates, list predicates,
   functions, arbitrary expressions, or cross-variable property comparisons;
 - trailing node creation in row-producing `MATCH ... CREATE`, relationship
-  variables in row-producing `CREATE` / `MERGE`, and explicit relationship IDs
-  in row-producing `CREATE` / `MERGE`;
+  IDs in row-producing `CREATE` / `MERGE`, and general path-style binding for
+  row-producing writes;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
 
@@ -310,9 +311,9 @@ Core tests should cover:
 - row-producing edge `MATCH ... CREATE` / `MATCH ... MERGE` plan/report
   conversion;
 - rejection of unsupported expression `SET`, trailing node creation in
-  row-producing `MATCH ... CREATE`, relationship variables in row-producing
-  relationship upserts, explicit relationship IDs in row-producing relationship
-  upserts, and unsupported `WHERE` predicate forms.
+  row-producing `MATCH ... CREATE`, explicit relationship IDs in row-producing
+  relationship upserts, general path-style row binding, and unsupported
+  `WHERE` predicate forms.
 
 Sail unit tests should cover:
 
@@ -1395,11 +1396,10 @@ supported `RETURN` form must appear on the final write statement and may only
 project elements or properties from node variables already bound to concrete
 node IDs, or relationship variables already bound to concrete edge identities
 by the write plan. Concrete relationship variables can come from edge upserts
-or edge patch/remove operations. Sail also supports relationship variables
-bound by restricted row-producing `MATCH ... CREATE/MERGE` edge writes and
-returns one result row per produced edge; the backend-neutral helper still
-rejects those row-producing relationship projections before executing the
-mutation. Examples include
+or edge patch/remove operations. Sail and the backend-neutral helper also
+support relationship variables bound by restricted row-producing
+`MATCH ... CREATE/MERGE` edge writes and return one result row per produced
+edge. Examples include
 `RETURN n.id, n.label, n.seen AS seen`,
 `RETURN e.id, e.label, e.weight`, and
 `RETURN n AS node, e AS relationship`, plus
@@ -1412,13 +1412,13 @@ properties project as `Value::Null`; `n.id` projects the resolved `NodeId`,
 `EdgeId` when one exists, and `e.label` projects the relationship label. Whole
 bound node and relationship elements project as `Value::Json` using the
 existing Grust `Node` / `Edge` serde shape. Sail and Memory share the same
-parser and result-table evaluator for the concrete-variable slice.
+parser and result-table evaluator for the concrete-variable and portable
+row-producing relationship slices.
 Aggregation, path returns, broad matched-row result tables, portable generic
-row-producing relationship projections, `ORDER BY`, `LIMIT`, `SKIP`, and
-arbitrary read-query features remain deferred. The generic
+path-style row projections, `ORDER BY`, `LIMIT`, `SKIP`, and arbitrary
+read-query features remain deferred. The generic
 Memory/Sail returning helper now also honors `CypherCreateMode::ErrorIfExists`
 for concrete node and edge `CREATE` writes through portable `GraphStore` reads;
 that helper shares the same intra-plan duplicate concrete identity preflight as
-Sail. Strict row-producing edge conflict checks and row-producing relationship
-`RETURN` remain backend-specific because they need backend-owned row
-materialization.
+Sail. Strict row-producing edge conflict checks remain backend-specific because
+they need backend-owned row materialization before writes execute.

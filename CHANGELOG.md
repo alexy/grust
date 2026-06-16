@@ -32,6 +32,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added Sail writable Cypher `RETURN` rows for row-producing
   `MATCH ... CREATE/MERGE` relationship variables such as
   `RETURN e.label, e.source`.
+- Added the same row-producing relationship `RETURN` support to the
+  backend-neutral Memory/Sail returning helper for upsert-compatible execution.
 - Fixed writable Cypher `RETURN` parsing so aliases such as `AS limit` and
   `AS skip` no longer trip the `LIMIT` / `SKIP` clause rejection.
 - Added backend-neutral graph constraint metadata for required and unique node

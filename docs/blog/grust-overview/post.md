@@ -442,14 +442,14 @@ IDs.
 The first `RETURN` support for writes stays similarly narrow: a final element
 or property projection over node variables and concrete relationship variables
 already resolved by the write plan, including concrete edge upserts and edge
-patches, returns a `CypherMutationTableResult`. Sail can also return one row
-per relationship variable produced by restricted row-producing
-`MATCH ... CREATE/MERGE` edge writes. Physical `id` and `label` fields are
-supported alongside stored properties, and whole elements are returned as
-`Value::Json` in the Grust `Node` / `Edge` serde shape, keeping the
-count-oriented mutation report separate from the table rows while rejecting
-aggregation, paths, ordering, limiting, arbitrary read-query features, and
-portable generic row-producing `RETURN`.
+patches, returns a `CypherMutationTableResult`. Sail and the backend-neutral
+Memory/Sail helper can also return one row per relationship variable produced
+by restricted row-producing `MATCH ... CREATE/MERGE` edge writes. Physical
+`id` and `label` fields are supported alongside stored properties, and whole
+elements are returned as `Value::Json` in the Grust `Node` / `Edge` serde
+shape, keeping the count-oriented mutation report separate from the table rows
+while rejecting aggregation, paths, ordering, limiting, arbitrary read-query
+features, and path-style row projections.
 Parameters are option-driven too: callers can bind Grust `Value`s to `$name`
 placeholders in literal positions such as IDs, property maps, and literal
 property assignments. The first expression form is deliberately narrow:
