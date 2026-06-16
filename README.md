@@ -593,8 +593,10 @@ let schema = GraphSchema::builder()
 
 Constraint metadata is portable but enforcement is explicit. Required-property
 constraints validate through `GraphSchema` before writes on backends that keep
-an applied schema, while uniqueness constraints are currently metadata unless a
-backend reports stronger behavior through `GraphStore::constraint_capability`.
+an applied schema. Unique-property constraints validate inside
+`GraphSchema::validate_graph`; the memory backend reports validate-before-write
+behavior for them, while other backends may still report metadata-only behavior
+until they add comparable preflight or native enforcement.
 
 The current backends use schema differently:
 

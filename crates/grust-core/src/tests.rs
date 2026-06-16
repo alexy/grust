@@ -739,6 +739,62 @@ fn graph_schema_carries_and_validates_required_constraints() {
 }
 
 #[test]
+fn graph_schema_validates_unique_property_constraints() {
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .node("Project", Vec::<Field>::new())
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            Vec::<Field>::new(),
+        )
+        .unique_node_property("Person", "email")
+        .unique_edge_property("WORKS_ON", "role")
+        .build();
+
+    let mut duplicate_nodes = Graph::builder();
+    let _ = duplicate_nodes
+        .node("Person", "person:ada")
+        .prop("email", "ada@example.com")
+        .finish();
+    let _ = duplicate_nodes
+        .node("Person", "person:grace")
+        .prop("email", "ada@example.com")
+        .finish();
+    let error = schema
+        .validate_graph(&duplicate_nodes.build())
+        .expect_err("duplicate node property should violate unique constraint");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicates unique constrained property 'email'")
+    );
+
+    let mut duplicate_edges = Graph::builder();
+    let _ = duplicate_edges.node("Person", "person:ada").finish();
+    let _ = duplicate_edges.node("Person", "person:grace").finish();
+    let _ = duplicate_edges.node("Project", "project:grust").finish();
+    let _ = duplicate_edges.node("Project", "project:sail").finish();
+    let _ = duplicate_edges
+        .edge("WORKS_ON", "person:ada", "project:grust")
+        .prop("role", "maintainer")
+        .finish();
+    let _ = duplicate_edges
+        .edge("WORKS_ON", "person:grace", "project:sail")
+        .prop("role", "maintainer")
+        .finish();
+    let error = schema
+        .validate_graph(&duplicate_edges.build())
+        .expect_err("duplicate edge property should violate unique constraint");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicates unique constrained property 'role'")
+    );
+}
+
+#[test]
 fn graph_schema_rejects_wrong_field_type() {
     let schema = GraphSchema::builder()
         .node("Person", vec![Field::required("age", FieldType::Int)])

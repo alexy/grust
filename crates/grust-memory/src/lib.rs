@@ -148,12 +148,64 @@ impl MemoryGraphStore {
             .cloned()
             .collect()
     }
+
+    fn graph_snapshot(inner: &MemoryGraph) -> Graph {
+        Graph {
+            nodes: inner.nodes.values().cloned().collect(),
+            edges: inner.edges.values().cloned().collect(),
+        }
+    }
+
+    fn graph_snapshot_with_node(inner: &MemoryGraph, node: &Node) -> Graph {
+        let mut graph = Self::graph_snapshot(inner);
+        if let Some(existing) = graph
+            .nodes
+            .iter_mut()
+            .find(|existing| existing.id == node.id)
+        {
+            *existing = node.clone();
+        } else {
+            graph.nodes.push(node.clone());
+        }
+        graph
+    }
+
+    fn graph_snapshot_with_edge(inner: &MemoryGraph, edge: &Edge) -> Graph {
+        let mut graph = Self::graph_snapshot(inner);
+        let key = MemoryEdgeKey::from_edge(edge);
+        if let Some(existing) = graph
+            .edges
+            .iter_mut()
+            .find(|existing| MemoryEdgeKey::from_edge(existing) == key)
+        {
+            *existing = edge.clone();
+        } else {
+            graph.edges.push(edge.clone());
+        }
+        graph
+    }
+
+    fn graph_snapshot_with_graph(inner: &MemoryGraph, input: &Graph) -> Graph {
+        let mut nodes = inner.nodes.clone();
+        let mut edges = inner.edges.clone();
+        for node in &input.nodes {
+            nodes.insert(node.id.clone(), node.clone());
+        }
+        for edge in &input.edges {
+            edges.insert(MemoryEdgeKey::from_edge(edge), edge.clone());
+        }
+        Graph {
+            nodes: nodes.into_values().collect(),
+            edges: edges.into_values().collect(),
+        }
+    }
 }
 
 #[async_trait]
 impl GraphStore for MemoryGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        schema.validate_graph(&Self::graph_snapshot(&inner))?;
         inner.schema = Some(schema.clone());
         Ok(())
     }
@@ -161,18 +213,18 @@ impl GraphStore for MemoryGraphStore {
     fn constraint_capability(&self, constraint: &GraphConstraint) -> GraphConstraintCapability {
         match constraint {
             GraphConstraint::NodePropertyRequired { .. }
-            | GraphConstraint::EdgePropertyRequired { .. } => {
+            | GraphConstraint::EdgePropertyRequired { .. }
+            | GraphConstraint::NodePropertyUnique { .. }
+            | GraphConstraint::EdgePropertyUnique { .. } => {
                 GraphConstraintCapability::ValidateBeforeWrite
             }
-            GraphConstraint::NodePropertyUnique { .. }
-            | GraphConstraint::EdgePropertyUnique { .. } => GraphConstraintCapability::MetadataOnly,
         }
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
         if let Some(schema) = &inner.schema {
-            schema.validate_node(node)?;
+            schema.validate_graph(&Self::graph_snapshot_with_node(&inner, node))?;
         }
         let previous = inner.nodes.insert(node.id.clone(), node.clone());
         Ok(match previous {
@@ -184,7 +236,7 @@ impl GraphStore for MemoryGraphStore {
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
         if let Some(schema) = &inner.schema {
-            schema.validate_edge_with(edge, |id| inner.nodes.get(id).map(|node| &node.label))?;
+            schema.validate_graph(&Self::graph_snapshot_with_edge(&inner, edge))?;
         }
         let previous = inner
             .edges
@@ -198,7 +250,7 @@ impl GraphStore for MemoryGraphStore {
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
         if let Some(schema) = &inner.schema {
-            schema.validate_graph(graph)?;
+            schema.validate_graph(&Self::graph_snapshot_with_graph(&inner, graph))?;
         }
         let mut report = LoadReport::default();
         for node in &graph.nodes {

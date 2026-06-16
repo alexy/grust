@@ -1376,9 +1376,11 @@ writes; Sail and LanceDB validate writes before mirroring them into typed
 tables. FalkorDB, Helix, pgGraph, and SurrealDB currently use schema primarily
 for indexes, query-shape validation, views, or backend-native definitions.
 Constraint handling follows the same honest-capability rule. Required-property
-constraints validate through `GraphSchema`, while uniqueness constraints are
-portable metadata until a backend reports stronger behavior through
-`GraphStore::constraint_capability`.
+constraints validate through `GraphSchema`; unique-property constraints validate
+inside `GraphSchema::validate_graph`, and the memory backend reports
+validate-before-write behavior for them. Backends that have not added a
+read-before-write preflight or native enforcement should continue reporting
+metadata-only behavior through `GraphStore::constraint_capability`.
 
 A flexible backend can keep universal node and edge tables as the portable
 interchange surface. A typed backend can add native tables, fields, indexes, or

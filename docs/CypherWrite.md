@@ -1329,11 +1329,15 @@ required and unique node or edge properties, stores them on `GraphSchema`, and
 exposes builder helpers such as `required_node_property` and
 `unique_node_property`. `GraphStore::constraint_capability` lets a backend
 report `MetadataOnly`, `ValidateBeforeWrite`, or `EnforcedByBackend`. The
-default remains metadata-only; Memory and Sail report validate-before-write
-for required-property constraints and metadata-only for uniqueness. Required
-constraints validate through the existing `GraphSchema` write-validation path.
+default remains metadata-only; Memory reports validate-before-write for
+required and unique property constraints, while Sail reports
+validate-before-write for required properties and metadata-only for uniqueness.
+Required constraints validate through the existing `GraphSchema`
+write-validation path, and unique-property constraints validate inside
+`GraphSchema::validate_graph`. Memory applies that whole-graph validation to
+merged write snapshots before accepting a node, edge, graph batch, or schema.
 Cypher DDL parsing, native backend index/constraint creation, migrations, and
-portable uniqueness enforcement remain deferred.
+Sail uniqueness enforcement remain deferred.
 
 ### Batch AA: Mutation Results With Optional Element Identities
 

@@ -39,6 +39,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added backend-neutral graph constraint metadata for required and unique node
   or edge properties, plus constraint capability reporting so backends can
   distinguish metadata-only constraints from validate-before-write behavior.
+- Added portable unique-property validation to `GraphSchema::validate_graph`
+  and wired the memory backend to reject duplicate unique node or edge
+  properties before writes when a schema is applied.
 - Added opt-in Sail writable Cypher node and edge identity payloads through
   `CypherMutationOptions::collect_written_node_identities`,
   `CypherMutationOptions::collect_written_edge_identities`,

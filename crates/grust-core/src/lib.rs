@@ -1617,7 +1617,8 @@ impl GraphSchema {
         for edge in &graph.edges {
             self.validate_edge_with(edge, |id| labels.get(id).copied())?;
         }
-        self.validate_edge_uniqueness(graph)
+        self.validate_edge_uniqueness(graph)?;
+        self.validate_unique_property_constraints(graph)
     }
 
     /// Enforces each edge type's [`EdgeUniqueness`]: at most one edge of the
@@ -1644,6 +1645,55 @@ impl GraphSchema {
                     b.as_str(),
                     edge_type.uniqueness
                 )));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_unique_property_constraints(&self, graph: &Graph) -> Result<()> {
+        for constraint in &self.constraints {
+            match constraint {
+                GraphConstraint::NodePropertyUnique { label, key } => {
+                    let mut seen: Vec<(&NodeId, &Value)> = Vec::new();
+                    for node in graph.nodes.iter().filter(|node| &node.label == label) {
+                        let Some(value) = node.props.get(key) else {
+                            continue;
+                        };
+                        if let Some((existing_id, _)) =
+                            seen.iter().find(|(_, existing)| *existing == value)
+                        {
+                            return Err(GrustError::Schema(format!(
+                                "node '{}' with label '{}' duplicates unique constrained property '{}' from node '{}'",
+                                node.id.as_str(),
+                                label.as_str(),
+                                key,
+                                existing_id.as_str()
+                            )));
+                        }
+                        seen.push((&node.id, value));
+                    }
+                }
+                GraphConstraint::EdgePropertyUnique { label, key } => {
+                    let mut seen: Vec<(String, &Value)> = Vec::new();
+                    for edge in graph.edges.iter().filter(|edge| &edge.label == label) {
+                        let Some(value) = edge.props.get(key) else {
+                            continue;
+                        };
+                        if let Some((existing_key, _)) =
+                            seen.iter().find(|(_, existing)| *existing == value)
+                        {
+                            return Err(GrustError::Schema(format!(
+                                "edge '{}' duplicates unique constrained property '{}' from edge '{}'",
+                                edge_key(edge),
+                                key,
+                                existing_key
+                            )));
+                        }
+                        seen.push((edge_key(edge), value));
+                    }
+                }
+                GraphConstraint::NodePropertyRequired { .. }
+                | GraphConstraint::EdgePropertyRequired { .. } => {}
             }
         }
         Ok(())

@@ -92,7 +92,7 @@ fn applied_schema_validates_memory_graph_writes() {
 }
 
 #[test]
-fn memory_reports_constraint_capabilities_and_validates_required_constraints() {
+fn memory_reports_constraint_capabilities_and_validates_constraints() {
     let required = GraphConstraint::NodePropertyRequired {
         label: Label::new("Person"),
         key: "email".to_string(),
@@ -114,7 +114,7 @@ fn memory_reports_constraint_capabilities_and_validates_required_constraints() {
     );
     assert_eq!(
         store.constraint_capability(&unique),
-        GraphConstraintCapability::MetadataOnly
+        GraphConstraintCapability::ValidateBeforeWrite
     );
 
     futures_executor::block_on(store.apply_schema(&schema)).unwrap();
@@ -126,6 +126,76 @@ fn memory_reports_constraint_capabilities_and_validates_required_constraints() {
         error
             .to_string()
             .contains("missing required constrained property 'email'")
+    );
+
+    let mut first_props = Props::new();
+    first_props.insert("email".to_string(), Value::from("ada@example.com"));
+    futures_executor::block_on(store.put_node(&Node::new("Person", "person-1", first_props)))
+        .unwrap();
+
+    let mut duplicate_props = Props::new();
+    duplicate_props.insert("email".to_string(), Value::from("ada@example.com"));
+    let error = futures_executor::block_on(store.put_node(&Node::new(
+        "Person",
+        "person-2",
+        duplicate_props,
+    )))
+    .expect_err("duplicate unique constrained property should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicates unique constrained property 'email'")
+    );
+}
+
+#[test]
+fn memory_validates_unique_edge_constraints_before_writes() {
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .node("Project", Vec::<Field>::new())
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            Vec::<Field>::new(),
+        )
+        .unique_edge_property("WORKS_ON", "role")
+        .build();
+    let store = MemoryGraphStore::new();
+
+    futures_executor::block_on(store.apply_schema(&schema)).unwrap();
+    futures_executor::block_on(store.put_node(&Node::new("Person", "person-1", Props::new())))
+        .unwrap();
+    futures_executor::block_on(store.put_node(&Node::new("Person", "person-2", Props::new())))
+        .unwrap();
+    futures_executor::block_on(store.put_node(&Node::new("Project", "project-1", Props::new())))
+        .unwrap();
+    futures_executor::block_on(store.put_node(&Node::new("Project", "project-2", Props::new())))
+        .unwrap();
+
+    let mut first_props = Props::new();
+    first_props.insert("role".to_string(), Value::from("maintainer"));
+    futures_executor::block_on(store.put_edge(&Edge::new(
+        "WORKS_ON",
+        "person-1",
+        "project-1",
+        first_props,
+    )))
+    .unwrap();
+
+    let mut duplicate_props = Props::new();
+    duplicate_props.insert("role".to_string(), Value::from("maintainer"));
+    let error = futures_executor::block_on(store.put_edge(&Edge::new(
+        "WORKS_ON",
+        "person-2",
+        "project-2",
+        duplicate_props,
+    )))
+    .expect_err("duplicate unique constrained edge property should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicates unique constrained property 'role'")
     );
 }
 
