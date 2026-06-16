@@ -125,6 +125,12 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             id: NodeId::new("person-1"),
             keys: vec!["nickname".to_string()],
         },
+        GraphMutationPlanOp::RemoveMatchingNodeProps {
+            label: Some(Label::new("Person")),
+            props: Props::from([("active".to_string(), Value::Bool(false))]),
+            keys: vec!["nickname".to_string()],
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
         GraphMutationPlanOp::RemoveEdgeProps {
             from: NodeId::new("person-1"),
             label: Label::new("KNOWS"),
@@ -152,7 +158,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             merges: 1,
             deletes: 3,
             patches: 3,
-            property_removes: 2,
+            property_removes: 3,
             matched_rows: 0,
             changed_nodes: 4,
             changed_edges: 4,
@@ -189,6 +195,11 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             },
             GraphMutation::RemoveNodeProps {
                 id: NodeId::new("person-1"),
+                keys: vec!["nickname".to_string()],
+            },
+            GraphMutation::RemoveMatchingNodeProps {
+                label: Some(Label::new("Person")),
+                props: Props::from([("active".to_string(), Value::Bool(false))]),
                 keys: vec!["nickname".to_string()],
             },
             GraphMutation::RemoveEdgeProps {

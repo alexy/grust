@@ -28,6 +28,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added Sail writable Cypher lowering for literal property assignment and
   explicit `REMOVE` on resolved node and edge identities, backed by
   backend-neutral property remove mutations and existing patch/load paths.
+- Added backend-neutral matching-node property removal plus Sail and Memory
+  execution for broad node `MATCH ... SET n.key = value` and
+  `MATCH ... REMOVE n.key`, preserving literal-only assignment and matched-row
+  reporting.
 - Added opt-in generated node IDs for Sail writable Cypher node `CREATE`
   through `CypherNodeIdPolicy::GenerateForCreate` and
   `CypherMutationResult::generated_node_ids`, while keeping explicit IDs as the

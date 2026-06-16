@@ -320,3 +320,89 @@ fn executes_mutation_plan_with_cardinality_aware_node_changes() {
             .is_empty()
     );
 }
+
+#[test]
+fn executes_matching_node_property_removal() {
+    let store = MemoryGraphStore::new();
+    let plan = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "a",
+                Props::from([
+                    ("status".to_string(), Value::from("inactive")),
+                    ("nickname".to_string(), Value::from("ada")),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "b",
+                Props::from([
+                    ("status".to_string(), Value::from("inactive")),
+                    ("nickname".to_string(), Value::from("bob")),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "c",
+                Props::from([
+                    ("status".to_string(), Value::from("active")),
+                    ("nickname".to_string(), Value::from("charlie")),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::RemoveMatchingNodeProps {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            keys: vec!["nickname".to_string()],
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+    ]);
+
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&plan)).unwrap();
+
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            creates: 3,
+            property_removes: 1,
+            matched_rows: 2,
+            changed_nodes: 5,
+            node_upserts: 3,
+            node_property_removes: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+    for id in ["a", "b"] {
+        let node = futures_executor::block_on(store.get_node(&NodeId::new(id)))
+            .unwrap()
+            .expect("matched node exists");
+        assert_eq!(node.props.get("nickname"), None);
+    }
+    let active = futures_executor::block_on(store.get_node(&NodeId::new("c")))
+        .unwrap()
+        .expect("active node exists");
+    assert_eq!(active.props.get("nickname"), Some(&Value::from("charlie")));
+
+    let zero = GraphMutationPlan::new(vec![GraphMutationPlanOp::RemoveMatchingNodeProps {
+        label: Some(Label::new("Person")),
+        props: Props::from([("status".to_string(), Value::from("missing"))]),
+        keys: vec!["nickname".to_string()],
+        cardinality: GraphMutationCardinality::BoundedMany,
+    }]);
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&zero)).unwrap();
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            property_removes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+}

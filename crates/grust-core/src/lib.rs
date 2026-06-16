@@ -2136,6 +2136,11 @@ pub enum GraphMutation {
         id: NodeId,
         keys: Vec<String>,
     },
+    RemoveMatchingNodeProps {
+        label: Option<Label>,
+        props: Props,
+        keys: Vec<String>,
+    },
     RemoveEdgeProps {
         from: NodeId,
         label: Label,
@@ -2201,6 +2206,12 @@ pub enum GraphMutationPlanOp {
     RemoveNodeProps {
         id: NodeId,
         keys: Vec<String>,
+    },
+    RemoveMatchingNodeProps {
+        label: Option<Label>,
+        props: Props,
+        keys: Vec<String>,
+        cardinality: GraphMutationCardinality,
     },
     RemoveEdgeProps {
         from: NodeId,
@@ -2315,6 +2326,9 @@ impl GraphMutationReport {
                 self.node_property_removes += 1;
                 self.changed_nodes += 1;
             }
+            GraphMutationPlanOp::RemoveMatchingNodeProps { .. } => {
+                self.property_removes += 1;
+            }
             GraphMutationPlanOp::RemoveEdgeProps { .. } => {
                 self.property_removes += 1;
                 self.edge_property_removes += 1;
@@ -2379,6 +2393,9 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 id,
                 keys,
             },
+            GraphMutationPlanOp::RemoveMatchingNodeProps {
+                label, props, keys, ..
+            } => Self::RemoveMatchingNodeProps { label, props, keys },
             GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
                 Self::DeleteMatchingNodes { label, props }
             }
@@ -2413,6 +2430,12 @@ pub trait CypherMutationExecutor: GraphMutationStore {
                 GraphMutationPlanOp::PatchMatchingNodes { .. } => {
                     return Err(GrustError::CypherExecution(
                         "matched node patches require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::RemoveMatchingNodeProps { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node property removals require backend-specific query support"
+                            .to_string(),
                     ));
                 }
                 _ => {
@@ -2507,6 +2530,12 @@ pub trait GraphMutationStore: GraphStore {
                         }
                         self.put_node(&node).await?;
                     }
+                }
+                GraphMutation::RemoveMatchingNodeProps { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched node property removal requires backend-specific query support"
+                            .to_string(),
+                    ));
                 }
                 GraphMutation::RemoveEdgeProps {
                     from,

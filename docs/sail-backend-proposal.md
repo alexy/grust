@@ -300,16 +300,17 @@ Open semantic decisions before accepting general Cypher writes:
 - `CREATE` versus `MERGE`: whether duplicate IDs are errors or replacement
   upserts.
 - Property update mode: shallow map patching, literal assignment, and explicit
-  `REMOVE` exist for resolved identities; broad relationship updates,
-  computed expressions, and remove-on-null remain open.
+  `REMOVE` exist for resolved identities, and broad node matches support map
+  patching plus literal property assignment/removal; broad relationship
+  updates, computed expressions, and remove-on-null remain open.
 - Schema validation: mutations should validate through `GraphSchema` before
   they reach backend SQL.
 - Match cardinality: mutating `MATCH ... SET/DELETE` may affect zero, one, or
   many rows; broad node `MATCH ... DELETE` now reports matched rows and changed
-  graph elements, and broad node `MATCH ... SET +=` uses the same matched-row
-  reporting model for node patches. ID-resolved edge patches use structural
-  edge identity plus optional explicit edge `id`; broad relationship matching
-  remains deferred.
+  graph elements, and broad node `MATCH ... SET +=`, `SET n.key = value`, and
+  `REMOVE n.key` use the same matched-row reporting model for node changes.
+  ID-resolved edge patches use structural edge identity plus optional explicit
+  edge `id`; broad relationship matching remains deferred.
 - Atomicity: Sail/Delta operations may need staged Arrow temp views and grouped
   `MERGE`/`DELETE` commands, but multi-statement Spark SQL should not be
   described as transactional unless Sail can prove it for the active table

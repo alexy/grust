@@ -247,6 +247,32 @@ impl CypherMutationExecutor for MemoryGraphStore {
                         inner.nodes.insert(node.id.clone(), node);
                     }
                 }
+                GraphMutationPlanOp::RemoveMatchingNodeProps {
+                    label, props, keys, ..
+                } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let ids = Self::matching_node_ids(&inner, label.as_ref(), props);
+                    report.matched_rows += ids.len();
+                    report.node_property_removes += ids.len();
+                    report.changed_nodes += ids.len();
+
+                    let mut updated = Vec::with_capacity(ids.len());
+                    for id in &ids {
+                        if let Some(node) = inner.nodes.get(id) {
+                            let mut node = node.clone();
+                            for key in keys {
+                                node.props.remove(key);
+                            }
+                            if let Some(schema) = &inner.schema {
+                                schema.validate_node(&node)?;
+                            }
+                            updated.push(node);
+                        }
+                    }
+                    for node in updated {
+                        inner.nodes.insert(node.id.clone(), node);
+                    }
+                }
                 GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
                     let mut inner = self.inner.write().expect("memory graph lock poisoned");
                     let ids = Self::matching_node_ids(&inner, label.as_ref(), props);

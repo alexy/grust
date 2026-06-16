@@ -1020,7 +1020,8 @@ accepts only a strict v1 mutation subset: explicit-ID node `CREATE` and
 resolved node or edge `DELETE`. It also accepts ordered multi-statement
 batches, local node variables bound by explicit-ID node patterns, ID-resolved
 `MATCH ... DELETE`, edge `MATCH ... MERGE`, and cardinality-aware broad node
-`MATCH ... DELETE` / `MATCH ... SET n += { ... }` forms, plus ID-resolved edge
+`MATCH ... DELETE` / `MATCH ... SET n += { ... }` / `MATCH ... SET n.key = value`
+/ `MATCH ... REMOVE n.key` forms, plus ID-resolved edge
 `MATCH ... SET e += { ... }`, literal property assignment, and explicit
 property `REMOVE` when the node or edge identity is resolved. It lowers those
 statements into `GraphMutationPlan` and then ordinary `GraphMutation` values.
@@ -1052,8 +1053,10 @@ ID-resolved edge `MATCH ... SET e += { ... }` lowers to an edge patch mutation
 and reuses the same typed-edge mirror writes as ordinary edge upserts.
 Literal `SET n.key = value` and `SET e.key = value` lower to one-key patches,
 while `REMOVE n.key` and `REMOVE e.key` lower to explicit property-remove
-mutations. Computed expressions, broad relationship mutation, and
-remove-on-null remain deferred.
+mutations. Node forms can target either a resolved identity or a broad node
+match; edge forms still require resolved relationship identity. Computed
+expressions, broad relationship property mutation, and remove-on-null remain
+deferred.
 For broad node deletes and broad node patches, the report records matched rows
 and changed graph elements, and Sail stages matched IDs before using the same
 delete or node-load helpers that keep generic and typed tables consistent. The

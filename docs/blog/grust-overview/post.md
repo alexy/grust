@@ -326,7 +326,8 @@ writable-Cypher subset: explicit-ID node `CREATE`/`MERGE`, resolved endpoint
 edge `CREATE`/`MERGE`, resolved node/edge `DELETE`, ordered multi-statement
 batches, local node variables bound from explicit IDs, ID-resolved
 `MATCH ... DELETE`, edge `MATCH ... MERGE`, and broad node
-`MATCH ... DELETE` / `MATCH ... SET n += { ... }` with matched-row and
+`MATCH ... DELETE` / `MATCH ... SET n += { ... }` /
+`MATCH ... SET n.key = value` / `MATCH ... REMOVE n.key` with matched-row and
 changed-element reporting, plus ID-resolved edge `MATCH ... SET e += { ... }`,
 literal property assignment, and explicit property `REMOVE` for resolved
 identities.
@@ -414,9 +415,10 @@ Writable Cypher follows the same rule. In Sail, Cypher write text is not a
 separate persistence path. `sail_cypher_mutation_plan` accepts a strict v1
 subset, ordered mutation batches, local explicit-ID node variables,
 ID-resolved `MATCH ... DELETE`, edge `MATCH ... MERGE`, broad node
-`MATCH ... DELETE`, ID-resolved or broad node map patches, and ID-resolved edge
-map patches, literal property assignment, and explicit property removal for
-resolved identities, then lowers them into `GraphMutationPlan`; `SailGraphStore`
+`MATCH ... DELETE`, ID-resolved or broad node map patches, broad node literal
+property assignment/removal, and ID-resolved edge map patches, literal property
+assignment, and explicit property removal for resolved identities, then lowers
+them into `GraphMutationPlan`; `SailGraphStore`
 executes that plan through
 `GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`, typed-table
 mirror writes, and the same delete paths as ordinary Grust mutations.

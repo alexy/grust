@@ -631,11 +631,6 @@ impl CypherMutationPlanner {
                 .as_ref()
                 .is_none_or(|variable| !self.node_bindings.contains_key(variable))
         {
-            if !assignment.is_map_patch {
-                return Err(cypher_unsupported_cardinality(
-                    "MATCH SET property assignment requires one resolved node identity",
-                ));
-            }
             let cardinality = match_node_cardinality(&node);
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::PatchMatchingNodes {
@@ -712,9 +707,15 @@ impl CypherMutationPlanner {
                 .as_ref()
                 .is_none_or(|variable| !self.node_bindings.contains_key(variable))
         {
-            return Err(cypher_unsupported_cardinality(
-                "MATCH REMOVE requires one resolved node identity",
-            ));
+            let cardinality = match_node_cardinality(&node);
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::RemoveMatchingNodeProps {
+                    label: node.label,
+                    props: node.props,
+                    keys: vec![key],
+                    cardinality,
+                },
+            ]));
         }
         let id = self.resolve_node_id(&node, "MATCH node REMOVE")?;
         Ok(GraphMutationPlan::new(vec![
@@ -1159,18 +1160,13 @@ fn split_match_remove(statement: &str) -> Result<(&str, &str)> {
 struct PatchAssignment {
     target: String,
     props: Props,
-    is_map_patch: bool,
 }
 
 fn parse_patch_assignment(assignment: &str) -> Result<PatchAssignment> {
     if let Some(index) = find_unquoted_sequence(assignment, "+=") {
         let target = parse_required_cypher_variable(&assignment[..index], "MATCH SET target")?;
         let props = parse_cypher_props_map_literal(&assignment[index + 2..])?;
-        return Ok(PatchAssignment {
-            target,
-            props,
-            is_map_patch: true,
-        });
+        return Ok(PatchAssignment { target, props });
     }
     let Some(index) = find_unquoted(assignment, '=') else {
         return Err(cypher_syntax(
@@ -1182,7 +1178,6 @@ fn parse_patch_assignment(assignment: &str) -> Result<PatchAssignment> {
     Ok(PatchAssignment {
         target,
         props: Props::from([(key, value)]),
-        is_map_patch: false,
     })
 }
 
@@ -1671,6 +1666,12 @@ impl SailGraphStore {
                     self.apply_patch_matching_nodes(label.as_ref(), props, patch, report)
                         .await?;
                 }
+                GraphMutationPlanOp::RemoveMatchingNodeProps {
+                    label, props, keys, ..
+                } => {
+                    self.apply_remove_matching_node_props(label.as_ref(), props, keys, report)
+                        .await?;
+                }
                 GraphMutationPlanOp::DeleteMatchingNodes { label, props, .. } => {
                     self.apply_delete_matching_nodes(label.as_ref(), props, report)
                         .await?;
@@ -1704,6 +1705,36 @@ impl SailGraphStore {
         for node in &mut nodes {
             for (key, value) in patch {
                 node.props.insert(key.clone(), value.clone());
+            }
+        }
+        let schema = self.current_schema();
+        if let Some(schema) = schema.as_ref() {
+            for node in &nodes {
+                schema.validate_node(node)?;
+            }
+        }
+        self.load_nodes(schema.as_ref(), &nodes).await
+    }
+
+    async fn apply_remove_matching_node_props(
+        &self,
+        label: Option<&Label>,
+        props: &Props,
+        keys: &[String],
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let (sql, args) = matching_nodes_sql(label, props)?;
+        let mut nodes = self.run_query(&sql, args).await?;
+        report.matched_rows += nodes.len();
+        report.node_property_removes += nodes.len();
+        report.changed_nodes += nodes.len();
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        for node in &mut nodes {
+            for key in keys {
+                node.props.remove(key);
             }
         }
         let schema = self.current_schema();

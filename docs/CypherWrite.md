@@ -49,11 +49,15 @@ describe unreleased working-tree additions:
   patch in Sail; `null` is stored as `Value::Null`.
 - `MATCH ... SET e += { ... }` lowers when the relationship identity is
   resolved by endpoint IDs, relationship type, and optional explicit edge `id`.
-- `MATCH ... SET n.key = value` and `MATCH ... SET e.key = value` lower to
-  one-key patch mutations when the node or relationship identity is resolved;
-  assignment values are literal-only.
-- `MATCH ... REMOVE n.key` and `MATCH ... REMOVE e.key` lower to explicit
-  property-remove mutations when the node or relationship identity is resolved.
+- `MATCH ... SET n.key = value` lowers to a one-key patch mutation when `n`
+  either resolves to one explicit node identity or describes a broad node
+  match; assignment values are literal-only.
+- `MATCH ... SET e.key = value` lowers to a one-key patch mutation when the
+  relationship identity is resolved.
+- `MATCH ... REMOVE n.key` lowers to explicit property removal when `n` either
+  resolves to one explicit node identity or describes a broad node match.
+- `MATCH ... REMOVE e.key` lowers to explicit property removal when the
+  relationship identity is resolved.
 - Opt-in generated node IDs are available for node `CREATE` through
   `CypherNodeIdPolicy::GenerateForCreate`; explicit IDs remain the default,
   `MERGE` still requires explicit identity, and edge endpoint IDs must resolve
@@ -68,9 +72,8 @@ The v1 implementation should reject, with clear errors:
 - node identity derived from non-`id` properties;
 - broad edge patching and relationship property predicates beyond explicit
   edge `id`;
-- broad node property assignment/removal, broad edge property assignment/removal,
-  remove-on-null, arithmetic updates, parameters, path expressions, or computed
-  expression evaluation;
+- broad relationship property assignment/removal, remove-on-null, arithmetic
+  updates, parameters, path expressions, or computed expression evaluation;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
 
@@ -114,8 +117,12 @@ to backend-neutral Grust mutation concepts:
   metadata retained in `GraphMutationPlanOp`;
 - ID-resolved edge map patch -> `GraphMutation::PatchEdge`;
 - ID-resolved node property assignment -> one-key `GraphMutation::PatchNode`;
+- broad node property assignment -> one-key `GraphMutation::PatchMatchingNodes`
+  with cardinality metadata retained in `GraphMutationPlanOp`;
 - ID-resolved edge property assignment -> one-key `GraphMutation::PatchEdge`;
 - ID-resolved node property removal -> `GraphMutation::RemoveNodeProps`;
+- broad node property removal -> `GraphMutation::RemoveMatchingNodeProps` with
+  cardinality metadata retained in `GraphMutationPlanOp`;
 - ID-resolved edge property removal -> `GraphMutation::RemoveEdgeProps`;
 - Sail broad node delete -> `GraphMutation::DeleteMatchingNodes` with
   cardinality metadata retained in `GraphMutationPlanOp`.
@@ -785,3 +792,160 @@ error. pgGraph and SurrealDB report `Transactional` because their
 `apply_mutations` overrides already wrap mutation batches in PostgreSQL and
 SurrealDB transactions. Sail keeps the default non-transactional capability
 until its active table mode can prove stronger guarantees.
+
+## Further Feature Plan
+
+The next writable Cypher work should grow outward from the semantics that are
+already implemented. The order below favors features that reuse existing
+`GraphMutationPlan`, `CypherMutationExecutor`, cardinality reporting, and Sail
+staging paths before adding a larger expression language or shared parser
+crate.
+
+### Batch N: Broad Node Property Assignment And `REMOVE`
+
+Extend broad node matching from map patches to single-property assignment and
+property removal:
+
+```cypher
+MATCH (n:Person {status: 'inactive'})
+SET n.archived = true;
+
+MATCH (n:Person {status: 'inactive'})
+REMOVE n.nickname;
+```
+
+Acceptance criteria:
+
+- Add backend-neutral matching-node property assignment/removal operations, or
+  reuse matching-node patch/remove operations with explicit cardinality
+  metadata.
+- Keep assignment literal-only and keep `SET n.key = null` distinct from
+  `REMOVE n.key`.
+- Sail stages matched node IDs, reports matched rows, changed nodes,
+  node-patch/property-remove counts, and updates typed node tables through the
+  existing load path.
+- Memory implements the same resolved-plan behavior through
+  `CypherMutationExecutor`.
+- Unit tests cover bounded-many and unbounded-many planning, zero matches,
+  many matches, typed-column assignment, typed-column removal, and rejection of
+  computed expressions.
+
+Implementation status: implemented in the working tree after `0.8.4`.
+Broad node `SET n.key = literal` lowers as a one-key
+`GraphMutationPlanOp::PatchMatchingNodes`, preserving `null` as `Value::Null`
+rather than treating it as removal. Broad node `REMOVE n.key` lowers to
+`GraphMutationPlanOp::RemoveMatchingNodeProps` and records actual matched-row,
+changed-node, and node-property-removal counts during backend execution. Sail
+executes both paths through matched-node scans and the existing node load path
+so typed node mirrors stay consistent. Memory implements the same resolved-plan
+behavior through `CypherMutationExecutor`. Computed expressions remain rejected
+until Batch R.
+
+### Batch O: Resolved `MATCH ... CREATE`
+
+Allow `MATCH` to bind endpoint variables and then create one resolved edge:
+
+```cypher
+MATCH (a:Person {id: 'person-1'}), (b:Person {id: 'person-2'})
+CREATE (a)-[:KNOWS {since: 2026}]->(b);
+```
+
+Acceptance criteria:
+
+- Reuse the existing explicit-ID variable binding machinery from
+  `MATCH ... MERGE`.
+- Lower exactly one relationship `CREATE` to
+  `GraphMutationPlanOp::UpsertEdge` with `GraphMutationPlanKind::Create`.
+- Preserve `CypherCreateMode::ErrorIfExists` behavior for strict create
+  callers.
+- Reject node creation in the trailing `CREATE` clause, unbound endpoint
+  variables, multi-edge creates, and broad row-producing matches.
+- Add Sail planner tests and Memory facade execution tests.
+
+### Batch P: Broad Relationship Matching And Edge Mutations
+
+Add cardinality-aware relationship matching before supporting broad edge
+patch/delete/property removal:
+
+```cypher
+MATCH (:Person {id: 'a'})-[e:KNOWS]->(:Person)
+DELETE e;
+
+MATCH (:Person {id: 'a'})-[e:KNOWS]->(:Person)
+SET e += {seen: true};
+```
+
+Acceptance criteria:
+
+- Define a backend-neutral relationship match descriptor that carries endpoint
+  label/property predicates, relationship type, optional relationship
+  predicates, and cardinality.
+- Decide how duplicate structural edges are addressed when no explicit edge
+  `id` exists; preserve the current ambiguity error for single-identity
+  operations.
+- Sail stages matched edge identities before mutation and reports matched
+  rows, changed edges, and patch/delete/property-remove counts.
+- Memory implements the same semantics over its edge map.
+- Keep relationship property predicates beyond explicit `id` rejected until
+  the match descriptor and Sail SQL lowering can prove consistent behavior.
+
+### Batch Q: Parameters And Literal Binding
+
+Introduce parameters as values, not as arbitrary expressions:
+
+```cypher
+CREATE (:Person {id: $id, name: $name});
+MATCH (n:Person {id: $id}) SET n.name = $name;
+```
+
+Acceptance criteria:
+
+- Add an options or request type that carries a parameter map using Grust
+  `Value`.
+- Permit parameters only where literals are already accepted: IDs, property
+  maps, and literal property assignments.
+- Validate parameter presence and type before planning, returning structured
+  `CypherSyntax` or `CypherUnresolvedIdentity` errors as appropriate.
+- Keep arithmetic, functions, path expressions, and expression evaluation
+  deferred.
+- Add tests for string ID parameters, integer/bool/null property parameters,
+  missing parameters, wrong ID types, and parameters inside quoted strings.
+
+### Batch R: Minimal Expression Updates
+
+Add a deliberately small expression evaluator only after parameters are stable:
+
+```cypher
+MATCH (n:Counter {id: 'c1'})
+SET n.count = n.count + 1;
+```
+
+Acceptance criteria:
+
+- Scope v1 expressions to current-property reference plus literal/parameter
+  arithmetic for numeric values.
+- Define missing-property, null, type-mismatch, and overflow behavior before
+  execution.
+- Lower expression updates to an explicit read-modify-write plan operation
+  rather than hiding expression evaluation inside parser code.
+- Sail and Memory must produce the same result for supported expressions.
+- Reject function calls, list/map projections, path expressions, `CASE`, and
+  cross-variable expressions.
+
+### Batch S: Shared Parser Crate Decision
+
+Revisit parser ownership only after Batch Q or R makes the hand-written Sail
+parser too large or after another backend needs Cypher text parsing.
+
+Acceptance criteria:
+
+- Identify at least two parser consumers or one expression grammar whose size
+  justifies extraction.
+- Move statement splitting, comment stripping, top-level classification,
+  pattern parsing, literal parsing, and expression parsing behind an AST module
+  or `grust-cypher` crate.
+- Keep lowering from AST to `GraphMutationPlan` separate from parsing.
+- Preserve all current structured error categories and add AST-level tests for
+  every accepted mutation form.
+- Keep `sail_cypher_mutation_plan` as a stable compatibility wrapper over the
+  shared parser/lowering path.

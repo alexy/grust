@@ -386,7 +386,8 @@ endpoint edge `CREATE`/`MERGE`, and resolved node/edge `DELETE` into Grust
 mutation plans. It also accepts ordered multi-statement batches and local node
 variables bound from explicit-ID node patterns, plus ID-resolved
 `MATCH ... DELETE`, edge `MATCH ... MERGE`, and cardinality-aware broad node
-`MATCH ... DELETE` / `MATCH ... SET n += { ... }` forms plus ID-resolved edge
+`MATCH ... DELETE` / `MATCH ... SET n += { ... }` / `MATCH ... SET n.key = value`
+/ `MATCH ... REMOVE n.key` forms plus ID-resolved edge
 `MATCH ... SET e += { ... }`, literal property assignment, and explicit
 property `REMOVE` for resolved node or edge identities, while
 `SailGraphStore::execute_cypher_mutation` executes those plans through
@@ -422,8 +423,10 @@ patch mutations and reuses the same typed-edge mirror writes as ordinary edge
 upserts.
 Literal `SET n.key = value` / `SET e.key = value` lowers to one-key patches,
 and explicit `REMOVE n.key` / `REMOVE e.key` lowers to backend-neutral property
-remove mutations when identity is resolved; broader expression updates and
-remove-on-null remain deferred.
+remove mutations. Node forms can target either a resolved identity or a broad
+node match; edge forms still require resolved relationship identity. Broader
+expression updates, broad relationship property mutation, and remove-on-null
+remain deferred.
 The mutation report includes matched-row and changed node/edge counts for
 broad Sail deletes and broad Sail node patches, and the parser accepts
 top-level mutation keywords case-insensitively while stripping Cypher comments

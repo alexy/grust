@@ -1152,6 +1152,18 @@ fn cypher_match_set_property_assignment_lowers_resolved_node_and_edge() {
             props: Props::from([("since".to_string(), Value::Int(2026))]),
         }]
     );
+
+    let broad =
+        sail_cypher_mutation_plan("MATCH (n:Person {status: 'inactive'}) SET n.archived = true")
+            .unwrap();
+    assert_eq!(
+        broad.into_mutations(),
+        vec![GraphMutation::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            patch: Props::from([("archived".to_string(), Value::Bool(true))]),
+        }]
+    );
 }
 
 #[test]
@@ -1189,15 +1201,33 @@ fn cypher_match_remove_lowers_resolved_node_and_edge_properties() {
             keys: vec!["note".to_string()],
         }]
     );
+
+    let broad =
+        sail_cypher_mutation_plan("MATCH (n:Person {status: 'inactive'}) REMOVE n.nickname")
+            .unwrap();
+    assert_eq!(
+        broad.report(),
+        GraphMutationReport {
+            property_removes: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        broad.into_mutations(),
+        vec![GraphMutation::RemoveMatchingNodeProps {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("inactive"))]),
+            keys: vec!["nickname".to_string()],
+        }]
+    );
 }
 
 #[test]
 fn cypher_match_set_rejects_deferred_patch_forms() {
     for cypher in [
         "MATCH (n:Person {id: 'person-1'}) SET m += {name: 'Ada'}",
-        "MATCH (n:Person {name: 'Ada'}) SET n.name = 'Ada'",
+        "MATCH (n:Person {status: 'inactive'}) SET n.count = n.count + 1",
         "MATCH (:Person {id: 'person-1'})-[e:KNOWS {since: 2020}]->(:Person {id: 'person-2'}) SET e += {since: 2026}",
-        "MATCH (n:Person {name: 'Ada'}) REMOVE n.name",
     ] {
         let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH SET must fail");
         assert!(is_cypher_planning_error(&error));
@@ -1867,9 +1897,9 @@ async fn test_execute_cypher_broad_match_set_updates_typed_nodes() {
         .expect("seed typed Person rows");
 
     let report = store
-        .execute_cypher_mutation("MATCH (n:Person) SET n += {age: 37}")
+        .execute_cypher_mutation("MATCH (n:Person) SET n.age = 37")
         .await
-        .expect("broad patch typed Person age");
+        .expect("broad assign typed Person age");
     assert_eq!(
         report,
         GraphMutationReport {
@@ -1897,6 +1927,32 @@ async fn test_execute_cypher_broad_match_set_updates_typed_nodes() {
             vec!["person-2".to_string(), "37".to_string()],
         ]
     );
+
+    let report = store
+        .execute_cypher_mutation("MATCH (n:Person) REMOVE n.age")
+        .await
+        .expect("broad remove typed Person age");
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            property_removes: 1,
+            matched_rows: 2,
+            changed_nodes: 2,
+            node_property_removes: 2,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let rows = query_string_rows(
+        store
+            .query_arrow_ipc(
+                "SELECT CAST(COUNT(*) AS STRING) AS null_age_count FROM grust_node_person WHERE age IS NULL",
+            )
+            .await
+            .expect("query typed Person table after remove"),
+        1,
+    );
+    assert_eq!(rows, vec![vec!["2".to_string()]]);
 }
 
 #[tokio::test]
