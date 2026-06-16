@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.4", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.9.0", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.8.4", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.4", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.9.0", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -1041,10 +1041,11 @@ entrypoint on the lower-friction upsert-compatible path. Generated node IDs are
 also caller-selected rather than implicit: `CypherNodeIdPolicy::GenerateForCreate`
 allows node `CREATE` without an `id`, and the result API returns generated IDs
 separately from the count-oriented mutation report. Callers can also opt into
-written edge identity payloads for resolved and row-producing edge writes; the
-payload describes accepted writes rather than exact insert-versus-update
-outcomes on upsert backends. `MERGE` and edge endpoint patterns still require
-resolved IDs before writing.
+written node and edge identity payloads. Node payloads cover explicit and
+generated node writes; edge payloads cover resolved and row-producing edge
+writes. These payloads describe accepted writes rather than exact
+insert-versus-update outcomes on upsert backends. `MERGE` and edge endpoint
+patterns still require resolved IDs before writing.
 `CypherMutationOptions::parameters` binds Grust `Value`s to `$name`
 placeholders only where literals are already accepted: IDs, property maps, and
 literal property assignments. Quoted `'$name'` remains ordinary string text

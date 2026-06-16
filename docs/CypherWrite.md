@@ -1352,13 +1352,15 @@ Implementation status: partially implemented in the working tree after Batch
 Y. `CypherMutationResult` remains separate from `CypherMutationReport`: the
 report stays count-oriented, generated node IDs remain opt-in through
 `CypherNodeIdPolicy::GenerateForCreate`, and callers can now set
+`CypherMutationOptions::collect_written_node_identities` and
 `CypherMutationOptions::collect_written_edge_identities` to collect
-`CypherMutationResult::written_edge_identities` for resolved edge writes and
-row-producing `MATCH ... CREATE` / `MATCH ... MERGE` edge writes. The edge
-payload carries accepted write intent and the structural or explicit edge
-identity, but it does not promise inserted-versus-updated status on
-upsert-compatible backends. General returned rows, aggregation, projections,
-and exact insert/update classification remain deferred.
+`CypherMutationResult::written_node_identities` for explicit or generated node
+writes and `CypherMutationResult::written_edge_identities` for resolved edge
+writes plus row-producing `MATCH ... CREATE` / `MATCH ... MERGE` edge writes.
+The payloads carry accepted write intent and structural identities, but they do
+not promise inserted-versus-updated status on upsert-compatible backends.
+General returned rows, aggregation, projections, and exact insert/update
+classification remain deferred.
 
 ### Batch AB: General `RETURN` After Writes
 

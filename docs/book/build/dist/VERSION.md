@@ -1,4 +1,4 @@
-kindle_name: grust (0.8.4)
+kindle_name: grust (0.9.0)
 built_at: 2026-06-16
 epub_file: grust.epub
-kindle_link: grust (0.8.4).epub
+kindle_link: grust (0.9.0).epub

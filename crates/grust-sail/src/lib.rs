@@ -109,6 +109,11 @@ impl Default for CypherNullAssignment {
 pub struct CypherMutationOptions {
     pub create_mode: CypherCreateMode,
     pub node_id_policy: CypherNodeIdPolicy,
+    /// Collect written node identities in `CypherMutationResult`.
+    ///
+    /// This is opt-in so broad write result payloads remain deliberate. The
+    /// mutation report remains count-oriented either way.
+    pub collect_written_node_identities: bool,
     /// Collect written edge identities in `CypherMutationResult`.
     ///
     /// This is opt-in because row-producing edge writes can materialize a large
@@ -127,6 +132,7 @@ impl Default for CypherMutationOptions {
         Self {
             create_mode: CypherCreateMode::UpsertCompatible,
             node_id_policy: CypherNodeIdPolicy::ExplicitOnly,
+            collect_written_node_identities: false,
             collect_written_edge_identities: false,
             null_assignment: CypherNullAssignment::StoreNull,
             parameters: CypherParameters::new(),
@@ -137,6 +143,13 @@ impl Default for CypherMutationOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CypherGeneratedNodeId {
     pub variable: Option<String>,
+    pub id: NodeId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CypherWrittenNodeIdentity {
+    pub kind: GraphMutationPlanKind,
+    pub label: Label,
     pub id: NodeId,
 }
 
@@ -153,6 +166,7 @@ pub struct CypherWrittenEdgeIdentity {
 pub struct CypherMutationResult {
     pub report: CypherMutationReport,
     pub generated_node_ids: Vec<CypherGeneratedNodeId>,
+    pub written_node_identities: Vec<CypherWrittenNodeIdentity>,
     pub written_edge_identities: Vec<CypherWrittenEdgeIdentity>,
 }
 
@@ -1831,6 +1845,17 @@ fn cypher_written_edge_identity(
     }
 }
 
+fn cypher_written_node_identity(
+    kind: GraphMutationPlanKind,
+    node: &Node,
+) -> CypherWrittenNodeIdentity {
+    CypherWrittenNodeIdentity {
+        kind,
+        label: node.label.clone(),
+        id: node.id.clone(),
+    }
+}
+
 struct NumericExpression {
     source_target: String,
     source_key: String,
@@ -2395,6 +2420,7 @@ impl SailGraphStore {
         options: CypherMutationOptions,
     ) -> Result<CypherMutationResult> {
         let create_mode = options.create_mode;
+        let collect_written_node_identities = options.collect_written_node_identities;
         let collect_written_edge_identities = options.collect_written_edge_identities;
         let (plan, generated_node_ids) = sail_cypher_mutation_plan_with_options(cypher, options)?;
         let mut report = plan.report();
@@ -2403,15 +2429,24 @@ impl SailGraphStore {
                 .await
                 .map_err(cypher_execution_error)?;
         }
+        let mut written_node_identities = Vec::new();
         let mut written_edge_identities = Vec::new();
+        let node_identity_collector =
+            collect_written_node_identities.then_some(&mut written_node_identities);
         let identity_collector =
             collect_written_edge_identities.then_some(&mut written_edge_identities);
-        self.apply_cypher_mutation_plan(&plan, &mut report, identity_collector)
-            .await
-            .map_err(cypher_execution_error)?;
+        self.apply_cypher_mutation_plan(
+            &plan,
+            &mut report,
+            node_identity_collector,
+            identity_collector,
+        )
+        .await
+        .map_err(cypher_execution_error)?;
         Ok(CypherMutationResult {
             report,
             generated_node_ids,
+            written_node_identities,
             written_edge_identities,
         })
     }
@@ -2420,6 +2455,7 @@ impl SailGraphStore {
         &self,
         plan: &GraphMutationPlan,
         report: &mut CypherMutationReport,
+        mut written_node_identities: Option<&mut Vec<CypherWrittenNodeIdentity>>,
         mut written_edge_identities: Option<&mut Vec<CypherWrittenEdgeIdentity>>,
     ) -> Result<()> {
         for operation in &plan.operations {
@@ -2528,6 +2564,11 @@ impl SailGraphStore {
                     let mutation = GraphMutation::from(operation.clone());
                     self.apply_mutations(std::slice::from_ref(&mutation))
                         .await?;
+                    if let (Some(collector), GraphMutationPlanOp::UpsertNode { kind, node }) =
+                        (written_node_identities.as_deref_mut(), operation)
+                    {
+                        collector.push(cypher_written_node_identity(*kind, node));
+                    }
                     if let (Some(collector), GraphMutationPlanOp::UpsertEdge { kind, edge }) =
                         (written_edge_identities.as_deref_mut(), operation)
                     {
@@ -3399,7 +3440,7 @@ impl CypherMutationExecutor for SailGraphStore {
         plan: &GraphMutationPlan,
     ) -> Result<GraphMutationReport> {
         let mut report = plan.report();
-        self.apply_cypher_mutation_plan(plan, &mut report, None)
+        self.apply_cypher_mutation_plan(plan, &mut report, None, None)
             .await
             .map_err(cypher_execution_error)?;
         Ok(report)

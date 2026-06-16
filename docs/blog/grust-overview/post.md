@@ -24,7 +24,7 @@ The project is here:
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
 - Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-ladybug](https://crates.io/crates/grust-ladybug), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
-The `0.8.4` line is the first point where I think the full idea is visible in
+The `0.9.0` line is the first point where I think the full idea is visible in
 code. The workspace has the core graph model, document fixtures, typed
 ingestion, schema-backed writes, traversal lowering, shared graph-index
 construction, backend-specific typed storage, LadybugDB and Sail Arrow IPC
@@ -161,7 +161,7 @@ them into ordinary Grust nodes and edges:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.4", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.9.0", features = ["typed-garde"] }
 ```
 
 ```rust
@@ -214,7 +214,7 @@ treats it as typed. In Grust, `zod-rs` plays that role for
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.4", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.9.0", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers
@@ -431,8 +431,9 @@ executes that plan through
 mirror writes, and the same delete paths as ordinary Grust mutations.
 Generated node IDs are opt-in through Sail writable-Cypher options and are
 returned in a result shape separate from the count-oriented report, while
-written edge identities for resolved and row-producing edge writes can be
-collected through the same result path when callers opt in. These payloads
+written node and edge identities can be collected through the same result path
+when callers opt in. Node payloads cover explicit and generated node writes;
+edge payloads cover resolved and row-producing edge writes. These payloads
 describe accepted writes, not exact insert-versus-update outcomes on upsert
 backends, and `MERGE` and edge endpoint writes keep requiring resolved IDs.
 Parameters are option-driven too: callers can bind Grust `Value`s to `$name`

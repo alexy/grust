@@ -16,7 +16,7 @@ arrow = ["dep:arrow", "lbug/arrow"]
 [dependencies]
 arrow = { version = "55", optional = true }
 async-trait = { workspace = true }
-grust-core = { version = "0.8.4", path = "../grust-core" }
+grust-core = { version = "0.9.0", path = "../grust-core" }
 lbug = { workspace = true }
 serde_json = { workspace = true }
 

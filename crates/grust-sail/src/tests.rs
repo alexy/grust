@@ -211,6 +211,7 @@ fn cypher_mutation_options_default_to_upsert_compatible_create() {
         CypherMutationOptions {
             create_mode: CypherCreateMode::UpsertCompatible,
             node_id_policy: CypherNodeIdPolicy::ExplicitOnly,
+            collect_written_node_identities: false,
             collect_written_edge_identities: false,
             null_assignment: CypherNullAssignment::StoreNull,
             parameters: CypherParameters::new(),
@@ -3458,6 +3459,71 @@ async fn test_execute_cypher_mutation_generated_node_ids() {
     assert_eq!(node.label, Label::new("Person"));
     assert_eq!(node.props.get("id"), Some(&Value::from(node.id.as_str())));
     assert_eq!(node.props.get("name"), Some(&Value::from("Ada")));
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_mutation_collects_written_node_identities() {
+    let store = store().await;
+    let default_result = store
+        .execute_cypher_mutation_result_with_options(
+            "
+            CREATE (:Person {id: 'ada'});
+            MERGE (:Person {id: 'bob'});
+            ",
+            CypherMutationOptions::default(),
+        )
+        .await
+        .expect("execute default node writes");
+    assert!(default_result.written_node_identities.is_empty());
+
+    store.clear().await.expect("clear graph before collect run");
+    let result = store
+        .execute_cypher_mutation_result_with_options(
+            "
+            CREATE (:Person {id: 'ada'});
+            MERGE (:Person {id: 'bob'});
+            CREATE (n:Person {name: 'Generated'});
+            ",
+            CypherMutationOptions {
+                node_id_policy: CypherNodeIdPolicy::GenerateForCreate,
+                collect_written_node_identities: true,
+                ..CypherMutationOptions::default()
+            },
+        )
+        .await
+        .expect("execute node writes with identity collection");
+
+    assert_eq!(result.written_node_identities.len(), 3);
+    assert!(
+        result
+            .written_node_identities
+            .contains(&CypherWrittenNodeIdentity {
+                kind: GraphMutationPlanKind::Create,
+                label: Label::new("Person"),
+                id: NodeId::new("ada"),
+            })
+    );
+    assert!(
+        result
+            .written_node_identities
+            .contains(&CypherWrittenNodeIdentity {
+                kind: GraphMutationPlanKind::Merge,
+                label: Label::new("Person"),
+                id: NodeId::new("bob"),
+            })
+    );
+    assert_eq!(result.generated_node_ids.len(), 1);
+    let generated_id = result.generated_node_ids[0].id.clone();
+    assert!(
+        result
+            .written_node_identities
+            .contains(&CypherWrittenNodeIdentity {
+                kind: GraphMutationPlanKind::Create,
+                label: Label::new("Person"),
+                id: generated_id,
+            })
+    );
 }
 
 #[tokio::test]

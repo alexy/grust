@@ -225,7 +225,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.4", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.9.0", features = ["memory"] }
 ```
 
 The facade re-exports the full `grust-memory` crate surface when the feature is
@@ -315,7 +315,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.4", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.9.0", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
 ```
 
 For Arrow-native data sources, enable `ladybug-arrow` to use embedded
@@ -406,10 +406,13 @@ allows node `CREATE` without an `id`, and
 `execute_cypher_mutation_result_with_options` returns the generated IDs in
 `CypherMutationResult::generated_node_ids` while leaving
 `CypherMutationReport` count-oriented. Callers can also set
-`CypherMutationOptions::collect_written_edge_identities` to collect resolved
-and row-producing edge write identities in
-`CypherMutationResult::written_edge_identities`; these identities describe
-accepted writes, not exact insert-versus-update outcomes on upsert backends.
+`CypherMutationOptions::collect_written_node_identities` and
+`CypherMutationOptions::collect_written_edge_identities` to collect accepted
+node and edge write identities in
+`CypherMutationResult::written_node_identities` and
+`CypherMutationResult::written_edge_identities`; edge payloads cover both
+resolved and row-producing edge writes. These identities describe accepted
+writes, not exact insert-versus-update outcomes on upsert backends.
 `MERGE` and edge endpoint patterns still require resolved IDs before writing.
 `CypherMutationOptions::parameters` lets callers bind Grust `Value`s to
 `$name` placeholders in literal positions such as IDs, property maps, and
