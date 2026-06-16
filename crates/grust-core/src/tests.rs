@@ -120,6 +120,22 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             kind: GraphMutationPlanKind::Merge,
             edge: edge.clone(),
         },
+        GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+            kind: GraphMutationPlanKind::Create,
+            from: GraphNodeMatch {
+                label: Some(Label::new("Person")),
+                props: Props::from([("status".to_string(), Value::from("active"))]),
+                predicates: Vec::new(),
+            },
+            to: GraphNodeMatch {
+                label: Some(Label::new("Team")),
+                props: Props::from([("id".to_string(), Value::from("team-1"))]),
+                predicates: Vec::new(),
+            },
+            label: Label::new("MEMBER_OF"),
+            props: Props::new(),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
         GraphMutationPlanOp::PatchNode {
             id: NodeId::new("person-1"),
             props: Props::from([("name".to_string(), Value::from("Ada"))]),
@@ -197,7 +213,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
     assert_eq!(
         plan.report(),
         GraphMutationReport {
-            creates: 1,
+            creates: 2,
             merges: 1,
             deletes: 4,
             patches: 5,
@@ -220,6 +236,21 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
         vec![
             GraphMutation::UpsertNode(node),
             GraphMutation::UpsertEdge(edge),
+            GraphMutation::UpsertEdgesFromNodeMatches {
+                kind: GraphMutationPlanKind::Create,
+                from: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("status".to_string(), Value::from("active"))]),
+                    predicates: Vec::new(),
+                },
+                to: GraphNodeMatch {
+                    label: Some(Label::new("Team")),
+                    props: Props::from([("id".to_string(), Value::from("team-1"))]),
+                    predicates: Vec::new(),
+                },
+                label: Label::new("MEMBER_OF"),
+                props: Props::new(),
+            },
             GraphMutation::PatchNode {
                 id: NodeId::new("person-1"),
                 props: Props::from([("name".to_string(), Value::from("Ada"))]),

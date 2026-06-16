@@ -490,6 +490,55 @@ impl CypherMutationExecutor for MemoryGraphStore {
                         ));
                     }
                 }
+                GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+                    from,
+                    to,
+                    label,
+                    props,
+                    ..
+                } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let from_ids = Self::matching_node_ids(
+                        &inner,
+                        from.label.as_ref(),
+                        &from.props,
+                        &from.predicates,
+                    );
+                    let to_ids = Self::matching_node_ids(
+                        &inner,
+                        to.label.as_ref(),
+                        &to.props,
+                        &to.predicates,
+                    );
+                    let matched_rows = from_ids.len().saturating_mul(to_ids.len());
+                    report.matched_rows += matched_rows;
+                    report.edge_upserts += matched_rows;
+                    report.changed_edges += matched_rows;
+
+                    let mut edges = Vec::with_capacity(matched_rows);
+                    for from_id in &from_ids {
+                        for to_id in &to_ids {
+                            let edge = Edge::new(
+                                label.clone(),
+                                from_id.clone(),
+                                to_id.clone(),
+                                props.clone(),
+                            );
+                            if let Some(schema) = &inner.schema {
+                                schema.validate_edge_with(&edge, |id| {
+                                    inner.nodes.get(id).map(|node| &node.label)
+                                })?;
+                            }
+                            edges.push(edge);
+                        }
+                    }
+                    for edge in edges {
+                        inner.edges.insert(
+                            (edge.from.clone(), edge.label.clone(), edge.to.clone()),
+                            edge,
+                        );
+                    }
+                }
                 _ => {
                     let mutation = GraphMutation::from(operation.clone());
                     self.apply_mutations(std::slice::from_ref(&mutation))

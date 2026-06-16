@@ -41,6 +41,11 @@ describe unreleased working-tree additions:
   `MATCH (a:Src {id: ...}), (b:Dst {id: ...}) MERGE (a)-[:TYPE]->(b)` lower
   to edge upserts when both endpoint variables are resolved by explicit-ID
   node patterns.
+- `MATCH (a:Src {...}), (b:Dst {...}) CREATE (a)-[:TYPE {...}]->(b)` can
+  create one edge per matched endpoint-node pair when both edge endpoints are
+  bound variables. The row-producing form materializes matched rows at
+  execution time and rejects trailing node creation, relationship variables,
+  and explicit relationship `id` properties.
 - `MATCH (n:Label {...}) DELETE n` without an explicit `id` lowers to a
   cardinality-aware matched node delete in Sail. The planner marks the
   operation as bounded-many when a label or property predicate is present and
@@ -99,6 +104,9 @@ The v1 implementation should reject, with clear errors:
   expression evaluation;
 - `WHERE` forms using `OR`, `NOT`, pattern predicates, list predicates,
   functions, arbitrary expressions, or cross-variable property comparisons;
+- row-producing `MATCH ... MERGE`, trailing node creation in `MATCH ... CREATE`,
+  relationship variables in row-producing `CREATE`, and explicit relationship
+  IDs in row-producing `CREATE`;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
 
@@ -157,6 +165,10 @@ to backend-neutral Grust mutation concepts:
 - broad edge property assignment -> one-key
   `GraphMutation::PatchMatchingEdges` with a `GraphRelationshipMatch`
   descriptor and cardinality metadata retained in `GraphMutationPlanOp`;
+- row-producing matched edge create ->
+  `GraphMutation::UpsertEdgesFromNodeMatches`, carrying source and destination
+  `GraphNodeMatch` descriptors plus the edge label and properties, with
+  matched-row counts filled in by backend execution;
 - ID-resolved node property removal -> `GraphMutation::RemoveNodeProps`;
 - broad node property removal -> `GraphMutation::RemoveMatchingNodeProps` with
   cardinality metadata retained in `GraphMutationPlanOp`;
@@ -288,8 +300,10 @@ Core tests should cover:
 - lowering of literal property assignment and explicit property removal;
 - `GraphPropertyPredicate` matching semantics for missing properties, `null`,
   numeric comparisons, string comparisons, and mismatched ordered types;
-- rejection of unsupported expression `SET`, row-producing `MATCH ... CREATE`,
-  and unsupported `WHERE` predicate forms.
+- row-producing edge `MATCH ... CREATE` plan/report conversion;
+- rejection of unsupported expression `SET`, row-producing `MATCH ... MERGE`,
+  trailing node creation in `MATCH ... CREATE`, and unsupported `WHERE`
+  predicate forms.
 
 Sail unit tests should cover:
 
@@ -301,6 +315,9 @@ Sail unit tests should cover:
   relationships, and matching-node mutation operations;
 - equivalent predicate selection between Sail-planned mutation plans executed
   on Memory and predicate SQL emitted by Sail helpers;
+- row-producing edge `MATCH ... CREATE` lowering over matched node variables,
+  including zero-, one-, and many-row execution coverage through Memory and
+  ignored live Sail tests;
 - clear errors for unsupported writable Cypher forms.
 
 Ignored live Sail tests should cover:
@@ -1182,6 +1199,24 @@ Acceptance criteria:
 - Define duplicate edge behavior separately for `CREATE` and `MERGE`, honoring
   strict-create mode when enabled.
 - Add Sail live tests for zero-row, one-row, and many-row edge creation.
+
+Implementation status: implemented for `MATCH ... CREATE` edges. The planner
+now emits `GraphMutationPlanOp::UpsertEdgesFromNodeMatches` for row-producing
+edge creates, carrying source and destination `GraphNodeMatch` descriptors plus
+the edge label and properties. Sail materializes the matched source and
+destination node sets before writing, computes the Cartesian endpoint rows,
+reports matched rows separately from edge upserts, validates edges against the
+active schema, and loads them through the existing generic and typed edge
+staging path. Memory implements the same resolved-plan operation for
+deterministic parser-to-executor tests.
+
+The row-producing `CREATE` form remains intentionally narrow: both endpoints
+must be bound node variables from the `MATCH` clause, trailing node creation is
+rejected, relationship variables are rejected, and explicit relationship `id`
+properties are rejected because one literal ID cannot safely identify multiple
+created rows. Existing ID-resolved `MATCH ... CREATE` still lowers to a single
+`UpsertEdge`, and strict-create mode preflights row-produced edges before
+writing. Broad `MATCH ... MERGE` is still deferred to Batch X.
 
 ### Batch X: Row-producing `MATCH ... MERGE`
 

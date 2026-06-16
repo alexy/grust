@@ -944,6 +944,9 @@ fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> R
         GraphMutation::UpsertEdge(edge) => {
             surreal_relate_edges_query(std::slice::from_ref(edge), &edge_id_tables(edge))
         }
+        GraphMutation::UpsertEdgesFromNodeMatches { .. } => Err(GrustError::Unsupported(
+            "SurrealDB row-producing edge upserts are not implemented yet".to_string(),
+        )),
         GraphMutation::DeleteEdge { from, label, to } => {
             Ok(surreal_delete_edge_query(from, label, to, config))
         }

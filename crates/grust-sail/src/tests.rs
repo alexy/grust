@@ -1277,6 +1277,54 @@ fn cypher_match_create_lowers_id_resolved_edge_pattern() {
 }
 
 #[test]
+fn cypher_match_create_lowers_row_producing_edge_pattern() {
+    let plan = sail_cypher_mutation_plan_with_options(
+        "
+        MATCH (a:Person {status: 'active'}), (b:Team {id: $team})
+        WHERE a.score >= 10
+        CREATE (a)-[:MEMBER_OF {source: 'cypher'}]->(b)
+        ",
+        CypherMutationOptions {
+            parameters: CypherParameters::from([("team".to_string(), Value::from("team-1"))]),
+            ..CypherMutationOptions::default()
+        },
+    )
+    .unwrap()
+    .0;
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            creates: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    assert_eq!(
+        plan.operations,
+        vec![GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+            kind: GraphMutationPlanKind::Create,
+            from: GraphNodeMatch {
+                label: Some(Label::new("Person")),
+                props: Props::from([("status".to_string(), Value::from("active"))]),
+                predicates: vec![GraphPropertyPredicate {
+                    key: "score".to_string(),
+                    op: GraphPredicateOp::GreaterThanOrEqual,
+                    value: Value::Int(10),
+                }],
+            },
+            to: GraphNodeMatch {
+                label: Some(Label::new("Team")),
+                props: Props::from([("id".to_string(), Value::from("team-1"))]),
+                predicates: Vec::new(),
+            },
+            label: Label::new("MEMBER_OF"),
+            props: Props::from([("source".to_string(), Value::from("cypher"))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+}
+
+#[test]
 fn cypher_match_merge_rejects_unresolved_or_broad_forms() {
     for cypher in [
         "MATCH (:Person {id: 'person-1'}), (b:Person {id: 'person-2'}) MERGE (:Person {id: 'person-1'})-[:KNOWS]->(b)",
@@ -1295,9 +1343,10 @@ fn cypher_match_create_rejects_unresolved_or_broad_forms() {
     for cypher in [
         "MATCH (:Person {id: 'person-1'}), (b:Person {id: 'person-2'}) CREATE (:Person {id: 'person-1'})-[:KNOWS]->(b)",
         "MATCH (a:Person {id: 'person-1'}) CREATE (a)-[:KNOWS]->(b)",
-        "MATCH (a:Person {name: 'Ada'}), (b:Person {id: 'person-2'}) CREATE (a)-[:KNOWS]->(b)",
         "MATCH (a:Person {id: 'person-1'}) CREATE (:Person {id: 'person-3'})",
         "MATCH (a:Person {id: 'person-1'}) CREATE (a)-[:KNOWS]->(:Person {id: 'person-2'})",
+        "MATCH (a:Person {name: 'Ada'}), (b:Person {id: 'person-2'}) CREATE (a)-[e:KNOWS]->(b)",
+        "MATCH (a:Person {name: 'Ada'}), (b:Person {id: 'person-2'}) CREATE (a)-[:KNOWS {id: 'edge-1'}]->(b)",
     ] {
         let error =
             sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH CREATE must fail");
@@ -2060,6 +2109,45 @@ fn sail_cypher_plan_executes_on_memory_facade() {
 }
 
 #[test]
+fn sail_row_producing_match_create_executes_on_memory_facade() {
+    let plan = sail_cypher_mutation_plan(
+        "
+        CREATE (:Person {id: 'ada', status: 'active', score: 11});
+        CREATE (:Person {id: 'bob', status: 'active', score: 9});
+        CREATE (:Team {id: 'eng'});
+        MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
+        WHERE a.score >= 10
+        CREATE (a)-[:MEMBER_OF {source: 'cypher'}]->(b);
+        ",
+    )
+    .unwrap();
+    let store = MemoryGraphStore::new();
+
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&plan)).unwrap();
+
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            creates: 4,
+            matched_rows: 1,
+            changed_nodes: 3,
+            changed_edges: 1,
+            node_upserts: 3,
+            edge_upserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    let edges = futures_executor::block_on(store.get_edges(EdgeQuery {
+        from: Some(NodeId::new("ada")),
+        to: Some(NodeId::new("eng")),
+        label: Some(Label::new("MEMBER_OF")),
+    }))
+    .unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].props.get("source"), Some(&Value::from("cypher")));
+}
+
+#[test]
 fn cypher_parser_polish_handles_comments_keyword_case_and_statement_splitting() {
     let plan = sail_cypher_mutation_plan(
         r#"
@@ -2454,6 +2542,104 @@ async fn test_execute_cypher_mutations() {
             .expect("read after node delete")
             .is_none()
     );
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_row_producing_match_create_edges() {
+    let store = store().await;
+
+    store
+        .execute_cypher_mutation(
+            "
+            CREATE (:Person {id: 'ada', status: 'active', score: 11});
+            CREATE (:Person {id: 'bob', status: 'active', score: 12});
+            CREATE (:Person {id: 'cam', status: 'inactive', score: 20});
+            CREATE (:Team {id: 'eng'});
+            CREATE (:Team {id: 'research'});
+            ",
+        )
+        .await
+        .expect("seed nodes");
+
+    let zero = store
+        .execute_cypher_mutation(
+            "
+            MATCH (a:Person {status: 'missing'}), (b:Team {id: 'eng'})
+            CREATE (a)-[:MEMBER_OF {source: 'zero'}]->(b)
+            ",
+        )
+        .await
+        .expect("zero-row create");
+    assert_eq!(
+        zero,
+        GraphMutationReport {
+            creates: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let one = store
+        .execute_cypher_mutation(
+            "
+            MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
+            WHERE a.score >= 12
+            CREATE (a)-[:MEMBER_OF {source: 'one'}]->(b)
+            ",
+        )
+        .await
+        .expect("one-row create");
+    assert_eq!(
+        one,
+        GraphMutationReport {
+            creates: 1,
+            matched_rows: 1,
+            changed_edges: 1,
+            edge_upserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let many = store
+        .execute_cypher_mutation(
+            "
+            MATCH (a:Person {status: 'active'}), (b:Team)
+            CREATE (a)-[:ASSIGNED_TO {source: 'many'}]->(b)
+            ",
+        )
+        .await
+        .expect("many-row create");
+    assert_eq!(
+        many,
+        GraphMutationReport {
+            creates: 1,
+            matched_rows: 4,
+            changed_edges: 4,
+            edge_upserts: 4,
+            ..GraphMutationReport::default()
+        }
+    );
+
+    let member_of = store
+        .get_edges(EdgeQuery {
+            from: Some(NodeId::new("bob")),
+            to: Some(NodeId::new("eng")),
+            label: Some(Label::new("MEMBER_OF")),
+        })
+        .await
+        .expect("read one-row edge");
+    assert_eq!(member_of.len(), 1);
+    assert_eq!(member_of[0].props.get("source"), Some(&Value::from("one")));
+
+    let assigned = store
+        .get_edges(EdgeQuery {
+            from: None,
+            to: None,
+            label: Some(Label::new("ASSIGNED_TO")),
+        })
+        .await
+        .expect("read many-row edges");
+    assert_eq!(assigned.len(), 4);
 }
 
 #[tokio::test]

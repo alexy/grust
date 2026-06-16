@@ -605,6 +605,8 @@ impl CypherMutationPlanner {
         kind: GraphMutationPlanKind,
     ) -> Result<GraphMutationPlan> {
         let (match_clause, edge_pattern) = split_match_edge_upsert(statement, keyword)?;
+        let (match_clause, where_predicates) = split_match_where(match_clause, &self.parameters)?;
+        let mut matched_nodes = BTreeMap::new();
         for pattern in split_top_level_patterns(match_clause)? {
             let (node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
             if !rest.trim().is_empty() {
@@ -618,24 +620,111 @@ impl CypherMutationPlanner {
                     "MATCH {keyword} requires each matched node pattern to bind a variable"
                 )));
             }
-            self.resolve_node_id(&node, &format!("MATCH {keyword} node"))?;
+            let variable = node.variable.clone().expect("checked above");
+            if matched_nodes.insert(variable.clone(), node).is_some() {
+                return Err(cypher_unresolved_identity(format!(
+                    "MATCH {keyword} cannot bind variable '{variable}' more than once"
+                )));
+            }
         }
+        apply_match_where_predicates(
+            &mut matched_nodes,
+            where_predicates,
+            &format!("MATCH {keyword}"),
+        )?;
 
         if !edge_pattern.contains("->") {
             return Err(cypher_syntax(format!(
                 "MATCH {keyword} currently supports one relationship pattern only",
             )));
         }
-        let parsed = self.parse_edge_pattern(edge_pattern)?;
-        if parsed.from_variable.is_none() || parsed.to_variable.is_none() {
+        let parsed = self.parse_edge_match_pattern(edge_pattern)?;
+        let Some(from_variable) = parsed.from.variable.as_ref() else {
             return Err(cypher_syntax(format!(
                 "MATCH {keyword} relationship endpoints must be bound variables"
             )));
+        };
+        let Some(to_variable) = parsed.to.variable.as_ref() else {
+            return Err(cypher_syntax(format!(
+                "MATCH {keyword} relationship endpoints must be bound variables"
+            )));
+        };
+        if parsed.from.label.is_some()
+            || !parsed.from.props.is_empty()
+            || !parsed.from.predicates.is_empty()
+            || parsed.to.label.is_some()
+            || !parsed.to.props.is_empty()
+            || !parsed.to.predicates.is_empty()
+        {
+            return Err(cypher_syntax(format!(
+                "MATCH {keyword} relationship endpoints must reference bound variables only"
+            )));
         }
+        let Some(from_node) = matched_nodes.get(from_variable).cloned() else {
+            return Err(cypher_unresolved_identity(format!(
+                "MATCH {keyword} relationship source variable '{from_variable}' is not bound"
+            )));
+        };
+        let Some(to_node) = matched_nodes.get(to_variable).cloned() else {
+            return Err(cypher_unresolved_identity(format!(
+                "MATCH {keyword} relationship destination variable '{to_variable}' is not bound"
+            )));
+        };
+        if parsed.relationship.variable.is_some() {
+            return Err(cypher_syntax(format!(
+                "MATCH {keyword} row-producing relationship creation does not bind relationship variables yet"
+            )));
+        }
+        if !parsed.relationship.predicates.is_empty() {
+            return Err(cypher_syntax(format!(
+                "MATCH {keyword} relationship creation does not accept relationship WHERE predicates"
+            )));
+        }
+
+        let from_id = self.resolved_endpoint_id(&from_node)?;
+        let to_id = self.resolved_endpoint_id(&to_node)?;
+        if let (Some(from), Some(to)) = (from_id, to_id)
+            && from_node.predicates.is_empty()
+            && to_node.predicates.is_empty()
+        {
+            let mut edge = Edge::new(
+                parsed.relationship.label.clone(),
+                from,
+                to,
+                parsed.relationship.props.clone(),
+            );
+            if let Some(id) = edge
+                .props
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                edge = edge.with_id(id);
+            }
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::UpsertEdge { kind, edge },
+            ]));
+        }
+        if kind == GraphMutationPlanKind::Merge {
+            return Err(cypher_unsupported_cardinality(
+                "row-producing MATCH ... MERGE is deferred; use MATCH ... CREATE or resolved endpoint IDs",
+            ));
+        }
+        if parsed.relationship.props.contains_key("id") {
+            return Err(cypher_unsupported_cardinality(
+                "row-producing MATCH ... CREATE does not support explicit relationship id properties",
+            ));
+        }
+        let from = self.node_match_from_pattern(from_node, "MATCH CREATE source")?;
+        let to = self.node_match_from_pattern(to_node, "MATCH CREATE destination")?;
         Ok(GraphMutationPlan::new(vec![
-            GraphMutationPlanOp::UpsertEdge {
+            GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
                 kind,
-                edge: parsed.edge,
+                from,
+                to,
+                label: parsed.relationship.label,
+                props: parsed.relationship.props,
+                cardinality: GraphMutationCardinality::BoundedMany,
             },
         ]))
     }
@@ -983,8 +1072,6 @@ impl CypherMutationPlanner {
             from_id,
             to_id,
             edge,
-            from_variable: from.variable,
-            to_variable: to.variable,
         })
     }
 
@@ -1280,7 +1367,7 @@ fn strip_cypher_comments(cypher: &str) -> Result<String> {
     Ok(output)
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ParsedCypherNode {
     variable: Option<String>,
     label: Option<Label>,
@@ -1293,8 +1380,6 @@ struct ParsedCypherEdge {
     from_id: NodeId,
     to_id: NodeId,
     edge: Edge,
-    from_variable: Option<String>,
-    to_variable: Option<String>,
 }
 
 #[derive(Debug)]
@@ -1518,6 +1603,23 @@ fn apply_node_where_predicates(
                 predicate.target
             )));
         }
+    }
+    Ok(())
+}
+
+fn apply_match_where_predicates(
+    nodes: &mut BTreeMap<String, ParsedCypherNode>,
+    predicates: Vec<ParsedWherePredicate>,
+    context: &str,
+) -> Result<()> {
+    for predicate in predicates {
+        let Some(node) = nodes.get_mut(&predicate.target) else {
+            return Err(cypher_unresolved_identity(format!(
+                "{context} WHERE references unknown variable '{}'",
+                predicate.target
+            )));
+        };
+        node.predicates.push(predicate.predicate);
     }
     Ok(())
 }
@@ -2315,6 +2417,19 @@ impl SailGraphStore {
                     self.apply_delete_matching_edges(relationship, report)
                         .await?;
                 }
+                GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+                    kind,
+                    from,
+                    to,
+                    label,
+                    props,
+                    ..
+                } => {
+                    self.apply_upsert_edges_from_node_matches(
+                        *kind, from, to, label, props, report,
+                    )
+                    .await?;
+                }
                 _ => {
                     let mutation = GraphMutation::from(operation.clone());
                     self.apply_mutations(std::slice::from_ref(&mutation))
@@ -2489,6 +2604,52 @@ impl SailGraphStore {
         self.run_edge_query(&sql, args).await
     }
 
+    async fn apply_upsert_edges_from_node_matches(
+        &self,
+        kind: GraphMutationPlanKind,
+        from: &GraphNodeMatch,
+        to: &GraphNodeMatch,
+        label: &Label,
+        props: &Props,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let edges = self.edges_from_node_matches(from, to, label, props).await?;
+        report.matched_rows += edges.len();
+        report.edge_upserts += edges.len();
+        report.changed_edges += edges.len();
+        match kind {
+            GraphMutationPlanKind::Create => {}
+            GraphMutationPlanKind::Merge => {}
+        }
+        self.validate_and_load_edges(&edges).await
+    }
+
+    async fn edges_from_node_matches(
+        &self,
+        from: &GraphNodeMatch,
+        to: &GraphNodeMatch,
+        label: &Label,
+        props: &Props,
+    ) -> Result<Vec<Edge>> {
+        let (from_sql, from_args) =
+            matching_nodes_sql(from.label.as_ref(), &from.props, &from.predicates)?;
+        let (to_sql, to_args) = matching_nodes_sql(to.label.as_ref(), &to.props, &to.predicates)?;
+        let from_nodes = self.run_query(&from_sql, from_args).await?;
+        let to_nodes = self.run_query(&to_sql, to_args).await?;
+        let mut edges = Vec::with_capacity(from_nodes.len().saturating_mul(to_nodes.len()));
+        for from_node in &from_nodes {
+            for to_node in &to_nodes {
+                edges.push(Edge::new(
+                    label.clone(),
+                    from_node.id.clone(),
+                    to_node.id.clone(),
+                    props.clone(),
+                ));
+            }
+        }
+        Ok(edges)
+    }
+
     async fn validate_and_load_edges(&self, edges: &[Edge]) -> Result<()> {
         let schema = self.current_schema();
         let endpoint_ids = edges
@@ -2559,6 +2720,24 @@ impl SailGraphStore {
                             "Cypher CREATE would overwrite existing edge '{}'",
                             edge_key(edge)
                         )));
+                    }
+                }
+                GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+                    kind: GraphMutationPlanKind::Create,
+                    from,
+                    to,
+                    label,
+                    props,
+                    ..
+                } => {
+                    let edges = self.edges_from_node_matches(from, to, label, props).await?;
+                    for edge in &edges {
+                        if self.strict_create_edge_exists(edge).await? {
+                            return Err(GrustError::Unsupported(format!(
+                                "Cypher CREATE would overwrite existing edge '{}'",
+                                edge_key(edge)
+                            )));
+                        }
                     }
                 }
                 _ => {}

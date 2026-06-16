@@ -2174,6 +2174,13 @@ pub enum GraphMutation {
     },
     DeleteNode(NodeId),
     UpsertEdge(Edge),
+    UpsertEdgesFromNodeMatches {
+        kind: GraphMutationPlanKind,
+        from: GraphNodeMatch,
+        to: GraphNodeMatch,
+        label: Label,
+        props: Props,
+    },
     DeleteEdge {
         from: NodeId,
         label: Label,
@@ -2403,6 +2410,14 @@ pub enum GraphMutationPlanOp {
         kind: GraphMutationPlanKind,
         edge: Edge,
     },
+    UpsertEdgesFromNodeMatches {
+        kind: GraphMutationPlanKind,
+        from: GraphNodeMatch,
+        to: GraphNodeMatch,
+        label: Label,
+        props: Props,
+        cardinality: GraphMutationCardinality,
+    },
     DeleteNode(NodeId),
     DeleteEdge {
         from: NodeId,
@@ -2486,6 +2501,10 @@ impl GraphMutationReport {
                     _ => {}
                 }
             }
+            GraphMutationPlanOp::UpsertEdgesFromNodeMatches { kind, .. } => match kind {
+                GraphMutationPlanKind::Create => self.creates += 1,
+                GraphMutationPlanKind::Merge => self.merges += 1,
+            },
             GraphMutationPlanOp::PatchNode { .. } => {
                 self.patches += 1;
                 self.node_patches += 1;
@@ -2637,6 +2656,20 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 predicates,
             },
             GraphMutationPlanOp::UpsertEdge { edge, .. } => Self::UpsertEdge(edge),
+            GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+                kind,
+                from,
+                to,
+                label,
+                props,
+                ..
+            } => Self::UpsertEdgesFromNodeMatches {
+                kind,
+                from,
+                to,
+                label,
+                props,
+            },
             GraphMutationPlanOp::DeleteNode(id) => Self::DeleteNode(id),
             GraphMutationPlanOp::DeleteEdge { from, label, to } => {
                 Self::DeleteEdge { from, label, to }
@@ -2698,6 +2731,12 @@ pub trait CypherMutationExecutor: GraphMutationStore {
                 GraphMutationPlanOp::DeleteMatchingEdges { .. } => {
                     return Err(GrustError::CypherExecution(
                         "matched edge deletes require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::UpsertEdgesFromNodeMatches { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "row-producing edge upserts require backend-specific query support"
+                            .to_string(),
                     ));
                 }
                 _ => {
@@ -2857,6 +2896,12 @@ pub trait GraphMutationStore: GraphStore {
                 GraphMutation::DeleteNode(id) => self.delete_node(id).await?,
                 GraphMutation::UpsertEdge(edge) => {
                     self.put_edge(edge).await?;
+                }
+                GraphMutation::UpsertEdgesFromNodeMatches { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "row-producing edge upserts require backend-specific query support"
+                            .to_string(),
+                    ));
                 }
                 GraphMutation::DeleteEdge { from, label, to } => {
                     self.delete_edge(from, label, to).await?

@@ -1024,7 +1024,9 @@ cardinality-aware broad node
 `MATCH ... DELETE` / `MATCH ... SET n += { ... }` / `MATCH ... SET n.key = value`
 / `MATCH ... REMOVE n.key` forms, plus ID-resolved edge
 `MATCH ... SET e += { ... }`, literal property assignment, and explicit
-property `REMOVE` when the node or edge identity is resolved, plus broad
+property `REMOVE` when the node or edge identity is resolved, row-producing
+edge `MATCH ... CREATE` when both endpoints come from matched node variables,
+plus broad
 relationship `MATCH ... DELETE` / `MATCH ... SET e += { ... }` /
 `MATCH ... SET e.key = value` / `MATCH ... REMOVE e.key` over endpoint
 predicates. It lowers those
@@ -1074,6 +1076,10 @@ node `MATCH ... SET n += { ... }` lower to node patch mutations; `null` in the
 patch map is stored as `Value::Null` rather than treated as property removal.
 ID-resolved edge `MATCH ... SET e += { ... }` lowers to an edge patch mutation
 and reuses the same typed-edge mirror writes as ordinary edge upserts.
+Row-producing edge `MATCH ... CREATE` materializes matched endpoint node pairs
+before writing, reports matched rows separately from edge upserts, and still
+rejects trailing node creation or explicit relationship IDs in the
+row-producing form. Broad `MATCH ... MERGE` remains deferred.
 Literal `SET n.key = value` and `SET e.key = value` lower to one-key patches,
 while `REMOVE n.key` and `REMOVE e.key` lower to explicit property-remove
 mutations. Node forms can target either a resolved identity or a broad node

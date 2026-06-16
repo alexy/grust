@@ -499,6 +499,91 @@ fn matching_node_mutations_filter_property_predicates() {
 }
 
 #[test]
+fn row_producing_edge_create_matches_endpoint_nodes() {
+    let store = MemoryGraphStore::new();
+    let plan = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "ada",
+                Props::from([
+                    ("status".to_string(), Value::from("active")),
+                    ("score".to_string(), Value::Int(11)),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new(
+                "Person",
+                "bob",
+                Props::from([
+                    ("status".to_string(), Value::from("active")),
+                    ("score".to_string(), Value::Int(9)),
+                ]),
+            ),
+        },
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: Node::new("Team", "eng", Props::new()),
+        },
+        GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+            kind: GraphMutationPlanKind::Create,
+            from: GraphNodeMatch {
+                label: Some(Label::new("Person")),
+                props: Props::from([("status".to_string(), Value::from("active"))]),
+                predicates: vec![GraphPropertyPredicate {
+                    key: "score".to_string(),
+                    op: GraphPredicateOp::GreaterThanOrEqual,
+                    value: Value::Int(10),
+                }],
+            },
+            to: GraphNodeMatch {
+                label: Some(Label::new("Team")),
+                props: Props::from([("id".to_string(), Value::from("eng"))]),
+                predicates: Vec::new(),
+            },
+            label: Label::new("MEMBER_OF"),
+            props: Props::from([("source".to_string(), Value::from("cypher"))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+    ]);
+
+    let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&plan)).unwrap();
+
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            creates: 4,
+            matched_rows: 1,
+            changed_nodes: 3,
+            changed_edges: 1,
+            node_upserts: 3,
+            edge_upserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    let edges = futures_executor::block_on(store.get_edges(EdgeQuery {
+        from: Some(NodeId::new("ada")),
+        to: Some(NodeId::new("eng")),
+        label: Some(Label::new("MEMBER_OF")),
+    }))
+    .unwrap();
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].props.get("source"), Some(&Value::from("cypher")));
+    assert!(
+        futures_executor::block_on(store.get_edges(EdgeQuery {
+            from: Some(NodeId::new("bob")),
+            to: Some(NodeId::new("eng")),
+            label: Some(Label::new("MEMBER_OF")),
+        }))
+        .unwrap()
+        .is_empty()
+    );
+}
+
+#[test]
 fn executes_matching_node_numeric_property_updates() {
     let store = MemoryGraphStore::new();
     let plan = GraphMutationPlan::new(vec![
