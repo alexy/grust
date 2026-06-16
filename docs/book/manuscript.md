@@ -1040,8 +1040,11 @@ mode performs a read-before-write check and therefore keeps the default
 entrypoint on the lower-friction upsert-compatible path. Generated node IDs are
 also caller-selected rather than implicit: `CypherNodeIdPolicy::GenerateForCreate`
 allows node `CREATE` without an `id`, and the result API returns generated IDs
-separately from the count-oriented mutation report. `MERGE` and edge endpoint
-patterns still require resolved IDs before writing.
+separately from the count-oriented mutation report. Callers can also opt into
+written edge identity payloads for resolved and row-producing edge writes; the
+payload describes accepted writes rather than exact insert-versus-update
+outcomes on upsert backends. `MERGE` and edge endpoint patterns still require
+resolved IDs before writing.
 `CypherMutationOptions::parameters` binds Grust `Value`s to `$name`
 placeholders only where literals are already accepted: IDs, property maps, and
 literal property assignments. Quoted `'$name'` remains ordinary string text

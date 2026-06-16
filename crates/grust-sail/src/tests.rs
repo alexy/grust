@@ -211,6 +211,7 @@ fn cypher_mutation_options_default_to_upsert_compatible_create() {
         CypherMutationOptions {
             create_mode: CypherCreateMode::UpsertCompatible,
             node_id_policy: CypherNodeIdPolicy::ExplicitOnly,
+            collect_written_edge_identities: false,
             null_assignment: CypherNullAssignment::StoreNull,
             parameters: CypherParameters::new(),
         }
@@ -3438,6 +3439,77 @@ async fn test_execute_cypher_mutation_generated_node_ids() {
     assert_eq!(node.label, Label::new("Person"));
     assert_eq!(node.props.get("id"), Some(&Value::from(node.id.as_str())));
     assert_eq!(node.props.get("name"), Some(&Value::from("Ada")));
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_execute_cypher_mutation_collects_written_edge_identities() {
+    let store = store().await;
+    let default_result = store
+        .execute_cypher_mutation_result_with_options(
+            "
+            CREATE (:Person {id: 'ada'});
+            CREATE (:Person {id: 'bob'});
+            CREATE (:Person {id: 'ada'})-[:KNOWS {id: 'edge-1'}]->(:Person {id: 'bob'});
+            ",
+            CypherMutationOptions::default(),
+        )
+        .await
+        .expect("execute default edge create");
+    assert!(default_result.written_edge_identities.is_empty());
+
+    store.clear().await.expect("clear graph before collect run");
+    let result = store
+        .execute_cypher_mutation_result_with_options(
+            "
+            CREATE (:Person {id: 'ada', status: 'active'});
+            CREATE (:Person {id: 'bob', status: 'active'});
+            CREATE (:Team {id: 'eng'});
+            CREATE (:Person {id: 'ada'})-[e:KNOWS {id: 'edge-1'}]->(:Person {id: 'bob'});
+            MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
+            CREATE (a)-[:MEMBER_OF {source: 'create'}]->(b);
+            MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
+            MERGE (a)-[:MEMBER_OF {source: 'merge'}]->(b);
+            ",
+            CypherMutationOptions {
+                collect_written_edge_identities: true,
+                ..CypherMutationOptions::default()
+            },
+        )
+        .await
+        .expect("execute edge writes with identity collection");
+
+    assert_eq!(result.generated_node_ids, Vec::new());
+    assert_eq!(result.written_edge_identities.len(), 5);
+    assert!(
+        result
+            .written_edge_identities
+            .contains(&CypherWrittenEdgeIdentity {
+                kind: GraphMutationPlanKind::Create,
+                from: NodeId::new("ada"),
+                label: Label::new("KNOWS"),
+                to: NodeId::new("bob"),
+                id: Some(EdgeId::new("edge-1")),
+            })
+    );
+    assert_eq!(
+        result
+            .written_edge_identities
+            .iter()
+            .filter(|identity| identity.kind == GraphMutationPlanKind::Create
+                && identity.label == Label::new("MEMBER_OF"))
+            .count(),
+        2
+    );
+    assert_eq!(
+        result
+            .written_edge_identities
+            .iter()
+            .filter(|identity| identity.kind == GraphMutationPlanKind::Merge
+                && identity.label == Label::new("MEMBER_OF"))
+            .count(),
+        2
+    );
 }
 
 #[tokio::test]

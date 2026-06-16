@@ -6,6 +6,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added opt-in Sail writable Cypher edge identity payloads through
+  `CypherMutationOptions::collect_written_edge_identities` and
+  `CypherMutationResult::written_edge_identities`, covering resolved and
+  row-producing edge writes without changing the count-oriented mutation
+  report.
 - Added Sail writable Cypher support for comma-separated `MATCH ... SET`
   assignments, preserving source order across literal patches, map patches,
   remove-on-null compatibility, and numeric node property updates.

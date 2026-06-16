@@ -431,7 +431,10 @@ executes that plan through
 mirror writes, and the same delete paths as ordinary Grust mutations.
 Generated node IDs are opt-in through Sail writable-Cypher options and are
 returned in a result shape separate from the count-oriented report, while
-`MERGE` and edge endpoint writes keep requiring resolved IDs.
+written edge identities for resolved and row-producing edge writes can be
+collected through the same result path when callers opt in. These payloads
+describe accepted writes, not exact insert-versus-update outcomes on upsert
+backends, and `MERGE` and edge endpoint writes keep requiring resolved IDs.
 Parameters are option-driven too: callers can bind Grust `Value`s to `$name`
 placeholders in literal positions such as IDs, property maps, and literal
 property assignments. The first expression form is deliberately narrow:

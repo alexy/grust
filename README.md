@@ -405,8 +405,12 @@ Generated node IDs are also opt-in: `CypherNodeIdPolicy::GenerateForCreate`
 allows node `CREATE` without an `id`, and
 `execute_cypher_mutation_result_with_options` returns the generated IDs in
 `CypherMutationResult::generated_node_ids` while leaving
-`CypherMutationReport` count-oriented. `MERGE` and edge endpoint patterns still
-require resolved IDs before writing.
+`CypherMutationReport` count-oriented. Callers can also set
+`CypherMutationOptions::collect_written_edge_identities` to collect resolved
+and row-producing edge write identities in
+`CypherMutationResult::written_edge_identities`; these identities describe
+accepted writes, not exact insert-versus-update outcomes on upsert backends.
+`MERGE` and edge endpoint patterns still require resolved IDs before writing.
 `CypherMutationOptions::parameters` lets callers bind Grust `Value`s to
 `$name` placeholders in literal positions such as IDs, property maps, and
 literal property assignments; quoted `'$name'` remains ordinary string text.
