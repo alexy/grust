@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Cursor;
 use std::sync::{Arc, RwLock};
 
@@ -8,6 +8,7 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use async_trait::async_trait;
 use grust_core::prelude::*;
+use serde::{Deserialize, Serialize};
 use tonic::transport::Channel;
 
 #[allow(clippy::all, unused_imports, dead_code)]
@@ -89,6 +90,19 @@ impl Default for CypherNodeIdPolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CypherRelationshipIdPolicy {
+    ExplicitOnly,
+    GenerateForRowCreate,
+    GenerateForRowCreateAndMerge,
+}
+
+impl Default for CypherRelationshipIdPolicy {
+    fn default() -> Self {
+        Self::ExplicitOnly
+    }
+}
+
 pub type CypherParameters = BTreeMap<String, Value>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,6 +123,7 @@ impl Default for CypherNullAssignment {
 pub struct CypherMutationOptions {
     pub create_mode: CypherCreateMode,
     pub node_id_policy: CypherNodeIdPolicy,
+    pub relationship_id_policy: CypherRelationshipIdPolicy,
     /// Collect written node identities in `CypherMutationResult`.
     ///
     /// This is opt-in so broad write result payloads remain deliberate. The
@@ -132,6 +147,7 @@ impl Default for CypherMutationOptions {
         Self {
             create_mode: CypherCreateMode::UpsertCompatible,
             node_id_policy: CypherNodeIdPolicy::ExplicitOnly,
+            relationship_id_policy: CypherRelationshipIdPolicy::ExplicitOnly,
             collect_written_node_identities: false,
             collect_written_edge_identities: false,
             null_assignment: CypherNullAssignment::StoreNull,
@@ -191,6 +207,7 @@ const DELETE_NODE_STAGE_VIEW: &str = "grust_delete_node_ids";
 const DELETE_EDGE_STAGE_VIEW: &str = "grust_delete_edges";
 pub const GRUST_NODES_TABLE: &str = "grust_nodes";
 pub const GRUST_EDGES_TABLE: &str = "grust_edges";
+pub const CYPHER_CONSTRAINT_REGISTRY_TABLE: &str = "grust_cypher_constraint_registry";
 pub const NODE_ID_COLUMN: &str = "id";
 pub const NODE_LABEL_COLUMN: &str = "label";
 pub const NODE_PROPS_COLUMN: &str = "props";
@@ -407,6 +424,239 @@ pub enum CypherDdlStatement {
     DropConstraint { name: String, if_exists: bool },
 }
 
+/// A named Cypher constraint stored outside [`GraphSchema`].
+///
+/// `GraphSchema` remains the portable enforcement shape and stores unnamed
+/// [`GraphConstraint`] values. This registry layer preserves Cypher constraint
+/// names so callers can apply `DROP CONSTRAINT name` deterministically before
+/// passing the resulting constraints into a schema.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NamedGraphConstraint {
+    pub name: String,
+    pub constraint: GraphConstraint,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CypherDdlApplicationReport {
+    pub created: usize,
+    pub skipped: usize,
+    pub dropped: usize,
+    pub missing: usize,
+}
+
+impl CypherDdlApplicationReport {
+    fn merge(&mut self, other: Self) {
+        self.created += other.created;
+        self.skipped += other.skipped;
+        self.dropped += other.dropped;
+        self.missing += other.missing;
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CypherSchemaApplication {
+    pub schema: GraphSchema,
+    pub report: CypherDdlApplicationReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CypherSchemaManager {
+    pub schema: GraphSchema,
+    pub registry: CypherConstraintRegistry,
+}
+
+impl CypherSchemaManager {
+    pub fn new(schema: GraphSchema) -> Self {
+        let registry = CypherConstraintRegistry::from_schema(&schema);
+        Self { schema, registry }
+    }
+
+    pub fn with_registry(schema: GraphSchema, registry: CypherConstraintRegistry) -> Self {
+        Self { schema, registry }
+    }
+
+    pub fn from_registry_json(schema: GraphSchema, registry_json: &str) -> Result<Self> {
+        Ok(Self::with_registry(
+            schema,
+            CypherConstraintRegistry::from_json(registry_json)?,
+        ))
+    }
+
+    pub fn registry_json(&self) -> Result<String> {
+        self.registry.to_json()
+    }
+
+    pub async fn apply_cypher_ddl<S>(
+        &mut self,
+        store: &S,
+        cypher: &str,
+    ) -> Result<CypherSchemaApplication>
+    where
+        S: GraphStore + Sync,
+    {
+        let applied =
+            apply_cypher_ddl_to_schema(store, &self.schema, &mut self.registry, cypher).await?;
+        self.schema = applied.schema.clone();
+        Ok(applied)
+    }
+}
+
+/// Named constraint metadata for applying parsed Cypher DDL.
+///
+/// The registry is intentionally separate from backend persistence. Callers can
+/// parse DDL with [`sail_cypher_ddl`], apply it here, then build or update a
+/// [`GraphSchema`] from [`CypherConstraintRegistry::constraints`] before calling
+/// [`GraphStore::apply_schema`]. [`CypherConstraintRegistry::to_json`] and
+/// [`CypherConstraintRegistry::from_json`] provide a caller-owned persistence
+/// hook for storing that named metadata outside backend-native schema storage.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CypherConstraintRegistry {
+    named: BTreeMap<String, GraphConstraint>,
+    anonymous: Vec<GraphConstraint>,
+}
+
+impl CypherConstraintRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn from_schema(schema: &GraphSchema) -> Self {
+        Self {
+            named: BTreeMap::new(),
+            anonymous: schema.constraints.clone(),
+        }
+    }
+
+    pub fn from_json(json: &str) -> Result<Self> {
+        serde_json::from_str(json).map_err(|err| {
+            GrustError::Serialization(format!(
+                "Cypher constraint registry JSON parse error: {err}"
+            ))
+        })
+    }
+
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(self).map_err(|err| {
+            GrustError::Serialization(format!(
+                "Cypher constraint registry JSON serialization error: {err}"
+            ))
+        })
+    }
+
+    pub fn named_constraints(&self) -> Vec<NamedGraphConstraint> {
+        self.named
+            .iter()
+            .map(|(name, constraint)| NamedGraphConstraint {
+                name: name.clone(),
+                constraint: constraint.clone(),
+            })
+            .collect()
+    }
+
+    pub fn anonymous_constraints(&self) -> &[GraphConstraint] {
+        &self.anonymous
+    }
+
+    pub fn constraints(&self) -> Vec<GraphConstraint> {
+        self.named
+            .values()
+            .cloned()
+            .chain(self.anonymous.iter().cloned())
+            .collect()
+    }
+
+    pub fn apply_to_schema(&self, schema: &GraphSchema) -> GraphSchema {
+        let mut schema = schema.clone();
+        schema.constraints = self.constraints();
+        schema
+    }
+
+    pub fn apply_statement(
+        &mut self,
+        statement: CypherDdlStatement,
+    ) -> Result<CypherDdlApplicationReport> {
+        match statement {
+            CypherDdlStatement::CreateConstraint {
+                name,
+                if_not_exists,
+                constraint,
+            } => {
+                if let Some(name) = name {
+                    if self.named.contains_key(&name) {
+                        if if_not_exists {
+                            return Ok(CypherDdlApplicationReport {
+                                skipped: 1,
+                                ..Default::default()
+                            });
+                        }
+                        return Err(GrustError::CypherExecution(format!(
+                            "constraint '{name}' already exists"
+                        )));
+                    }
+                    self.named.insert(name, constraint);
+                } else {
+                    self.anonymous.push(constraint);
+                }
+                Ok(CypherDdlApplicationReport {
+                    created: 1,
+                    ..Default::default()
+                })
+            }
+            CypherDdlStatement::DropConstraint { name, if_exists } => {
+                if self.named.remove(&name).is_some() {
+                    return Ok(CypherDdlApplicationReport {
+                        dropped: 1,
+                        ..Default::default()
+                    });
+                }
+                if if_exists {
+                    return Ok(CypherDdlApplicationReport {
+                        missing: 1,
+                        ..Default::default()
+                    });
+                }
+                Err(GrustError::CypherExecution(format!(
+                    "constraint '{name}' does not exist"
+                )))
+            }
+        }
+    }
+
+    pub fn apply_statements(
+        &mut self,
+        statements: impl IntoIterator<Item = CypherDdlStatement>,
+    ) -> Result<CypherDdlApplicationReport> {
+        let mut next = self.clone();
+        let mut report = CypherDdlApplicationReport::default();
+        for statement in statements {
+            report.merge(next.apply_statement(statement)?);
+        }
+        *self = next;
+        Ok(report)
+    }
+
+    pub fn apply_cypher(&mut self, cypher: &str) -> Result<CypherDdlApplicationReport> {
+        self.apply_statements(sail_cypher_ddl(cypher)?)
+    }
+}
+
+pub async fn apply_cypher_ddl_to_schema<S>(
+    store: &S,
+    schema: &GraphSchema,
+    registry: &mut CypherConstraintRegistry,
+    cypher: &str,
+) -> Result<CypherSchemaApplication>
+where
+    S: GraphStore + Sync,
+{
+    let mut next = registry.clone();
+    let report = next.apply_cypher(cypher)?;
+    let schema = next.apply_to_schema(schema);
+    store.apply_schema(&schema).await?;
+    *registry = next;
+    Ok(CypherSchemaApplication { schema, report })
+}
+
 /// Parses one or more Cypher DDL statements (currently `CREATE CONSTRAINT` and
 /// `DROP CONSTRAINT`) into backend-neutral [`CypherDdlStatement`] values.
 ///
@@ -464,6 +714,7 @@ fn sail_cypher_mutation_plan_with_options(
 
     let mut planner = CypherMutationPlanner {
         node_id_policy: options.node_id_policy,
+        relationship_id_policy: options.relationship_id_policy,
         null_assignment: options.null_assignment,
         parameters: options.parameters,
         ..CypherMutationPlanner::default()
@@ -485,6 +736,7 @@ struct CypherPlannedMutationWithReturn {
     row_node_bindings: HashMap<String, GraphNodeMatch>,
     row_edge_match_bindings: HashMap<String, GraphRelationshipMatch>,
     row_edge_bindings: HashMap<String, CypherRowProducedEdgeBinding>,
+    row_path_bindings: HashMap<String, CypherRowProducedPathBinding>,
     return_clause: CypherReturnClause,
 }
 
@@ -517,8 +769,10 @@ fn sail_cypher_mutation_plan_with_return_options(
 
     let mut planner = CypherMutationPlanner {
         node_id_policy: options.node_id_policy,
+        relationship_id_policy: options.relationship_id_policy,
         null_assignment: options.null_assignment,
         parameters: options.parameters,
+        bind_delete_return_rows: true,
         ..CypherMutationPlanner::default()
     };
     let mut plan = GraphMutationPlan::default();
@@ -537,6 +791,8 @@ fn sail_cypher_mutation_plan_with_return_options(
         &planner.row_node_bindings,
         &planner.row_edge_match_bindings,
         &planner.row_edge_bindings,
+        &planner.row_path_bindings,
+        &planner.parameters,
     )?;
     Ok(CypherPlannedMutationWithReturn {
         plan,
@@ -546,6 +802,7 @@ fn sail_cypher_mutation_plan_with_return_options(
         row_node_bindings: planner.row_node_bindings,
         row_edge_match_bindings: planner.row_edge_match_bindings,
         row_edge_bindings: planner.row_edge_bindings,
+        row_path_bindings: planner.row_path_bindings,
         return_clause,
     })
 }
@@ -557,10 +814,13 @@ struct CypherMutationPlanner {
     row_node_bindings: HashMap<String, GraphNodeMatch>,
     row_edge_match_bindings: HashMap<String, GraphRelationshipMatch>,
     row_edge_bindings: HashMap<String, CypherRowProducedEdgeBinding>,
+    row_path_bindings: HashMap<String, CypherRowProducedPathBinding>,
     node_id_policy: CypherNodeIdPolicy,
+    relationship_id_policy: CypherRelationshipIdPolicy,
     null_assignment: CypherNullAssignment,
     parameters: CypherParameters,
     generated_node_ids: Vec<CypherGeneratedNodeId>,
+    bind_delete_return_rows: bool,
 }
 
 impl CypherMutationPlanner {
@@ -679,49 +939,58 @@ impl CypherMutationPlanner {
 
     fn parse_match_delete(&mut self, statement: &str) -> Result<GraphMutationPlan> {
         let (pattern, target) = split_match_delete(statement)?;
-        let target = parse_required_cypher_variable(target.trim(), "MATCH DELETE target")?;
+        let targets = parse_match_delete_targets(target)?;
         let (pattern, where_predicates) = split_match_where(pattern, &self.parameters)?;
 
         if find_unquoted_sequence(pattern, "->").is_some() {
             let mut parsed = self.parse_edge_match_pattern(pattern)?;
             apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge DELETE")?;
-            let Some(edge_variable) = parsed.relationship.variable.clone() else {
+            let Some(edge_variable) = parsed.relationship.variable.as_ref() else {
                 return Err(cypher_syntax(
                     "MATCH edge DELETE requires the relationship pattern to bind the DELETE target"
                         .to_string(),
                 ));
             };
-            if edge_variable != target {
-                return Err(cypher_syntax(format!(
-                    "MATCH edge DELETE target '{target}' does not match relationship variable '{edge_variable}'"
-                )));
+            let mut plan = GraphMutationPlan::default();
+            for target in targets {
+                if target == *edge_variable {
+                    plan.operations.extend(
+                        self.lower_match_edge_delete(parsed.clone(), edge_variable)?
+                            .operations,
+                    );
+                } else if parsed.from.variable.as_deref() == Some(target.as_str()) {
+                    plan.operations.extend(
+                        self.lower_match_edge_endpoint_delete(&parsed.from, &target)?
+                            .operations,
+                    );
+                } else if parsed.to.variable.as_deref() == Some(target.as_str()) {
+                    plan.operations.extend(
+                        self.lower_match_edge_endpoint_delete(&parsed.to, &target)?
+                            .operations,
+                    );
+                } else {
+                    return Err(cypher_syntax(format!(
+                        "MATCH edge DELETE target '{target}' is not bound by the relationship pattern"
+                    )));
+                }
             }
-            let from_id = self.resolved_endpoint_id(&parsed.from)?;
-            let to_id = self.resolved_endpoint_id(&parsed.to)?;
-            let edge_id = optional_string_prop(&parsed.relationship.props, "id");
-            if let (Some(from), Some(to), None) = (from_id, to_id, edge_id)
-                && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
-                && parsed.from.predicates.is_empty()
-                && parsed.to.predicates.is_empty()
-                && parsed.relationship.predicates.is_empty()
-            {
-                return Ok(GraphMutationPlan::new(vec![
-                    GraphMutationPlanOp::DeleteEdge {
-                        from,
-                        label: parsed.relationship.label,
-                        to,
-                    },
-                ]));
+            if plan.operations.is_empty() {
+                return Err(cypher_syntax(
+                    "MATCH edge DELETE requires at least one target",
+                ));
             }
-            let relationship = self.relationship_match_from_pattern(parsed, "MATCH edge DELETE")?;
-            return Ok(GraphMutationPlan::new(vec![
-                GraphMutationPlanOp::DeleteMatchingEdges {
-                    relationship,
-                    cardinality: GraphMutationCardinality::BoundedMany,
-                },
-            ]));
+            return Ok(plan);
         }
 
+        if targets.len() != 1 {
+            return Err(cypher_syntax(
+                "MATCH node DELETE supports one target for a single-node pattern",
+            ));
+        }
+        let target = targets
+            .into_iter()
+            .next()
+            .expect("checked one delete target");
         let (mut node, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
         apply_node_where_predicates(&mut node, where_predicates, "MATCH node DELETE")?;
         if !rest.trim().is_empty() {
@@ -762,6 +1031,9 @@ impl CypherMutationPlanner {
             ]));
         }
         let cardinality = match_node_cardinality(&node);
+        if self.bind_delete_return_rows {
+            self.bind_row_node_variable(&node)?;
+        }
         Ok(GraphMutationPlan::new(vec![
             GraphMutationPlanOp::DeleteMatchingNodes {
                 label: node.label,
@@ -769,6 +1041,61 @@ impl CypherMutationPlanner {
                 predicates: node.predicates,
                 cardinality,
             },
+        ]))
+    }
+
+    fn lower_match_edge_delete(
+        &mut self,
+        parsed: ParsedCypherEdgeMatch,
+        edge_variable: &str,
+    ) -> Result<GraphMutationPlan> {
+        let from_id = self.resolved_endpoint_id(&parsed.from)?;
+        let to_id = self.resolved_endpoint_id(&parsed.to)?;
+        let edge_id = optional_string_prop(&parsed.relationship.props, "id");
+        if let (Some(from), Some(to), None) = (from_id, to_id, edge_id)
+            && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
+            && parsed.from.predicates.is_empty()
+            && parsed.to.predicates.is_empty()
+            && parsed.relationship.predicates.is_empty()
+        {
+            return Ok(GraphMutationPlan::new(vec![
+                GraphMutationPlanOp::DeleteEdge {
+                    from,
+                    label: parsed.relationship.label,
+                    to,
+                },
+            ]));
+        }
+        let relationship = self.relationship_match_from_pattern(parsed, "MATCH edge DELETE")?;
+        if self.bind_delete_return_rows {
+            self.bind_row_edge_match_variable(edge_variable, &relationship)?;
+        }
+        Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::DeleteMatchingEdges {
+                relationship,
+                cardinality: GraphMutationCardinality::BoundedMany,
+            },
+        ]))
+    }
+
+    fn lower_match_edge_endpoint_delete(
+        &mut self,
+        node: &ParsedCypherNode,
+        target: &str,
+    ) -> Result<GraphMutationPlan> {
+        if !node.predicates.is_empty() {
+            return Err(cypher_unsupported_cardinality(format!(
+                "MATCH edge DELETE target '{target}' cannot delete endpoint rows selected only by predicates"
+            )));
+        }
+        let id = self.resolved_endpoint_id(node)?.ok_or_else(|| {
+            cypher_unsupported_cardinality(format!(
+                "MATCH edge DELETE target '{target}' must resolve to a stable node id"
+            ))
+        })?;
+        self.bind_node_variable(node, &id)?;
+        Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::DeleteNode(id),
         ]))
     }
 
@@ -815,6 +1142,7 @@ impl CypherMutationPlanner {
             &format!("MATCH {keyword}"),
         )?;
 
+        let (path_variable, edge_pattern) = parse_row_path_binding(edge_pattern)?;
         if find_unquoted_sequence(edge_pattern, "->").is_none() {
             return Err(cypher_syntax(format!(
                 "MATCH {keyword} currently supports one relationship pattern only",
@@ -887,26 +1215,58 @@ impl CypherMutationPlanner {
                     id: edge.id.clone(),
                 },
             )?;
+            self.bind_node_variable(&from_node, &edge.from)?;
+            self.bind_node_variable(&to_node, &edge.to)?;
+            if let Some(path_variable) = path_variable {
+                let Some(edge_variable) = parsed.relationship.variable.as_ref() else {
+                    return Err(cypher_syntax(format!(
+                        "MATCH {keyword} path variables require the relationship pattern to bind a variable"
+                    )));
+                };
+                self.bind_row_path_variable(
+                    &path_variable,
+                    CypherRowProducedPathBinding {
+                        from_variable: from_variable.clone(),
+                        edge_variable: edge_variable.clone(),
+                        to_variable: to_variable.clone(),
+                    },
+                )?;
+            }
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::UpsertEdge { kind, edge },
             ]));
         }
-        if parsed.relationship.props.contains_key("id") {
-            return Err(cypher_unsupported_cardinality(
-                "row-producing MATCH ... CREATE/MERGE does not support explicit relationship id properties",
-            ));
-        }
+        validate_optional_edge_id_property(&parsed.relationship.props)?;
         let from = self.node_match_from_pattern(from_node, "MATCH CREATE source")?;
         let to = self.node_match_from_pattern(to_node, "MATCH CREATE destination")?;
+        let edge_id_policy = self.row_edge_id_policy(kind);
         if let Some(variable) = &parsed.relationship.variable {
             self.bind_row_edge_variable(
                 variable,
                 CypherRowProducedEdgeBinding {
                     kind,
+                    from_variable: from_variable.clone(),
                     from: from.clone(),
+                    to_variable: to_variable.clone(),
                     to: to.clone(),
                     label: parsed.relationship.label.clone(),
                     props: parsed.relationship.props.clone(),
+                    edge_id_policy,
+                },
+            )?;
+        }
+        if let Some(path_variable) = path_variable {
+            let Some(edge_variable) = parsed.relationship.variable.as_ref() else {
+                return Err(cypher_syntax(format!(
+                    "MATCH {keyword} path variables require the relationship pattern to bind a variable"
+                )));
+            };
+            self.bind_row_path_variable(
+                &path_variable,
+                CypherRowProducedPathBinding {
+                    from_variable: from_variable.clone(),
+                    edge_variable: edge_variable.clone(),
+                    to_variable: to_variable.clone(),
                 },
             )?;
         }
@@ -917,9 +1277,23 @@ impl CypherMutationPlanner {
                 to,
                 label: parsed.relationship.label,
                 props: parsed.relationship.props,
+                edge_id_policy,
                 cardinality: GraphMutationCardinality::BoundedMany,
             },
         ]))
+    }
+
+    fn row_edge_id_policy(&self, kind: GraphMutationPlanKind) -> GraphRowEdgeIdPolicy {
+        match (kind, self.relationship_id_policy) {
+            (GraphMutationPlanKind::Create, CypherRelationshipIdPolicy::GenerateForRowCreate) => {
+                GraphRowEdgeIdPolicy::GenerateForCreate
+            }
+            (
+                GraphMutationPlanKind::Create | GraphMutationPlanKind::Merge,
+                CypherRelationshipIdPolicy::GenerateForRowCreateAndMerge,
+            ) => GraphRowEdgeIdPolicy::GenerateForCreateAndMerge,
+            _ => GraphRowEdgeIdPolicy::ExplicitOnly,
+        }
     }
 
     fn parse_match_set(&mut self, statement: &str) -> Result<GraphMutationPlan> {
@@ -958,13 +1332,78 @@ impl CypherMutationPlanner {
                 )));
             }
             let kind = assignment.kind;
-            if let PatchAssignmentKind::NumericExpression { .. } = kind {
-                return Err(cypher_unsupported_cardinality(
-                    "MATCH edge SET does not support numeric expression updates",
-                ));
-            }
             let from_id = self.resolved_endpoint_id(&parsed.from)?;
             let to_id = self.resolved_endpoint_id(&parsed.to)?;
+            if let PatchAssignmentKind::NumericExpression {
+                key,
+                source_target,
+                source_key,
+                op,
+                operand,
+            } = kind
+            {
+                if source_target != assignment.target {
+                    return Err(cypher_unsupported_cardinality(
+                        "MATCH edge SET numeric expressions cannot reference another variable",
+                    ));
+                }
+                let (relationship, cardinality) = if let (Some(from), Some(to)) =
+                    (from_id.clone(), to_id.clone())
+                    && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
+                    && parsed.from.predicates.is_empty()
+                    && parsed.to.predicates.is_empty()
+                    && parsed.relationship.predicates.is_empty()
+                {
+                    let id =
+                        optional_string_prop(&parsed.relationship.props, "id").map(EdgeId::new);
+                    self.bind_edge_variable(
+                        &parsed.relationship,
+                        CypherBoundEdgeIdentity {
+                            from: from.clone(),
+                            label: parsed.relationship.label.clone(),
+                            to: to.clone(),
+                            id: id.clone(),
+                        },
+                    )?;
+                    (
+                        GraphRelationshipMatch {
+                            from: GraphNodeMatch {
+                                label: None,
+                                props: Props::from([(
+                                    "id".to_string(),
+                                    Value::from(from.as_str()),
+                                )]),
+                                predicates: Vec::new(),
+                            },
+                            label: parsed.relationship.label,
+                            to: GraphNodeMatch {
+                                label: None,
+                                props: Props::from([("id".to_string(), Value::from(to.as_str()))]),
+                                predicates: Vec::new(),
+                            },
+                            id,
+                            props: Props::new(),
+                            predicates: Vec::new(),
+                        },
+                        GraphMutationCardinality::SingleIdentity,
+                    )
+                } else {
+                    let relationship =
+                        self.relationship_match_from_pattern(parsed, "MATCH edge SET")?;
+                    self.bind_row_edge_match_variable(&edge_variable, &relationship)?;
+                    (relationship, GraphMutationCardinality::BoundedMany)
+                };
+                return Ok(GraphMutationPlan::new(vec![
+                    GraphMutationPlanOp::UpdateMatchingEdgeProperty {
+                        relationship,
+                        target_key: key,
+                        source_key,
+                        op,
+                        operand,
+                        cardinality,
+                    },
+                ]));
+            }
             if let PatchAssignmentKind::RemoveProperty { key } = kind {
                 if let (Some(from), Some(to)) = (from_id, to_id)
                     && !has_relationship_predicates_beyond_id(&parsed.relationship.props)
@@ -1482,6 +1921,7 @@ impl CypherMutationPlanner {
         };
         if self.edge_bindings.contains_key(variable)
             || self.row_edge_bindings.contains_key(variable)
+            || self.row_path_bindings.contains_key(variable)
         {
             return Err(cypher_unresolved_identity(format!(
                 "Cypher variable '{variable}' is already bound to a relationship"
@@ -1516,6 +1956,7 @@ impl CypherMutationPlanner {
     ) -> Result<()> {
         if self.node_bindings.contains_key(variable)
             || self.row_node_bindings.contains_key(variable)
+            || self.row_path_bindings.contains_key(variable)
         {
             return Err(cypher_unresolved_identity(format!(
                 "Cypher variable '{variable}' is already bound to a node"
@@ -1551,6 +1992,11 @@ impl CypherMutationPlanner {
                 "Cypher variable '{variable}' is already bound to a node id"
             )));
         }
+        if self.row_path_bindings.contains_key(variable) {
+            return Err(cypher_unresolved_identity(format!(
+                "Cypher path variable '{variable}' is already bound"
+            )));
+        }
         if self.edge_bindings.contains_key(variable)
             || self.row_edge_bindings.contains_key(variable)
         {
@@ -1559,6 +2005,38 @@ impl CypherMutationPlanner {
             )));
         }
         self.row_edge_bindings.insert(variable.to_string(), binding);
+        Ok(())
+    }
+
+    fn bind_row_path_variable(
+        &mut self,
+        variable: &str,
+        binding: CypherRowProducedPathBinding,
+    ) -> Result<()> {
+        if self.node_bindings.contains_key(variable)
+            || self.row_node_bindings.contains_key(variable)
+        {
+            return Err(cypher_unresolved_identity(format!(
+                "Cypher path variable '{variable}' is already bound to a node"
+            )));
+        }
+        if self.edge_bindings.contains_key(variable)
+            || self.row_edge_match_bindings.contains_key(variable)
+            || self.row_edge_bindings.contains_key(variable)
+        {
+            return Err(cypher_unresolved_identity(format!(
+                "Cypher path variable '{variable}' is already bound to a relationship"
+            )));
+        }
+        if let Some(existing) = self.row_path_bindings.get(variable) {
+            if existing != &binding {
+                return Err(cypher_unresolved_identity(format!(
+                    "Cypher path variable '{variable}' is already bound to a different path"
+                )));
+            }
+            return Ok(());
+        }
+        self.row_path_bindings.insert(variable.to_string(), binding);
         Ok(())
     }
 }
@@ -1655,9 +2133,7 @@ fn parse_create_constraint(rest: &str) -> Result<CypherDdlStatement> {
         .or_else(|| {
             find_unquoted_keyword(rest, "ON").map(|index| (index, &rest[index + "ON".len()..]))
         })
-        .ok_or_else(|| {
-            cypher_syntax("CREATE CONSTRAINT requires a FOR (or ON) pattern clause")
-        })?;
+        .ok_or_else(|| cypher_syntax("CREATE CONSTRAINT requires a FOR (or ON) pattern clause"))?;
     let header = rest[..for_index].trim();
 
     let (name, if_not_exists) = if let Some(if_index) = find_unquoted_keyword(header, "IF") {
@@ -1713,9 +2189,7 @@ fn parse_drop_constraint(rest: &str) -> Result<CypherDdlStatement> {
         (rest.trim(), false)
     };
     if !is_cypher_identifier(name) {
-        return Err(cypher_syntax(
-            "DROP CONSTRAINT requires a constraint name",
-        ));
+        return Err(cypher_syntax("DROP CONSTRAINT requires a constraint name"));
     }
     Ok(CypherDdlStatement::DropConstraint {
         name: name.to_string(),
@@ -1750,9 +2224,9 @@ fn parse_constraint_pattern(pattern: &str) -> Result<(bool, String, Label)> {
         let (variable, label) = parse_constraint_var_label(&pattern[open + 1..close])?;
         return Ok((true, variable, label));
     }
-    let open = pattern
-        .find('(')
-        .ok_or_else(|| cypher_syntax("constraint pattern must be a node or relationship pattern"))?;
+    let open = pattern.find('(').ok_or_else(|| {
+        cypher_syntax("constraint pattern must be a node or relationship pattern")
+    })?;
     let close = pattern[open + 1..]
         .find(')')
         .map(|offset| offset + open + 1)
@@ -1777,10 +2251,10 @@ fn parse_constraint_var_label(body: &str) -> Result<(String, Label)> {
 /// Parses a `variable.key IS [NOT NULL|UNIQUE]` constraint predicate, returning
 /// `(is_unique, key)`. The predicate variable must match the pattern variable.
 fn parse_constraint_predicate(predicate: &str, pattern_variable: &str) -> Result<(bool, String)> {
-    let is_index = find_unquoted_keyword(predicate, "IS")
-        .ok_or_else(|| cypher_syntax("constraint predicate requires 'IS UNIQUE' or 'IS NOT NULL'"))?;
-    let (variable, key) =
-        parse_property_ref(predicate[..is_index].trim(), "constraint predicate")?;
+    let is_index = find_unquoted_keyword(predicate, "IS").ok_or_else(|| {
+        cypher_syntax("constraint predicate requires 'IS UNIQUE' or 'IS NOT NULL'")
+    })?;
+    let (variable, key) = parse_property_ref(predicate[..is_index].trim(), "constraint predicate")?;
     if variable != pattern_variable {
         return Err(cypher_syntax(format!(
             "constraint predicate variable '{variable}' does not match pattern variable '{pattern_variable}'"
@@ -1965,14 +2439,14 @@ struct ParsedCypherEdge {
     edge: Edge,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ParsedCypherEdgeMatch {
     from: ParsedCypherNode,
     relationship: ParsedCypherRelationship,
     to: ParsedCypherNode,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ParsedCypherRelationship {
     variable: Option<String>,
     label: Label,
@@ -1991,10 +2465,20 @@ struct CypherBoundEdgeIdentity {
 #[derive(Clone, Debug, PartialEq)]
 struct CypherRowProducedEdgeBinding {
     kind: GraphMutationPlanKind,
+    from_variable: String,
     from: GraphNodeMatch,
+    to_variable: String,
     to: GraphNodeMatch,
     label: Label,
     props: Props,
+    edge_id_policy: GraphRowEdgeIdPolicy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CypherRowProducedPathBinding {
+    from_variable: String,
+    edge_variable: String,
+    to_variable: String,
 }
 
 struct ParsedWherePredicate {
@@ -2096,6 +2580,20 @@ fn parse_cypher_relationship(
         props,
         predicates: Vec::new(),
     })
+}
+
+fn validate_optional_edge_id_property(props: &Props) -> Result<()> {
+    edge_id_from_props(props).map(|_| ())
+}
+
+fn edge_id_from_props(props: &Props) -> Result<Option<String>> {
+    match props.get("id") {
+        Some(Value::String(id)) => Ok(Some(id.clone())),
+        Some(_) => Err(cypher_syntax(
+            "relationship id property must be a string literal",
+        )),
+        None => Ok(None),
+    }
 }
 
 fn match_node_cardinality(node: &ParsedCypherNode) -> GraphMutationCardinality {
@@ -2262,6 +2760,20 @@ fn split_match_delete(statement: &str) -> Result<(&str, &str)> {
     ))
 }
 
+fn parse_match_delete_targets(targets: &str) -> Result<Vec<String>> {
+    split_top_level_commas(targets)?
+        .into_iter()
+        .map(str::trim)
+        .map(|target| {
+            if target.is_empty() {
+                Err(cypher_syntax("MATCH DELETE contains an empty target"))
+            } else {
+                parse_required_cypher_variable(target, "MATCH DELETE target")
+            }
+        })
+        .collect()
+}
+
 fn split_match_edge_upsert<'a>(statement: &'a str, keyword: &str) -> Result<(&'a str, &'a str)> {
     if let Some(index) = find_unquoted_keyword(statement, keyword) {
         let match_clause = statement[..index].trim();
@@ -2276,6 +2788,23 @@ fn split_match_edge_upsert<'a>(statement: &'a str, keyword: &str) -> Result<(&'a
     Err(GrustError::Unsupported(format!(
         "only ID-resolved MATCH ... {keyword} edge is supported in writable Cypher",
     )))
+}
+
+fn parse_row_path_binding(pattern: &str) -> Result<(Option<String>, &str)> {
+    let Some(index) = find_unquoted(pattern, '=') else {
+        return Ok((None, pattern.trim()));
+    };
+    let variable = parse_required_cypher_variable(
+        pattern[..index].trim(),
+        "MATCH CREATE/MERGE path variable",
+    )?;
+    let relationship_pattern = pattern[index + 1..].trim();
+    if !relationship_pattern.starts_with('(') {
+        return Err(cypher_syntax(
+            "MATCH CREATE/MERGE path variable must bind a relationship pattern",
+        ));
+    }
+    Ok((Some(variable), relationship_pattern))
 }
 
 fn split_match_set(statement: &str) -> Result<(&str, &str)> {
@@ -2326,7 +2855,7 @@ fn split_final_return(statement: &str) -> Result<(&str, &str)> {
 
 fn find_return_control_clause(return_clause: &str) -> Option<usize> {
     let mut earliest: Option<usize> = None;
-    for keyword in ["ORDER", "LIMIT", "SKIP"] {
+    for keyword in ["ORDER", "LIMIT", "SKIP", "OFFSET"] {
         let mut offset = 0usize;
         let mut rest = return_clause;
         while let Some(index) = find_unquoted_keyword(rest, keyword) {
@@ -2365,12 +2894,13 @@ fn is_return_alias_keyword_prefix(prefix: &str) -> bool {
         .is_some_and(|word| word.eq_ignore_ascii_case("AS"))
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct CypherReturnClause {
     projections: Vec<CypherReturnProjection>,
     order_by: Vec<CypherOrderItem>,
     skip: Option<usize>,
     limit: Option<usize>,
+    distinct: bool,
 }
 
 /// One `ORDER BY` term, resolved to the index of a returned column. Ordering by
@@ -2381,18 +2911,136 @@ struct CypherOrderItem {
     descending: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct CypherReturnProjection {
     variable: String,
     target: CypherReturnTarget,
     column: String,
+    expression: String,
     element: CypherReturnElement,
+    aggregate: Option<CypherReturnAggregate>,
+    distinct: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum CypherReturnTarget {
+    All,
     Element,
+    Literal(Value),
     Property(String),
+    MapProjection(Vec<String>),
+    ListProjection(Vec<String>),
+    Case(CypherReturnCase),
+    Coalesce(CypherReturnCoalesce),
+    PropertyExists(String),
+    PropertySize(String),
+    PropertyAbs(String),
+    PropertyToString(String),
+    PropertyStringTransform {
+        key: String,
+        transform: CypherReturnStringTransform,
+    },
+    PropertyStringTrim {
+        key: String,
+        trim: CypherReturnStringTrim,
+    },
+    PropertyIsEmpty(String),
+    PropertyStringReverse(String),
+    PropertyStringSplit(CypherReturnStringSplit),
+    PropertySubstring(CypherReturnSubstring),
+    PropertyStringSlice(CypherReturnStringSlice),
+    PropertyReplace(CypherReturnReplace),
+    PropertyStringPredicate(CypherReturnStringPredicateProjection),
+    NodeLabels,
+    RelationshipType,
+    ElementProperties,
+    ElementKeys,
+    ElementId,
+    RelationshipStartNode,
+    RelationshipEndNode,
+    PathLength,
+    PathNodes,
+    PathRelationships,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnCoalesce {
+    variable: Option<String>,
+    terms: Vec<CypherReturnCoalesceTerm>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CypherReturnCoalesceTerm {
+    Property(String),
+    Literal(Value),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CypherReturnStringTransform {
+    Lower,
+    Upper,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CypherReturnStringTrim {
+    Both,
+    Left,
+    Right,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnCase {
+    key: String,
+    equals: Value,
+    then_value: Value,
+    else_value: Value,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnSubstring {
+    key: String,
+    start: usize,
+    length: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnStringSplit {
+    key: String,
+    delimiter: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnStringSlice {
+    key: String,
+    side: CypherReturnStringSliceSide,
+    length: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CypherReturnStringSliceSide {
+    Left,
+    Right,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnReplace {
+    key: String,
+    search: String,
+    replacement: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnStringPredicateProjection {
+    key: String,
+    predicate: CypherReturnStringPredicate,
+    needle: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CypherReturnStringPredicate {
+    StartsWith,
+    EndsWith,
+    Contains,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2401,6 +3049,19 @@ enum CypherReturnElement {
     Edge,
     RowNode,
     RowEdge,
+    RowPath,
+    Literal,
+    Aggregate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CypherReturnAggregate {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Collect,
 }
 
 fn parse_cypher_return_clause(
@@ -2410,78 +3071,225 @@ fn parse_cypher_return_clause(
     row_node_bindings: &HashMap<String, GraphNodeMatch>,
     row_edge_match_bindings: &HashMap<String, GraphRelationshipMatch>,
     row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    parameters: &CypherParameters,
 ) -> Result<CypherReturnClause> {
     let (projection_clause, control_clause) = split_return_control(clause);
+    if projection_clause.eq_ignore_ascii_case("DISTINCT") {
+        return Err(cypher_syntax("RETURN DISTINCT requires a projection"));
+    }
+    let (projection_clause, distinct) =
+        if let Some(after_distinct) = strip_leading_keyword(projection_clause, "DISTINCT") {
+            let projection_clause = after_distinct.trim();
+            if projection_clause.is_empty() {
+                return Err(cypher_syntax("RETURN DISTINCT requires a projection"));
+            }
+            (projection_clause, true)
+        } else {
+            (projection_clause, false)
+        };
     let mut projections = Vec::new();
     for projection in split_top_level_commas(projection_clause)? {
         let projection = projection.trim();
         if projection.is_empty() {
             return Err(cypher_syntax("RETURN contains an empty projection"));
         }
-        if projection == "*" || projection.contains('(') || projection.contains(')') {
+        let (expression, alias) = split_return_alias(projection)?;
+        if let Some((aggregate, variable, target, distinct)) =
+            parse_aggregate_projection(expression, parameters)?
+        {
+            if let Some(variable) = variable.as_ref() {
+                validate_return_variable_binding(
+                    variable,
+                    node_bindings,
+                    edge_bindings,
+                    row_node_bindings,
+                    row_edge_match_bindings,
+                    row_edge_bindings,
+                    row_path_bindings,
+                )?;
+                if matches!(
+                    target,
+                    CypherReturnTarget::PathLength
+                        | CypherReturnTarget::PathNodes
+                        | CypherReturnTarget::PathRelationships
+                ) && !row_path_bindings.contains_key(variable)
+                {
+                    return Err(cypher_unsupported_cardinality(
+                        "writable Cypher RETURN path functions require a bound path variable",
+                    ));
+                }
+                let element = cypher_return_element_for_variable(
+                    variable,
+                    node_bindings,
+                    edge_bindings,
+                    row_node_bindings,
+                    row_edge_match_bindings,
+                    row_edge_bindings,
+                    row_path_bindings,
+                )?;
+                validate_return_function_target(&target, element)?;
+            }
+            projections.push(CypherReturnProjection {
+                variable: variable.unwrap_or_default(),
+                target,
+                column: alias.unwrap_or_else(|| expression.trim().to_string()),
+                expression: expression.trim().to_string(),
+                element: CypherReturnElement::Aggregate,
+                aggregate: Some(aggregate),
+                distinct,
+            });
+            continue;
+        }
+        if projection == "*" {
+            append_star_return_projections(
+                &mut projections,
+                node_bindings,
+                edge_bindings,
+                row_node_bindings,
+                row_edge_match_bindings,
+                row_edge_bindings,
+                row_path_bindings,
+            )?;
+            continue;
+        }
+        let (variable, target) = if let Some((variable, path_target)) =
+            parse_return_path_function_projection(expression)?
+        {
+            (variable, path_target)
+        } else if let Some((variable, element_target)) =
+            parse_return_element_function_projection(expression)?
+        {
+            (variable, element_target)
+        } else if let Some((variable, coalesce)) =
+            parse_return_coalesce_projection(expression, parameters)?
+        {
+            (
+                variable.unwrap_or_default(),
+                CypherReturnTarget::Coalesce(coalesce),
+            )
+        } else if let Some((variable, key)) = parse_return_exists_projection(expression)? {
+            (variable, CypherReturnTarget::PropertyExists(key))
+        } else if let Some((variable, key)) = parse_return_size_projection(expression)? {
+            (variable, CypherReturnTarget::PropertySize(key))
+        } else if let Some((variable, key)) = parse_return_abs_projection(expression)? {
+            (variable, CypherReturnTarget::PropertyAbs(key))
+        } else if let Some((variable, key)) = parse_return_to_string_projection(expression)? {
+            (variable, CypherReturnTarget::PropertyToString(key))
+        } else if let Some((variable, key, transform)) =
+            parse_return_string_transform_projection(expression)?
+        {
+            (
+                variable,
+                CypherReturnTarget::PropertyStringTransform { key, transform },
+            )
+        } else if let Some((variable, key, trim)) = parse_return_string_trim_projection(expression)?
+        {
+            (
+                variable,
+                CypherReturnTarget::PropertyStringTrim { key, trim },
+            )
+        } else if let Some((variable, key)) = parse_return_is_empty_projection(expression)? {
+            (variable, CypherReturnTarget::PropertyIsEmpty(key))
+        } else if let Some((variable, key)) = parse_return_string_reverse_projection(expression)? {
+            (variable, CypherReturnTarget::PropertyStringReverse(key))
+        } else if let Some((variable, split)) =
+            parse_return_string_split_projection(expression, parameters)?
+        {
+            (variable, CypherReturnTarget::PropertyStringSplit(split))
+        } else if let Some((variable, substring)) =
+            parse_return_substring_projection(expression, parameters)?
+        {
+            (variable, CypherReturnTarget::PropertySubstring(substring))
+        } else if let Some((variable, slice)) =
+            parse_return_string_slice_projection(expression, parameters)?
+        {
+            (variable, CypherReturnTarget::PropertyStringSlice(slice))
+        } else if let Some((variable, replace)) =
+            parse_return_replace_projection(expression, parameters)?
+        {
+            (variable, CypherReturnTarget::PropertyReplace(replace))
+        } else if let Some((variable, predicate)) =
+            parse_return_string_predicate_projection(expression, parameters)?
+        {
+            (
+                variable,
+                CypherReturnTarget::PropertyStringPredicate(predicate),
+            )
+        } else if expression.contains('(') || expression.contains(')') {
             return Err(cypher_unsupported_cardinality(
-                "writable Cypher RETURN only supports bound element and property projections",
+                "writable Cypher RETURN only supports bound element, property, and restricted path projections",
+            ));
+        } else if let Some((variable, case)) = parse_return_case_projection(expression, parameters)?
+        {
+            (variable, CypherReturnTarget::Case(case))
+        } else if let Some(literal) = parse_return_literal_projection(expression, parameters)? {
+            (String::new(), CypherReturnTarget::Literal(literal))
+        } else if let Some((variable, keys)) = parse_return_list_projection(expression)? {
+            (variable, CypherReturnTarget::ListProjection(keys))
+        } else if let Some((variable, keys)) = parse_return_map_projection(expression)? {
+            (variable, CypherReturnTarget::MapProjection(keys))
+        } else if let Ok((variable, key)) = parse_property_ref(expression, "RETURN projection") {
+            (variable, CypherReturnTarget::Property(key))
+        } else {
+            (
+                parse_required_cypher_variable(expression, "RETURN projection")?,
+                CypherReturnTarget::Element,
+            )
+        };
+        let element = if matches!(target, CypherReturnTarget::Literal(_))
+            || matches!(
+                target,
+                CypherReturnTarget::Coalesce(CypherReturnCoalesce { variable: None, .. })
+            ) {
+            CypherReturnElement::Literal
+        } else {
+            cypher_return_element_for_variable(
+                &variable,
+                node_bindings,
+                edge_bindings,
+                row_node_bindings,
+                row_edge_match_bindings,
+                row_edge_bindings,
+                row_path_bindings,
+            )?
+        };
+        if matches!(
+            target,
+            CypherReturnTarget::PathLength
+                | CypherReturnTarget::PathNodes
+                | CypherReturnTarget::PathRelationships
+        ) && element != CypherReturnElement::RowPath
+        {
+            return Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN path functions require a bound path variable",
             ));
         }
-        let (expression, alias) = split_return_alias(projection)?;
-        let (variable, target) =
-            if let Ok((variable, key)) = parse_property_ref(expression, "RETURN projection") {
-                (variable, CypherReturnTarget::Property(key))
-            } else {
-                (
-                    parse_required_cypher_variable(expression, "RETURN projection")?,
-                    CypherReturnTarget::Element,
-                )
-            };
-        let element = match (
-            node_bindings.contains_key(&variable),
-            edge_bindings.contains_key(&variable),
-            row_node_bindings.contains_key(&variable),
-            row_edge_match_bindings.contains_key(&variable),
-            row_edge_bindings.contains_key(&variable),
-        ) {
-            (true, false, false, false, false) => CypherReturnElement::Node,
-            (false, true, false, false, false) => CypherReturnElement::Edge,
-            (false, false, true, false, false) => CypherReturnElement::RowNode,
-            (false, false, false, true, false) | (false, false, false, false, true) => {
-                CypherReturnElement::RowEdge
-            }
-            (true, _, _, _, _) | (_, true, _, _, _) | (_, _, true, _, _) => {
-                return Err(cypher_unresolved_identity(format!(
-                    "RETURN variable '{variable}' is ambiguously bound",
-                )));
-            }
-            (false, false, false, true, true) => {
-                return Err(cypher_unresolved_identity(format!(
-                    "RETURN relationship variable '{variable}' is ambiguously bound",
-                )));
-            }
-            (false, false, false, false, false) => {
-                return Err(cypher_unresolved_identity(format!(
-                    "RETURN references variable '{variable}' that is not bound by the write plan"
-                )));
-            }
-        };
+        validate_return_function_target(&target, element)?;
         projections.push(CypherReturnProjection {
             variable,
             target,
             column: alias.unwrap_or_else(|| expression.trim().to_string()),
+            expression: expression.trim().to_string(),
             element,
+            aggregate: None,
+            distinct: false,
         });
     }
     if projections.is_empty() {
         return Err(cypher_syntax("RETURN requires at least one projection"));
     }
-    let columns = projections
+    let order_keys = projections
         .iter()
-        .map(|projection| projection.column.clone())
+        .map(|projection| vec![projection.column.clone(), projection.expression.clone()])
         .collect::<Vec<_>>();
-    let (order_by, skip, limit) = parse_return_control(control_clause, &columns)?;
+    let (order_by, skip, limit) = parse_return_control(control_clause, &order_keys)?;
     Ok(CypherReturnClause {
         projections,
         order_by,
         skip,
         limit,
+        distinct,
     })
 }
 
@@ -2494,36 +3302,38 @@ fn split_return_control(clause: &str) -> (&str, &str) {
     }
 }
 
-/// Parses a `ORDER BY ... [SKIP n] [LIMIT n]` control clause. Cypher's canonical
-/// `ORDER BY`, then `SKIP`, then `LIMIT` ordering is required, and `ORDER BY`
-/// terms must reference returned column names or aliases.
+/// Parses a `ORDER BY ... [SKIP/OFFSET n] [LIMIT n]` control clause. Cypher's
+/// canonical `ORDER BY`, then row offset, then `LIMIT` ordering is required,
+/// and `ORDER BY` terms must reference returned column names or aliases.
 fn parse_return_control(
     control: &str,
-    columns: &[String],
+    order_keys: &[Vec<String>],
 ) -> Result<(Vec<CypherOrderItem>, Option<usize>, Option<usize>)> {
     let mut rest = control.trim();
     let mut order_by = Vec::new();
     if let Some(after_order) = strip_leading_keyword(rest, "ORDER") {
         let after_by = strip_leading_keyword(after_order.trim_start(), "BY")
             .ok_or_else(|| cypher_syntax("ORDER must be followed by BY"))?;
-        let (items, tail) = split_before_keywords(after_by, &["SKIP", "LIMIT"]);
-        order_by = parse_order_items(items, columns)?;
+        let (items, tail) = split_before_keywords(after_by, &["SKIP", "OFFSET", "LIMIT"]);
+        order_by = parse_order_items(items, order_keys)?;
         rest = tail.trim_start();
     }
     let mut skip = None;
-    if let Some(after_skip) = strip_leading_keyword(rest, "SKIP") {
+    if let Some(after_skip) =
+        strip_leading_keyword(rest, "SKIP").or_else(|| strip_leading_keyword(rest, "OFFSET"))
+    {
         let (count, tail) = split_before_keywords(after_skip, &["LIMIT"]);
-        skip = Some(parse_return_count(count, "SKIP")?);
+        skip = Some(parse_return_count(count, "SKIP/OFFSET")?);
         rest = tail.trim_start();
     }
     let mut limit = None;
     if let Some(after_limit) = strip_leading_keyword(rest, "LIMIT") {
-        limit = Some(parse_return_count(after_limit, "LIMIT")?);
+        limit = parse_return_limit(after_limit)?;
         rest = "";
     }
     if !rest.trim().is_empty() {
         return Err(cypher_syntax(format!(
-            "unsupported RETURN clause tail; expected ORDER BY, SKIP, then LIMIT: {}",
+            "unsupported RETURN clause tail; expected ORDER BY, SKIP/OFFSET, then LIMIT: {}",
             rest.trim()
         )));
     }
@@ -2543,7 +3353,7 @@ fn split_before_keywords<'a>(value: &'a str, keywords: &[&str]) -> (&'a str, &'a
     }
 }
 
-fn parse_order_items(items: &str, columns: &[String]) -> Result<Vec<CypherOrderItem>> {
+fn parse_order_items(items: &str, order_keys: &[Vec<String>]) -> Result<Vec<CypherOrderItem>> {
     let mut order_by = Vec::new();
     for item in split_top_level_commas(items)? {
         let item = item.trim();
@@ -2562,12 +3372,12 @@ fn parse_order_items(items: &str, columns: &[String]) -> Result<Vec<CypherOrderI
             (item, false)
         };
         let expression = expression.trim();
-        let column = columns
+        let column = order_keys
             .iter()
-            .position(|column| column == expression)
+            .position(|keys| keys.iter().any(|key| key == expression))
             .ok_or_else(|| {
                 cypher_unsupported_cardinality(format!(
-                    "ORDER BY '{expression}' must reference a returned column or alias"
+                    "ORDER BY '{expression}' must reference a returned column, alias, or projection expression"
                 ))
             })?;
         order_by.push(CypherOrderItem { column, descending });
@@ -2576,6 +3386,1279 @@ fn parse_order_items(items: &str, columns: &[String]) -> Result<Vec<CypherOrderI
         return Err(cypher_syntax("ORDER BY requires at least one term"));
     }
     Ok(order_by)
+}
+
+fn parse_aggregate_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<
+    Option<(
+        CypherReturnAggregate,
+        Option<String>,
+        CypherReturnTarget,
+        bool,
+    )>,
+> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    let aggregate = match expression[..open].trim().to_ascii_lowercase().as_str() {
+        "count" => CypherReturnAggregate::Count,
+        "sum" => CypherReturnAggregate::Sum,
+        "avg" => CypherReturnAggregate::Avg,
+        "min" => CypherReturnAggregate::Min,
+        "max" => CypherReturnAggregate::Max,
+        "collect" => CypherReturnAggregate::Collect,
+        _ => {
+            return Ok(None);
+        }
+    };
+    let aggregate_name = match aggregate {
+        CypherReturnAggregate::Count => "COUNT",
+        CypherReturnAggregate::Sum => "SUM",
+        CypherReturnAggregate::Avg => "AVG",
+        CypherReturnAggregate::Min => "MIN",
+        CypherReturnAggregate::Max => "MAX",
+        CypherReturnAggregate::Collect => "COLLECT",
+    };
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(format!(
+            "{aggregate_name} projection is missing ')'"
+        )));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    let (body, distinct) = if let Some(after_distinct) = strip_leading_keyword(body, "DISTINCT") {
+        let body = after_distinct.trim();
+        if body.is_empty() {
+            return Err(cypher_syntax(format!(
+                "{aggregate_name} DISTINCT requires a target"
+            )));
+        }
+        (body, true)
+    } else {
+        (body, false)
+    };
+    if let Some((variable, target)) = parse_return_path_function_projection(body)? {
+        return Ok(Some((aggregate, Some(variable), target, distinct)));
+    }
+    if let Some((variable, target)) = parse_return_element_function_projection(body)? {
+        return Ok(Some((aggregate, Some(variable), target, distinct)));
+    }
+    if !matches!(
+        aggregate,
+        CypherReturnAggregate::Count | CypherReturnAggregate::Collect
+    ) && body == "*"
+    {
+        return Err(cypher_unsupported_cardinality(format!(
+            "writable Cypher RETURN does not support {aggregate_name}(*)"
+        )));
+    }
+    if body == "*" {
+        if aggregate == CypherReturnAggregate::Count && distinct {
+            return Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN does not support COUNT(DISTINCT *)",
+            ));
+        }
+        return Ok(Some((aggregate, None, CypherReturnTarget::All, distinct)));
+    }
+    if let Some(literal) = parse_return_literal_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            None,
+            CypherReturnTarget::Literal(literal),
+            distinct,
+        )));
+    }
+    if let Some((variable, coalesce)) = parse_return_coalesce_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            variable,
+            CypherReturnTarget::Coalesce(coalesce),
+            distinct,
+        )));
+    }
+    if let Some((variable, key)) = parse_return_exists_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyExists(key),
+            distinct,
+        )));
+    }
+    if let Some((variable, key)) = parse_return_size_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertySize(key),
+            distinct,
+        )));
+    }
+    if let Some((variable, key)) = parse_return_abs_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyAbs(key),
+            distinct,
+        )));
+    }
+    if let Some((variable, key)) = parse_return_to_string_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyToString(key),
+            distinct,
+        )));
+    }
+    if let Some((variable, key, transform)) = parse_return_string_transform_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyStringTransform { key, transform },
+            distinct,
+        )));
+    }
+    if let Some((variable, key, trim)) = parse_return_string_trim_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyStringTrim { key, trim },
+            distinct,
+        )));
+    }
+    if let Some((variable, key)) = parse_return_is_empty_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyIsEmpty(key),
+            distinct,
+        )));
+    }
+    if let Some((variable, key)) = parse_return_string_reverse_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyStringReverse(key),
+            distinct,
+        )));
+    }
+    if let Some((variable, split)) = parse_return_string_split_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyStringSplit(split),
+            distinct,
+        )));
+    }
+    if let Some((variable, substring)) = parse_return_substring_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertySubstring(substring),
+            distinct,
+        )));
+    }
+    if let Some((variable, slice)) = parse_return_string_slice_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyStringSlice(slice),
+            distinct,
+        )));
+    }
+    if let Some((variable, replace)) = parse_return_replace_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyReplace(replace),
+            distinct,
+        )));
+    }
+    if let Some((variable, predicate)) = parse_return_string_predicate_projection(body, parameters)?
+    {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyStringPredicate(predicate),
+            distinct,
+        )));
+    }
+    if let Some((variable, case)) = parse_return_case_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::Case(case),
+            distinct,
+        )));
+    }
+    if let Some((variable, keys)) = parse_return_list_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::ListProjection(keys),
+            distinct,
+        )));
+    }
+    if let Some((variable, keys)) = parse_return_map_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::MapProjection(keys),
+            distinct,
+        )));
+    }
+    if !matches!(
+        aggregate,
+        CypherReturnAggregate::Count | CypherReturnAggregate::Collect
+    ) && !body.contains('.')
+    {
+        return Err(cypher_unsupported_cardinality(format!(
+            "writable Cypher RETURN only supports {aggregate_name}(variable.property) or restricted CASE"
+        )));
+    }
+    if let Ok((variable, key)) = parse_property_ref(body, "RETURN aggregate projection") {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::Property(key),
+            distinct,
+        )));
+    }
+    if !matches!(
+        aggregate,
+        CypherReturnAggregate::Count | CypherReturnAggregate::Collect
+    ) {
+        return Err(cypher_unsupported_cardinality(format!(
+            "writable Cypher RETURN only supports {aggregate_name}(variable.property) or restricted CASE"
+        )));
+    }
+    Ok(Some((
+        aggregate,
+        Some(parse_required_cypher_variable(
+            body,
+            "RETURN aggregate projection",
+        )?),
+        CypherReturnTarget::Element,
+        distinct,
+    )))
+}
+
+fn parse_return_literal_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<Value>> {
+    let expression = expression.trim();
+    if !is_return_literal_candidate(expression) {
+        return Ok(None);
+    }
+    parse_cypher_literal(expression, parameters).map(Some)
+}
+
+fn is_return_literal_candidate(expression: &str) -> bool {
+    if expression.starts_with('\'')
+        || expression.starts_with('"')
+        || expression.starts_with('$')
+        || expression.eq_ignore_ascii_case("true")
+        || expression.eq_ignore_ascii_case("false")
+        || expression.eq_ignore_ascii_case("null")
+    {
+        return true;
+    }
+    expression
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '-' || ch == '+' || ch.is_ascii_digit())
+}
+
+fn parse_return_coalesce_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<(Option<String>, CypherReturnCoalesce)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("coalesce") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN coalesce projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN coalesce projection requires at least one argument",
+        ));
+    }
+
+    let mut variable = None;
+    let mut terms = Vec::new();
+    for argument in split_top_level_commas(body)? {
+        let argument = argument.trim();
+        if argument.is_empty() {
+            return Err(cypher_syntax(
+                "RETURN coalesce projection contains an empty argument",
+            ));
+        }
+        if let Some(literal) = parse_return_literal_projection(argument, parameters)? {
+            terms.push(CypherReturnCoalesceTerm::Literal(literal));
+            continue;
+        }
+        let (argument_variable, key) = parse_property_ref(argument, "RETURN coalesce projection")
+            .map_err(|_| {
+                cypher_unsupported_cardinality(
+                    "writable Cypher RETURN coalesce only supports variable.property and literal arguments",
+                )
+            })?;
+        if let Some(variable) = &variable {
+            if variable != &argument_variable {
+                return Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN coalesce arguments must reference one variable",
+                ));
+            }
+        } else {
+            variable = Some(argument_variable);
+        }
+        terms.push(CypherReturnCoalesceTerm::Property(key));
+    }
+
+    Ok(Some((
+        variable.clone(),
+        CypherReturnCoalesce { variable, terms },
+    )))
+}
+
+fn parse_return_exists_projection(expression: &str) -> Result<Option<(String, String)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("exists") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN exists projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN exists projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN exists only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN exists projection")
+        .map(Some)
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN exists only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_size_projection(expression: &str) -> Result<Option<(String, String)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("size") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN size projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN size projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN size only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN size projection")
+        .map(Some)
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN size only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_abs_projection(expression: &str) -> Result<Option<(String, String)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("abs") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN abs projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN abs projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN abs only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN abs projection")
+        .map(Some)
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN abs only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_to_string_projection(expression: &str) -> Result<Option<(String, String)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("toString") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN toString projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN toString projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toString only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN toString projection")
+        .map(Some)
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN toString only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_is_empty_projection(expression: &str) -> Result<Option<(String, String)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("isEmpty") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN isEmpty projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN isEmpty projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN isEmpty only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN isEmpty projection")
+        .map(Some)
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN isEmpty only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_string_transform_projection(
+    expression: &str,
+) -> Result<Option<(String, String, CypherReturnStringTransform)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    let transform = match expression[..open].trim().to_ascii_lowercase().as_str() {
+        "tolower" => CypherReturnStringTransform::Lower,
+        "toupper" => CypherReturnStringTransform::Upper,
+        _ => return Ok(None),
+    };
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(
+            "RETURN string transform projection is missing ')'",
+        ));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN string transform projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN string transforms only support variable.property arguments",
+        ));
+    }
+    let (variable, key) =
+        parse_property_ref(body, "RETURN string transform projection").map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN string transforms only support variable.property arguments",
+            )
+        })?;
+    Ok(Some((variable, key, transform)))
+}
+
+fn parse_return_string_trim_projection(
+    expression: &str,
+) -> Result<Option<(String, String, CypherReturnStringTrim)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    let trim = match expression[..open].trim().to_ascii_lowercase().as_str() {
+        "trim" => CypherReturnStringTrim::Both,
+        "ltrim" => CypherReturnStringTrim::Left,
+        "rtrim" => CypherReturnStringTrim::Right,
+        _ => return Ok(None),
+    };
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(
+            "RETURN string trim projection is missing ')'",
+        ));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN string trim projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN string trims only support variable.property arguments",
+        ));
+    }
+    let (variable, key) =
+        parse_property_ref(body, "RETURN string trim projection").map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN string trims only support variable.property arguments",
+            )
+        })?;
+    Ok(Some((variable, key, trim)))
+}
+
+fn parse_return_string_reverse_projection(expression: &str) -> Result<Option<(String, String)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("reverse") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(
+            "RETURN string reverse projection is missing ')'",
+        ));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN string reverse projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN reverse only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN string reverse projection")
+        .map(Some)
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN reverse only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_string_split_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<(String, CypherReturnStringSplit)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("split") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(
+            "RETURN string split projection is missing ')'",
+        ));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN string split projection requires arguments",
+        ));
+    }
+    let arguments = split_top_level_commas(body)?;
+    if arguments.len() != 2 {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN split requires variable.property and delimiter",
+        ));
+    }
+    let (variable, key) = parse_property_ref(arguments[0].trim(), "RETURN string split projection")
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN split requires a variable.property first argument",
+            )
+        })?;
+    let delimiter = parse_string_literal_argument(
+        arguments[1].trim(),
+        parameters,
+        "RETURN string split delimiter",
+    )?;
+    if delimiter.is_empty() {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN split delimiter must be non-empty",
+        ));
+    }
+    Ok(Some((variable, CypherReturnStringSplit { key, delimiter })))
+}
+
+fn parse_return_substring_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<(String, CypherReturnSubstring)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("substring") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN substring projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN substring projection requires arguments",
+        ));
+    }
+    let arguments = split_top_level_commas(body)?;
+    if !(2..=3).contains(&arguments.len()) {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN substring requires variable.property, start, and optional length",
+        ));
+    }
+    let (variable, key) = parse_property_ref(arguments[0].trim(), "RETURN substring projection")
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN substring requires a variable.property first argument",
+            )
+        })?;
+    let start = parse_non_negative_usize_literal(
+        arguments[1].trim(),
+        parameters,
+        "RETURN substring start",
+    )?;
+    let length = if let Some(length) = arguments.get(2) {
+        Some(parse_non_negative_usize_literal(
+            length.trim(),
+            parameters,
+            "RETURN substring length",
+        )?)
+    } else {
+        None
+    };
+    Ok(Some((
+        variable,
+        CypherReturnSubstring { key, start, length },
+    )))
+}
+
+fn parse_non_negative_usize_literal(
+    expression: &str,
+    parameters: &CypherParameters,
+    context: &str,
+) -> Result<usize> {
+    let value = parse_cypher_literal(expression, parameters)?;
+    let Value::Int(value) = value else {
+        return Err(cypher_unsupported_cardinality(format!(
+            "{context} must be an integer literal or parameter"
+        )));
+    };
+    usize::try_from(value).map_err(|_| {
+        cypher_unsupported_cardinality(format!("{context} must be a non-negative integer"))
+    })
+}
+
+fn parse_return_string_slice_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<(String, CypherReturnStringSlice)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    let side = match expression[..open].trim().to_ascii_lowercase().as_str() {
+        "left" => CypherReturnStringSliceSide::Left,
+        "right" => CypherReturnStringSliceSide::Right,
+        _ => return Ok(None),
+    };
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(
+            "RETURN string slice projection is missing ')'",
+        ));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN string slice projection requires arguments",
+        ));
+    }
+    let arguments = split_top_level_commas(body)?;
+    if arguments.len() != 2 {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN left/right requires variable.property and length",
+        ));
+    }
+    let (variable, key) = parse_property_ref(arguments[0].trim(), "RETURN string slice projection")
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN left/right requires a variable.property first argument",
+            )
+        })?;
+    let length = parse_non_negative_usize_literal(
+        arguments[1].trim(),
+        parameters,
+        "RETURN left/right length",
+    )?;
+    Ok(Some((
+        variable,
+        CypherReturnStringSlice { key, side, length },
+    )))
+}
+
+fn parse_return_replace_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<(String, CypherReturnReplace)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("replace") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN replace projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN replace projection requires arguments",
+        ));
+    }
+    let arguments = split_top_level_commas(body)?;
+    if arguments.len() != 3 {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN replace requires variable.property, search, and replacement",
+        ));
+    }
+    let (variable, key) = parse_property_ref(arguments[0].trim(), "RETURN replace projection")
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN replace requires a variable.property first argument",
+            )
+        })?;
+    let search =
+        parse_string_literal_argument(arguments[1].trim(), parameters, "RETURN replace search")?;
+    let replacement = parse_string_literal_argument(
+        arguments[2].trim(),
+        parameters,
+        "RETURN replace replacement",
+    )?;
+    Ok(Some((
+        variable,
+        CypherReturnReplace {
+            key,
+            search,
+            replacement,
+        },
+    )))
+}
+
+fn parse_return_string_predicate_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<(String, CypherReturnStringPredicateProjection)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    let predicate = match expression[..open].trim().to_ascii_lowercase().as_str() {
+        "startswith" => CypherReturnStringPredicate::StartsWith,
+        "endswith" => CypherReturnStringPredicate::EndsWith,
+        "contains" => CypherReturnStringPredicate::Contains,
+        _ => return Ok(None),
+    };
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(
+            "RETURN string predicate projection is missing ')'",
+        ));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN string predicate projection requires arguments",
+        ));
+    }
+    let arguments = split_top_level_commas(body)?;
+    if arguments.len() != 2 {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN string predicates require variable.property and needle",
+        ));
+    }
+    let (variable, key) = parse_property_ref(
+        arguments[0].trim(),
+        "RETURN string predicate projection",
+    )
+    .map_err(|_| {
+        cypher_unsupported_cardinality(
+            "writable Cypher RETURN string predicates require a variable.property first argument",
+        )
+    })?;
+    let needle = parse_string_literal_argument(
+        arguments[1].trim(),
+        parameters,
+        "RETURN string predicate needle",
+    )?;
+    Ok(Some((
+        variable,
+        CypherReturnStringPredicateProjection {
+            key,
+            predicate,
+            needle,
+        },
+    )))
+}
+
+fn parse_string_literal_argument(
+    expression: &str,
+    parameters: &CypherParameters,
+    context: &str,
+) -> Result<String> {
+    let value = parse_cypher_literal(expression, parameters)?;
+    let Value::String(value) = value else {
+        return Err(cypher_unsupported_cardinality(format!(
+            "{context} must be a string literal or parameter"
+        )));
+    };
+    Ok(value)
+}
+
+fn parse_return_element_function_projection(
+    expression: &str,
+) -> Result<Option<(String, CypherReturnTarget)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    let target = match expression[..open].trim().to_ascii_lowercase().as_str() {
+        "labels" => CypherReturnTarget::NodeLabels,
+        "type" => CypherReturnTarget::RelationshipType,
+        "properties" => CypherReturnTarget::ElementProperties,
+        "keys" => CypherReturnTarget::ElementKeys,
+        "id" | "elementid" => CypherReturnTarget::ElementId,
+        "startnode" => CypherReturnTarget::RelationshipStartNode,
+        "endnode" => CypherReturnTarget::RelationshipEndNode,
+        _ => return Ok(None),
+    };
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(
+            "RETURN element function projection is missing ')'",
+        ));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN element functions do not support nested expressions",
+        ));
+    }
+    let variable = parse_required_cypher_variable(body, "RETURN element function variable")?;
+    Ok(Some((variable, target)))
+}
+
+fn parse_return_map_projection(expression: &str) -> Result<Option<(String, Vec<String>)>> {
+    let expression = expression.trim();
+    let Some(open) = find_unquoted(expression, '{') else {
+        return Ok(None);
+    };
+    if !expression.ends_with('}') {
+        return Err(cypher_syntax("RETURN map projection is missing '}'"));
+    }
+    let variable = parse_required_cypher_variable(
+        expression[..open].trim(),
+        "RETURN map projection variable",
+    )?;
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN map projection requires at least one property selector",
+        ));
+    }
+    let mut keys = Vec::new();
+    for selector in split_top_level_commas(body)? {
+        let selector = selector.trim();
+        let Some(key) = selector.strip_prefix('.') else {
+            return Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN map projections only support .property selectors",
+            ));
+        };
+        let key = key.trim();
+        validate_json_key(key)?;
+        keys.push(key.to_string());
+    }
+    Ok(Some((variable, keys)))
+}
+
+fn parse_return_list_projection(expression: &str) -> Result<Option<(String, Vec<String>)>> {
+    let expression = expression.trim();
+    if !expression.starts_with('[') {
+        return Ok(None);
+    }
+    if !expression.ends_with(']') {
+        return Err(cypher_syntax("RETURN list projection is missing ']'"));
+    }
+    let body = expression[1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN list projection requires at least one property reference",
+        ));
+    }
+    let mut variable = None;
+    let mut keys = Vec::new();
+    for item in split_top_level_commas(body)? {
+        let (item_variable, key) = parse_property_ref(item.trim(), "RETURN list projection")?;
+        if let Some(variable) = &variable {
+            if variable != &item_variable {
+                return Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN list projections must reference one variable",
+                ));
+            }
+        } else {
+            variable = Some(item_variable);
+        }
+        keys.push(key);
+    }
+    Ok(Some((
+        variable.expect("list projection contains at least one item"),
+        keys,
+    )))
+}
+
+fn parse_return_case_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<(String, CypherReturnCase)>> {
+    let expression = expression.trim();
+    let Some(after_case) = strip_leading_keyword(expression, "CASE") else {
+        return Ok(None);
+    };
+    if expression.contains('(') || expression.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN CASE does not support function calls or nested expressions",
+        ));
+    }
+    let after_when = strip_leading_keyword(after_case.trim_start(), "WHEN")
+        .ok_or_else(|| cypher_syntax("RETURN CASE requires WHEN"))?;
+    let Some(then_index) = find_unquoted_keyword(after_when, "THEN") else {
+        return Err(cypher_syntax("RETURN CASE requires THEN"));
+    };
+    let condition = after_when[..then_index].trim();
+    let after_then = after_when[then_index + "THEN".len()..].trim_start();
+    let Some(else_index) = find_unquoted_keyword(after_then, "ELSE") else {
+        return Err(cypher_syntax("RETURN CASE requires ELSE"));
+    };
+    let then_value = after_then[..else_index].trim();
+    let after_else = after_then[else_index + "ELSE".len()..].trim_start();
+    let Some(end_index) = find_unquoted_keyword(after_else, "END") else {
+        return Err(cypher_syntax("RETURN CASE requires END"));
+    };
+    let else_value = after_else[..end_index].trim();
+    if !after_else[end_index + "END".len()..].trim().is_empty() {
+        return Err(cypher_syntax(
+            "RETURN CASE does not support trailing content after END",
+        ));
+    }
+    let Some(equals_index) = find_unquoted(condition, '=') else {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN CASE only supports property equality predicates",
+        ));
+    };
+    let (variable, key) = parse_property_ref(
+        condition[..equals_index].trim(),
+        "RETURN CASE predicate property",
+    )?;
+    let equals = parse_cypher_literal(&condition[equals_index + 1..], parameters)?;
+    let then_value = parse_cypher_literal(then_value, parameters)?;
+    let else_value = parse_cypher_literal(else_value, parameters)?;
+    Ok(Some((
+        variable,
+        CypherReturnCase {
+            key,
+            equals,
+            then_value,
+            else_value,
+        },
+    )))
+}
+
+fn parse_return_path_function_projection(
+    expression: &str,
+) -> Result<Option<(String, CypherReturnTarget)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    let target = match expression[..open].trim().to_ascii_lowercase().as_str() {
+        "length" => CypherReturnTarget::PathLength,
+        "nodes" => CypherReturnTarget::PathNodes,
+        "relationships" => CypherReturnTarget::PathRelationships,
+        _ => return Ok(None),
+    };
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(
+            "RETURN path function projection is missing ')'",
+        ));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN path functions do not support nested expressions",
+        ));
+    }
+    let variable = parse_required_cypher_variable(body, "RETURN path function variable")?;
+    Ok(Some((variable, target)))
+}
+
+fn append_star_return_projections(
+    projections: &mut Vec<CypherReturnProjection>,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_bindings: &HashMap<String, GraphNodeMatch>,
+    row_edge_match_bindings: &HashMap<String, GraphRelationshipMatch>,
+    row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+) -> Result<()> {
+    let mut variables = BTreeSet::new();
+    variables.extend(node_bindings.keys().cloned());
+    variables.extend(edge_bindings.keys().cloned());
+    variables.extend(row_node_bindings.keys().cloned());
+    variables.extend(row_edge_match_bindings.keys().cloned());
+    variables.extend(row_edge_bindings.keys().cloned());
+    variables.extend(row_path_bindings.keys().cloned());
+    for binding in row_edge_bindings.values() {
+        variables.insert(binding.from_variable.clone());
+        variables.insert(binding.to_variable.clone());
+    }
+    if variables.is_empty() {
+        return Err(cypher_unresolved_identity(
+            "RETURN * has no variables bound by the write plan",
+        ));
+    }
+    for variable in variables {
+        let element = cypher_return_element_for_variable(
+            &variable,
+            node_bindings,
+            edge_bindings,
+            row_node_bindings,
+            row_edge_match_bindings,
+            row_edge_bindings,
+            row_path_bindings,
+        )?;
+        projections.push(CypherReturnProjection {
+            variable: variable.clone(),
+            target: CypherReturnTarget::Element,
+            column: variable.clone(),
+            expression: variable,
+            element,
+            aggregate: None,
+            distinct: false,
+        });
+    }
+    Ok(())
+}
+
+fn cypher_return_element_for_variable(
+    variable: &str,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_bindings: &HashMap<String, GraphNodeMatch>,
+    row_edge_match_bindings: &HashMap<String, GraphRelationshipMatch>,
+    row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+) -> Result<CypherReturnElement> {
+    match (
+        node_bindings.contains_key(variable),
+        edge_bindings.contains_key(variable),
+        row_node_bindings.contains_key(variable),
+        row_edge_match_bindings.contains_key(variable),
+        row_edge_bindings.contains_key(variable),
+        row_edge_endpoint_variable(variable, row_edge_bindings),
+        row_path_bindings.contains_key(variable),
+    ) {
+        (true, false, false, false, false, false, false)
+        | (true, false, false, false, false, true, false) => Ok(CypherReturnElement::Node),
+        (false, true, false, false, false, false, false) => Ok(CypherReturnElement::Edge),
+        (false, false, true, false, false, false, false)
+        | (false, false, true, false, false, true, false)
+        | (false, false, false, false, false, true, false) => Ok(CypherReturnElement::RowNode),
+        (false, false, false, true, false, false, false)
+        | (false, false, false, false, true, false, false) => Ok(CypherReturnElement::RowEdge),
+        (false, false, false, false, false, false, true) => Ok(CypherReturnElement::RowPath),
+        (true, _, _, _, _, _, _) | (_, true, _, _, _, _, _) | (_, _, true, _, _, _, _) => {
+            Err(cypher_unresolved_identity(format!(
+                "RETURN variable '{variable}' is ambiguously bound",
+            )))
+        }
+        (false, false, false, true, true, _, _) => Err(cypher_unresolved_identity(format!(
+            "RETURN relationship variable '{variable}' is ambiguously bound",
+        ))),
+        (false, false, false, _, _, true, _) => Err(cypher_unresolved_identity(format!(
+            "RETURN variable '{variable}' is ambiguously bound",
+        ))),
+        (false, false, false, _, _, _, true) => Err(cypher_unresolved_identity(format!(
+            "RETURN path variable '{variable}' is ambiguously bound",
+        ))),
+        (false, false, false, false, false, false, false) => Err(cypher_unresolved_identity(
+            format!("RETURN references variable '{variable}' that is not bound by the write plan"),
+        )),
+    }
+}
+
+fn row_edge_endpoint_variable(
+    variable: &str,
+    row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
+) -> bool {
+    row_edge_bindings
+        .values()
+        .any(|binding| binding.from_variable == variable || binding.to_variable == variable)
+}
+
+fn validate_return_variable_binding(
+    variable: &str,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_bindings: &HashMap<String, GraphNodeMatch>,
+    row_edge_match_bindings: &HashMap<String, GraphRelationshipMatch>,
+    row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+) -> Result<()> {
+    match (
+        node_bindings.contains_key(variable),
+        edge_bindings.contains_key(variable),
+        row_node_bindings.contains_key(variable),
+        row_edge_match_bindings.contains_key(variable),
+        row_edge_bindings.contains_key(variable),
+        row_edge_endpoint_variable(variable, row_edge_bindings),
+        row_path_bindings.contains_key(variable),
+    ) {
+        (true, false, false, false, false, false, false)
+        | (true, false, false, false, false, true, false)
+        | (false, true, false, false, false, false, false)
+        | (false, false, true, false, false, false, false)
+        | (false, false, true, false, false, true, false)
+        | (false, false, false, true, false, false, false)
+        | (false, false, false, false, true, false, false)
+        | (false, false, false, false, false, true, false)
+        | (false, false, false, false, false, false, true) => Ok(()),
+        (true, _, _, _, _, _, _) | (_, true, _, _, _, _, _) | (_, _, true, _, _, _, _) => {
+            Err(cypher_unresolved_identity(format!(
+                "RETURN variable '{variable}' is ambiguously bound",
+            )))
+        }
+        (false, false, false, true, true, _, _) => Err(cypher_unresolved_identity(format!(
+            "RETURN relationship variable '{variable}' is ambiguously bound",
+        ))),
+        (false, false, false, _, _, true, _) => Err(cypher_unresolved_identity(format!(
+            "RETURN variable '{variable}' is ambiguously bound",
+        ))),
+        (false, false, false, _, _, _, true) => Err(cypher_unresolved_identity(format!(
+            "RETURN path variable '{variable}' is ambiguously bound",
+        ))),
+        (false, false, false, false, false, false, false) => Err(cypher_unresolved_identity(
+            format!("RETURN references variable '{variable}' that is not bound by the write plan"),
+        )),
+    }
+}
+
+fn validate_return_function_target(
+    target: &CypherReturnTarget,
+    element: CypherReturnElement,
+) -> Result<()> {
+    match target {
+        CypherReturnTarget::NodeLabels
+            if !matches!(
+                element,
+                CypherReturnElement::Node | CypherReturnElement::RowNode
+            ) =>
+        {
+            Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN labels(...) requires a bound node variable",
+            ))
+        }
+        CypherReturnTarget::RelationshipType
+            if !matches!(
+                element,
+                CypherReturnElement::Edge | CypherReturnElement::RowEdge
+            ) =>
+        {
+            Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN type(...) requires a bound relationship variable",
+            ))
+        }
+        CypherReturnTarget::ElementProperties
+        | CypherReturnTarget::ElementKeys
+        | CypherReturnTarget::ElementId
+            if !matches!(
+                element,
+                CypherReturnElement::Node
+                    | CypherReturnElement::Edge
+                    | CypherReturnElement::RowNode
+                    | CypherReturnElement::RowEdge
+            ) =>
+        {
+            Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN properties(...), keys(...), id(...), and elementId(...) require a bound node or relationship variable",
+            ))
+        }
+        CypherReturnTarget::RelationshipStartNode | CypherReturnTarget::RelationshipEndNode
+            if !matches!(
+                element,
+                CypherReturnElement::Edge | CypherReturnElement::RowEdge
+            ) =>
+        {
+            Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN startNode(...) and endNode(...) require a bound relationship variable",
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 fn strip_trailing_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> {
@@ -2598,9 +4681,19 @@ fn strip_trailing_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> 
 
 fn parse_return_count(value: &str, context: &str) -> Result<usize> {
     let value = value.trim();
-    value
-        .parse::<usize>()
-        .map_err(|_| cypher_syntax(format!("{context} requires a non-negative integer, got '{value}'")))
+    value.parse::<usize>().map_err(|_| {
+        cypher_syntax(format!(
+            "{context} requires a non-negative integer, got '{value}'"
+        ))
+    })
+}
+
+fn parse_return_limit(value: &str) -> Result<Option<usize>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("ALL") {
+        return Ok(None);
+    }
+    Ok(Some(parse_return_count(value, "LIMIT")?))
 }
 
 fn split_return_alias(projection: &str) -> Result<(&str, Option<String>)> {
@@ -2729,6 +4822,8 @@ fn cypher_mutation_result_from_plan(
     generated_node_ids: Vec<CypherGeneratedNodeId>,
     plan: &GraphMutationPlan,
     options: &CypherMutationOptions,
+    row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
 ) -> Result<CypherMutationResult> {
     let mut written_node_identities = Vec::new();
     let mut written_edge_identities = Vec::new();
@@ -2743,13 +4838,21 @@ fn cypher_mutation_result_from_plan(
                 GraphMutationPlanOp::UpsertEdge { kind, edge } => {
                     written_edge_identities.push(cypher_written_edge_identity(*kind, edge));
                 }
-                GraphMutationPlanOp::UpsertEdgesFromNodeMatches { .. } => {
-                    return Err(cypher_unsupported_cardinality(
-                        "generic writable Cypher RETURN execution cannot collect row-producing edge identities",
-                    ));
-                }
+                GraphMutationPlanOp::UpsertEdgesFromNodeMatches { .. } => {}
                 _ => {}
             }
+        }
+    }
+    if options.collect_written_edge_identities {
+        for (variable, binding) in row_edge_bindings {
+            let Some(edges) = row_edge_values.get(variable) else {
+                continue;
+            };
+            written_edge_identities.extend(
+                edges
+                    .iter()
+                    .map(|edge| cypher_written_edge_identity(binding.kind, edge)),
+            );
         }
     }
     Ok(CypherMutationResult {
@@ -2760,12 +4863,157 @@ fn cypher_mutation_result_from_plan(
     })
 }
 
+/// Restricted row table produced by writable Cypher execution before `RETURN`
+/// projection.
+///
+/// This model deliberately contains only variables whose values are already
+/// owned by the write path:
+///
+/// - concrete node and relationship variables are tracked separately by the
+///   resolved mutation plan;
+/// - row-node variables come from broad `MATCH ... SET/REMOVE/DELETE` rows or
+///   endpoint-aligned row-producing relationship writes;
+/// - row-edge variables come from broad relationship mutations or
+///   row-producing relationship writes.
+/// - row-path variables are assembled from aligned row-node and row-edge
+///   variables produced by one row-producing relationship write.
+///
+/// It is not a general Cypher read-query row model. Keeping this vocabulary
+/// explicit prevents restricted writable `RETURN` from growing path or
+/// arbitrary read-query semantics accidentally.
+struct CypherWriteResultRows<'a> {
+    row_nodes: &'a HashMap<String, Vec<Node>>,
+    row_edges: &'a HashMap<String, Vec<Edge>>,
+    row_paths: &'a HashMap<String, CypherRowProducedPathBinding>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CypherWriteResultBindingKind {
+    RowNode,
+    RowEdge,
+    RowPath,
+}
+
+impl<'a> CypherWriteResultRows<'a> {
+    fn new(
+        row_nodes: &'a HashMap<String, Vec<Node>>,
+        row_edges: &'a HashMap<String, Vec<Edge>>,
+        row_paths: &'a HashMap<String, CypherRowProducedPathBinding>,
+    ) -> Self {
+        Self {
+            row_nodes,
+            row_edges,
+            row_paths,
+        }
+    }
+
+    fn row_nodes(&self, variable: &str) -> Option<&'a [Node]> {
+        self.row_nodes.get(variable).map(Vec::as_slice)
+    }
+
+    fn row_edges(&self, variable: &str) -> Option<&'a [Edge]> {
+        self.row_edges.get(variable).map(Vec::as_slice)
+    }
+
+    fn binding_kind(&self, variable: &str) -> Option<CypherWriteResultBindingKind> {
+        if self.row_nodes.contains_key(variable) {
+            Some(CypherWriteResultBindingKind::RowNode)
+        } else if self.row_edges.contains_key(variable) {
+            Some(CypherWriteResultBindingKind::RowEdge)
+        } else if self.row_paths.contains_key(variable) {
+            Some(CypherWriteResultBindingKind::RowPath)
+        } else {
+            None
+        }
+    }
+
+    fn variable_names(&self) -> BTreeSet<String> {
+        self.row_nodes
+            .keys()
+            .chain(self.row_edges.keys())
+            .chain(self.row_paths.keys())
+            .cloned()
+            .collect()
+    }
+
+    fn row_count_for_return(&self, return_clause: &CypherReturnClause) -> Result<usize> {
+        let mut row_count = None;
+        for projection in &return_clause.projections {
+            let count = match projection.element {
+                CypherReturnElement::RowNode => self
+                    .row_nodes(&projection.variable)
+                    .map(<[Node]>::len)
+                    .ok_or_else(|| {
+                        cypher_unsupported_cardinality(format!(
+                            "writable Cypher RETURN cannot materialize matched node variable '{}'",
+                            projection.variable
+                        ))
+                    })?,
+                CypherReturnElement::RowEdge => self
+                    .row_edges(&projection.variable)
+                    .map(<[Edge]>::len)
+                    .ok_or_else(|| {
+                        cypher_unsupported_cardinality(format!(
+                            "writable Cypher RETURN cannot materialize row-producing relationship variable '{}'",
+                            projection.variable
+                        ))
+                    })?,
+                CypherReturnElement::RowPath => {
+                    let path = self.row_paths.get(&projection.variable).ok_or_else(|| {
+                        cypher_unsupported_cardinality(format!(
+                            "writable Cypher RETURN cannot materialize path variable '{}'",
+                            projection.variable
+                        ))
+                    })?;
+                    self.row_edges(&path.edge_variable).map(<[Edge]>::len).unwrap_or(1)
+                }
+                CypherReturnElement::Node
+                | CypherReturnElement::Edge
+                | CypherReturnElement::Literal
+                | CypherReturnElement::Aggregate => continue,
+            };
+            Self::merge_row_count(&mut row_count, count)?;
+        }
+        if let Some(count) = row_count {
+            return Ok(count);
+        }
+        if let Some(count) = self.materialized_row_count()? {
+            return Ok(count);
+        }
+        Ok(1)
+    }
+
+    fn materialized_row_count(&self) -> Result<Option<usize>> {
+        let mut row_count = None;
+        for count in self
+            .row_nodes
+            .values()
+            .map(Vec::len)
+            .chain(self.row_edges.values().map(Vec::len))
+        {
+            Self::merge_row_count(&mut row_count, count)?;
+        }
+        Ok(row_count)
+    }
+
+    fn merge_row_count(row_count: &mut Option<usize>, count: usize) -> Result<()> {
+        if row_count.is_some_and(|current| current != count) {
+            return Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN does not support mixing row-producing variables with different row counts",
+            ));
+        }
+        *row_count = Some(count);
+        Ok(())
+    }
+}
+
 async fn evaluate_cypher_return_table<S>(
     store: &S,
     node_bindings: &HashMap<String, NodeId>,
     edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
     row_node_values: &HashMap<String, Vec<Node>>,
     row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
     return_clause: &CypherReturnClause,
 ) -> Result<CypherResultTable>
 where
@@ -2776,77 +5024,1205 @@ where
         .iter()
         .map(|projection| projection.column.clone())
         .collect::<Vec<_>>();
-    let row_count = cypher_return_row_count(return_clause, row_node_values, row_edge_values)?;
-    let mut rows = Vec::with_capacity(row_count);
+    let write_rows =
+        CypherWriteResultRows::new(row_node_values, row_edge_values, row_path_bindings);
+    let row_count = write_rows.row_count_for_return(return_clause)?;
     let mut nodes = HashMap::new();
     let mut edges = HashMap::new();
+    if return_clause
+        .projections
+        .iter()
+        .all(|projection| projection.element == CypherReturnElement::Aggregate)
+    {
+        let mut row = Vec::with_capacity(return_clause.projections.len());
+        for projection in &return_clause.projections {
+            let value = evaluate_return_aggregate(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                &mut nodes,
+                &mut edges,
+                projection,
+                row_count,
+            )
+            .await?;
+            row.push(value);
+        }
+        let mut rows = vec![row];
+        if return_clause.distinct {
+            apply_return_distinct(&mut rows)?;
+        }
+        apply_return_control(
+            &mut rows,
+            &return_clause.order_by,
+            return_clause.skip,
+            return_clause.limit,
+        );
+        return Ok(CypherResultTable { columns, rows });
+    }
+    if return_clause
+        .projections
+        .iter()
+        .any(|projection| projection.element == CypherReturnElement::Aggregate)
+    {
+        return evaluate_grouped_cypher_return_table(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            return_clause,
+            columns,
+            row_count,
+            &mut nodes,
+            &mut edges,
+        )
+        .await;
+    }
+    let mut rows = Vec::with_capacity(row_count);
     for row_index in 0..row_count {
         let mut row = Vec::with_capacity(return_clause.projections.len());
         for projection in &return_clause.projections {
-            match projection.element {
-                CypherReturnElement::Node => {
-                    let id = node_bindings.get(&projection.variable).ok_or_else(|| {
-                        cypher_unresolved_identity(format!(
-                            "RETURN references variable '{}' that is not bound by the write plan",
-                            projection.variable
-                        ))
-                    })?;
-                    let CypherReturnTarget::Property(key) = &projection.target else {
-                        let node =
-                            resolve_bound_node(store, &mut nodes, &projection.variable, id).await?;
-                        row.push(graph_node_value(node)?);
-                        continue;
-                    };
-                    if key == "id" {
-                        row.push(Value::from(id.as_str()));
-                        continue;
+            row.push(
+                evaluate_scalar_return_projection(
+                    store,
+                    node_bindings,
+                    edge_bindings,
+                    row_node_values,
+                    row_edge_values,
+                    row_path_bindings,
+                    &mut nodes,
+                    &mut edges,
+                    projection,
+                    row_index,
+                )
+                .await?,
+            );
+        }
+        rows.push(row);
+    }
+    if return_clause.distinct {
+        apply_return_distinct(&mut rows)?;
+    }
+    apply_return_control(
+        &mut rows,
+        &return_clause.order_by,
+        return_clause.skip,
+        return_clause.limit,
+    );
+    Ok(CypherResultTable { columns, rows })
+}
+
+struct CypherReturnGroup {
+    scalar_values: Vec<Value>,
+    aggregate_states: Vec<Option<CypherGroupedAggregateState>>,
+}
+
+enum CypherGroupedAggregateState {
+    Count {
+        count: usize,
+        distinct: Option<BTreeSet<String>>,
+    },
+    Values {
+        aggregate: CypherReturnAggregate,
+        values: Vec<Value>,
+        distinct: bool,
+    },
+}
+
+impl CypherGroupedAggregateState {
+    fn new(projection: &CypherReturnProjection) -> Result<Self> {
+        let aggregate = projection.aggregate.ok_or_else(|| {
+            cypher_unsupported_cardinality("RETURN aggregate projection is missing aggregate kind")
+        })?;
+        Ok(match aggregate {
+            CypherReturnAggregate::Count => CypherGroupedAggregateState::Count {
+                count: 0,
+                distinct: projection.distinct.then(BTreeSet::new),
+            },
+            CypherReturnAggregate::Sum
+            | CypherReturnAggregate::Avg
+            | CypherReturnAggregate::Min
+            | CypherReturnAggregate::Max
+            | CypherReturnAggregate::Collect => CypherGroupedAggregateState::Values {
+                aggregate,
+                values: Vec::new(),
+                distinct: projection.distinct,
+            },
+        })
+    }
+
+    fn record(&mut self, values: Vec<Value>) -> Result<()> {
+        match self {
+            CypherGroupedAggregateState::Count { count, distinct } => {
+                if let Some(seen) = distinct {
+                    for value in values {
+                        let key = serde_json::to_string(&value.to_json()).map_err(|err| {
+                            GrustError::CypherExecution(format!(
+                                "RETURN COUNT(DISTINCT) value serialization failed: {err}"
+                            ))
+                        })?;
+                        if seen.insert(key) {
+                            *count += 1;
+                        }
                     }
-                    let node =
-                        resolve_bound_node(store, &mut nodes, &projection.variable, id).await?;
-                    row.push(project_node_value(node, key));
+                } else {
+                    *count += values.len();
                 }
-                CypherReturnElement::Edge => {
-                    let identity = edge_bindings.get(&projection.variable).ok_or_else(|| {
-                        cypher_unresolved_identity(format!(
-                            "RETURN references relationship variable '{}' that is not bound by the write plan",
-                            projection.variable
-                        ))
-                    })?;
-                    let CypherReturnTarget::Property(key) = &projection.target else {
-                        let edge = resolve_bound_edge_cached(
-                            store,
-                            &mut edges,
-                            identity,
-                            &projection.variable,
-                        )
-                        .await?;
-                        row.push(graph_edge_value(edge)?);
-                        continue;
-                    };
-                    if key == "id" {
-                        row.push(
-                            identity
-                                .id
-                                .as_ref()
-                                .map(|id| Value::from(id.as_str()))
-                                .unwrap_or(Value::Null),
-                        );
-                        continue;
+            }
+            CypherGroupedAggregateState::Values {
+                values: aggregate_values,
+                ..
+            } => {
+                aggregate_values.extend(values);
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Value> {
+        match self {
+            CypherGroupedAggregateState::Count { count, .. } => count_value(count),
+            CypherGroupedAggregateState::Values {
+                aggregate,
+                mut values,
+                distinct,
+            } => {
+                if distinct {
+                    values = distinct_return_values(values)?;
+                }
+                evaluate_non_count_aggregate(aggregate, values)
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn evaluate_grouped_cypher_return_table<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    return_clause: &CypherReturnClause,
+    columns: Vec<String>,
+    row_count: usize,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+) -> Result<CypherResultTable>
+where
+    S: GraphStore + Sync,
+{
+    let scalar_indices = return_clause
+        .projections
+        .iter()
+        .enumerate()
+        .filter_map(|(index, projection)| {
+            (projection.element != CypherReturnElement::Aggregate).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if scalar_indices.is_empty() {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher grouped RETURN requires at least one scalar projection",
+        ));
+    }
+
+    let mut group_indexes = BTreeMap::new();
+    let mut groups = Vec::<CypherReturnGroup>::new();
+    for row_index in 0..row_count {
+        let mut scalar_values = Vec::with_capacity(scalar_indices.len());
+        for index in &scalar_indices {
+            scalar_values.push(
+                evaluate_scalar_return_projection(
+                    store,
+                    node_bindings,
+                    edge_bindings,
+                    row_node_values,
+                    row_edge_values,
+                    row_path_bindings,
+                    nodes,
+                    edges,
+                    &return_clause.projections[*index],
+                    row_index,
+                )
+                .await?,
+            );
+        }
+        let group_key = return_row_key(&scalar_values, "RETURN grouping")?;
+        let group_index = if let Some(group_index) = group_indexes.get(&group_key).copied() {
+            group_index
+        } else {
+            let group_index = groups.len();
+            group_indexes.insert(group_key, group_index);
+            let aggregate_states = return_clause
+                .projections
+                .iter()
+                .map(|projection| {
+                    if projection.element == CypherReturnElement::Aggregate {
+                        CypherGroupedAggregateState::new(projection).map(Some)
+                    } else {
+                        Ok(None)
                     }
-                    if key == "label" {
-                        row.push(Value::from(identity.label.as_str()));
-                        continue;
-                    }
-                    let edge = resolve_bound_edge_cached(
-                        store,
-                        &mut edges,
-                        identity,
-                        &projection.variable,
+                })
+                .collect::<Result<Vec<_>>>()?;
+            groups.push(CypherReturnGroup {
+                scalar_values,
+                aggregate_states,
+            });
+            group_index
+        };
+
+        for (projection_index, projection) in return_clause.projections.iter().enumerate() {
+            if projection.element != CypherReturnElement::Aggregate {
+                continue;
+            }
+            let values = materialize_return_aggregate_row_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_index,
+            )
+            .await?;
+            let Some(state) = groups[group_index].aggregate_states[projection_index].as_mut()
+            else {
+                continue;
+            };
+            state.record(values)?;
+        }
+    }
+
+    let mut rows = Vec::with_capacity(groups.len());
+    for group in groups {
+        let CypherReturnGroup {
+            scalar_values,
+            aggregate_states,
+        } = group;
+        let mut aggregate_states = aggregate_states.into_iter();
+        let mut scalar_cursor = 0usize;
+        let mut row = Vec::with_capacity(return_clause.projections.len());
+        for projection in &return_clause.projections {
+            if projection.element == CypherReturnElement::Aggregate {
+                let state = aggregate_states.next().flatten().ok_or_else(|| {
+                    cypher_unsupported_cardinality(
+                        "RETURN grouped aggregate state is missing for projection",
                     )
-                    .await?;
-                    row.push(project_edge_value(edge, key));
+                })?;
+                row.push(state.finish()?);
+            } else {
+                let _ = aggregate_states.next();
+                let value = scalar_values.get(scalar_cursor).cloned().ok_or_else(|| {
+                    cypher_unsupported_cardinality("RETURN grouped scalar state is missing")
+                })?;
+                scalar_cursor += 1;
+                row.push(value);
+            }
+        }
+        rows.push(row);
+    }
+    if return_clause.distinct {
+        apply_return_distinct(&mut rows)?;
+    }
+    apply_return_control(
+        &mut rows,
+        &return_clause.order_by,
+        return_clause.skip,
+        return_clause.limit,
+    );
+    Ok(CypherResultTable { columns, rows })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn evaluate_scalar_return_projection<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    match &projection.target {
+        CypherReturnTarget::All => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN * is only supported inside COUNT(*) or COLLECT(*)",
+        )),
+        CypherReturnTarget::Element => {
+            materialize_return_element_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::Literal(value) => Ok(value.clone()),
+        CypherReturnTarget::Property(key) => {
+            materialize_return_property_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::MapProjection(keys) => {
+            materialize_return_map_projection_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                keys,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::ListProjection(keys) => {
+            materialize_return_list_projection_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                keys,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::Case(case) => {
+            materialize_return_case_projection_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                case,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::Coalesce(coalesce) => {
+            materialize_return_coalesce_projection_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                coalesce,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyExists(key) => {
+            materialize_return_property_exists_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertySize(key) => {
+            materialize_return_property_size_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyAbs(key) => {
+            materialize_return_property_abs_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyToString(key) => {
+            materialize_return_property_to_string_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyStringTransform { key, transform } => {
+            materialize_return_property_string_transform_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *transform,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyStringTrim { key, trim } => {
+            materialize_return_property_string_trim_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *trim,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyIsEmpty(key) => {
+            materialize_return_property_is_empty_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyStringReverse(key) => {
+            materialize_return_property_string_reverse_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyStringSplit(split) => {
+            materialize_return_property_string_split_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                split,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertySubstring(substring) => {
+            materialize_return_property_substring_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                substring,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyStringSlice(slice) => {
+            materialize_return_property_string_slice_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                slice,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyReplace(replace) => {
+            materialize_return_property_replace_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                replace,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PropertyStringPredicate(predicate) => {
+            materialize_return_property_string_predicate_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                predicate,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::NodeLabels
+        | CypherReturnTarget::RelationshipType
+        | CypherReturnTarget::ElementProperties
+        | CypherReturnTarget::ElementKeys
+        | CypherReturnTarget::ElementId
+        | CypherReturnTarget::RelationshipStartNode
+        | CypherReturnTarget::RelationshipEndNode => {
+            materialize_return_element_function_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::PathLength
+        | CypherReturnTarget::PathNodes
+        | CypherReturnTarget::PathRelationships => {
+            materialize_return_path_function_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_index,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_aggregate_row_values<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_index: usize,
+) -> Result<Vec<Value>>
+where
+    S: GraphStore + Sync,
+{
+    let aggregate = projection.aggregate.ok_or_else(|| {
+        cypher_unsupported_cardinality("RETURN aggregate projection is missing aggregate kind")
+    })?;
+    match &projection.target {
+        CypherReturnTarget::All
+            if aggregate == CypherReturnAggregate::Count && !projection.distinct =>
+        {
+            Ok(vec![Value::Int(1)])
+        }
+        CypherReturnTarget::All if aggregate == CypherReturnAggregate::Collect => {
+            materialize_return_star_row_value(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                row_index,
+            )
+            .await
+            .map(|value| vec![value])
+        }
+        CypherReturnTarget::All => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN aggregates other than COUNT and COLLECT require variable.property",
+        )),
+        CypherReturnTarget::Element
+            if aggregate == CypherReturnAggregate::Count && !projection.distinct =>
+        {
+            Ok(vec![Value::Int(1)])
+        }
+        CypherReturnTarget::Element
+            if aggregate == CypherReturnAggregate::Count
+                || aggregate == CypherReturnAggregate::Collect =>
+        {
+            materialize_return_element_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_index,
+            )
+            .await
+            .map(|value| vec![value])
+        }
+        CypherReturnTarget::Element => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN aggregates other than COUNT and COLLECT require variable.property",
+        )),
+        CypherReturnTarget::Literal(value) => {
+            Ok(non_null_return_value(value.clone()).into_iter().collect())
+        }
+        CypherReturnTarget::Property(key) => {
+            let value = materialize_return_property_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::Case(case) => {
+            let value = materialize_return_case_projection_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                case,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::Coalesce(coalesce) => {
+            let value = materialize_return_coalesce_projection_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                coalesce,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyExists(key) => {
+            let value = materialize_return_property_exists_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertySize(key) => {
+            let value = materialize_return_property_size_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyAbs(key) => {
+            let value = materialize_return_property_abs_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyToString(key) => {
+            let value = materialize_return_property_to_string_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyStringTransform { key, transform } => {
+            let value = materialize_return_property_string_transform_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *transform,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyStringTrim { key, trim } => {
+            let value = materialize_return_property_string_trim_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *trim,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyIsEmpty(key) => {
+            let value = materialize_return_property_is_empty_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyStringReverse(key) => {
+            let value = materialize_return_property_string_reverse_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyStringSplit(split) => {
+            let value = materialize_return_property_string_split_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                split,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertySubstring(substring) => {
+            let value = materialize_return_property_substring_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                substring,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyStringSlice(slice) => {
+            let value = materialize_return_property_string_slice_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                slice,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyReplace(replace) => {
+            let value = materialize_return_property_replace_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                replace,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyStringPredicate(predicate) => {
+            let value = materialize_return_property_string_predicate_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                predicate,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::NodeLabels
+        | CypherReturnTarget::RelationshipType
+        | CypherReturnTarget::ElementProperties
+        | CypherReturnTarget::ElementKeys
+        | CypherReturnTarget::ElementId
+        | CypherReturnTarget::RelationshipStartNode
+        | CypherReturnTarget::RelationshipEndNode => {
+            let value = materialize_return_element_function_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PathLength
+        | CypherReturnTarget::PathNodes
+        | CypherReturnTarget::PathRelationships => {
+            let value = materialize_return_path_function_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::MapProjection(_) | CypherReturnTarget::ListProjection(_) => {
+            let value = evaluate_scalar_return_projection(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_element_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    match projection.element {
+        CypherReturnElement::Node => {
+            let id = node_bindings.get(&projection.variable).ok_or_else(|| {
+                cypher_unresolved_identity(format!(
+                    "RETURN references variable '{}' that is not bound by the write plan",
+                    projection.variable
+                ))
+            })?;
+            let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+            graph_node_value(node)
+        }
+        CypherReturnElement::Edge => {
+            let identity = edge_bindings.get(&projection.variable).ok_or_else(|| {
+                cypher_unresolved_identity(format!(
+                    "RETURN references relationship variable '{}' that is not bound by the write plan",
+                    projection.variable
+                ))
+            })?;
+            let edge =
+                resolve_bound_edge_cached(store, edges, identity, &projection.variable).await?;
+            graph_edge_value(edge)
+        }
+        CypherReturnElement::RowNode => {
+            let node = row_node_values
+                .get(&projection.variable)
+                .and_then(|nodes| nodes.get(row_index))
+                .ok_or_else(|| {
+                    cypher_unsupported_cardinality(format!(
+                        "writable Cypher RETURN cannot materialize matched node variable '{}'",
+                        projection.variable
+                    ))
+                })?;
+            graph_node_value(node)
+        }
+        CypherReturnElement::RowEdge => {
+            let edge = row_edge_values
+                .get(&projection.variable)
+                .and_then(|edges| edges.get(row_index))
+                .ok_or_else(|| {
+                    cypher_unsupported_cardinality(format!(
+                        "writable Cypher RETURN cannot materialize row-producing relationship variable '{}'",
+                        projection.variable
+                    ))
+                })?;
+            graph_edge_value(edge)
+        }
+        CypherReturnElement::RowPath => {
+            materialize_return_path_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                &projection.variable,
+                row_index,
+            )
+            .await
+        }
+        CypherReturnElement::Literal => match &projection.target {
+            CypherReturnTarget::Literal(value) => Ok(value.clone()),
+            _ => Err(cypher_unsupported_cardinality(
+                "RETURN literal element received a non-literal projection",
+            )),
+        },
+        CypherReturnElement::Aggregate => {
+            match (
+                node_bindings.contains_key(&projection.variable),
+                edge_bindings.contains_key(&projection.variable),
+                row_node_values.contains_key(&projection.variable),
+                row_edge_values.contains_key(&projection.variable),
+                row_path_bindings.contains_key(&projection.variable),
+            ) {
+                (true, false, false, false, false) => {
+                    let id = node_bindings
+                        .get(&projection.variable)
+                        .expect("checked binding");
+                    let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+                    graph_node_value(node)
                 }
-                CypherReturnElement::RowNode => {
+                (false, true, false, false, false) => {
+                    let identity = edge_bindings
+                        .get(&projection.variable)
+                        .expect("checked binding");
+                    let edge =
+                        resolve_bound_edge_cached(store, edges, identity, &projection.variable)
+                            .await?;
+                    graph_edge_value(edge)
+                }
+                (false, false, true, false, false) => {
                     let node = row_node_values
                         .get(&projection.variable)
                         .and_then(|nodes| nodes.get(row_index))
@@ -2856,19 +6232,9 @@ where
                                 projection.variable
                             ))
                         })?;
-                    let value = match &projection.target {
-                        CypherReturnTarget::Element => graph_node_value(node)?,
-                        CypherReturnTarget::Property(key) => {
-                            if key == "id" {
-                                Value::from(node.id.as_str())
-                            } else {
-                                project_node_value(node, key)
-                            }
-                        }
-                    };
-                    row.push(value);
+                    graph_node_value(node)
                 }
-                CypherReturnElement::RowEdge => {
+                (false, false, false, true, false) => {
                     let edge = row_edge_values
                         .get(&projection.variable)
                         .and_then(|edges| edges.get(row_index))
@@ -2878,34 +6244,2752 @@ where
                                 projection.variable
                             ))
                         })?;
-                    let value = match &projection.target {
-                        CypherReturnTarget::Element => graph_edge_value(edge)?,
-                        CypherReturnTarget::Property(key) => {
-                            if key == "id" {
-                                edge.id
-                                    .as_ref()
-                                    .map(|id| Value::from(id.as_str()))
-                                    .unwrap_or(Value::Null)
-                            } else if key == "label" {
-                                Value::from(edge.label.as_str())
-                            } else {
-                                project_edge_value(edge, key)
-                            }
-                        }
-                    };
-                    row.push(value);
+                    graph_edge_value(edge)
                 }
+                (false, false, false, false, true) => {
+                    materialize_return_path_value_at(
+                        store,
+                        node_bindings,
+                        edge_bindings,
+                        row_node_values,
+                        row_edge_values,
+                        row_path_bindings,
+                        nodes,
+                        edges,
+                        &projection.variable,
+                        row_index,
+                    )
+                    .await
+                }
+                _ => Err(cypher_unresolved_identity(format!(
+                    "RETURN references variable '{}' that is not bound by the write plan",
+                    projection.variable
+                ))),
             }
         }
-        rows.push(row);
     }
-    apply_return_control(
-        &mut rows,
-        &return_clause.order_by,
-        return_clause.skip,
-        return_clause.limit,
-    );
-    Ok(CypherResultTable { columns, rows })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_path_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    variable: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let path = row_path_bindings.get(variable).ok_or_else(|| {
+        cypher_unsupported_cardinality(format!(
+            "writable Cypher RETURN cannot materialize path variable '{variable}'"
+        ))
+    })?;
+    let from = materialize_return_path_endpoint_node(
+        store,
+        node_bindings,
+        row_node_values,
+        nodes,
+        &path.from_variable,
+        row_index,
+    )
+    .await?;
+    let from_value = graph_node_value(from)?.to_json();
+    let edge = if let Some(edge) = row_edge_values
+        .get(&path.edge_variable)
+        .and_then(|edges| edges.get(row_index))
+    {
+        edge
+    } else if let Some(identity) = edge_bindings.get(&path.edge_variable) {
+        resolve_bound_edge_cached(store, edges, identity, &path.edge_variable).await?
+    } else {
+        return Err(cypher_unsupported_cardinality(format!(
+            "writable Cypher RETURN cannot materialize path variable '{variable}'"
+        )));
+    };
+    let to = materialize_return_path_endpoint_node(
+        store,
+        node_bindings,
+        row_node_values,
+        nodes,
+        &path.to_variable,
+        row_index,
+    )
+    .await?;
+    let to_value = graph_node_value(to)?.to_json();
+    let edge_value = graph_edge_value(edge)?.to_json();
+    Ok(Value::Json(serde_json::json!({
+        "nodes": [from_value, to_value],
+        "relationships": [edge_value],
+    })))
+}
+
+async fn materialize_return_path_endpoint_node<'a, S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    row_node_values: &'a HashMap<String, Vec<Node>>,
+    nodes: &'a mut HashMap<String, Node>,
+    variable: &str,
+    row_index: usize,
+) -> Result<&'a Node>
+where
+    S: GraphStore + Sync,
+{
+    if let Some(id) = node_bindings.get(variable) {
+        return resolve_bound_node(store, nodes, variable, id).await;
+    }
+    row_node_values
+        .get(variable)
+        .and_then(|nodes| nodes.get(row_index))
+        .ok_or_else(|| {
+            cypher_unsupported_cardinality(format!(
+                "writable Cypher RETURN cannot materialize path endpoint variable '{variable}'"
+            ))
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_map_projection_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    keys: &[String],
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let mut map = serde_json::Map::new();
+    for key in keys {
+        let value = materialize_return_property_value_at(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            projection,
+            key,
+            row_index,
+        )
+        .await?;
+        map.insert(key.clone(), value.to_json());
+    }
+    Ok(Value::Json(serde_json::Value::Object(map)))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_list_projection_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    keys: &[String],
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let mut values = Vec::with_capacity(keys.len());
+    for key in keys {
+        let value = materialize_return_property_value_at(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            projection,
+            key,
+            row_index,
+        )
+        .await?;
+        values.push(value.to_json());
+    }
+    Ok(Value::Json(serde_json::Value::Array(values)))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_case_projection_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    case: &CypherReturnCase,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let actual = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        &case.key,
+        row_index,
+    )
+    .await?;
+    if actual == case.equals {
+        Ok(case.then_value.clone())
+    } else {
+        Ok(case.else_value.clone())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_case_values<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    case: &CypherReturnCase,
+    row_count: usize,
+) -> Result<Vec<Value>>
+where
+    S: GraphStore + Sync,
+{
+    let mut values = Vec::with_capacity(row_count);
+    for row_index in 0..row_count {
+        let value = materialize_return_case_projection_value_at(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            projection,
+            case,
+            row_index,
+        )
+        .await?;
+        if let Some(value) = non_null_return_value(value) {
+            values.push(value);
+        }
+    }
+    Ok(values)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_coalesce_projection_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    coalesce: &CypherReturnCoalesce,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    for term in &coalesce.terms {
+        let value = match term {
+            CypherReturnCoalesceTerm::Property(key) => {
+                materialize_return_property_value_at(
+                    store,
+                    node_bindings,
+                    edge_bindings,
+                    row_node_values,
+                    row_edge_values,
+                    row_path_bindings,
+                    nodes,
+                    edges,
+                    projection,
+                    key,
+                    row_index,
+                )
+                .await?
+            }
+            CypherReturnCoalesceTerm::Literal(value) => value.clone(),
+        };
+        if value != Value::Null {
+            return Ok(value);
+        }
+    }
+    Ok(Value::Null)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_exists_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    Ok(Value::Bool(value != Value::Null))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_size_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_size_value(value)
+}
+
+fn restricted_size_value(value: Value) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(Value::Int(value.chars().count() as i64)),
+        Value::DateTime(value) => Ok(Value::Int(value.as_str().chars().count() as i64)),
+        Value::StringArray(values) => Ok(Value::Int(values.len() as i64)),
+        Value::IntArray(values) => Ok(Value::Int(values.len() as i64)),
+        Value::FloatArray(values) => Ok(Value::Int(values.len() as i64)),
+        Value::Json(serde_json::Value::String(value)) => {
+            Ok(Value::Int(value.chars().count() as i64))
+        }
+        Value::Json(serde_json::Value::Array(values)) => Ok(Value::Int(values.len() as i64)),
+        Value::Json(serde_json::Value::Object(values)) => Ok(Value::Int(values.len() as i64)),
+        Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Json(_) => {
+            Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN size only supports string, array, or JSON collection values",
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_abs_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_abs_value(value)
+}
+
+fn restricted_abs_value(value: Value) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Int(value) => value
+            .checked_abs()
+            .map(Value::Int)
+            .ok_or_else(|| GrustError::CypherExecution("RETURN abs integer overflow".to_string())),
+        Value::Float(value) => {
+            let value = value.abs();
+            if value.is_finite() {
+                Ok(Value::Float(value))
+            } else {
+                Err(GrustError::CypherExecution(
+                    "RETURN abs produced non-finite float".to_string(),
+                ))
+            }
+        }
+        Value::Json(serde_json::Value::Number(value)) => {
+            if let Some(value) = value.as_i64() {
+                restricted_abs_value(Value::Int(value))
+            } else if let Some(value) = value.as_f64() {
+                restricted_abs_value(Value::Float(value))
+            } else {
+                Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN abs only supports finite numeric values",
+                ))
+            }
+        }
+        Value::Bool(_)
+        | Value::String(_)
+        | Value::DateTime(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN abs only supports numeric values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_to_string_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_to_string_value(value)
+}
+
+fn restricted_to_string_value(value: Value) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Bool(value) => Ok(Value::from(value.to_string())),
+        Value::Int(value) => Ok(Value::from(value.to_string())),
+        Value::Float(value) => Ok(Value::from(value.to_string())),
+        Value::String(value) => Ok(Value::from(value)),
+        Value::DateTime(value) => Ok(Value::from(value.as_str().to_string())),
+        Value::Json(serde_json::Value::Null) => Ok(Value::Null),
+        Value::Json(serde_json::Value::Bool(value)) => Ok(Value::from(value.to_string())),
+        Value::Json(serde_json::Value::Number(value)) => Ok(Value::from(value.to_string())),
+        Value::Json(serde_json::Value::String(value)) => Ok(Value::from(value)),
+        Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(serde_json::Value::Array(_))
+        | Value::Json(serde_json::Value::Object(_)) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toString only supports scalar values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_is_empty_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_is_empty_value(value)
+}
+
+fn restricted_is_empty_value(value: Value) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(Value::Bool(value.is_empty())),
+        Value::DateTime(value) => Ok(Value::Bool(value.as_str().is_empty())),
+        Value::StringArray(values) => Ok(Value::Bool(values.is_empty())),
+        Value::IntArray(values) => Ok(Value::Bool(values.is_empty())),
+        Value::FloatArray(values) => Ok(Value::Bool(values.is_empty())),
+        Value::Json(serde_json::Value::String(value)) => Ok(Value::Bool(value.is_empty())),
+        Value::Json(serde_json::Value::Array(values)) => Ok(Value::Bool(values.is_empty())),
+        Value::Json(serde_json::Value::Object(values)) => Ok(Value::Bool(values.is_empty())),
+        Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Json(_) => {
+            Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN isEmpty only supports string, array, or JSON collection values",
+            ))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_string_transform_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    transform: CypherReturnStringTransform,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_string_transform_value(value, transform)
+}
+
+fn restricted_string_transform_value(
+    value: Value,
+    transform: CypherReturnStringTransform,
+) -> Result<Value> {
+    let transform_value = |value: String| match transform {
+        CypherReturnStringTransform::Lower => value.to_lowercase(),
+        CypherReturnStringTransform::Upper => value.to_uppercase(),
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(Value::from(transform_value(value))),
+        Value::DateTime(value) => Ok(Value::from(transform_value(value.as_str().to_string()))),
+        Value::Json(serde_json::Value::String(value)) => Ok(Value::from(transform_value(value))),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN string transforms only support string values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_string_trim_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    trim: CypherReturnStringTrim,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_string_trim_value(value, trim)
+}
+
+fn restricted_string_trim_value(value: Value, trim: CypherReturnStringTrim) -> Result<Value> {
+    let trim_value = |value: String| match trim {
+        CypherReturnStringTrim::Both => value.trim().to_string(),
+        CypherReturnStringTrim::Left => value.trim_start().to_string(),
+        CypherReturnStringTrim::Right => value.trim_end().to_string(),
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(Value::from(trim_value(value))),
+        Value::DateTime(value) => Ok(Value::from(trim_value(value.as_str().to_string()))),
+        Value::Json(serde_json::Value::String(value)) => Ok(Value::from(trim_value(value))),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN string trims only support string values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_string_reverse_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_string_reverse_value(value)
+}
+
+fn restricted_string_reverse_value(value: Value) -> Result<Value> {
+    let reverse_value = |value: String| value.chars().rev().collect::<String>();
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(Value::from(reverse_value(value))),
+        Value::DateTime(value) => Ok(Value::from(reverse_value(value.as_str().to_string()))),
+        Value::Json(serde_json::Value::String(value)) => Ok(Value::from(reverse_value(value))),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN reverse only supports string values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_string_split_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    split: &CypherReturnStringSplit,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        &split.key,
+        row_index,
+    )
+    .await?;
+    restricted_string_split_value(value, split)
+}
+
+fn restricted_string_split_value(value: Value, split: &CypherReturnStringSplit) -> Result<Value> {
+    let split_value = |value: String| {
+        Value::Json(serde_json::Value::Array(
+            value
+                .split(&split.delimiter)
+                .map(|part| serde_json::Value::String(part.to_string()))
+                .collect(),
+        ))
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(split_value(value)),
+        Value::DateTime(value) => Ok(split_value(value.as_str().to_string())),
+        Value::Json(serde_json::Value::String(value)) => Ok(split_value(value)),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN split only supports string values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_substring_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    substring: &CypherReturnSubstring,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        &substring.key,
+        row_index,
+    )
+    .await?;
+    restricted_substring_value(value, substring)
+}
+
+fn restricted_substring_value(value: Value, substring: &CypherReturnSubstring) -> Result<Value> {
+    let slice_value = |value: String| -> String {
+        let chars = value.chars().skip(substring.start);
+        match substring.length {
+            Some(length) => chars.take(length).collect(),
+            None => chars.collect(),
+        }
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(Value::from(slice_value(value))),
+        Value::DateTime(value) => Ok(Value::from(slice_value(value.as_str().to_string()))),
+        Value::Json(serde_json::Value::String(value)) => Ok(Value::from(slice_value(value))),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN substring only supports string values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_string_slice_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    slice: &CypherReturnStringSlice,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        &slice.key,
+        row_index,
+    )
+    .await?;
+    restricted_string_slice_value(value, slice)
+}
+
+fn restricted_string_slice_value(value: Value, slice: &CypherReturnStringSlice) -> Result<Value> {
+    let slice_value = |value: String| -> String {
+        match slice.side {
+            CypherReturnStringSliceSide::Left => value.chars().take(slice.length).collect(),
+            CypherReturnStringSliceSide::Right => {
+                let chars: Vec<_> = value.chars().collect();
+                let start = chars.len().saturating_sub(slice.length);
+                chars.into_iter().skip(start).collect()
+            }
+        }
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(Value::from(slice_value(value))),
+        Value::DateTime(value) => Ok(Value::from(slice_value(value.as_str().to_string()))),
+        Value::Json(serde_json::Value::String(value)) => Ok(Value::from(slice_value(value))),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN left/right only supports string values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_replace_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    replace: &CypherReturnReplace,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        &replace.key,
+        row_index,
+    )
+    .await?;
+    restricted_replace_value(value, replace)
+}
+
+fn restricted_replace_value(value: Value, replace: &CypherReturnReplace) -> Result<Value> {
+    let replace_value = |value: String| value.replace(&replace.search, &replace.replacement);
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(Value::from(replace_value(value))),
+        Value::DateTime(value) => Ok(Value::from(replace_value(value.as_str().to_string()))),
+        Value::Json(serde_json::Value::String(value)) => Ok(Value::from(replace_value(value))),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN replace only supports string values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_string_predicate_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    predicate: &CypherReturnStringPredicateProjection,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        &predicate.key,
+        row_index,
+    )
+    .await?;
+    restricted_string_predicate_value(value, predicate)
+}
+
+fn restricted_string_predicate_value(
+    value: Value,
+    predicate: &CypherReturnStringPredicateProjection,
+) -> Result<Value> {
+    let predicate_value = |value: String| match predicate.predicate {
+        CypherReturnStringPredicate::StartsWith => value.starts_with(&predicate.needle),
+        CypherReturnStringPredicate::EndsWith => value.ends_with(&predicate.needle),
+        CypherReturnStringPredicate::Contains => value.contains(&predicate.needle),
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::String(value) => Ok(Value::Bool(predicate_value(value))),
+        Value::DateTime(value) => Ok(Value::Bool(predicate_value(value.as_str().to_string()))),
+        Value::Json(serde_json::Value::String(value)) => Ok(Value::Bool(predicate_value(value))),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN string predicates only support string values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_element_function_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    match projection.target {
+        CypherReturnTarget::NodeLabels => match projection.element {
+            CypherReturnElement::Node
+            | CypherReturnElement::RowNode
+            | CypherReturnElement::Aggregate => {
+                let label = materialize_return_property_value_at(
+                    store,
+                    node_bindings,
+                    edge_bindings,
+                    row_node_values,
+                    row_edge_values,
+                    row_path_bindings,
+                    nodes,
+                    edges,
+                    projection,
+                    "label",
+                    row_index,
+                )
+                .await?;
+                let Value::String(label) = label else {
+                    return Err(GrustError::CypherExecution(
+                        "RETURN labels(...) could not materialize node label".to_string(),
+                    ));
+                };
+                Ok(Value::Json(serde_json::json!([label])))
+            }
+            _ => Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN labels(...) requires a bound node variable",
+            )),
+        },
+        CypherReturnTarget::RelationshipType => match projection.element {
+            CypherReturnElement::Edge
+            | CypherReturnElement::RowEdge
+            | CypherReturnElement::Aggregate => {
+                materialize_return_property_value_at(
+                    store,
+                    node_bindings,
+                    edge_bindings,
+                    row_node_values,
+                    row_edge_values,
+                    row_path_bindings,
+                    nodes,
+                    edges,
+                    projection,
+                    "label",
+                    row_index,
+                )
+                .await
+            }
+            _ => Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN type(...) requires a bound relationship variable",
+            )),
+        },
+        CypherReturnTarget::ElementProperties => {
+            let props = materialize_return_element_props_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                nodes,
+                edges,
+                projection,
+                row_index,
+            )
+            .await?;
+            Ok(props_value(&props))
+        }
+        CypherReturnTarget::ElementKeys => {
+            let props = materialize_return_element_props_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                nodes,
+                edges,
+                projection,
+                row_index,
+            )
+            .await?;
+            Ok(Value::Json(serde_json::Value::Array(
+                props
+                    .keys()
+                    .map(|key| serde_json::Value::String(key.clone()))
+                    .collect(),
+            )))
+        }
+        CypherReturnTarget::ElementId => {
+            materialize_return_property_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                "id",
+                row_index,
+            )
+            .await
+        }
+        CypherReturnTarget::RelationshipStartNode | CypherReturnTarget::RelationshipEndNode => {
+            let edge = materialize_return_relationship_edge_at(
+                store,
+                edge_bindings,
+                row_edge_values,
+                edges,
+                projection,
+                row_index,
+            )
+            .await?;
+            let id = match projection.target {
+                CypherReturnTarget::RelationshipStartNode => &edge.from,
+                CypherReturnTarget::RelationshipEndNode => &edge.to,
+                _ => unreachable!("checked relationship endpoint target"),
+            };
+            let node = store.get_node(id).await?.ok_or_else(|| {
+                GrustError::CypherExecution(format!(
+                    "RETURN relationship endpoint '{}' does not exist after the write",
+                    id.as_str()
+                ))
+            })?;
+            graph_node_value(&node)
+        }
+        _ => Err(cypher_unsupported_cardinality(
+            "RETURN element function materializer received a non-element-function projection",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_element_props_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_index: usize,
+) -> Result<Props>
+where
+    S: GraphStore + Sync,
+{
+    if let Some(id) = node_bindings.get(&projection.variable) {
+        let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+        return Ok(node.props.clone());
+    }
+    if let Some(identity) = edge_bindings.get(&projection.variable) {
+        let edge = resolve_bound_edge_cached(store, edges, identity, &projection.variable).await?;
+        return Ok(edge.props.clone());
+    }
+    if let Some(row_nodes) = row_node_values.get(&projection.variable) {
+        let node = row_nodes.get(row_index).ok_or_else(|| {
+            cypher_unsupported_cardinality(format!(
+                "writable Cypher RETURN cannot materialize matched node variable '{}'",
+                projection.variable
+            ))
+        })?;
+        return Ok(node.props.clone());
+    }
+    if let Some(row_edges) = row_edge_values.get(&projection.variable) {
+        let edge = row_edges.get(row_index).ok_or_else(|| {
+            cypher_unsupported_cardinality(format!(
+                "writable Cypher RETURN cannot materialize row-producing relationship variable '{}'",
+                projection.variable
+            ))
+        })?;
+        return Ok(edge.props.clone());
+    }
+    Err(cypher_unresolved_identity(format!(
+        "RETURN references variable '{}' that is not bound by the write plan",
+        projection.variable
+    )))
+}
+
+async fn materialize_return_relationship_edge_at<S>(
+    store: &S,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_index: usize,
+) -> Result<Edge>
+where
+    S: GraphStore + Sync,
+{
+    if let Some(identity) = edge_bindings.get(&projection.variable) {
+        return resolve_bound_edge_cached(store, edges, identity, &projection.variable)
+            .await
+            .cloned();
+    }
+    if let Some(row_edges) = row_edge_values.get(&projection.variable) {
+        return row_edges.get(row_index).cloned().ok_or_else(|| {
+            cypher_unsupported_cardinality(format!(
+                "writable Cypher RETURN cannot materialize row-producing relationship variable '{}'",
+                projection.variable
+            ))
+        });
+    }
+    Err(cypher_unsupported_cardinality(format!(
+        "writable Cypher RETURN cannot materialize relationship variable '{}'",
+        projection.variable
+    )))
+}
+
+fn props_value(props: &Props) -> Value {
+    Value::Json(serde_json::Value::Object(
+        props
+            .iter()
+            .map(|(key, value)| (key.clone(), value.to_json()))
+            .collect(),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_projection_values<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_count: usize,
+) -> Result<Vec<Value>>
+where
+    S: GraphStore + Sync,
+{
+    let mut values = Vec::with_capacity(row_count);
+    for row_index in 0..row_count {
+        let value = evaluate_scalar_return_projection(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            projection,
+            row_index,
+        )
+        .await?;
+        if let Some(value) = non_null_return_value(value) {
+            values.push(value);
+        }
+    }
+    Ok(values)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    match projection.element {
+        CypherReturnElement::Node => {
+            let id = node_bindings.get(&projection.variable).ok_or_else(|| {
+                cypher_unresolved_identity(format!(
+                    "RETURN references variable '{}' that is not bound by the write plan",
+                    projection.variable
+                ))
+            })?;
+            if key == "id" {
+                return Ok(Value::from(id.as_str()));
+            }
+            let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+            Ok(project_node_value(node, key))
+        }
+        CypherReturnElement::Edge => {
+            let identity = edge_bindings.get(&projection.variable).ok_or_else(|| {
+                cypher_unresolved_identity(format!(
+                    "RETURN references relationship variable '{}' that is not bound by the write plan",
+                    projection.variable
+                ))
+            })?;
+            if key == "id" {
+                return Ok(identity
+                    .id
+                    .as_ref()
+                    .map(|id| Value::from(id.as_str()))
+                    .unwrap_or(Value::Null));
+            }
+            if key == "label" {
+                return Ok(Value::from(identity.label.as_str()));
+            }
+            let edge =
+                resolve_bound_edge_cached(store, edges, identity, &projection.variable).await?;
+            Ok(project_edge_value(edge, key))
+        }
+        CypherReturnElement::RowNode => {
+            let node = row_node_values
+                .get(&projection.variable)
+                .and_then(|nodes| nodes.get(row_index))
+                .ok_or_else(|| {
+                    cypher_unsupported_cardinality(format!(
+                        "writable Cypher RETURN cannot materialize matched node variable '{}'",
+                        projection.variable
+                    ))
+                })?;
+            if key == "id" {
+                Ok(Value::from(node.id.as_str()))
+            } else {
+                Ok(project_node_value(node, key))
+            }
+        }
+        CypherReturnElement::RowEdge => {
+            let edge = row_edge_values
+                .get(&projection.variable)
+                .and_then(|edges| edges.get(row_index))
+                .ok_or_else(|| {
+                    cypher_unsupported_cardinality(format!(
+                        "writable Cypher RETURN cannot materialize row-producing relationship variable '{}'",
+                        projection.variable
+                    ))
+                })?;
+            if key == "id" {
+                Ok(edge
+                    .id
+                    .as_ref()
+                    .map(|id| Value::from(id.as_str()))
+                    .unwrap_or(Value::Null))
+            } else if key == "label" {
+                Ok(Value::from(edge.label.as_str()))
+            } else {
+                Ok(project_edge_value(edge, key))
+            }
+        }
+        CypherReturnElement::RowPath => {
+            let _ = row_path_bindings.get(&projection.variable).ok_or_else(|| {
+                cypher_unsupported_cardinality(format!(
+                    "writable Cypher RETURN cannot materialize path variable '{}'",
+                    projection.variable
+                ))
+            })?;
+            Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN path properties are not supported",
+            ))
+        }
+        CypherReturnElement::Literal => match &projection.target {
+            CypherReturnTarget::Literal(value) => Ok(value.clone()),
+            _ => Err(cypher_unsupported_cardinality(
+                "RETURN literal element received a non-literal projection",
+            )),
+        },
+        CypherReturnElement::Aggregate => {
+            match (
+                node_bindings.contains_key(&projection.variable),
+                edge_bindings.contains_key(&projection.variable),
+                row_node_values.contains_key(&projection.variable),
+                row_edge_values.contains_key(&projection.variable),
+                row_path_bindings.contains_key(&projection.variable),
+            ) {
+                (true, false, false, false, false) => {
+                    let id = node_bindings
+                        .get(&projection.variable)
+                        .expect("checked binding");
+                    if key == "id" {
+                        return Ok(Value::from(id.as_str()));
+                    }
+                    let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+                    Ok(project_node_value(node, key))
+                }
+                (false, true, false, false, false) => {
+                    let identity = edge_bindings
+                        .get(&projection.variable)
+                        .expect("checked binding");
+                    if key == "id" {
+                        return Ok(identity
+                            .id
+                            .as_ref()
+                            .map(|id| Value::from(id.as_str()))
+                            .unwrap_or(Value::Null));
+                    }
+                    if key == "label" {
+                        return Ok(Value::from(identity.label.as_str()));
+                    }
+                    let edge =
+                        resolve_bound_edge_cached(store, edges, identity, &projection.variable)
+                            .await?;
+                    Ok(project_edge_value(edge, key))
+                }
+                (false, false, true, false, false) => {
+                    let node = row_node_values
+                        .get(&projection.variable)
+                        .and_then(|nodes| nodes.get(row_index))
+                        .ok_or_else(|| {
+                            cypher_unsupported_cardinality(format!(
+                                "writable Cypher RETURN cannot materialize matched node variable '{}'",
+                                projection.variable
+                            ))
+                        })?;
+                    if key == "id" {
+                        Ok(Value::from(node.id.as_str()))
+                    } else {
+                        Ok(project_node_value(node, key))
+                    }
+                }
+                (false, false, false, true, false) => {
+                    let edge = row_edge_values
+                        .get(&projection.variable)
+                        .and_then(|edges| edges.get(row_index))
+                        .ok_or_else(|| {
+                            cypher_unsupported_cardinality(format!(
+                                "writable Cypher RETURN cannot materialize row-producing relationship variable '{}'",
+                                projection.variable
+                            ))
+                        })?;
+                    if key == "id" {
+                        Ok(edge
+                            .id
+                            .as_ref()
+                            .map(|id| Value::from(id.as_str()))
+                            .unwrap_or(Value::Null))
+                    } else if key == "label" {
+                        Ok(Value::from(edge.label.as_str()))
+                    } else {
+                        Ok(project_edge_value(edge, key))
+                    }
+                }
+                (false, false, false, false, true) => Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN path properties are not supported",
+                )),
+                _ => Err(cypher_unresolved_identity(format!(
+                    "RETURN references variable '{}' that is not bound by the write plan",
+                    projection.variable
+                ))),
+            }
+        }
+    }
+}
+
+fn return_row_key(values: &[Value], context: &str) -> Result<String> {
+    serde_json::to_string(
+        &values
+            .iter()
+            .map(Value::to_json)
+            .collect::<Vec<serde_json::Value>>(),
+    )
+    .map_err(|err| {
+        GrustError::CypherExecution(format!("{context} key serialization failed: {err}"))
+    })
+}
+
+async fn evaluate_return_aggregate<'a, S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &'a mut HashMap<String, Node>,
+    edges: &'a mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_count: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let aggregate = projection.aggregate.ok_or_else(|| {
+        cypher_unsupported_cardinality("RETURN aggregate projection is missing aggregate kind")
+    })?;
+    if aggregate == CypherReturnAggregate::Count {
+        return count_return_projection(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            projection,
+            row_count,
+        )
+        .await
+        .and_then(count_value);
+    }
+    let values = materialize_return_aggregate_values(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        aggregate,
+        row_count,
+    )
+    .await?;
+    evaluate_non_count_aggregate(aggregate, values)
+}
+
+async fn count_return_projection<'a, S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &'a mut HashMap<String, Node>,
+    edges: &'a mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_count: usize,
+) -> Result<usize>
+where
+    S: GraphStore + Sync,
+{
+    if let CypherReturnTarget::Case(case) = &projection.target {
+        let values = materialize_return_case_values(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            projection,
+            case,
+            row_count,
+        )
+        .await?;
+        return if projection.distinct {
+            Ok(distinct_return_values(values)?.len())
+        } else {
+            Ok(values.len())
+        };
+    }
+    if matches!(
+        projection.target,
+        CypherReturnTarget::PathLength
+            | CypherReturnTarget::PathNodes
+            | CypherReturnTarget::PathRelationships
+    ) {
+        let values = materialize_return_path_function_values(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            projection,
+            row_count,
+        )
+        .await?;
+        return if projection.distinct {
+            Ok(distinct_return_values(values)?.len())
+        } else {
+            Ok(values.len())
+        };
+    }
+    if matches!(
+        projection.target,
+        CypherReturnTarget::MapProjection(_)
+            | CypherReturnTarget::ListProjection(_)
+            | CypherReturnTarget::Coalesce(_)
+            | CypherReturnTarget::PropertyExists(_)
+            | CypherReturnTarget::PropertySize(_)
+            | CypherReturnTarget::PropertyAbs(_)
+            | CypherReturnTarget::PropertyToString(_)
+            | CypherReturnTarget::PropertyStringTransform { .. }
+            | CypherReturnTarget::PropertyStringTrim { .. }
+            | CypherReturnTarget::PropertyIsEmpty(_)
+            | CypherReturnTarget::PropertyStringReverse(_)
+            | CypherReturnTarget::PropertyStringSplit(_)
+            | CypherReturnTarget::PropertySubstring(_)
+            | CypherReturnTarget::PropertyStringSlice(_)
+            | CypherReturnTarget::PropertyReplace(_)
+            | CypherReturnTarget::PropertyStringPredicate(_)
+            | CypherReturnTarget::NodeLabels
+            | CypherReturnTarget::RelationshipType
+            | CypherReturnTarget::ElementProperties
+            | CypherReturnTarget::ElementKeys
+            | CypherReturnTarget::ElementId
+            | CypherReturnTarget::RelationshipStartNode
+            | CypherReturnTarget::RelationshipEndNode
+    ) {
+        let values = materialize_return_projection_values(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            projection,
+            row_count,
+        )
+        .await?;
+        return if projection.distinct {
+            Ok(distinct_return_values(values)?.len())
+        } else {
+            Ok(values.len())
+        };
+    }
+    if let CypherReturnTarget::Literal(_) = projection.target {
+        let values = materialize_return_projection_values(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            projection,
+            row_count,
+        )
+        .await?;
+        return if projection.distinct {
+            Ok(distinct_return_values(values)?.len())
+        } else {
+            Ok(values.len())
+        };
+    }
+    let CypherReturnTarget::Property(key) = &projection.target else {
+        if projection.distinct {
+            if row_path_bindings.contains_key(&projection.variable) {
+                let values = materialize_return_path_values(
+                    store,
+                    node_bindings,
+                    edge_bindings,
+                    row_node_values,
+                    row_edge_values,
+                    row_path_bindings,
+                    nodes,
+                    edges,
+                    &projection.variable,
+                    row_count,
+                )
+                .await?;
+                return Ok(distinct_return_values(values)?.len());
+            }
+            return count_distinct_elements(
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                projection,
+                row_count,
+            );
+        }
+        return Ok(row_count);
+    };
+    if row_path_bindings.contains_key(&projection.variable) {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN path properties are not supported",
+        ));
+    }
+    if let Some(id) = node_bindings.get(&projection.variable) {
+        if key == "id" {
+            return Ok(1);
+        }
+        let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+        let value = project_node_value(node, key);
+        return Ok(usize::from(value != Value::Null));
+    }
+    if let Some(identity) = edge_bindings.get(&projection.variable) {
+        if key == "id" {
+            return Ok(usize::from(identity.id.is_some()));
+        }
+        if key == "label" {
+            return Ok(1);
+        }
+        let edge = resolve_bound_edge_cached(store, edges, identity, &projection.variable).await?;
+        let value = project_edge_value(edge, key);
+        return Ok(usize::from(value != Value::Null));
+    }
+    if let Some(row_nodes) = row_node_values.get(&projection.variable) {
+        if projection.distinct {
+            return count_distinct_values(row_nodes.iter().filter_map(|node| {
+                if key == "id" {
+                    Some(Value::from(node.id.as_str()))
+                } else {
+                    non_null_return_value(project_node_value(node, key))
+                }
+            }));
+        }
+        return Ok(row_nodes
+            .iter()
+            .filter(|node| {
+                if key == "id" {
+                    true
+                } else {
+                    project_node_value(node, key) != Value::Null
+                }
+            })
+            .count());
+    }
+    if let Some(row_edges) = row_edge_values.get(&projection.variable) {
+        if projection.distinct {
+            return count_distinct_values(row_edges.iter().filter_map(|edge| {
+                if key == "id" {
+                    edge.id.as_ref().map(|id| Value::from(id.as_str()))
+                } else if key == "label" {
+                    Some(Value::from(edge.label.as_str()))
+                } else {
+                    non_null_return_value(project_edge_value(edge, key))
+                }
+            }));
+        }
+        return Ok(row_edges
+            .iter()
+            .filter(|edge| {
+                if key == "id" {
+                    edge.id.is_some()
+                } else if key == "label" {
+                    true
+                } else {
+                    project_edge_value(edge, key) != Value::Null
+                }
+            })
+            .count());
+    }
+    Err(cypher_unresolved_identity(format!(
+        "RETURN references variable '{}' that is not bound by the write plan",
+        projection.variable
+    )))
+}
+
+async fn materialize_return_aggregate_values<'a, S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &'a mut HashMap<String, Node>,
+    edges: &'a mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    aggregate: CypherReturnAggregate,
+    row_count: usize,
+) -> Result<Vec<Value>>
+where
+    S: GraphStore + Sync,
+{
+    let mut values = match &projection.target {
+        CypherReturnTarget::All if aggregate == CypherReturnAggregate::Collect => {
+            let mut values = Vec::with_capacity(row_count);
+            for row_index in 0..row_count {
+                values.push(
+                    materialize_return_star_row_value(
+                        store,
+                        node_bindings,
+                        edge_bindings,
+                        row_node_values,
+                        row_edge_values,
+                        row_path_bindings,
+                        nodes,
+                        edges,
+                        row_index,
+                    )
+                    .await?,
+                );
+            }
+            values
+        }
+        CypherReturnTarget::All => {
+            return Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN aggregates other than COUNT and COLLECT require variable.property",
+            ));
+        }
+        CypherReturnTarget::Element if aggregate == CypherReturnAggregate::Collect => {
+            materialize_return_element_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+            )
+            .await?
+        }
+        CypherReturnTarget::Element => {
+            return Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN aggregates other than COUNT and COLLECT require variable.property",
+            ));
+        }
+        CypherReturnTarget::Literal(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::Property(key) => {
+            materialize_return_property_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+            )
+            .await?
+        }
+        CypherReturnTarget::Case(case) => {
+            materialize_return_case_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                case,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::Coalesce(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyExists(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertySize(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyAbs(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyToString(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyStringTransform { .. } => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyStringTrim { .. } => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyIsEmpty(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyStringReverse(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyStringSplit(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertySubstring(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyStringSlice(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyReplace(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyStringPredicate(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::NodeLabels
+        | CypherReturnTarget::RelationshipType
+        | CypherReturnTarget::ElementProperties
+        | CypherReturnTarget::ElementKeys
+        | CypherReturnTarget::ElementId
+        | CypherReturnTarget::RelationshipStartNode
+        | CypherReturnTarget::RelationshipEndNode => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PathLength
+        | CypherReturnTarget::PathNodes
+        | CypherReturnTarget::PathRelationships => {
+            materialize_return_path_function_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::MapProjection(_) | CypherReturnTarget::ListProjection(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+    };
+    if projection.distinct {
+        values = distinct_return_values(values)?;
+    }
+    Ok(values)
+}
+
+async fn materialize_return_property_values<'a, S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &'a mut HashMap<String, Node>,
+    edges: &'a mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+) -> Result<Vec<Value>>
+where
+    S: GraphStore + Sync,
+{
+    if row_path_bindings.contains_key(&projection.variable) {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN path properties are not supported",
+        ));
+    }
+    if let Some(id) = node_bindings.get(&projection.variable) {
+        Ok(if key == "id" {
+            vec![Value::from(id.as_str())]
+        } else {
+            let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+            non_null_return_value(project_node_value(node, key))
+                .into_iter()
+                .collect()
+        })
+    } else if let Some(identity) = edge_bindings.get(&projection.variable) {
+        Ok(if key == "id" {
+            identity
+                .id
+                .as_ref()
+                .map(|id| Value::from(id.as_str()))
+                .into_iter()
+                .collect()
+        } else if key == "label" {
+            vec![Value::from(identity.label.as_str())]
+        } else {
+            let edge =
+                resolve_bound_edge_cached(store, edges, identity, &projection.variable).await?;
+            non_null_return_value(project_edge_value(edge, key))
+                .into_iter()
+                .collect()
+        })
+    } else if let Some(row_nodes) = row_node_values.get(&projection.variable) {
+        Ok(row_nodes
+            .iter()
+            .filter_map(|node| {
+                if key == "id" {
+                    Some(Value::from(node.id.as_str()))
+                } else {
+                    non_null_return_value(project_node_value(node, key))
+                }
+            })
+            .collect())
+    } else if let Some(row_edges) = row_edge_values.get(&projection.variable) {
+        Ok(row_edges
+            .iter()
+            .filter_map(|edge| {
+                if key == "id" {
+                    edge.id.as_ref().map(|id| Value::from(id.as_str()))
+                } else if key == "label" {
+                    Some(Value::from(edge.label.as_str()))
+                } else {
+                    non_null_return_value(project_edge_value(edge, key))
+                }
+            })
+            .collect())
+    } else {
+        Err(cypher_unresolved_identity(format!(
+            "RETURN references variable '{}' that is not bound by the write plan",
+            projection.variable
+        )))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_star_row_value<'a, S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &'a mut HashMap<String, Node>,
+    edges: &'a mut HashMap<String, Edge>,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let write_rows =
+        CypherWriteResultRows::new(row_node_values, row_edge_values, row_path_bindings);
+    let mut variables = BTreeSet::new();
+    variables.extend(node_bindings.keys().cloned());
+    variables.extend(edge_bindings.keys().cloned());
+    variables.extend(write_rows.variable_names());
+
+    let mut row = serde_json::Map::new();
+    for variable in variables {
+        let value = if let Some(id) = node_bindings.get(&variable) {
+            let node = resolve_bound_node(store, nodes, &variable, id).await?;
+            graph_node_value(node)?
+        } else if let Some(identity) = edge_bindings.get(&variable) {
+            let edge = resolve_bound_edge_cached(store, edges, identity, &variable).await?;
+            graph_edge_value(edge)?
+        } else {
+            match write_rows.binding_kind(&variable) {
+                Some(CypherWriteResultBindingKind::RowNode) => {
+                    let row_nodes = write_rows.row_nodes(&variable).ok_or_else(|| {
+                        cypher_unsupported_cardinality(format!(
+                            "writable Cypher RETURN cannot materialize matched node variable '{variable}'"
+                        ))
+                    })?;
+                    let node = row_nodes.get(row_index).ok_or_else(|| {
+                        cypher_unsupported_cardinality(format!(
+                            "writable Cypher RETURN cannot materialize matched node variable '{variable}'"
+                        ))
+                    })?;
+                    graph_node_value(node)?
+                }
+                Some(CypherWriteResultBindingKind::RowEdge) => {
+                    let row_edges = write_rows.row_edges(&variable).ok_or_else(|| {
+                        cypher_unsupported_cardinality(format!(
+                            "writable Cypher RETURN cannot materialize row-producing relationship variable '{variable}'"
+                        ))
+                    })?;
+                    let edge = row_edges.get(row_index).ok_or_else(|| {
+                        cypher_unsupported_cardinality(format!(
+                            "writable Cypher RETURN cannot materialize row-producing relationship variable '{variable}'"
+                        ))
+                    })?;
+                    graph_edge_value(edge)?
+                }
+                Some(CypherWriteResultBindingKind::RowPath) => {
+                    materialize_return_path_value_at(
+                        store,
+                        node_bindings,
+                        edge_bindings,
+                        row_node_values,
+                        row_edge_values,
+                        row_path_bindings,
+                        nodes,
+                        edges,
+                        &variable,
+                        row_index,
+                    )
+                    .await?
+                }
+                None => {
+                    return Err(cypher_unresolved_identity(format!(
+                        "RETURN references variable '{variable}' that is not bound by the write plan"
+                    )));
+                }
+            }
+        };
+        row.insert(variable, value.to_json());
+    }
+    Ok(Value::Json(serde_json::Value::Object(row)))
+}
+
+async fn materialize_return_element_values<'a, S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &'a mut HashMap<String, Node>,
+    edges: &'a mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+) -> Result<Vec<Value>>
+where
+    S: GraphStore + Sync,
+{
+    if let Some(id) = node_bindings.get(&projection.variable) {
+        let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+        Ok(vec![graph_node_value(node)?])
+    } else if let Some(identity) = edge_bindings.get(&projection.variable) {
+        let edge = resolve_bound_edge_cached(store, edges, identity, &projection.variable).await?;
+        Ok(vec![graph_edge_value(edge)?])
+    } else if let Some(row_nodes) = row_node_values.get(&projection.variable) {
+        row_nodes.iter().map(graph_node_value).collect()
+    } else if let Some(row_edges) = row_edge_values.get(&projection.variable) {
+        row_edges.iter().map(graph_edge_value).collect()
+    } else if let Some(path) = row_path_bindings.get(&projection.variable) {
+        let row_count = row_edge_values
+            .get(&path.edge_variable)
+            .map(Vec::len)
+            .unwrap_or(1);
+        materialize_return_path_values(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            &projection.variable,
+            row_count,
+        )
+        .await
+    } else {
+        Err(cypher_unresolved_identity(format!(
+            "RETURN references variable '{}' that is not bound by the write plan",
+            projection.variable
+        )))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_path_values<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    variable: &str,
+    row_count: usize,
+) -> Result<Vec<Value>>
+where
+    S: GraphStore + Sync,
+{
+    let mut values = Vec::with_capacity(row_count);
+    for row_index in 0..row_count {
+        values.push(
+            materialize_return_path_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                variable,
+                row_index,
+            )
+            .await?,
+        );
+    }
+    Ok(values)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_path_function_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let path = materialize_return_path_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        &projection.variable,
+        row_index,
+    )
+    .await?;
+    let Value::Json(path) = path else {
+        return Err(GrustError::CypherExecution(
+            "RETURN path materialization did not produce JSON".to_string(),
+        ));
+    };
+    match projection.target {
+        CypherReturnTarget::PathLength => {
+            let relationships = path
+                .get("relationships")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    GrustError::CypherExecution(
+                        "RETURN path materialization is missing relationships".to_string(),
+                    )
+                })?;
+            count_value(relationships.len())
+        }
+        CypherReturnTarget::PathNodes => Ok(Value::Json(path.get("nodes").cloned().ok_or_else(
+            || {
+                GrustError::CypherExecution(
+                    "RETURN path materialization is missing nodes".to_string(),
+                )
+            },
+        )?)),
+        CypherReturnTarget::PathRelationships => Ok(Value::Json(
+            path.get("relationships").cloned().ok_or_else(|| {
+                GrustError::CypherExecution(
+                    "RETURN path materialization is missing relationships".to_string(),
+                )
+            })?,
+        )),
+        _ => Err(cypher_unsupported_cardinality(
+            "RETURN path function materializer received a non-path projection",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_path_function_values<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    row_count: usize,
+) -> Result<Vec<Value>>
+where
+    S: GraphStore + Sync,
+{
+    let mut values = Vec::with_capacity(row_count);
+    for row_index in 0..row_count {
+        let value = materialize_return_path_function_value_at(
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes,
+            edges,
+            projection,
+            row_index,
+        )
+        .await?;
+        if let Some(value) = non_null_return_value(value) {
+            values.push(value);
+        }
+    }
+    Ok(values)
+}
+
+fn evaluate_non_count_aggregate(
+    aggregate: CypherReturnAggregate,
+    values: Vec<Value>,
+) -> Result<Value> {
+    match aggregate {
+        CypherReturnAggregate::Count => unreachable!("COUNT handled before non-count aggregate"),
+        CypherReturnAggregate::Sum => sum_return_values(&values),
+        CypherReturnAggregate::Avg => avg_return_values(&values),
+        CypherReturnAggregate::Min => Ok(values
+            .into_iter()
+            .min_by(compare_return_values)
+            .unwrap_or(Value::Null)),
+        CypherReturnAggregate::Max => Ok(values
+            .into_iter()
+            .max_by(compare_return_values)
+            .unwrap_or(Value::Null)),
+        CypherReturnAggregate::Collect => Ok(Value::Json(serde_json::Value::Array(
+            values.into_iter().map(|value| value.to_json()).collect(),
+        ))),
+    }
+}
+
+fn distinct_return_values(values: Vec<Value>) -> Result<Vec<Value>> {
+    let mut seen = BTreeSet::new();
+    let mut distinct = Vec::with_capacity(values.len());
+    for value in values {
+        let key = serde_json::to_string(&value.to_json()).map_err(|err| {
+            GrustError::CypherExecution(format!(
+                "RETURN DISTINCT aggregate value serialization failed: {err}"
+            ))
+        })?;
+        if seen.insert(key) {
+            distinct.push(value);
+        }
+    }
+    Ok(distinct)
+}
+
+fn sum_return_values(values: &[Value]) -> Result<Value> {
+    let mut int_sum = 0i64;
+    let mut float_sum = 0.0f64;
+    let mut saw_float = false;
+    for value in values {
+        match value {
+            Value::Int(value) if !saw_float => {
+                int_sum = int_sum.checked_add(*value).ok_or_else(|| {
+                    GrustError::CypherExecution("RETURN SUM integer overflow".to_string())
+                })?;
+            }
+            Value::Int(value) => {
+                float_sum += *value as f64;
+            }
+            Value::Float(value) => {
+                if !saw_float {
+                    float_sum = int_sum as f64;
+                    saw_float = true;
+                }
+                float_sum += *value;
+            }
+            other => {
+                return Err(cypher_unsupported_cardinality(format!(
+                    "RETURN SUM only supports numeric values, got {:?}",
+                    other
+                )));
+            }
+        }
+    }
+    if values.is_empty() {
+        Ok(Value::Null)
+    } else if saw_float {
+        Ok(Value::Float(float_sum))
+    } else {
+        Ok(Value::Int(int_sum))
+    }
+}
+
+fn avg_return_values(values: &[Value]) -> Result<Value> {
+    if values.is_empty() {
+        return Ok(Value::Null);
+    }
+    let mut sum = 0.0f64;
+    for value in values {
+        match value {
+            Value::Int(value) => sum += *value as f64,
+            Value::Float(value) => sum += *value,
+            other => {
+                return Err(cypher_unsupported_cardinality(format!(
+                    "RETURN AVG only supports numeric values, got {:?}",
+                    other
+                )));
+            }
+        }
+    }
+    Ok(Value::Float(sum / values.len() as f64))
+}
+
+fn count_distinct_elements(
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    projection: &CypherReturnProjection,
+    row_count: usize,
+) -> Result<usize> {
+    if row_path_bindings.contains_key(&projection.variable) {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN aggregates over path variables are not supported",
+        ));
+    }
+    if let Some(id) = node_bindings.get(&projection.variable) {
+        return Ok(usize::from(row_count > 0 && !id.as_str().is_empty()));
+    }
+    if let Some(identity) = edge_bindings.get(&projection.variable) {
+        return Ok(usize::from(
+            row_count > 0 && !edge_identity_count_key(identity).is_empty(),
+        ));
+    }
+    if let Some(row_nodes) = row_node_values.get(&projection.variable) {
+        return Ok(row_nodes
+            .iter()
+            .map(|node| node.id.as_str().to_string())
+            .collect::<BTreeSet<_>>()
+            .len());
+    }
+    if let Some(row_edges) = row_edge_values.get(&projection.variable) {
+        return Ok(row_edges
+            .iter()
+            .map(edge_count_key)
+            .collect::<BTreeSet<_>>()
+            .len());
+    }
+    Err(cypher_unresolved_identity(format!(
+        "RETURN references variable '{}' that is not bound by the write plan",
+        projection.variable
+    )))
+}
+
+fn count_distinct_values(values: impl IntoIterator<Item = Value>) -> Result<usize> {
+    let mut distinct = BTreeSet::new();
+    for value in values {
+        let key = serde_json::to_string(&value.to_json()).map_err(|err| {
+            GrustError::CypherExecution(format!(
+                "COUNT(DISTINCT) value serialization failed: {err}"
+            ))
+        })?;
+        distinct.insert(key);
+    }
+    Ok(distinct.len())
+}
+
+fn non_null_return_value(value: Value) -> Option<Value> {
+    (value != Value::Null).then_some(value)
+}
+
+fn edge_identity_count_key(identity: &CypherBoundEdgeIdentity) -> String {
+    identity
+        .id
+        .as_ref()
+        .map(|id| format!("id:{}", id.as_str()))
+        .unwrap_or_else(|| {
+            format!(
+                "struct:{}:{}:{}",
+                identity.from.as_str(),
+                identity.label.as_str(),
+                identity.to.as_str()
+            )
+        })
+}
+
+fn edge_count_key(edge: &Edge) -> String {
+    edge.id
+        .as_ref()
+        .map(|id| format!("id:{}", id.as_str()))
+        .unwrap_or_else(|| {
+            format!(
+                "struct:{}:{}:{}",
+                edge.from.as_str(),
+                edge.label.as_str(),
+                edge.to.as_str()
+            )
+        })
+}
+
+fn count_value(count: usize) -> Result<Value> {
+    i64::try_from(count).map(Value::Int).map_err(|_| {
+        GrustError::CypherExecution(format!("RETURN count {count} cannot fit in int64"))
+    })
+}
+
+fn apply_return_distinct(rows: &mut Vec<Vec<Value>>) -> Result<()> {
+    let mut seen = BTreeSet::new();
+    let mut distinct = Vec::with_capacity(rows.len());
+    for row in rows.drain(..) {
+        let key = serde_json::to_string(
+            &row.iter()
+                .map(Value::to_json)
+                .collect::<Vec<serde_json::Value>>(),
+        )
+        .map_err(|err| {
+            GrustError::CypherExecution(format!("RETURN DISTINCT row serialization failed: {err}"))
+        })?;
+        if seen.insert(key) {
+            distinct.push(row);
+        }
+    }
+    *rows = distinct;
+    Ok(())
 }
 
 /// Applies `ORDER BY` (stable), then `SKIP`, then `LIMIT` to materialized rows.
@@ -2995,44 +9079,6 @@ where
         })
 }
 
-fn cypher_return_row_count(
-    return_clause: &CypherReturnClause,
-    row_node_values: &HashMap<String, Vec<Node>>,
-    row_edge_values: &HashMap<String, Vec<Edge>>,
-) -> Result<usize> {
-    let mut row_count = None;
-    for projection in &return_clause.projections {
-        let count = match projection.element {
-            CypherReturnElement::RowNode => row_node_values
-                .get(&projection.variable)
-                .map(Vec::len)
-                .ok_or_else(|| {
-                    cypher_unsupported_cardinality(format!(
-                        "writable Cypher RETURN cannot materialize matched node variable '{}'",
-                        projection.variable
-                    ))
-                })?,
-            CypherReturnElement::RowEdge => row_edge_values
-                .get(&projection.variable)
-                .map(Vec::len)
-                .ok_or_else(|| {
-                    cypher_unsupported_cardinality(format!(
-                        "writable Cypher RETURN cannot materialize row-producing relationship variable '{}'",
-                        projection.variable
-                    ))
-                })?,
-            CypherReturnElement::Node | CypherReturnElement::Edge => continue,
-        };
-        if row_count.is_some_and(|current| current != count) {
-            return Err(cypher_unsupported_cardinality(
-                "writable Cypher RETURN does not support mixing row-producing variables with different row counts",
-            ));
-        }
-        row_count = Some(count);
-    }
-    Ok(row_count.unwrap_or(1))
-}
-
 async fn row_edge_return_values_on_store<S>(
     store: &S,
     bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
@@ -3074,6 +9120,53 @@ where
         values.insert(variable.clone(), rows);
     }
     Ok(values)
+}
+
+async fn row_edge_endpoint_node_values_on_store<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
+    edge_values: &HashMap<String, Vec<Edge>>,
+) -> Result<HashMap<String, Vec<Node>>>
+where
+    S: GraphStore + Sync,
+{
+    let mut values = HashMap::new();
+    for (edge_variable, binding) in edge_bindings {
+        let Some(edges) = edge_values.get(edge_variable) else {
+            continue;
+        };
+        for (variable, endpoint) in [
+            (&binding.from_variable, RowEdgeEndpoint::From),
+            (&binding.to_variable, RowEdgeEndpoint::To),
+        ] {
+            if node_bindings.contains_key(variable) || values.contains_key(variable) {
+                continue;
+            }
+            let mut nodes = Vec::with_capacity(edges.len());
+            for edge in edges {
+                let id = match endpoint {
+                    RowEdgeEndpoint::From => &edge.from,
+                    RowEdgeEndpoint::To => &edge.to,
+                };
+                let node = store.get_node(id).await?.ok_or_else(|| {
+                    GrustError::CypherExecution(format!(
+                        "RETURN endpoint variable '{variable}' resolved to missing node '{}'",
+                        id.as_str()
+                    ))
+                })?;
+                nodes.push(node);
+            }
+            values.insert(variable.clone(), nodes);
+        }
+    }
+    Ok(values)
+}
+
+#[derive(Clone, Copy)]
+enum RowEdgeEndpoint {
+    From,
+    To,
 }
 
 async fn collect_row_node_ids_for_operation<S>(
@@ -3126,6 +9219,65 @@ where
     Ok(())
 }
 
+async fn collect_deleted_row_node_values_for_operation<S>(
+    store: &S,
+    operation: &GraphMutationPlanOp,
+    bindings: &HashMap<String, GraphNodeMatch>,
+    values: &mut HashMap<String, Vec<Node>>,
+) -> Result<()>
+where
+    S: GraphStore + Sync,
+{
+    let GraphMutationPlanOp::DeleteMatchingNodes {
+        label,
+        props,
+        predicates,
+        ..
+    } = operation
+    else {
+        return Ok(());
+    };
+    let operation_match = GraphNodeMatch {
+        label: label.clone(),
+        props: props.clone(),
+        predicates: predicates.clone(),
+    };
+    for (variable, binding) in bindings {
+        if values.contains_key(variable) || binding != &operation_match {
+            continue;
+        }
+        values.insert(
+            variable.clone(),
+            matching_nodes_on_store(store, binding, variable).await?,
+        );
+    }
+    Ok(())
+}
+
+async fn collect_deleted_row_edge_values_for_operation<S>(
+    store: &S,
+    operation: &GraphMutationPlanOp,
+    bindings: &HashMap<String, GraphRelationshipMatch>,
+    values: &mut HashMap<String, Vec<Edge>>,
+) -> Result<()>
+where
+    S: GraphStore + Sync,
+{
+    let GraphMutationPlanOp::DeleteMatchingEdges { relationship, .. } = operation else {
+        return Ok(());
+    };
+    for (variable, binding) in bindings {
+        if values.contains_key(variable) || binding != relationship {
+            continue;
+        }
+        values.insert(
+            variable.clone(),
+            matching_edges_on_store(store, binding).await?,
+        );
+    }
+    Ok(())
+}
+
 fn operation_node_match(operation: &GraphMutationPlanOp) -> Option<GraphNodeMatch> {
     match operation {
         GraphMutationPlanOp::PatchMatchingNodes {
@@ -3157,6 +9309,7 @@ fn operation_node_match(operation: &GraphMutationPlanOp) -> Option<GraphNodeMatc
 fn operation_relationship_match(operation: &GraphMutationPlanOp) -> Option<GraphRelationshipMatch> {
     match operation {
         GraphMutationPlanOp::PatchMatchingEdges { relationship, .. }
+        | GraphMutationPlanOp::UpdateMatchingEdgeProperty { relationship, .. }
         | GraphMutationPlanOp::RemoveMatchingEdgeProps { relationship, .. } => {
             Some(relationship.clone())
         }
@@ -3243,6 +9396,48 @@ fn merge_cypher_reports(report: &mut CypherMutationReport, next: CypherMutationR
     report.edge_patches += next.edge_patches;
     report.node_property_removes += next.node_property_removes;
     report.edge_property_removes += next.edge_property_removes;
+    report.node_inserts += next.node_inserts;
+    report.node_updates += next.node_updates;
+    report.edge_inserts += next.edge_inserts;
+    report.edge_updates += next.edge_updates;
+}
+
+fn row_edge_id_policy_generates(kind: GraphMutationPlanKind, policy: GraphRowEdgeIdPolicy) -> bool {
+    matches!(
+        (kind, policy),
+        (
+            GraphMutationPlanKind::Create,
+            GraphRowEdgeIdPolicy::GenerateForCreate
+                | GraphRowEdgeIdPolicy::GenerateForCreateAndMerge
+        ) | (
+            GraphMutationPlanKind::Merge,
+            GraphRowEdgeIdPolicy::GenerateForCreateAndMerge
+        )
+    )
+}
+
+enum CypherResolvedUpsertClassification {
+    Node { existed: bool },
+    Edge { existed: bool },
+}
+
+impl CypherResolvedUpsertClassification {
+    fn record(self, report: &mut CypherMutationReport) {
+        match self {
+            CypherResolvedUpsertClassification::Node { existed: true } => {
+                report.node_updates += 1;
+            }
+            CypherResolvedUpsertClassification::Node { existed: false } => {
+                report.node_inserts += 1;
+            }
+            CypherResolvedUpsertClassification::Edge { existed: true } => {
+                report.edge_updates += 1;
+            }
+            CypherResolvedUpsertClassification::Edge { existed: false } => {
+                report.edge_inserts += 1;
+            }
+        }
+    }
 }
 
 async fn matching_edges_on_store<S>(
@@ -3456,8 +9651,26 @@ where
     }
     let mut row_node_ids = HashMap::new();
     let mut row_edge_keys = HashMap::new();
+    let mut row_node_pre_delete_values = HashMap::new();
+    let mut row_edge_pre_delete_values = HashMap::new();
     let mut report = CypherMutationReport::default();
     for operation in &planned.plan.operations {
+        collect_deleted_row_node_values_for_operation(
+            store,
+            operation,
+            &planned.row_node_bindings,
+            &mut row_node_pre_delete_values,
+        )
+        .await
+        .map_err(cypher_execution_error)?;
+        collect_deleted_row_edge_values_for_operation(
+            store,
+            operation,
+            &planned.row_edge_match_bindings,
+            &mut row_edge_pre_delete_values,
+        )
+        .await
+        .map_err(cypher_execution_error)?;
         collect_row_node_ids_for_operation(
             store,
             operation,
@@ -3481,16 +9694,28 @@ where
             .map_err(cypher_execution_error)?;
         merge_cypher_reports(&mut report, operation_report);
     }
-    let row_node_values = row_node_return_values_on_store(store, row_node_ids)
+    let mut row_node_values = row_node_return_values_on_store(store, row_node_ids)
         .await
         .map_err(cypher_execution_error)?;
+    row_node_values.extend(row_node_pre_delete_values);
     let mut row_edge_values = row_edge_match_return_values_on_store(store, row_edge_keys)
         .await
         .map_err(cypher_execution_error)?;
+    row_edge_values.extend(row_edge_pre_delete_values);
     row_edge_values.extend(
         row_edge_return_values_on_store(store, &planned.row_edge_bindings)
             .await
             .map_err(cypher_execution_error)?,
+    );
+    row_node_values.extend(
+        row_edge_endpoint_node_values_on_store(
+            store,
+            &planned.node_bindings,
+            &planned.row_edge_bindings,
+            &row_edge_values,
+        )
+        .await
+        .map_err(cypher_execution_error)?,
     );
     let table = evaluate_cypher_return_table(
         store,
@@ -3498,6 +9723,7 @@ where
         &planned.edge_bindings,
         &row_node_values,
         &row_edge_values,
+        &planned.row_path_bindings,
         &planned.return_clause,
     )
     .await
@@ -3507,6 +9733,8 @@ where
         planned.generated_node_ids,
         &planned.plan,
         &options,
+        &planned.row_edge_bindings,
+        &row_edge_values,
     )?;
     Ok(CypherMutationTableResult { mutation, table })
 }
@@ -4096,6 +10324,52 @@ impl SailGraphStore {
         Ok(chunks)
     }
 
+    /// Persists a named Cypher constraint registry JSON blob in Sail.
+    ///
+    /// This is intentionally a Grust metadata helper, not native Sail
+    /// constraint/index DDL. Callers still apply the projected [`GraphSchema`]
+    /// through [`GraphStore::apply_schema`] when they want constraints to affect
+    /// writes.
+    pub async fn save_cypher_constraint_registry(
+        &self,
+        name: &str,
+        registry: &CypherConstraintRegistry,
+    ) -> Result<()> {
+        validate_cypher_constraint_registry_name(name)?;
+        let registry_json = registry.to_json()?;
+        self.run_command(&create_cypher_constraint_registry_table_sql(), vec![])
+            .await?;
+        self.run_command(
+            &upsert_cypher_constraint_registry_sql(name, &registry_json)?,
+            vec![],
+        )
+        .await
+    }
+
+    /// Loads a named Cypher constraint registry JSON blob from Sail.
+    ///
+    /// Missing names return `Ok(None)`. Existing rows are deserialized with
+    /// [`CypherConstraintRegistry::from_json`].
+    pub async fn load_cypher_constraint_registry(
+        &self,
+        name: &str,
+    ) -> Result<Option<CypherConstraintRegistry>> {
+        validate_cypher_constraint_registry_name(name)?;
+        self.run_command(&create_cypher_constraint_registry_table_sql(), vec![])
+            .await?;
+        let sql = select_cypher_constraint_registry_sql(name)?;
+        let chunks = self.query_arrow_ipc(&sql).await?;
+        let Some(registry_json) = parse_optional_single_string_from_arrow(
+            &chunks,
+            "registry_json",
+            "Cypher constraint registry",
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(CypherConstraintRegistry::from_json(&registry_json)?))
+    }
+
     /// Executes the strict v1 writable-Cypher subset through Grust mutations.
     pub async fn execute_cypher_mutation(&self, cypher: &str) -> Result<CypherMutationReport> {
         self.execute_cypher_mutation_with_options(cypher, CypherMutationOptions::default())
@@ -4146,6 +10420,8 @@ impl SailGraphStore {
             &mut report,
             node_identity_collector,
             identity_collector,
+            None,
+            None,
             None,
             None,
         )
@@ -4202,6 +10478,8 @@ impl SailGraphStore {
             collect_written_edge_identities.then_some(&mut written_edge_identities);
         let mut row_node_ids = HashMap::new();
         let mut row_edge_keys = HashMap::new();
+        let mut row_node_pre_delete_values = HashMap::new();
+        let mut row_edge_pre_delete_values = HashMap::new();
         self.apply_cypher_mutation_plan(
             &planned.plan,
             &mut report,
@@ -4209,19 +10487,36 @@ impl SailGraphStore {
             identity_collector,
             Some((&planned.row_node_bindings, &mut row_node_ids)),
             Some((&planned.row_edge_match_bindings, &mut row_edge_keys)),
+            Some((&planned.row_node_bindings, &mut row_node_pre_delete_values)),
+            Some((
+                &planned.row_edge_match_bindings,
+                &mut row_edge_pre_delete_values,
+            )),
         )
         .await
         .map_err(cypher_execution_error)?;
-        let row_node_values = row_node_return_values_on_store(self, row_node_ids)
+        let mut row_node_values = row_node_return_values_on_store(self, row_node_ids)
             .await
             .map_err(cypher_execution_error)?;
+        row_node_values.extend(row_node_pre_delete_values);
         let mut row_edge_values = row_edge_match_return_values_on_store(self, row_edge_keys)
             .await
             .map_err(cypher_execution_error)?;
+        row_edge_values.extend(row_edge_pre_delete_values);
         row_edge_values.extend(
             self.row_edge_return_values(&planned.row_edge_bindings)
                 .await
                 .map_err(cypher_execution_error)?,
+        );
+        row_node_values.extend(
+            row_edge_endpoint_node_values_on_store(
+                self,
+                &planned.node_bindings,
+                &planned.row_edge_bindings,
+                &row_edge_values,
+            )
+            .await
+            .map_err(cypher_execution_error)?,
         );
         let table = evaluate_cypher_return_table(
             self,
@@ -4229,6 +10524,7 @@ impl SailGraphStore {
             &planned.edge_bindings,
             &row_node_values,
             &row_edge_values,
+            &planned.row_path_bindings,
             &planned.return_clause,
         )
         .await
@@ -4258,8 +10554,24 @@ impl SailGraphStore {
             &HashMap<String, GraphRelationshipMatch>,
             &mut HashMap<String, Vec<String>>,
         )>,
+        mut row_node_pre_delete_capture: Option<(
+            &HashMap<String, GraphNodeMatch>,
+            &mut HashMap<String, Vec<Node>>,
+        )>,
+        mut row_edge_pre_delete_capture: Option<(
+            &HashMap<String, GraphRelationshipMatch>,
+            &mut HashMap<String, Vec<Edge>>,
+        )>,
     ) -> Result<()> {
         for operation in &plan.operations {
+            if let Some((bindings, values)) = row_node_pre_delete_capture.as_mut() {
+                collect_deleted_row_node_values_for_operation(self, operation, bindings, values)
+                    .await?;
+            }
+            if let Some((bindings, values)) = row_edge_pre_delete_capture.as_mut() {
+                collect_deleted_row_edge_values_for_operation(self, operation, bindings, values)
+                    .await?;
+            }
             if let Some((bindings, values)) = row_node_capture.as_mut() {
                 collect_row_node_ids_for_operation(self, operation, bindings, values).await?;
             }
@@ -4338,6 +10650,24 @@ impl SailGraphStore {
                     self.apply_patch_matching_edges(relationship, patch, report)
                         .await?;
                 }
+                GraphMutationPlanOp::UpdateMatchingEdgeProperty {
+                    relationship,
+                    target_key,
+                    source_key,
+                    op,
+                    operand,
+                    ..
+                } => {
+                    self.apply_update_matching_edge_property(
+                        relationship,
+                        target_key,
+                        source_key,
+                        *op,
+                        operand,
+                        report,
+                    )
+                    .await?;
+                }
                 GraphMutationPlanOp::RemoveMatchingEdgeProps {
                     relationship, keys, ..
                 } => {
@@ -4354,6 +10684,7 @@ impl SailGraphStore {
                     to,
                     label,
                     props,
+                    edge_id_policy,
                     ..
                 } => {
                     self.apply_upsert_edges_from_node_matches(
@@ -4362,15 +10693,32 @@ impl SailGraphStore {
                         to,
                         label,
                         props,
+                        *edge_id_policy,
                         report,
                         written_edge_identities.as_deref_mut(),
                     )
                     .await?;
                 }
                 _ => {
+                    let precise_upsert = match operation {
+                        GraphMutationPlanOp::UpsertNode { node, .. } => {
+                            Some(CypherResolvedUpsertClassification::Node {
+                                existed: self.get_node(&node.id).await?.is_some(),
+                            })
+                        }
+                        GraphMutationPlanOp::UpsertEdge { edge, .. } => {
+                            Some(CypherResolvedUpsertClassification::Edge {
+                                existed: self.strict_create_edge_exists(edge).await?,
+                            })
+                        }
+                        _ => None,
+                    };
                     let mutation = GraphMutation::from(operation.clone());
                     self.apply_mutations(std::slice::from_ref(&mutation))
                         .await?;
+                    if let Some(classification) = precise_upsert {
+                        classification.record(report);
+                    }
                     if let (Some(collector), GraphMutationPlanOp::UpsertNode { kind, node }) =
                         (written_node_identities.as_deref_mut(), operation)
                     {
@@ -4385,6 +10733,24 @@ impl SailGraphStore {
             }
         }
         Ok(())
+    }
+
+    async fn strict_create_edge_exists(&self, edge: &Edge) -> Result<bool> {
+        let mut existing = self
+            .get_edges(EdgeQuery {
+                from: Some(edge.from.clone()),
+                to: Some(edge.to.clone()),
+                label: Some(edge.label.clone()),
+            })
+            .await?;
+
+        if let Some(id) = &edge.id {
+            let sql = "SELECT id, src_id, src_label, dst_id, dst_label, edge_type, props \
+                       FROM grust_edges WHERE id = ? LIMIT 1";
+            existing.extend(self.run_edge_query(sql, vec![lit_str(id.as_str())]).await?);
+        }
+
+        Ok(strict_create_edge_conflicts(edge, &existing))
     }
 
     async fn apply_patch_matching_nodes(
@@ -4509,6 +10875,35 @@ impl SailGraphStore {
         self.validate_and_load_edges(&edges).await
     }
 
+    async fn apply_update_matching_edge_property(
+        &self,
+        relationship: &GraphRelationshipMatch,
+        target_key: &str,
+        source_key: &str,
+        op: GraphNumericOp,
+        operand: &Value,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let mut edges = self.matching_edges(relationship).await?;
+        report.matched_rows += edges.len();
+        report.edge_patches += edges.len();
+        report.changed_edges += edges.len();
+        if edges.is_empty() {
+            return Ok(());
+        }
+
+        for edge in &mut edges {
+            let current = edge.props.get(source_key).ok_or_else(|| {
+                GrustError::CypherExecution(format!(
+                    "numeric expression source property '{source_key}' is missing"
+                ))
+            })?;
+            let value = evaluate_numeric_update(current, op, operand)?;
+            edge.props.insert(target_key.to_string(), value);
+        }
+        self.validate_and_load_edges(&edges).await
+    }
+
     async fn apply_remove_matching_edge_props(
         &self,
         relationship: &GraphRelationshipMatch,
@@ -4579,7 +10974,14 @@ impl SailGraphStore {
         let mut values = HashMap::new();
         for (variable, binding) in bindings {
             let edges = self
-                .edges_from_node_matches(&binding.from, &binding.to, &binding.label, &binding.props)
+                .edges_from_node_matches(
+                    binding.kind,
+                    &binding.from,
+                    &binding.to,
+                    &binding.label,
+                    &binding.props,
+                    binding.edge_id_policy,
+                )
                 .await?;
             match binding.kind {
                 GraphMutationPlanKind::Create | GraphMutationPlanKind::Merge => {}
@@ -4596,10 +10998,13 @@ impl SailGraphStore {
         to: &GraphNodeMatch,
         label: &Label,
         props: &Props,
+        edge_id_policy: GraphRowEdgeIdPolicy,
         report: &mut CypherMutationReport,
         written_edge_identities: Option<&mut Vec<CypherWrittenEdgeIdentity>>,
     ) -> Result<()> {
-        let edges = self.edges_from_node_matches(from, to, label, props).await?;
+        let edges = self
+            .edges_from_node_matches(kind, from, to, label, props, edge_id_policy)
+            .await?;
         report.matched_rows += edges.len();
         report.edge_upserts += edges.len();
         report.changed_edges += edges.len();
@@ -4607,7 +11012,18 @@ impl SailGraphStore {
             GraphMutationPlanKind::Create => {}
             GraphMutationPlanKind::Merge => {}
         }
+        let mut existing = Vec::with_capacity(edges.len());
+        for edge in &edges {
+            existing.push(self.strict_create_edge_exists(edge).await?);
+        }
         self.validate_and_load_edges(&edges).await?;
+        for existed in existing {
+            if existed {
+                report.edge_updates += 1;
+            } else {
+                report.edge_inserts += 1;
+            }
+        }
         if let Some(collector) = written_edge_identities {
             collector.extend(
                 edges
@@ -4620,10 +11036,12 @@ impl SailGraphStore {
 
     async fn edges_from_node_matches(
         &self,
+        kind: GraphMutationPlanKind,
         from: &GraphNodeMatch,
         to: &GraphNodeMatch,
         label: &Label,
         props: &Props,
+        edge_id_policy: GraphRowEdgeIdPolicy,
     ) -> Result<Vec<Edge>> {
         let (from_sql, from_args) =
             matching_nodes_sql(from.label.as_ref(), &from.props, &from.predicates)?;
@@ -4631,14 +11049,28 @@ impl SailGraphStore {
         let from_nodes = self.run_query(&from_sql, from_args).await?;
         let to_nodes = self.run_query(&to_sql, to_args).await?;
         let mut edges = Vec::with_capacity(from_nodes.len().saturating_mul(to_nodes.len()));
+        let edge_id = edge_id_from_props(props)?;
+        if edge_id.is_some() && edges.capacity() > 1 {
+            return Err(cypher_unsupported_cardinality(
+                "row-producing MATCH ... CREATE/MERGE with an explicit relationship id must produce exactly one edge",
+            ));
+        }
         for from_node in &from_nodes {
             for to_node in &to_nodes {
-                edges.push(Edge::new(
+                let mut edge = Edge::new(
                     label.clone(),
                     from_node.id.clone(),
                     to_node.id.clone(),
                     props.clone(),
-                ));
+                );
+                if let Some(id) = edge_id.clone() {
+                    edge = edge.with_id(id);
+                } else if row_edge_id_policy_generates(kind, edge_id_policy) {
+                    let generated_id =
+                        generated_row_edge_id(&edge.from, &edge.label, &edge.to, &edge.props);
+                    edge = edge.with_id(generated_id);
+                }
+                edges.push(edge);
             }
         }
         Ok(edges)
@@ -4723,9 +11155,19 @@ impl SailGraphStore {
                     to,
                     label,
                     props,
+                    edge_id_policy,
                     ..
                 } => {
-                    let edges = self.edges_from_node_matches(from, to, label, props).await?;
+                    let edges = self
+                        .edges_from_node_matches(
+                            GraphMutationPlanKind::Create,
+                            from,
+                            to,
+                            label,
+                            props,
+                            *edge_id_policy,
+                        )
+                        .await?;
                     for edge in &edges {
                         if self.strict_create_edge_exists(edge).await? {
                             return Err(GrustError::Unsupported(format!(
@@ -4739,24 +11181,6 @@ impl SailGraphStore {
             }
         }
         Ok(())
-    }
-
-    async fn strict_create_edge_exists(&self, edge: &Edge) -> Result<bool> {
-        let mut existing = self
-            .get_edges(EdgeQuery {
-                from: Some(edge.from.clone()),
-                to: Some(edge.to.clone()),
-                label: Some(edge.label.clone()),
-            })
-            .await?;
-
-        if let Some(id) = &edge.id {
-            let sql = "SELECT id, src_id, src_label, dst_id, dst_label, edge_type, props \
-                       FROM grust_edges WHERE id = ? LIMIT 1";
-            existing.extend(self.run_edge_query(sql, vec![lit_str(id.as_str())]).await?);
-        }
-
-        Ok(strict_create_edge_conflicts(edge, &existing))
     }
 
     async fn delete_nodes_by_ids(&self, ids: &[NodeId]) -> Result<()> {
@@ -5262,8 +11686,10 @@ impl GraphStore for SailGraphStore {
         let sql = format!("SELECT id, label, props FROM grust_nodes WHERE id IN ({placeholders})");
         let args = ids.iter().map(|id| lit_str(id.as_str())).collect();
         let fetched = self.run_query(&sql, args).await?;
-        let by_id: HashMap<&str, &Node> =
-            fetched.iter().map(|node| (node.id.as_str(), node)).collect();
+        let by_id: HashMap<&str, &Node> = fetched
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect();
         Ok(ids
             .iter()
             .filter_map(|id| by_id.get(id.as_str()).map(|node| (*node).clone()))
@@ -5400,7 +11826,7 @@ impl CypherMutationExecutor for SailGraphStore {
         plan: &GraphMutationPlan,
     ) -> Result<GraphMutationReport> {
         let mut report = plan.report();
-        self.apply_cypher_mutation_plan(plan, &mut report, None, None, None, None)
+        self.apply_cypher_mutation_plan(plan, &mut report, None, None, None, None, None, None)
             .await
             .map_err(cypher_execution_error)?;
         Ok(report)
@@ -6412,6 +12838,46 @@ fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
 }
 
+fn validate_cypher_constraint_registry_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(GrustError::Schema(
+            "Cypher constraint registry name must not be empty".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn create_cypher_constraint_registry_table_sql() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {} \
+         (name STRING NOT NULL, registry_json STRING NOT NULL) USING delta",
+        CYPHER_CONSTRAINT_REGISTRY_TABLE
+    )
+}
+
+fn upsert_cypher_constraint_registry_sql(name: &str, registry_json: &str) -> Result<String> {
+    validate_cypher_constraint_registry_name(name)?;
+    Ok(format!(
+        "MERGE INTO {table} AS t \
+         USING (SELECT {name} AS name, {registry_json} AS registry_json) AS s \
+         ON t.name = s.name \
+         WHEN MATCHED THEN UPDATE SET t.registry_json = s.registry_json \
+         WHEN NOT MATCHED THEN INSERT (name, registry_json) VALUES (s.name, s.registry_json)",
+        table = CYPHER_CONSTRAINT_REGISTRY_TABLE,
+        name = sql_str(name),
+        registry_json = sql_str(registry_json),
+    ))
+}
+
+fn select_cypher_constraint_registry_sql(name: &str) -> Result<String> {
+    validate_cypher_constraint_registry_name(name)?;
+    Ok(format!(
+        "SELECT registry_json FROM {} WHERE name = {} LIMIT 1",
+        CYPHER_CONSTRAINT_REGISTRY_TABLE,
+        sql_str(name)
+    ))
+}
+
 fn validate_json_key(value: &str) -> Result<()> {
     let valid = !value.is_empty()
         && value
@@ -6465,6 +12931,41 @@ fn props_from_json(data: &str) -> Result<Props> {
 }
 
 // ── Arrow parsing ─────────────────────────────────────────────────────────────
+
+fn parse_optional_single_string_from_arrow(
+    chunks: &[Vec<u8>],
+    column_name: &str,
+    context: &str,
+) -> Result<Option<String>> {
+    let mut value = None;
+    for data in chunks {
+        let reader = StreamReader::try_new(Cursor::new(data), None)
+            .map_err(|e| GrustError::Backend(format!("Arrow IPC read failed: {e}")))?;
+        let schema = reader.schema();
+        let column_idx = schema
+            .index_of(column_name)
+            .map_err(|_| GrustError::Schema(format!("{context} missing '{column_name}' column")))?;
+        for batch in reader {
+            let batch =
+                batch.map_err(|e| GrustError::Backend(format!("Arrow batch error: {e}")))?;
+            let values = string_column(&batch, column_idx, column_name)?;
+            for row in 0..batch.num_rows() {
+                if values.is_null(row) {
+                    return Err(GrustError::Schema(format!(
+                        "{context} column '{column_name}' must not be null"
+                    )));
+                }
+                if value.is_some() {
+                    return Err(GrustError::Schema(format!(
+                        "{context} returned more than one row"
+                    )));
+                }
+                value = Some(values.value(row).to_string());
+            }
+        }
+    }
+    Ok(value)
+}
 
 fn parse_nodes_from_arrow(data: &[u8]) -> Result<Vec<Node>> {
     let reader = StreamReader::try_new(Cursor::new(data), None)

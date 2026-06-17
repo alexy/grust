@@ -134,6 +134,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
             },
             label: Label::new("MEMBER_OF"),
             props: Props::new(),
+            edge_id_policy: GraphRowEdgeIdPolicy::ExplicitOnly,
             cardinality: GraphMutationCardinality::BoundedMany,
         },
         GraphMutationPlanOp::PatchNode {
@@ -256,6 +257,7 @@ fn mutation_plan_reports_and_lowers_to_graph_mutations() {
                 },
                 label: Label::new("MEMBER_OF"),
                 props: Props::new(),
+                edge_id_policy: GraphRowEdgeIdPolicy::ExplicitOnly,
             },
             GraphMutation::PatchNode {
                 id: NodeId::new("person-1"),
@@ -741,6 +743,65 @@ fn graph_schema_carries_and_validates_required_constraints() {
         error
             .to_string()
             .contains("missing required constrained property 'role'")
+    );
+}
+
+#[derive(Clone, Debug)]
+struct MetadataOnlyStore;
+
+#[async_trait::async_trait]
+impl GraphStore for MetadataOnlyStore {
+    async fn put_node(&self, _node: &Node) -> Result<PutOutcome> {
+        Err(GrustError::Unsupported(
+            "metadata-only test store does not write nodes".to_string(),
+        ))
+    }
+
+    async fn put_edge(&self, _edge: &Edge) -> Result<PutOutcome> {
+        Err(GrustError::Unsupported(
+            "metadata-only test store does not write edges".to_string(),
+        ))
+    }
+
+    async fn get_node(&self, _id: &NodeId) -> Result<Option<Node>> {
+        Ok(None)
+    }
+
+    async fn get_edges(&self, _query: EdgeQuery) -> Result<Vec<Edge>> {
+        Ok(Vec::new())
+    }
+
+    async fn traverse(&self, _traversal: Traversal) -> Result<Vec<Node>> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn native_constraint_ddl_is_explicitly_unsupported_by_default() {
+    let store = MetadataOnlyStore;
+    let constraint = GraphConstraint::NodePropertyUnique {
+        label: Label::new("Person"),
+        key: "email".to_string(),
+    };
+
+    assert_eq!(
+        store.constraint_capability(&constraint),
+        GraphConstraintCapability::MetadataOnly
+    );
+    assert_eq!(
+        store.native_constraint_capability(&constraint),
+        GraphNativeConstraintCapability::Unsupported
+    );
+
+    let error =
+        futures_executor::block_on(store.apply_native_constraint(GraphNativeConstraintRequest {
+            constraint,
+            if_not_exists: true,
+        }))
+        .expect_err("metadata-only store should reject native DDL");
+
+    assert!(
+        matches!(error, GrustError::Unsupported(message) if message.contains("backend-native DDL"))
     );
 }
 

@@ -37,6 +37,9 @@ describe unreleased working-tree additions:
 - `MATCH (:Src {id: ...})-[e:TYPE]->(:Dst {id: ...}) DELETE e` lowers to edge
   delete when both endpoints are resolved and the target variable matches the
   relationship pattern.
+- `MATCH (a:Src {id: ...})-[e:TYPE]->(:Dst {id: ...}) DELETE e, a` lowers
+  ordered relationship and ID-resolved endpoint node deletes. Broad endpoint
+  node deletes from relationship rows remain deferred.
 - `MATCH (a:Src {id: ...}), (b:Dst {id: ...}) CREATE (a)-[:TYPE]->(b)` and
   `MATCH (a:Src {id: ...}), (b:Dst {id: ...}) MERGE (a)-[:TYPE]->(b)` lower
   to edge upserts when both endpoint variables are resolved by explicit-ID
@@ -44,12 +47,18 @@ describe unreleased working-tree additions:
 - `MATCH (a:Src {...}), (b:Dst {...}) CREATE (a)-[:TYPE {...}]->(b)` can
   create one edge per matched endpoint-node pair when both edge endpoints are
   bound variables. The row-producing form materializes matched rows at
-  execution time and rejects trailing node creation and explicit relationship
-  `id` properties. Relationship variables can be projected by the returning
-  APIs as one result row per produced edge.
+  execution time and rejects trailing node creation. Explicit relationship
+  `id` properties are accepted only when the matched endpoint row set produces
+  exactly one edge. Callers can opt into deterministic generated relationship
+  IDs for row-producing `CREATE` with
+  `CypherRelationshipIdPolicy::GenerateForRowCreate`. Relationship variables
+  can be projected by the returning APIs as one result row per produced edge.
 - `MATCH (a:Src {...}), (b:Dst {...}) MERGE (a)-[:TYPE {...}]->(b)` reuses
   the same row-producing endpoint matching and performs one idempotent edge
-  upsert per matched endpoint-node pair.
+  upsert per matched endpoint-node pair. Generated relationship IDs are
+  available only when callers explicitly select
+  `CypherRelationshipIdPolicy::GenerateForRowCreateAndMerge`, making the
+  generated ID part of the merge identity.
 - `MATCH (n:Label {...}) DELETE n` without an explicit `id` lowers to a
   cardinality-aware matched node delete in Sail. The planner marks the
   operation as bounded-many when a label or property predicate is present and
@@ -98,7 +107,7 @@ describe unreleased working-tree additions:
 - `MATCH ... SET` accepts comma-separated assignment lists and lowers each item
   as an ordered plan operation, preserving source order for repeated property
   targets while retaining the supported literal, map patch, remove-on-null, and
-  numeric node update forms.
+  numeric node/relationship update forms.
 - Writable mutation keywords are parsed case-insensitively at the top level,
   and `// ...` plus `/* ... */` comments are stripped outside string literals.
 
@@ -107,14 +116,15 @@ The v1 implementation should reject, with clear errors:
 - generated node IDs unless the caller explicitly selects the generated-ID
   policy;
 - node identity derived from non-`id` properties;
-- relationship arithmetic updates, path expressions, functions, `CASE`,
-  list/map projections, cross-variable expressions, or general computed
-  expression evaluation;
+- path expressions, functions outside the restricted writable `RETURN`
+  aggregate slice, `CASE` in mutation assignments, arbitrary list/map
+  expressions beyond the restricted projection forms, cross-variable
+  expressions, or general computed expression evaluation;
 - `WHERE` forms using `OR`, `NOT`, pattern predicates, list predicates,
   functions, arbitrary expressions, or cross-variable property comparisons;
 - trailing node creation in row-producing `MATCH ... CREATE`, relationship
-  IDs in row-producing `CREATE` / `MERGE`, and general path-style binding for
-  row-producing writes;
+  IDs on multi-row row-producing `CREATE` / `MERGE`, and general path-style
+  binding for row-producing writes;
 - mutation plans whose endpoint variables cannot be resolved to stable node
   IDs before execution.
 
@@ -311,9 +321,9 @@ Core tests should cover:
 - row-producing edge `MATCH ... CREATE` / `MATCH ... MERGE` plan/report
   conversion;
 - rejection of unsupported expression `SET`, trailing node creation in
-  row-producing `MATCH ... CREATE`, explicit relationship IDs in row-producing
-  relationship upserts, general path-style row binding, and unsupported
-  `WHERE` predicate forms.
+  row-producing `MATCH ... CREATE`, multi-row row-producing relationship
+  upserts with one literal relationship ID, general path-style row binding,
+  and unsupported `WHERE` predicate forms.
 
 Sail unit tests should cover:
 
@@ -659,9 +669,10 @@ appears.
 The following decisions should remain out of v1:
 
 - pluggable non-UUID ID providers;
-- relationship arithmetic updates, path expressions, functions, `CASE`,
-  list/map projections, cross-variable expressions, and general computed
-  values;
+- path expressions, functions outside the restricted writable `RETURN`
+  aggregate slice, `CASE` in mutation assignments, arbitrary list/map
+  expressions beyond the restricted projection forms, cross-variable
+  expressions, and general computed values;
 - cross-backend Cypher text mutation APIs;
 - stronger transaction guarantees than the target backend documents.
 
@@ -1061,8 +1072,9 @@ numeric node updates. Sail lowers same-variable node property arithmetic with
 integer or float literal/parameter operands into that plan operation for both
 resolved and broad node matches. Memory and Sail execute the operation with the
 same missing-property, null, type-mismatch, overflow, and division-by-zero
-errors. Relationship expressions, function calls, list/map projections, path
-expressions, `CASE`, and cross-variable expressions remain rejected.
+errors. Function calls, list/map projections, path expressions, `CASE`, and
+cross-variable expressions remain rejected. Relationship numeric updates are
+handled later in Batch BM.
 
 ### Batch S: Shared Parser Crate Decision
 
@@ -1227,11 +1239,13 @@ deterministic parser-to-executor tests.
 
 The row-producing `CREATE` form remains intentionally narrow: both endpoints
 must be bound node variables from the `MATCH` clause, trailing node creation is
-rejected, relationship variables are rejected, and explicit relationship `id`
-properties are rejected because one literal ID cannot safely identify multiple
-created rows. Existing ID-resolved `MATCH ... CREATE` still lowers to a single
-`UpsertEdge`, and strict-create mode preflights row-produced edges before
-writing. Row-producing `MATCH ... MERGE` is handled in Batch X.
+rejected, and general path-style binding is rejected. Relationship variables
+are supported only for restricted post-write `RETURN`. Explicit relationship
+`id` properties are accepted only when the matched endpoint row set produces
+exactly one edge; multi-row fan-out with one literal ID is rejected. Existing
+ID-resolved `MATCH ... CREATE` still lowers to a single `UpsertEdge`, and
+strict-create mode preflights row-produced edges before writing.
+Row-producing `MATCH ... MERGE` is handled in Batch X.
 
 ### Batch X: Row-producing `MATCH ... MERGE`
 
@@ -1265,10 +1279,12 @@ that already existed.
 
 The same strict boundaries apply as for row-producing `CREATE`: both endpoints
 must be bound node variables, trailing node creation is not part of this batch,
-relationship variables are rejected, and explicit relationship `id` properties
-are rejected because one literal ID cannot describe many row-produced edges.
-This is still a restricted write-planning feature, not a general Cypher read
-query surface.
+and general path-style binding is rejected. Relationship variables are
+supported only for restricted post-write `RETURN`. Explicit relationship `id`
+properties are accepted only when the matched endpoint row set produces
+exactly one edge; multi-row fan-out with one literal ID is rejected. This is
+still a restricted write-planning feature, not a general Cypher read query
+surface.
 
 ### Batch Y: Multiple Assignments Per `SET`
 
@@ -1297,7 +1313,7 @@ commas. Each assignment lowers through the existing single-assignment path into
 one ordered plan operation, so repeated property targets preserve source order.
 Planner tests cover ordered repeated targets, parameters, numeric updates,
 nested commas, remove-on-null compatibility, edge assignments, target
-mismatches, rejected relationship numeric updates, and trailing empty
+mismatches, rejected cross-variable numeric updates, and trailing empty
 assignments. A Memory execution test verifies ordered numeric updates against
 the final stored value.
 
@@ -1324,20 +1340,29 @@ Acceptance criteria:
   migration until the constraint model is useful across more than one backend.
 
 Implementation status: partially implemented in the working tree after Batch
-AA. `grust-core` now has backend-neutral `GraphConstraint` descriptors for
+AB. `grust-core` now has backend-neutral `GraphConstraint` descriptors for
 required and unique node or edge properties, stores them on `GraphSchema`, and
 exposes builder helpers such as `required_node_property` and
 `unique_node_property`. `GraphStore::constraint_capability` lets a backend
 report `MetadataOnly`, `ValidateBeforeWrite`, or `EnforcedByBackend`. The
 default remains metadata-only; Memory reports validate-before-write for
 required and unique property constraints, while Sail reports
-validate-before-write for required properties and metadata-only for uniqueness.
+validate-before-write for required properties and uniqueness.
 Required constraints validate through the existing `GraphSchema`
 write-validation path, and unique-property constraints validate inside
 `GraphSchema::validate_graph`. Memory applies that whole-graph validation to
 merged write snapshots before accepting a node, edge, graph batch, or schema.
-Cypher DDL parsing, native backend index/constraint creation, migrations, and
-Sail uniqueness enforcement remain deferred.
+Sail validates unique node and edge property constraints before `put_node`,
+`put_edge`, and `put_graph` using read-before-write existence checks, so callers
+must still treat Sail uniqueness as non-transactional unless the surrounding
+backend transaction layer provides isolation.
+
+Cypher DDL parsing is implemented through `sail_cypher_ddl` and
+`sail_cypher_constraints`. Supported `CREATE CONSTRAINT` forms lower to
+backend-neutral `GraphConstraint` values, and `DROP CONSTRAINT` parses as a
+named DDL statement. Applying those statements to a persistent schema registry,
+tracking constraint names in `GraphSchema`, native backend index/constraint
+creation, and automatic table migration remain deferred.
 
 ### Batch AA: Mutation Results With Optional Element Identities
 
@@ -1369,7 +1394,12 @@ writes and `CypherMutationResult::written_edge_identities` for resolved edge
 writes plus row-producing `MATCH ... CREATE` / `MATCH ... MERGE` edge writes.
 The payloads carry accepted write intent and structural identities, but they do
 not promise inserted-versus-updated status on upsert-compatible backends.
-Exact insert/update classification remains deferred.
+`GraphMutationReport` now also exposes optional precise classification counters:
+`node_inserts`, `node_updates`, `edge_inserts`, and `edge_updates`. Memory,
+Sail resolved node/edge upserts, and Sail/Memory row-producing edge execution
+populate these counters where the executor can distinguish create from replace.
+Backend paths that cannot observe the outcome keep the existing `*_upserts`
+totals and leave the precise classification counters at zero.
 
 ### Batch AB: General `RETURN` After Writes
 
@@ -1388,8 +1418,10 @@ Acceptance criteria:
 - Permit only projections over variables already bound by the write plan.
 - Preserve mutation report counts even when a result table is returned.
 - Keep Sail and Memory results aligned for supported projections.
-- Reject aggregation, path returns, `ORDER BY`, `LIMIT`, and arbitrary read
-  query features until the read-query engine owns those semantics.
+- Keep aggregation and result controls narrow until the write-result row model
+  owns each accepted operation explicitly.
+- Reject path returns and arbitrary read query features until the read-query
+  engine owns those semantics.
 
 Implementation status: partially implemented after Batch AA. `grust-sail` now
 defines `CypherResultTable` and `CypherMutationTableResult`, plus
@@ -1416,8 +1448,9 @@ Examples include
 `RETURN n AS node, e AS relationship`, plus
 `RETURN e.label, e.source` after a row-producing edge write. Aliases are
 allowed for supported
-projections, including aliases that happen to be named `limit` or `skip`;
-actual `ORDER BY`, `LIMIT`, and `SKIP` clauses remain rejected. Missing
+projections, including aliases that happen to be named `limit` or `skip`.
+`ORDER BY`, `SKIP`, and `LIMIT` are supported as stable post-materialization
+operations over the restricted result table. Missing
 properties project as `Value::Null`; `n.id` projects the resolved `NodeId`,
 `n.label` projects the persisted node label, `e.id` projects the explicit
 `EdgeId` when one exists, and `e.label` projects the relationship label. Whole
@@ -1426,11 +1459,2170 @@ existing Grust `Node` / `Edge` serde shape. Sail and Memory share the same
 parser and result-table evaluator for the concrete-variable, portable
 broad-node, portable broad-relationship, and portable row-producing
 relationship slices.
-Aggregation, path returns, unrestricted broad matched-row result tables,
-portable generic path-style row projections, `ORDER BY`, `LIMIT`, `SKIP`, and
-arbitrary read-query features remain deferred. The generic
+Restricted aggregates and result controls are implemented in later batches.
+Path returns, unrestricted broad matched-row result tables, portable generic
+path-style row projections, and arbitrary read-query features remain deferred.
+The generic
 Memory/Sail returning helper now also honors `CypherCreateMode::ErrorIfExists`
 for concrete node and edge `CREATE` writes through portable `GraphStore` reads;
 that helper shares the same intra-plan duplicate concrete identity preflight as
 Sail. Strict row-producing edge conflict checks remain backend-specific because
 they need backend-owned row materialization before writes execute.
+
+## Batch AC: Named Constraint Application
+
+Connect parsed Cypher DDL to schema state without promising native backend DDL:
+
+```cypher
+CREATE CONSTRAINT person_id IF NOT EXISTS
+FOR (n:Person) REQUIRE n.id IS UNIQUE;
+DROP CONSTRAINT person_id IF EXISTS;
+```
+
+Acceptance criteria:
+
+- Add a Grust-owned representation for named schema constraints, or an
+  equivalent schema registry layer, so `DROP CONSTRAINT name` can be applied
+  without guessing from label and property alone.
+- Keep `GraphConstraint` as the backend-neutral enforcement payload used by
+  stores.
+- Provide a small API that applies parsed `CypherDdlStatement` values to schema
+  metadata and returns a report with created, skipped, dropped, and missing
+  counts.
+- Respect `IF NOT EXISTS` and `IF EXISTS`; duplicate names without those
+  modifiers should be errors.
+- Do not emit backend-native Sail DDL or migration SQL in this batch. After the
+  schema metadata is updated, callers still apply the resulting `GraphSchema`
+  through `GraphStore::apply_schema`.
+- Add tests for create, create-if-not-exists, duplicate create rejection,
+  drop, drop-if-exists, and preservation of constraint bodies.
+
+Implementation status: implemented in the working tree after Batch AB.
+`grust-sail` now provides `CypherConstraintRegistry`,
+`NamedGraphConstraint`, and `CypherDdlApplicationReport`. The registry accepts
+parsed `CypherDdlStatement` values or raw DDL text through `apply_cypher`,
+preserves named and anonymous constraints separately, applies
+`IF NOT EXISTS` / `IF EXISTS`, reports created/skipped/dropped/missing counts,
+applies multi-statement batches atomically at the registry layer, and projects
+the current constraint bodies as `GraphConstraint` values for `GraphSchema`.
+Native Sail DDL, indexes, migrations, and backend-persistent constraint
+registries remain deferred.
+
+## Batch AD: Constraint Registry To Schema Projection
+
+Make the DDL registry useful with existing typed schemas:
+
+```rust
+let mut registry = CypherConstraintRegistry::from_schema(&schema);
+registry.apply_cypher("CREATE CONSTRAINT person_email ...")?;
+let schema = registry.apply_to_schema(&schema);
+store.apply_schema(&schema).await?;
+```
+
+Acceptance criteria:
+
+- Preserve existing node and edge type metadata when applying parsed constraint
+  DDL to a schema.
+- Allow callers to seed the registry from an existing `GraphSchema` without
+  inventing names for pre-existing unnamed constraints.
+- Keep the resulting `GraphSchema` constraints as plain `GraphConstraint`
+  values, so all current backend validation paths continue to work.
+- Add tests that prove node types, edge types, existing unnamed constraints,
+  and newly named constraints survive projection correctly.
+- Keep persistence of the named registry and backend-native DDL execution
+  deferred.
+
+Implementation status: implemented in the working tree after Batch AC.
+`CypherConstraintRegistry::from_schema` seeds anonymous constraints from an
+existing `GraphSchema`, and `CypherConstraintRegistry::apply_to_schema` returns
+an updated schema whose node and edge definitions are preserved while its
+constraint list is replaced by the registry projection.
+
+## Batch AE: Preserve Precise Counters In Returning Execution
+
+Keep mutation reports consistent between count-only execution and
+`RETURN`-producing execution:
+
+```cypher
+CREATE (:Person {id: 'ada'})
+RETURN n.id;
+```
+
+Acceptance criteria:
+
+- Ensure report aggregation preserves every field on `GraphMutationReport`,
+  including optional precise insert/update counters.
+- Cover the returning execution path that executes one planned operation at a
+  time and merges per-operation reports.
+- Do not change the documented semantics for upsert-only Sail paths: they still
+  report through `node_upserts` / `edge_upserts` when the backend cannot
+  distinguish insert from update.
+
+Implementation status: implemented in the working tree after Batch AD.
+`merge_cypher_reports` now carries `node_inserts`, `node_updates`,
+`edge_inserts`, and `edge_updates`, and returning-memory facade tests assert
+those counters for node and edge creates.
+
+## Batch AF: Apply Cypher DDL Through `GraphStore::apply_schema`
+
+Expose one practical schema-management path without adding backend-native DDL:
+
+```rust
+let applied = apply_cypher_ddl_to_schema(&store, &schema, &mut registry, ddl).await?;
+let schema = applied.schema;
+```
+
+Acceptance criteria:
+
+- Parse Cypher constraint DDL, update a `CypherConstraintRegistry`, project the
+  registry onto an existing `GraphSchema`, and call `GraphStore::apply_schema`
+  in one helper.
+- Return both the updated schema and the DDL application report.
+- Keep native backend index creation, migrations, and persistent registry
+  storage deferred.
+- Add a store-backed test proving DDL-derived constraints affect subsequent
+  writes through the backend's existing schema application path.
+
+Implementation status: implemented in the working tree after Batch AE.
+`apply_cypher_ddl_to_schema` returns `CypherSchemaApplication { schema, report }`
+after applying parsed DDL to a caller-provided registry and backend. A
+Memory-backed test proves a DDL-derived unique-property constraint is enforced
+after the helper calls `apply_schema`.
+
+## Batch AG: Schema DDL Helper Failure Semantics
+
+Keep schema metadata aligned when backend schema application fails:
+
+```rust
+let result = apply_cypher_ddl_to_schema(&store, &schema, &mut registry, ddl).await;
+```
+
+Acceptance criteria:
+
+- Stage registry changes before applying the projected schema to a backend.
+- Commit the caller's registry only after `GraphStore::apply_schema` succeeds.
+- Leave the registry unchanged if parsing, registry application, or backend
+  schema validation fails.
+- Add a store-backed regression test where existing data violates a new DDL
+  constraint and the registry remains unchanged after the helper returns an
+  error.
+
+Implementation status: implemented in the working tree after Batch AF.
+`apply_cypher_ddl_to_schema` now applies Cypher DDL to a cloned registry,
+projects that clone onto the schema, calls `GraphStore::apply_schema`, and only
+then commits the clone back into the caller's registry. A Memory-backed test
+uses existing duplicate property values to force schema validation failure and
+asserts the registry was not mutated.
+
+## Batch AH: Narrow `RETURN count(*)`
+
+Support the first aggregate only over the restricted write-result table:
+
+```cypher
+MATCH (n:Person {status: 'active'}), (t:Team {id: 'eng'})
+CREATE (n)-[:MEMBER_OF]->(t)
+RETURN count(*) AS relationships;
+```
+
+Acceptance criteria:
+
+- Accept `COUNT(*)` case-insensitively, with an optional alias.
+- Count the rows already materialized by the supported returning execution
+  path: one row for concrete writes, or the matched row count for supported
+  row-producing writes.
+- Preserve the existing restriction that `RETURN` can only observe variables
+  produced by the write path; do not add arbitrary read-query aggregation.
+- Reject mixed aggregate and non-aggregate projections until a real grouping
+  model exists.
+- Keep other aggregates such as `sum`, `avg`, `collect`, and path aggregation
+  deferred until later explicit batches.
+
+Implementation status: implemented in the working tree after Batch AG.
+`COUNT(*)` is represented as a restricted return projection and evaluated from
+the materialized return row count before existing `ORDER BY`, `SKIP`, and
+`LIMIT` controls are applied. Memory-facade tests cover concrete writes,
+row-producing edge writes, aliases, and mixed aggregate/scalar rejection.
+
+## Batch AI: Narrow `RETURN count(variable)`
+
+Extend restricted count aggregation to variables already bound by the write
+plan:
+
+```cypher
+MATCH (n:Person {status: 'active'}), (t:Team {id: 'eng'})
+CREATE (n)-[e:MEMBER_OF]->(t)
+RETURN count(e) AS relationships;
+```
+
+Acceptance criteria:
+
+- Accept `COUNT(variable)` case-insensitively, with normal identifier parsing
+  for the variable and optional aliases.
+- Require the counted variable to be bound by the write plan.
+- Count the same restricted materialized result rows used by `COUNT(*)`.
+- Preserve rejection of mixed aggregate/scalar projections and non-count
+  aggregates until later explicit batches.
+
+Implementation status: implemented in the working tree after Batch AH.
+`COUNT(variable)` validates the variable against concrete, broad-row, and
+row-producing bindings before evaluating to the materialized row count.
+Memory-facade tests cover concrete node counts, row-producing relationship
+counts, spaced `COUNT ( * )`, and unbound counted variables.
+
+## Batch AJ: Narrow `RETURN count(variable.property)`
+
+Extend restricted count aggregation to projected properties:
+
+```cypher
+MATCH (n:Person {status: 'active'}), (t:Team {id: 'eng'})
+CREATE (n)-[e:MEMBER_OF {source: 'cypher'}]->(t)
+RETURN count(e.source) AS sourced;
+```
+
+Acceptance criteria:
+
+- Accept `COUNT(variable.property)` for variables already bound by the write
+  plan.
+- Count only non-null projected values.
+- Preserve current special projections such as `n.id`, `n.label`, `e.id`, and
+  `e.label`.
+- Keep grouping and mixed aggregate/scalar projection deferred. Non-count
+  aggregates are handled later in Batch AT.
+
+Implementation status: implemented in the working tree after Batch AI.
+`COUNT(variable.property)` reuses the restricted return-projection rules and
+counts non-null values from concrete, broad-row, and row-producing bindings.
+Memory-facade tests cover concrete node properties, missing properties,
+row-producing relationship properties, and missing explicit relationship IDs.
+
+## Batch AK: Writable `RETURN LIMIT ALL`
+
+Align writable `RETURN` controls with the read-query spelling already accepted
+by Sail:
+
+```cypher
+MATCH (n:Person) SET n.seen = true
+RETURN n.id ORDER BY n.id LIMIT ALL;
+```
+
+Acceptance criteria:
+
+- Accept `LIMIT ALL` case-insensitively in writable `RETURN` control clauses.
+- Treat `LIMIT ALL` as no limit after `ORDER BY` and `SKIP` have been applied.
+- Preserve existing numeric `LIMIT` behavior and syntax errors for unsupported
+  limit values.
+- Cover both ordinary materialized row tables and aggregate count tables.
+
+Implementation status: implemented in the working tree after Batch AJ.
+Writable `RETURN` control parsing now maps `LIMIT ALL` to no limit. Tests cover
+ordinary row projections and restricted count aggregation.
+
+## Batch AL: Serializable Constraint Registry Metadata
+
+Make the named constraint registry practical for callers that need to persist
+metadata outside backend-native schema storage:
+
+```rust
+let json = registry.to_json()?;
+let registry = CypherConstraintRegistry::from_json(&json)?;
+```
+
+Acceptance criteria:
+
+- Derive serde serialization for the Cypher DDL helper types that callers may
+  need to store or return from schema-management APIs.
+- Include `CypherConstraintRegistry`, `NamedGraphConstraint`,
+  `CypherDdlApplicationReport`, and `CypherSchemaApplication`.
+- Keep serialization as a caller-owned persistence hook; do not introduce a
+  backend-native registry table, migration, or storage format in this batch.
+- Add convenience JSON import/export helpers that map serde failures into Grust
+  errors for callers that do not want to depend directly on the registry's
+  serialized shape.
+- Add a regression test proving named and anonymous constraints round-trip
+  through JSON and continue to project to ordered `GraphConstraint` values.
+
+Implementation status: implemented in the working tree after Batch AK.
+The Cypher constraint DDL helper types now derive `Serialize` and
+`Deserialize`, and `grust-sail` depends on workspace `serde` directly.
+`CypherConstraintRegistry::to_json` and `from_json` provide convenience
+import/export helpers for caller-owned persistence with Grust error mapping.
+`cypher_constraint_registry_serializes_for_external_persistence` verifies a
+named Cypher constraint plus an anonymous schema-seeded constraint can be
+serialized, deserialized, compared for equality, and projected back to
+`GraphConstraint` values.
+
+## Batch AM: Schema Manager For Cypher DDL
+
+Make the caller-owned DDL path easier to use without adding backend-native
+registry storage:
+
+```rust
+let mut manager = CypherSchemaManager::new(schema);
+let applied = manager.apply_cypher_ddl(&store, ddl).await?;
+let registry_json = manager.registry_json()?;
+```
+
+Acceptance criteria:
+
+- Add a schema-management helper that owns the current `GraphSchema` plus the
+  named `CypherConstraintRegistry`.
+- Apply Cypher constraint DDL through the existing
+  `GraphStore::apply_schema` path and update the manager state only after the
+  backend accepts the projected schema.
+- Provide import/export helpers for the registry JSON so callers can persist
+  named constraint metadata externally.
+- Keep backend-native registry tables, native index creation, and automatic
+  migrations deferred.
+- Add Memory-backed tests proving successful DDL updates the manager and failed
+  backend schema application leaves manager state unchanged.
+
+Implementation status: implemented in the working tree after Batch AL.
+`CypherSchemaManager` owns `schema` and `registry`, can be constructed from a
+schema, from an explicit registry, or from registry JSON, and applies Cypher
+DDL through `apply_cypher_ddl_to_schema`. The manager commits its schema state
+only after the generic helper succeeds; the existing helper stages registry
+changes until `GraphStore::apply_schema` succeeds. Tests cover successful
+constraint application, registry JSON export/import, and schema-validation
+failure preserving the previous manager state.
+
+## Batch AN: Narrow `RETURN count(DISTINCT ...)`
+
+Extend restricted count aggregation without adding grouping:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN count(DISTINCT n.department) AS departments;
+```
+
+Acceptance criteria:
+
+- Accept `COUNT(DISTINCT variable)` and
+  `COUNT(DISTINCT variable.property)` for variables already bound by the write
+  plan.
+- Deduplicate only over the restricted materialized write-result table.
+- Preserve the existing `COUNT(property)` behavior that missing or null
+  property values are not counted.
+- Reject `COUNT(DISTINCT *)` until a broader aggregate model exists.
+- Keep grouping and mixed aggregate/scalar projection deferred. Non-count
+  aggregates are handled later in Batch AT.
+
+Implementation status: implemented in the working tree after Batch AM.
+The return parser now recognizes `DISTINCT` inside supported `COUNT`
+projections. Evaluation deduplicates concrete and row-producing node or
+relationship identities and property values using stable projected keys over
+the already materialized restricted result table. Tests cover duplicate row
+node property values, row-producing relationship labels and properties, null
+or missing property exclusion, and rejection of `COUNT(DISTINCT *)`.
+
+## Batch AO: Row-Level `RETURN DISTINCT`
+
+Deduplicate the restricted writable `RETURN` result table without adding new
+read-query semantics:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN DISTINCT n.department AS department ORDER BY department;
+```
+
+Acceptance criteria:
+
+- Accept `RETURN DISTINCT` for the same element, property, and restricted
+  aggregate projections already supported by writable `RETURN`.
+- Deduplicate complete projected rows after materialization and before
+  `ORDER BY`, `SKIP`, and `LIMIT`.
+- Keep grouping, path returns, arbitrary read-query features, and unsupported
+  projection expressions deferred.
+- Reject `RETURN DISTINCT` with no projection as a syntax error.
+
+Implementation status: implemented in the working tree after Batch AN.
+`CypherReturnClause` now carries a row-level `distinct` flag. The evaluator
+deduplicates projected rows using stable JSON keys before applying existing
+control clauses. Tests cover duplicate broad matched rows, aggregate result
+rows, ordering after deduplication, and syntax rejection for empty
+`RETURN DISTINCT`.
+
+## Batch AP: `ORDER BY` Returned Projection Expressions
+
+Allow writable `RETURN` ordering by the projected expression, not only the
+output alias:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN n.department AS department ORDER BY n.department DESC;
+```
+
+Acceptance criteria:
+
+- Accept `ORDER BY` terms that match either a returned column name/alias or
+  the original returned projection expression.
+- Keep ordering by non-returned expressions rejected.
+- Preserve existing ordering, skip, limit, and distinct evaluation order.
+- Cover property projections and restricted aggregate projections.
+
+Implementation status: implemented in the working tree after Batch AO.
+`CypherReturnProjection` now stores the original projection expression in
+addition to the output column name. `ORDER BY` resolution accepts either key
+for the same projected column while continuing to reject expressions that were
+not returned. Tests cover property-projection expression ordering and
+restricted `count(*)` expression ordering.
+
+## Batch AQ: Writable `RETURN OFFSET`
+
+Accept `OFFSET` as the Cypher spelling equivalent to `SKIP` for restricted
+writable `RETURN` tables:
+
+```cypher
+MATCH (n:Person) SET n.seen = true
+RETURN n.id ORDER BY n.id OFFSET 1 LIMIT 10;
+```
+
+Acceptance criteria:
+
+- Accept `OFFSET n` wherever the existing writable `RETURN` control parser
+  accepts `SKIP n`.
+- Apply offset after `ORDER BY` and before `LIMIT`, using the same evaluator
+  path as `SKIP`.
+- Cover ordinary materialized row tables and restricted aggregate result
+  tables.
+- Preserve rejection of unsupported control orderings and non-integer counts.
+
+Implementation status: implemented in the working tree after Batch AP.
+The return-control parser now detects `OFFSET`, maps it to the existing skip
+slot, and preserves the current `ORDER BY`, row-offset, then `LIMIT` control
+order. Tests cover row tables and aggregate result tables, including
+`OFFSET 0 LIMIT ALL`.
+
+## Batch AR: Single-Row Row-Producing Relationship IDs
+
+Allow the restricted row-producing edge write path to preserve an explicit
+relationship `id` when it is safe:
+
+```cypher
+MATCH (a:Person {id: 'ada'}), (b:Team {id: 'eng'})
+CREATE (a)-[e:MEMBER_OF {id: 'membership-1'}]->(b)
+RETURN e.id;
+```
+
+Acceptance criteria:
+
+- Accept a string `id` property on row-producing `MATCH ... CREATE/MERGE`
+  relationship writes when the matched endpoint row set produces exactly one
+  edge.
+- Copy that `id` property into the explicit `EdgeId`, matching the resolved
+  edge write behavior.
+- Reject non-string relationship `id` properties.
+- Reject multi-row row-producing writes with one literal relationship `id`,
+  because fanning out one id across many edges would create duplicate explicit
+  edge identities.
+- Cover the generic Memory facade path used by portable returning execution
+  and the Sail materialization helper.
+
+Implementation status: implemented in the working tree after Batch AQ.
+The planner no longer rejects all row-producing relationship `id` properties.
+Both Sail's row-producing edge materialization helper and the generic
+`grust-memory` executor validate the optional `id`, copy it into `EdgeId` for
+single-edge row-producing writes, and reject multi-row fan-out with a literal
+id. Tests cover `RETURN e.id` for the accepted single-row case and the
+multi-row rejection path.
+
+## Batch AS: Generic Row-Producing Edge Identity Collection
+
+Make `collect_written_edge_identities` work for the generic returning helper's
+row-producing edge writes:
+
+```rust
+let result = execute_cypher_mutation_returning_with_options_on_store(
+    &store,
+    cypher,
+    CypherMutationOptions {
+        collect_written_edge_identities: true,
+        ..Default::default()
+    },
+).await?;
+```
+
+Acceptance criteria:
+
+- Keep resolved edge identity collection unchanged.
+- For row-producing `MATCH ... CREATE/MERGE` relationship variables, collect
+  identities from the same materialized edge rows used by restricted `RETURN`.
+- Preserve explicit `EdgeId` values where present and structural identities
+  where no explicit id exists.
+- Do not attempt strict `CREATE` preflight for generic row-producing edge
+  writes in this batch.
+
+Implementation status: implemented in the working tree after Batch AR.
+`cypher_mutation_result_from_plan` now accepts the row-producing edge bindings
+and materialized edge values collected by generic returning execution. When
+`collect_written_edge_identities` is enabled, it appends those row-produced
+edge identities to the mutation result instead of rejecting
+`UpsertEdgesFromNodeMatches`. Tests cover single-row edges with explicit ids
+and structural identities through the Memory facade.
+
+## Batch AT: Restricted Non-Count `RETURN` Aggregates
+
+Extend writable `RETURN` aggregation beyond count without adding grouping or
+arbitrary read-query aggregation:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN sum(n.score) AS total, avg(n.score) AS average;
+```
+
+Acceptance criteria:
+
+- Accept `SUM(variable.property)`, `AVG(variable.property)`,
+  `MIN(variable.property)`, and `MAX(variable.property)` over variables already
+  bound by the write plan.
+- Evaluate aggregates only over the same restricted materialized write-result
+  table used by `COUNT`.
+- Ignore missing and `null` values, returning `Value::Null` when no values
+  remain.
+- Support `DISTINCT` value deduplication inside those aggregate calls.
+- Require numeric values for `SUM` and `AVG`; keep non-numeric values rejected
+  with a structured unsupported-cardinality error.
+- Keep grouping, mixed aggregate/scalar projection, collection, path
+  aggregation, and arbitrary read-query aggregation deferred.
+
+Implementation status: implemented in the working tree after Batch AS. The
+return parser now recognizes `SUM`, `AVG`, `MIN`, and `MAX` as restricted
+aggregate projections. Evaluation materializes non-null projected values from
+concrete, broad-row, and row-producing bindings, applies optional `DISTINCT`,
+and returns a single aggregate result row. `SUM` preserves integer totals when
+all inputs are integers and returns floats when any input is a float; `AVG`
+returns a float; `MIN` and `MAX` reuse the writable `RETURN ORDER BY` value
+ordering. Memory-facade tests cover broad node rows, row-producing edge rows,
+distinct numeric values, missing values, unsupported string `SUM`, star
+aggregates other than `COUNT`, element aggregates, and mixed aggregate/scalar
+rejection.
+
+## Batch AU: Restricted `RETURN collect(...)`
+
+Add collection as a restricted aggregate over the same write-result table used
+by the other supported writable `RETURN` aggregates:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN collect(n.team) AS teams, collect(DISTINCT n.team) AS distinct_teams;
+```
+
+Acceptance criteria:
+
+- Accept `collect(variable)` and `collect(variable.property)` over variables
+  already bound by the write plan.
+- Evaluate collection only over the restricted materialized write-result table.
+- Return a `Value::Json` array, preserving the projected `Value::to_json`
+  shape for properties and the existing serialized element shape for whole
+  nodes or relationships.
+- Ignore missing and `null` property values, producing an empty array when no
+  values remain.
+- Support `DISTINCT` value deduplication inside `collect`.
+- Keep grouping, mixed aggregate/scalar projection, path aggregation, and
+  arbitrary read-query aggregation deferred. `collect(*)` stays deferred for
+  this batch and is handled later in Batch AZ.
+
+Implementation status: implemented in the working tree after Batch AT. The
+return parser now recognizes `COLLECT` as a restricted aggregate projection.
+Evaluation materializes non-null property values, or whole bound node and
+relationship elements, from concrete, broad-row, and row-producing bindings.
+The aggregate returns a `Value::Json` array and applies optional `DISTINCT`
+using the same stable JSON-key deduplication used by the other restricted
+aggregate paths. Memory-facade tests cover broad node property collection,
+row-producing relationship property collection, whole bound node collection,
+distinct collection, missing property collection, and the then-current
+rejection of `collect(*)`; Batch AZ later adds restricted `collect(*)` support.
+
+## Batch AV: Restricted Grouped Writable `RETURN`
+
+Allow scalar projections and aggregate projections to appear together by
+grouping over the same restricted write-result table:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN n.team AS team, count(*) AS people, sum(n.score) AS total;
+```
+
+Acceptance criteria:
+
+- Treat every non-aggregate projection in a mixed scalar/aggregate `RETURN` as
+  a grouping key.
+- Evaluate `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and `collect` per group using
+  the same restricted aggregate semantics already implemented for aggregate
+  only `RETURN`.
+- Preserve existing result controls: `RETURN DISTINCT`, `ORDER BY`,
+  `SKIP`/`OFFSET`, and `LIMIT` apply after grouped rows are materialized.
+- Keep grouping limited to projections over variables already bound by the
+  write plan; do not add arbitrary read-query grouping or expressions.
+- Keep path aggregation and unrestricted broad row materialization deferred.
+  `collect(*)` stays deferred for this batch and is handled later in Batch AZ.
+
+Implementation status: implemented in the working tree after Batch AU. The
+return evaluator now detects mixed scalar/aggregate projections and groups
+materialized rows by stable JSON keys derived from the scalar projection
+values. Each group records aggregate state for supported aggregate projections,
+including `DISTINCT` handling. The final grouped table preserves the original
+projection order and then reuses the existing `RETURN DISTINCT`,
+`ORDER BY`, offset, and limit controls. Memory-facade tests cover broad node
+row grouping, aggregate ordering, collected grouped IDs, and concrete
+single-row grouping.
+
+## Batch AW: Restricted Broad `DELETE ... RETURN` Rows
+
+Return rows for broad deletes without changing delete semantics:
+
+```cypher
+MATCH (n:Person {status: 'inactive'})
+DELETE n
+RETURN n.id, n.name;
+```
+
+Acceptance criteria:
+
+- Capture matched node or relationship rows before broad `MATCH ... DELETE`
+  execution.
+- Project only variables already bound by the delete pattern and only through
+  the same restricted writable `RETURN` evaluator used by `SET`/`REMOVE`
+  rows.
+- Preserve post-write semantics for `SET` and `REMOVE`; only delete returns
+  use pre-delete captured values because the elements no longer exist after
+  execution.
+- Support the generic Memory/Sail returning helper and Sail's native returning
+  execution path.
+- Keep arbitrary read-query row materialization, path returns, and path-style
+  projections deferred.
+
+Implementation status: implemented in the working tree after Batch AV. The
+planner now records broad node and relationship delete variables as restricted
+row bindings. Returning execution captures matching nodes or relationships
+before executing `DeleteMatchingNodes` or `DeleteMatchingEdges`, then merges
+those pre-delete values into the same materialized result table used by the
+existing restricted `RETURN` evaluator. Memory-facade tests cover broad node
+delete returns, broad relationship delete returns, mutation reports, and proof
+that the returned elements were actually deleted. Ignored live Sail regression
+tests cover the same pre-delete projection contract through
+`SailGraphStore::execute_cypher_mutation_returning`.
+
+## Batch AX: Generated Row-producing `CREATE` Relationship IDs
+
+Allow callers to opt into per-row relationship IDs for row-producing
+`MATCH ... CREATE` without changing the default structural-edge behavior:
+
+```cypher
+MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
+CREATE (a)-[e:MEMBER_OF {source: 'cypher'}]->(b)
+RETURN e.id;
+```
+
+Acceptance criteria:
+
+- Add a public option for row-producing relationship ID generation, defaulting
+  to the current explicit-only behavior.
+- Apply generation to row-producing `CREATE` edges without an explicit
+  relationship `id` under `GenerateForRowCreate`.
+- Apply generation to row-producing `CREATE` and `MERGE` edges without an
+  explicit relationship `id` under the more explicit
+  `GenerateForRowCreateAndMerge` policy, documenting that generated IDs become
+  part of the merge identity.
+- Preserve the existing rejection for multi-row writes with one literal
+  relationship `id`.
+- Make generated IDs visible through `RETURN e.id`,
+  `collect_written_edge_identities`, and persisted backend reads.
+- Keep generation deterministic from the materialized row identity and edge
+  properties so returning execution can reconstruct row values without a
+  separate write-result side channel.
+
+Implementation status: implemented in the working tree after Batch AW.
+`CypherMutationOptions::relationship_id_policy` accepts
+`CypherRelationshipIdPolicy::GenerateForRowCreate`, which lowers row-producing
+`CREATE` plans with `GraphRowEdgeIdPolicy::GenerateForCreate`, and
+`GenerateForRowCreateAndMerge`, which lowers row-producing `CREATE/MERGE`
+plans with `GraphRowEdgeIdPolicy::GenerateForCreateAndMerge`. Sail and Memory
+use the backend-neutral `generated_row_edge_id` helper to derive stable edge
+IDs from source node ID, relationship label, destination node ID, and edge
+properties. Memory-facade tests cover `RETURN e.id`, persisted edge IDs, and
+collected written edge identities for `CREATE` and `MERGE`; direct Memory
+tests cover repeated generated-ID `MERGE` insert/update classification.
+Ignored live Sail coverage exercises the native returning path when a Sail
+server is available.
+
+## Batch AY: Sail Constraint Registry Persistence Helper
+
+Make named Cypher constraint metadata durable for Sail callers without turning
+Cypher DDL into native backend constraint or index DDL.
+
+Acceptance criteria:
+
+- Add Sail-owned save/load helpers for `CypherConstraintRegistry` JSON.
+- Store registry blobs by caller-provided name in a Grust metadata table.
+- Use the existing registry JSON format so callers can still import/export the
+  same metadata outside Sail.
+- Keep enforcement through `GraphStore::apply_schema`; loading a registry must
+  not by itself apply constraints to the backend.
+- Keep native index creation, native constraint DDL, table migration, and
+  backend transaction semantics deferred.
+- Add unit coverage for generated SQL, escaping, invalid names, and Arrow result
+  parsing, plus ignored live Sail coverage for save/load/overwrite.
+
+Implementation status: implemented in the working tree after Batch AX.
+`SailGraphStore::save_cypher_constraint_registry` serializes a named
+`CypherConstraintRegistry` and upserts it into
+`grust_cypher_constraint_registry`. `SailGraphStore::load_cypher_constraint_registry`
+returns `Ok(None)` for a missing name and deserializes the stored JSON through
+`CypherConstraintRegistry::from_json` for existing rows. The helper uses
+escaped SQL literals because Spark Connect command arguments are still not
+available on the command path. This intentionally does not create native Sail
+constraints or indexes; callers still project the registry onto `GraphSchema`
+and call `GraphStore::apply_schema` when they want write validation.
+
+## Batch AZ: Restricted `collect(*)` Rows
+
+Close the remaining small aggregate gap over the existing restricted
+write-result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN collect(*) AS rows;
+```
+
+Acceptance criteria:
+
+- Accept `collect(*)` only as a restricted writable `RETURN` aggregate.
+- Materialize one JSON object per existing write-result row, keyed by bound
+  variable name.
+- Include concrete bound node/relationship variables and portable row-producing
+  node/relationship variables already available to the return evaluator.
+- Preserve the current rejection of `COUNT(DISTINCT *)`, non-count/non-collect
+  star aggregates, path returns, and arbitrary read-query row materialization.
+- Support grouped `collect(*)` through the same aggregate state path used for
+  `collect(variable)` and `collect(variable.property)`.
+- Add tests for concrete, row-producing, and grouped `collect(*)`.
+
+Implementation status: implemented in the working tree after Batch AY. The
+return parser now treats `collect(*)` as a star aggregate target. The evaluator
+materializes each restricted write-result row as a deterministic JSON object,
+with keys sorted by bound variable name. Existing node and relationship
+serialization is reused, so collected row objects preserve Grust's typed
+property JSON rather than inventing a separate Cypher row encoding.
+
+## Batch BA: Restricted `RETURN *`
+
+Support the scalar form of star projection over the same restricted
+write-result table used by concrete variable projections and `collect(*)`:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN *, n.id AS id ORDER BY id;
+```
+
+Acceptance criteria:
+
+- Expand `RETURN *` only to variables already bound by the write plan.
+- Use deterministic column ordering so tests and callers get stable tables.
+- Project each expanded variable with the same serialized node/relationship
+  element shape already used by `RETURN n` and `RETURN e`.
+- Preserve existing `RETURN` controls and allow explicit projections beside
+  `*`.
+- Keep path returns, arbitrary read-query features, and new expression
+  projection semantics deferred.
+- Add tests for concrete bound variables, broad row node variables, and
+  row-producing relationship variables.
+
+Implementation status: implemented in the working tree after Batch AZ. The
+return parser expands `RETURN *` into element projections for the currently
+bound concrete and row-producing variables, ordered by variable name. The
+evaluator then reuses the existing scalar projection path, so star projection
+inherits current row-count checks, materialized-row restrictions, and result
+controls.
+
+## Batch BB: Row-Producing Relationship Endpoint Returns
+
+Make row-producing relationship writes expose their matched endpoint variables
+through the same restricted result table:
+
+```cypher
+MATCH (n:Person {status: 'active'}), (t:Team {id: 'eng'})
+CREATE (n)-[r:MEMBER_OF {source: 'cypher'}]->(t)
+RETURN n.id AS person, r.source AS source;
+```
+
+Acceptance criteria:
+
+- Preserve endpoint variable names in row-producing relationship write
+  bindings.
+- Materialize source and destination endpoint node rows aligned to the produced
+  relationship rows, not through independent node scans.
+- Keep fixed endpoint IDs as concrete node bindings when already resolved.
+- Allow `RETURN *`, `RETURN n`, `RETURN n.property`, and grouped/aggregate
+  forms to see endpoint variables through the existing restricted result table.
+- Keep arbitrary path returns, variable-length paths, and independent read
+  query row materialization deferred.
+- Cover both star projection and explicit source endpoint projection in tests.
+
+Implementation status: implemented in the working tree after Batch BA.
+`CypherRowProducedEdgeBinding` now records source and destination variable
+names. Returning execution derives endpoint node rows from the produced edge
+rows, preserving row alignment for fan-out writes. Fixed endpoint IDs remain
+ordinary concrete node bindings, while unresolved fan-out endpoints become
+row-node values for projection and aggregation.
+
+## Batch BC: Restricted Map Projections
+
+Support Cypher map projections over variables that are already bound by the
+write plan:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN n { .id, .label, .seen } AS person;
+```
+
+Acceptance criteria:
+
+- Accept only property-selector map projections, `variable { .key, ... }`.
+- Require the projected variable to be bound by the write plan or the
+  restricted write-result table.
+- Reuse the existing `id` and `label` pseudo-property behavior for nodes and
+  relationships.
+- Preserve missing properties as `null` in the returned JSON object.
+- Allow map projections in scalar and grouped `RETURN` rows, but not as
+  aggregate targets.
+- Keep arbitrary map expressions, computed keys, nested expressions, path
+  projections, and independent read-query projection semantics deferred.
+- Add tests for concrete, broad row, row-producing endpoint, and relationship
+  map projections plus unsupported map syntax.
+
+Implementation status: implemented in the working tree after Batch BB. The
+return parser recognizes restricted map projections before ordinary property
+references. The evaluator materializes each selected key through the existing
+scalar property projection path, so concrete variables, broad row variables,
+and row-producing relationship endpoint variables share the same semantics.
+
+## Batch BD: Restricted List Projections
+
+Support a narrow list expression over one variable already bound by the write
+plan:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN [n.id, n.label, n.seen] AS person;
+```
+
+Acceptance criteria:
+
+- Accept only list projections made of `variable.property` items.
+- Require every item in one list projection to reference the same bound
+  variable.
+- Reuse the existing `id` and `label` pseudo-property behavior for nodes and
+  relationships.
+- Preserve missing properties as `null` in the returned JSON array.
+- Allow list projections in scalar and grouped `RETURN` rows, but not as
+  aggregate targets.
+- Keep cross-variable lists, literal/function items, nested lists/maps, path
+  projections, and independent read-query projection semantics deferred.
+- Add tests for concrete, broad row, row-producing endpoint, and relationship
+  list projections plus unsupported cross-variable list syntax.
+
+Implementation status: implemented in the working tree after Batch BC. The
+return parser recognizes list projections before map/property projections and
+requires every item to be a property reference on the same bound variable. The
+evaluator materializes list items through the existing scalar property
+projection path, preserving the same restricted result-table semantics as map
+projections.
+
+## Remaining Work Snapshot: 2026-06-16 16:21:11 PDT
+
+The writable Cypher implementation is now broad enough for strict write
+syntax, cardinality-aware mutations, restricted row-producing edge writes, and
+small post-write `RETURN` tables. It also has backend-neutral constraint
+metadata, Cypher DDL parsing, Memory constraint validation, and Sail
+read-before-write validation for required and unique property constraints. The
+remaining pieces should stay explicit:
+
+- Applying parsed DDL to named in-memory schema metadata is supported through
+  `CypherConstraintRegistry`, including projection back onto an existing
+  `GraphSchema` while preserving typed node and edge metadata. A helper can now
+  apply parsed Cypher DDL through `GraphStore::apply_schema` with staged
+  registry failure semantics. The registry and DDL helper reports can now be
+  serialized with serde, and the registry has JSON import/export helpers so
+  callers can persist named metadata externally. `CypherSchemaManager` now
+  keeps the current schema and named registry together for this caller-owned
+  path. Sail also has a backend-owned save/load helper for named registry JSON
+  in `grust_cypher_constraint_registry`, but loading that metadata does not
+  apply constraints by itself.
+- Native backend index and constraint creation plus automatic migrations remain
+  deferred. Sail uniqueness is validated read-before-write, not enforced by a
+  backend-native unique index.
+- Exact insert-versus-update classification is available only where execution
+  can observe the outcome. Memory, Sail resolved node/edge upserts, and
+  Sail/Memory row-producing edge writes can populate `node_inserts`,
+  `node_updates`, `edge_inserts`, or `edge_updates`, including through
+  `RETURN`-producing execution where those paths are used. Generic returning
+  execution can also collect row-producing edge identities from its
+  materialized result rows. Backend paths that still cannot classify the
+  outcome continue to report through `*_upserts`.
+- General post-write `RETURN` remains intentionally narrow. `COUNT(*)`,
+  `COUNT(variable)`, `COUNT(variable.property)`, restricted
+  `COUNT(DISTINCT variable/property)`, restricted `SUM`, `AVG`, `MIN`, and
+  `MAX` over `variable.property`, restricted
+  `collect(variable/property/*)`, restricted `RETURN *`, restricted
+  property-selector map projections, restricted same-variable list
+  projections, restricted aggregates over the same literal-only `CASE`
+  projection grammar, restricted row-producing path projections, restricted
+  resolved single-edge path projections, restricted path `COUNT`/`COLLECT`,
+  restricted path introspection functions, restricted aggregates over path
+  introspection functions, restricted `COUNT`/`COLLECT` over map/list
+  projections, restricted literal scalar projections and aggregate bodies, and
+  restricted `coalesce(...)` projections and aggregate bodies, and restricted
+  `labels(node)` / `type(relationship)` projections and aggregate bodies, and
+  restricted `properties(element)` / `keys(element)` projections and aggregate
+  bodies, and
+  restricted `id(element)` / `elementId(element)` projections and aggregate
+  bodies, and
+  restricted `exists(variable.property)` projections and aggregate bodies, and
+  restricted `size(variable.property)` projections and aggregate bodies, and
+  restricted `abs(variable.property)` projections and aggregate bodies, and
+  restricted `isEmpty(variable.property)` projections and aggregate bodies,
+  and
+  restricted `toString(variable.property)` projections and aggregate bodies,
+  and
+  restricted `toLower(variable.property)` / `toUpper(variable.property)`
+  projections and aggregate bodies, and
+  restricted `trim(variable.property)` / `lTrim(variable.property)` /
+  `rTrim(variable.property)` projections and aggregate bodies, and
+  restricted `substring(variable.property, start[, length])` projections and
+  aggregate bodies, and
+  restricted `replace(variable.property, search, replacement)` projections and
+  aggregate bodies, and
+  restricted `startsWith(variable.property, needle)` /
+  `endsWith(variable.property, needle)` /
+  `contains(variable.property, needle)` projections and aggregate bodies, and
+  restricted `left(variable.property, length)` /
+  `right(variable.property, length)` projections and aggregate bodies, and
+  restricted `reverse(variable.property)` projections and aggregate bodies,
+  and
+  restricted `split(variable.property, delimiter)` projections and aggregate
+  bodies, and
+  restricted `startNode(relationship)` / `endNode(relationship)` projections
+  and aggregate bodies, and
+  restricted grouping over scalar projections are supported only over the
+  materialized write-result table.
+  Broad `MATCH ... DELETE` can return its pre-delete matched rows through the
+  same restricted projection rules. Row-level `RETURN DISTINCT` can deduplicate
+  that same restricted result table before existing controls run. General path
+  reads, path properties, arbitrary read-query
+  features, arbitrary map/list expressions, and unrestricted broad row
+  materialization remain deferred until a shared read/write row model owns
+  those semantics.
+  `ORDER BY`, `SKIP`, and `LIMIT` are supported only over the restricted
+  materialized result table. `ORDER BY` can reference returned columns,
+  aliases, or returned projection expressions; `OFFSET` is accepted as a
+  synonym for `SKIP`; `LIMIT ALL` is accepted as the no-limit spelling.
+- General path-style row projections remain deferred. Supported row tables and
+  star projections are limited to concrete bound variables, portable broad
+  node or relationship rows for restricted `MATCH ... SET/REMOVE/DELETE`, and
+  restricted row-producing relationship writes with endpoint-aligned source and
+  destination node variables, including path variables over those same aligned
+  rows. Row-producing relationship writes can
+  carry an explicit relationship `id` only when the matched endpoint row set
+  produces exactly one edge. Row-producing `CREATE` can also generate
+  deterministic relationship IDs when the caller selects
+  `CypherRelationshipIdPolicy::GenerateForRowCreate`; row-producing
+  `CREATE/MERGE` can generate deterministic relationship IDs when the caller
+  explicitly selects `GenerateForRowCreateAndMerge`.
+- Extracting the handwritten Sail parser into a separate `grust-cypher` crate
+  remains deferred until the grammar grows further or another backend needs a
+  parser without depending on `grust-sail`.
+
+## Continuation Plan After Review: 2026-06-16 16:23:54 PDT
+
+Claude's review fixed or confirmed several correctness items in the current
+working tree: quote-aware edge-pattern detection, Memory preservation of
+id-bearing parallel edges, static Sail SQL helpers, Sail batched `get_nodes`,
+and clearer mutation-report counter documentation. The remaining work should
+avoid broad rewrites and proceed in releaseable slices:
+
+### Batch BE: Documentation And Public Contract Cleanup
+
+Bring the public docs back into sync with the now-implemented write surface.
+
+Acceptance criteria:
+
+- Keep `docs/sail-backend-proposal.md` aligned with the implementation:
+  relationship property predicates, remove-on-null compatibility, parameters,
+  generated IDs, row-producing edge writes, and restricted `RETURN` are no
+  longer open semantic questions.
+- Keep the top-level v1 rejection list in this file precise: arbitrary
+  expressions remain deferred, but restricted map/list projections and
+  restricted writable `RETURN` aggregates are implemented.
+- Add a short changelog entry for the documentation alignment.
+- Rebuild the book artifacts after the doc change.
+
+### Batch BF: Backend-Native Constraint Planning
+
+Turn the current metadata-only Cypher DDL path into an implementation plan for
+native backend support without adding migrations prematurely.
+
+Acceptance criteria:
+
+- Define which `GraphConstraint` values can become native backend indexes or
+  constraints per backend.
+- Keep Sail read-before-write uniqueness documented as non-transactional until
+  a backend-native unique constraint exists.
+- Decide whether native DDL is an explicit helper, a schema-application option,
+  or a backend capability behind `GraphStore::apply_schema`.
+- Add tests around capability reporting and unsupported native DDL requests.
+
+Implementation status: implemented in the working tree after Batch BE.
+`grust-core` now separates validation/enforcement capability from native DDL
+capability. `GraphConstraintCapability` continues to describe the effective
+write-time behavior (`MetadataOnly`, `ValidateBeforeWrite`, or
+`EnforcedByBackend`), while `GraphNativeConstraintCapability` describes whether
+a backend can create a native index or native enforcing constraint for one
+`GraphConstraint`. Native DDL is an explicit request through
+`GraphStore::apply_native_constraint(GraphNativeConstraintRequest)`, not a side
+effect of `GraphStore::apply_schema`. The default implementation reports
+`Unsupported` and returns a structured unsupported error, which keeps Sail's
+read-before-write uniqueness honest until a backend-native unique constraint
+implementation exists. Current Grust backends can still create ordinary schema
+tables, views, fields, and query indexes from `GraphSchema`, but no backend in
+this branch yet advertises native Cypher-constraint DDL for the named registry.
+
+### Batch BG: Shared Write-Result Row Model
+
+Before adding path returns or broader `RETURN` expressions, make the restricted
+write-result row model explicit enough to be reused.
+
+Acceptance criteria:
+
+- Extract the row-binding vocabulary used by concrete variables, broad
+  `SET`/`REMOVE`/`DELETE` rows, and row-producing relationship endpoints into
+  a documented internal model.
+- Keep the public API stable, but reduce duplicated Sail/Memory return-table
+  materialization logic where possible.
+- Add tests that prove every supported row source preserves row alignment and
+  deterministic column order.
+- Continue rejecting path returns until this row model can represent paths
+  without inventing read-query semantics.
+
+Implementation status: implemented in the working tree after Batch BF.
+`grust-sail` now has an explicit internal `CypherWriteResultRows` model for
+the restricted writable `RETURN` table. The model names the row sources the
+write path is allowed to expose: row-node variables from broad
+`MATCH ... SET/REMOVE/DELETE` rows or endpoint-aligned row-producing
+relationship writes, and row-edge variables from broad relationship rows or
+row-producing relationship writes. It centralizes row-count validation and
+deterministic row-variable ordering for `RETURN *` / `collect(*)`, while
+leaving concrete node and relationship variables owned by the resolved
+mutation plan. This is intentionally still not a general read-query row model;
+path returns and arbitrary row materialization remain rejected until a future
+semantic can represent them directly. Regression coverage now proves
+row-producing relationship writes keep source endpoint, relationship, and
+target endpoint values aligned and preserve deterministic star-projection
+column order.
+
+### Batch BH: Next Expression Slice Decision
+
+Choose one small expression feature only after Batch BG clarifies row
+materialization.
+
+Preferred options:
+
+- restricted `CASE WHEN variable.property = literal THEN literal ELSE literal
+  END` projections over the existing write-result table; or
+- path-shaped returns for row-producing relationship writes, if represented as
+  a real row-binding value rather than a special-case projection.
+
+Acceptance criteria:
+
+- Add a backend-neutral semantic before accepting syntax.
+- Support Memory and Sail consistently.
+- Reject cross-variable, nested, function, and arbitrary read-query expression
+  forms until a real expression engine exists.
+
+Implementation status: implemented in the working tree after Batch BG for the
+restricted `CASE` projection option. Writable `RETURN` now accepts
+`CASE WHEN variable.property = literal THEN literal ELSE literal END` as a
+scalar projection over variables already bound by the write-result row model.
+Evaluation reuses the existing property projection semantics, so concrete
+node/relationship variables, broad row variables, and row-producing
+relationship endpoint variables behave consistently through both Sail and the
+Memory facade. Branch values are literal-only, the predicate is equality-only,
+and nested expressions, functions, cross-variable comparisons, path-shaped
+returns, and general aggregates over `CASE` remain rejected. Parameterized
+CASE literals are handled in Batch BI, and restricted aggregates over the same
+literal-only CASE grammar are handled in Batch BL.
+
+### Batch BI: Parameterized Restricted `CASE`
+
+Allow restricted CASE projections to use the same parameter map as other
+writable Cypher literal positions:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN CASE WHEN n.team = $team THEN $matched ELSE $unmatched END AS bucket;
+```
+
+Acceptance criteria:
+
+- Thread `CypherMutationOptions::parameters` into final `RETURN` parsing.
+- Permit parameters only where the restricted CASE grammar already accepts
+  literals: the equality right-hand side, `THEN`, and `ELSE`.
+- Keep the CASE predicate equality-only and same-variable; do not add
+  cross-variable comparisons or computed branch expressions.
+- Missing parameters should return the existing structured unresolved-identity
+  error.
+- Keep path-shaped returns, function calls, nested expressions, and general
+  aggregates over CASE deferred. Restricted aggregates over this same
+  literal-only CASE grammar are handled in Batch BL.
+
+Implementation status: implemented in the working tree after Batch BH.
+`parse_cypher_return_clause` now receives the planner's parameter map, and
+restricted CASE parsing reuses `parse_cypher_literal` with that map for the
+predicate value and literal branch values. Memory-facade coverage verifies
+parameterized CASE projection results and missing-parameter errors while
+preserving the strict equality-only, literal-only grammar.
+
+### Batch BJ: Restricted Row-Producing Path Returns
+
+Add path-shaped return values only where the writable mutation plan already has
+an aligned row source:
+
+```cypher
+MATCH (n:Person {status: 'active'}), (t:Team {id: 'eng'})
+CREATE p = (n)-[r:MEMBER_OF]->(t)
+RETURN p;
+```
+
+Acceptance criteria:
+
+- Support path variables on row-producing `MATCH ... CREATE/MERGE`
+  relationship writes only.
+- Require the relationship pattern to bind a relationship variable, so the path
+  is represented by explicit source endpoint, relationship, and target endpoint
+  row bindings.
+- Materialize `RETURN p` as a JSON path object with `nodes` and
+  `relationships` arrays using the same node and relationship serialization as
+  existing writable `RETURN` element projections.
+- Include path variables in deterministic `RETURN *` / `collect(*)` row-model
+  ordering.
+- Keep resolved single-edge path variables, path properties such as `p.id`,
+  path aggregates, variable-length paths, and general `MATCH` path reads
+  deferred for this batch. Restricted path aggregates are handled later in
+  Batch BK, and resolved single-edge path variables are handled later in
+  Batch BO.
+- Cover the supported path value plus the deferred cases through the
+  Memory-backed writable-Cypher return helper; Sail execution uses the same
+  planner and row materializer.
+
+Implementation status: implemented in the working tree after Batch BI.
+`grust-sail` now records a row-path binding when a row-producing
+`MATCH ... CREATE/MERGE` relationship write uses `p = (n)-[r:TYPE]->(t)`.
+The binding points at the existing endpoint row variables and row-produced
+relationship variable, so the returned path is assembled from mutation-owned
+row values rather than from an added read-query path engine. `RETURN p` and
+`RETURN *` can project that restricted path value. The implementation rejects
+missing relationship variables, path property projections, and path aggregates
+explicitly. Batch BK relaxes that last aggregate restriction only for
+restricted `count(p)`, `count(DISTINCT p)`, and `collect(p)`. Batch BO later
+adds resolved single-edge path variables.
+
+### Batch BK: Restricted Row-Producing Path Aggregates
+
+Once Batch BJ has a real row-path binding, allow the aggregate forms that can
+reuse that exact materialized path value:
+
+```cypher
+MATCH (n:Person {status: 'active'}), (t:Team {id: 'eng'})
+CREATE p = (n)-[r:MEMBER_OF]->(t)
+RETURN count(p) AS memberships, collect(p) AS paths;
+```
+
+Acceptance criteria:
+
+- Support `count(p)`, `count(DISTINCT p)`, and `collect(p)` where `p` is a
+  row-producing path variable from Batch BJ.
+- Use the same path JSON shape as `RETURN p`; do not introduce a second
+  aggregate-only path representation.
+- Support grouped aggregates through the existing grouped writable `RETURN`
+  state machine.
+- Keep path properties such as `p.id`, property aggregates such as
+  `count(p.id)`, non-count numeric path aggregates, resolved-edge path
+  variables, variable-length paths, and general read-query path matching
+  deferred for this batch. Batch BO later adds resolved single-edge path
+  variables.
+- Cover the Memory-backed returning helper; Sail execution reuses the same
+  planner and evaluator.
+
+Implementation status: implemented in the working tree after Batch BJ.
+The aggregate evaluator now allows row-path variables through the existing
+`COUNT` and `COLLECT` element paths and materializes each path by reusing the
+same endpoint and relationship row bindings used by scalar `RETURN p`.
+`count(DISTINCT p)` serializes the materialized path values through the
+existing distinct-value path. Path properties and non-supported aggregate
+forms remain rejected.
+
+### Batch BL: Restricted Aggregates Over `CASE`
+
+Once scalar restricted CASE projections and grouped writable `RETURN` are
+stable, allow aggregate bodies to use the same literal-only CASE grammar:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN sum(CASE WHEN n.team = 'eng' THEN 1 ELSE 0 END) AS eng_people;
+```
+
+Acceptance criteria:
+
+- Support `COUNT`, `COUNT(DISTINCT ...)`, `SUM`, `AVG`, `MIN`, `MAX`, and
+  `COLLECT` over `CASE WHEN variable.property = literal THEN literal ELSE
+  literal END`.
+- Reuse the existing CASE parser and evaluator, including parameter support in
+  the equality value and literal branch positions.
+- Treat `null` CASE branch results the same way property aggregates treat
+  missing values: exclude them from `COUNT(expr)`, `COLLECT(expr)`, and
+  numeric/string aggregate inputs.
+- Support grouped aggregate rows through the existing grouped writable
+  `RETURN` state machine.
+- Keep function calls, nested CASE, cross-variable predicates, computed branch
+  expressions, and arbitrary expression aggregation deferred.
+
+Implementation status: implemented in the working tree after Batch BK.
+`parse_aggregate_projection` now recognizes the restricted CASE grammar inside
+aggregate bodies using the same parameter map as scalar CASE projections. The
+aggregate materializers reuse the existing CASE evaluator per materialized
+write-result row, filter out `Value::Null`, and then feed the resulting values
+into the established count, distinct, numeric, min/max, collect, and grouped
+aggregate paths. Function calls and non-literal CASE branch expressions remain
+rejected.
+
+### Batch BM: Relationship Numeric Property Updates
+
+Extend Batch R's explicit read-modify-write numeric expression semantics from
+nodes to relationships:
+
+```cypher
+MATCH (:Person {id: 'a'})-[e:KNOWS]->(:Person {id: 'b'})
+SET e.weight = e.weight + 1;
+```
+
+Acceptance criteria:
+
+- Add backend-neutral `GraphMutationPlanOp` / `GraphMutation` support for
+  matched-edge numeric property updates.
+- Lower same-relationship property arithmetic where the right-hand side is
+  `e.source_property <op> literal_or_parameter`.
+- Support resolved single-edge matches and broad relationship matches,
+  including relationship property predicates and endpoint predicates.
+- Execute through Memory and Sail using the same
+  `evaluate_numeric_update` semantics as node numeric updates: missing source
+  property, null, type mismatch, overflow, and division by zero are structured
+  execution errors.
+- Preserve restricted writable `RETURN` over the updated relationship rows.
+- Keep cross-variable expressions, path expressions, functions, `CASE`, and
+  arbitrary computed relationship expressions deferred.
+
+Implementation status: implemented in the working tree after Batch BL.
+`grust-core` now has `UpdateMatchingEdgeProperty` plan and mutation variants
+parallel to the existing node numeric operation. `grust-sail` lowers
+same-relationship numeric assignments into that operation for both resolved
+edge identities and broad relationship matches, captures updated relationship
+rows for restricted `RETURN`, and executes the update through the existing
+matched-edge load path. `grust-memory` applies the same operation over its
+matched edge set and validates updated edges against the active schema before
+persisting them.
+
+### Batch BN: Strict Multi-Target `MATCH DELETE`
+
+Allow a relationship-pattern `MATCH ... DELETE` clause to delete more than one
+bound target when each target can lower to an existing Grust mutation:
+
+```cypher
+MATCH (a:Person {id: 'a'})-[e:KNOWS]->(b:Person {id: 'b'})
+DELETE e, a;
+```
+
+Acceptance criteria:
+
+- Parse comma-separated `MATCH ... DELETE` target variables with the same
+  top-level comma handling used elsewhere in writable Cypher.
+- Support relationship targets using the existing resolved or matched
+  relationship delete lowering.
+- Support endpoint node targets only when the endpoint resolves to a stable
+  node ID; do not infer broad endpoint node deletes from relationship rows.
+- Preserve source order in the generated `GraphMutationPlan`.
+- Keep node-pattern `MATCH ... DELETE` single-target for now.
+- Reject empty targets, unbound targets, unbound relationship variables, and
+  broad endpoint node targets with structured planning errors.
+- Cover lowering and Memory execution.
+
+Implementation status: implemented in the working tree after Batch BM.
+`parse_match_delete` now accepts comma-separated targets for relationship
+patterns. It lowers relationship targets through the existing edge delete path
+and lowers ID-resolved endpoint node targets to `DeleteNode`, preserving target
+order in the plan. Endpoint nodes selected only by broad relationship rows or
+predicates remain rejected until row-derived node delete semantics are owned
+explicitly by the mutation model.
+
+### Batch BO: Resolved Single-Edge Path Returns
+
+Extend the restricted path-return support from row-producing relationship
+writes to already-resolved single-edge relationship writes:
+
+```cypher
+MATCH (a:Person {id: 'a'}), (b:Person {id: 'b'})
+CREATE p = (a)-[r:KNOWS {id: 'r'}]->(b)
+RETURN p, count(p), collect(p);
+```
+
+Acceptance criteria:
+
+- Support path variables on resolved `MATCH ... CREATE/MERGE` relationship
+  writes when both endpoint variables resolve to stable node IDs before
+  execution.
+- Require the relationship pattern to bind a relationship variable, preserving
+  the same path vocabulary used by row-producing paths: source node variable,
+  relationship variable, and target node variable.
+- Materialize `RETURN p`, `count(p)`, `count(DISTINCT p)`, and `collect(p)`
+  through the existing restricted writable `RETURN` path JSON shape.
+- Include resolved path variables in `RETURN *` / `collect(*)` deterministic
+  ordering without adding general read-query path matching.
+- Keep path properties such as `p.id`, variable-length paths, path predicates,
+  and unresolved/broad path reads deferred.
+
+Implementation status: implemented in the working tree after Batch BN. The
+planner now records the same path binding for resolved single-edge
+`MATCH ... CREATE/MERGE` writes that already have concrete endpoint node IDs
+and a concrete relationship identity. The path materializer can assemble a path
+from either row-produced relationship values or a concrete relationship
+binding, so resolved `RETURN p`, `count(p)`, and `collect(p)` reuse the same
+JSON shape and aggregate machinery as row-producing path returns.
+
+### Batch BP: Restricted Path Introspection Projections
+
+Add the smallest useful Cypher path helper functions over writable path
+variables without opening general function evaluation:
+
+```cypher
+MATCH (a:Person {id: 'a'}), (b:Person {id: 'b'})
+CREATE p = (a)-[r:KNOWS]->(b)
+RETURN length(p), nodes(p), relationships(p);
+```
+
+Acceptance criteria:
+
+- Support `length(p)`, `nodes(p)`, and `relationships(p)` only when `p` is a
+  path variable already bound by the restricted writable path model from
+  Batch BJ or Batch BO.
+- Reuse the same JSON path materialization used by `RETURN p`: `length(p)`
+  returns the relationship count, `nodes(p)` returns the path node array, and
+  `relationships(p)` returns the path relationship array.
+- Work for row-producing relationship paths and resolved single-edge paths.
+- Preserve existing `RETURN` controls and grouping behavior because these are
+  scalar projections over the materialized write-result table.
+- Reject path functions over node or relationship variables, nested function
+  calls, variable-length paths, and arbitrary function evaluation.
+
+Implementation status: implemented in the working tree after Batch BO.
+`parse_cypher_return_clause` now recognizes the three path helper functions
+before applying the existing function-call rejection. The evaluator accepts
+them only for bound writable path variables and derives their values from the
+same path JSON object used by scalar `RETURN p`, so row-producing and resolved
+single-edge paths stay aligned.
+
+### Batch BQ: Restricted Aggregates Over Path Introspection
+
+Allow aggregate bodies to use the restricted path helper functions from
+Batch BP without adding general nested function evaluation:
+
+```cypher
+MATCH (a:Person {status: 'active'}), (b:Team {id: 'eng'})
+CREATE p = (a)-[r:MEMBER_OF]->(b)
+RETURN sum(length(p)), collect(nodes(p)), collect(relationships(p));
+```
+
+Acceptance criteria:
+
+- Support `COUNT`, `COUNT(DISTINCT ...)`, `SUM`, `AVG`, `MIN`, `MAX`, and
+  `COLLECT` over `length(p)` where `p` is a bound writable path variable.
+- Support `COUNT`, `COUNT(DISTINCT ...)`, and `COLLECT` over `nodes(p)` and
+  `relationships(p)` using the same JSON array values produced by Batch BP.
+  Numeric aggregates over those array values should fail with the existing
+  type-aware aggregate errors rather than introducing implicit casts.
+- Reuse existing distinct, grouped aggregate, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior.
+- Work for row-producing relationship paths and resolved single-edge paths.
+- Reject path introspection aggregates over node or relationship variables,
+  nested function calls, variable-length paths, and arbitrary aggregate
+  expressions.
+
+Implementation status: implemented in the working tree after Batch BP.
+`parse_aggregate_projection` now recognizes the restricted path helper
+functions before applying the existing property-only aggregate checks. The
+aggregate evaluator materializes each helper value through the same scalar
+path-function evaluator used by Batch BP, so distinct handling, grouped
+aggregation, and `COLLECT` reuse the existing writable `RETURN` aggregate
+machinery.
+
+### Batch BR: Restricted Aggregates Over Map/List Projections
+
+Allow the collection/count aggregate forms to consume the restricted map and
+list projections already supported as scalar writable `RETURN` values:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN count(n { .team }), collect([n.id, n.team]);
+```
+
+Acceptance criteria:
+
+- Support `COUNT`, `COUNT(DISTINCT ...)`, and `COLLECT` over
+  `variable { .key, ... }` map projections.
+- Support `COUNT`, `COUNT(DISTINCT ...)`, and `COLLECT` over same-variable
+  list projections such as `[n.id, n.team]`.
+- Reuse the existing restricted scalar map/list projection evaluators so
+  concrete variables, broad write rows, row-producing endpoints, and
+  row-producing relationship variables behave consistently.
+- Preserve existing distinct, grouped aggregate, and result-control behavior.
+- Keep numeric aggregates over map/list JSON values type-aware: they should
+  fail through the existing aggregate type checks rather than adding implicit
+  conversions.
+- Keep arbitrary map/list expressions, computed keys, cross-variable lists,
+  nested collections, and independent read-query expression semantics
+  deferred.
+
+Implementation status: implemented in the working tree after Batch BQ.
+`parse_aggregate_projection` now recognizes restricted map and list projection
+bodies before ordinary property references. The aggregate materializer reuses
+the scalar projection evaluator per row, so `COUNT`, `COUNT(DISTINCT ...)`, and
+`COLLECT` over these projections share the same JSON value shape as scalar
+`RETURN` map/list projections.
+
+### Batch BS: Restricted Literal Return Projections
+
+Allow literal values in writable `RETURN` projections and aggregate bodies
+without adding a general expression engine:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN 'seen' AS status, count(1) AS rows, collect($tag) AS tags;
+```
+
+Acceptance criteria:
+
+- Support scalar literal projections for string, integer, float, boolean,
+  `null`, and parameter references in literal positions.
+- Support literal aggregate bodies through the existing materialized
+  write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `SUM`, `AVG`, `MIN`,
+  `MAX`, and `COLLECT`.
+- Treat `null` the same way other aggregate expression values are treated:
+  `count(null)` returns zero for the materialized rows, `collect(null)`
+  excludes nulls, and numeric aggregates over only null values return `null`.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep computed expressions such as `1 + 1`, cross-variable expressions,
+  function calls other than the explicitly supported path helpers, list/map
+  literals, nested collection literals, and general read-query expression
+  evaluation deferred.
+
+Implementation status: implemented in the working tree after Batch BR.
+Writable `RETURN` now represents literals as a dedicated restricted projection
+target, so scalar literals and aggregate literal bodies reuse the same row
+count, grouping, distinct, ordering, and limiting semantics as the existing
+materialized write-result table. Parameter references are accepted only through
+the same literal parser already used by writable Cypher property maps, CASE
+branches, and assignment values; missing parameters produce the existing
+structured unresolved-identity error.
+
+### Batch BT: Restricted `coalesce(...)` Return Projections
+
+Add one small null-handling function over values that already belong to the
+materialized writable `RETURN` table:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN coalesce(n.nickname, n.name, 'unknown') AS display_name;
+```
+
+Acceptance criteria:
+
+- Support `coalesce(...)` as a scalar writable `RETURN` projection when every
+  argument is either `variable.property` or a literal/parameter value.
+- Allow property arguments only for one bound variable. This preserves the
+  existing restricted row-table contract and avoids cross-variable expression
+  semantics.
+- Evaluate arguments left to right and return the first non-null value, or
+  `null` when all arguments are null.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `SUM`,
+  `AVG`, `MIN`, `MAX`, and `COLLECT`.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep nested functions, whole-element arguments, path values, list/map
+  literals, cross-variable arguments, arithmetic arguments, and general
+  read-query expression evaluation deferred.
+
+Implementation status: implemented in the working tree after Batch BS.
+Writable `RETURN` now parses `coalesce(...)` into a dedicated restricted target
+whose arguments are literal values or property projections on one bound
+variable. Evaluation reuses the existing property materializer, so concrete
+variables, broad node or relationship rows, and row-producing relationship
+variables stay aligned with the rest of writable `RETURN`. Aggregate bodies
+reuse the scalar coalesce evaluator per materialized row, so null filtering,
+distinct handling, grouping, and result controls remain centralized in the
+existing return-table path.
+
+### Batch BU: Restricted Element Introspection Functions
+
+Support the two most common Cypher element-introspection functions over values
+already bound by writable mutation execution:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN labels(n) AS labels;
+```
+
+```cypher
+MATCH (:Person {status: 'active'})-[r:MEMBER_OF]->(:Team {id: 'eng'})
+SET r.checked = true
+RETURN type(r) AS relationship_type;
+```
+
+Acceptance criteria:
+
+- Support `labels(node_variable)` as a scalar writable `RETURN` projection
+  when the argument is a concrete node variable or a materialized row-node
+  variable. Return the label as a one-item JSON array, matching the existing
+  JSON representation used by list and path helper projections.
+- Support `type(relationship_variable)` as a scalar writable `RETURN`
+  projection when the argument is a concrete relationship variable or a
+  materialized row-relationship variable.
+- Support aggregate bodies over the same restricted forms through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over the JSON value produced by
+  `labels(...)` should fail through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject `labels(...)` on relationship variables, `type(...)` on node
+  variables, path variables, nested expressions, cross-variable expressions,
+  and general read-query function evaluation.
+
+Implementation status: implemented in the working tree after Batch BT.
+Writable `RETURN` now parses `labels(...)` and `type(...)` into dedicated
+restricted targets. The parser validates that the argument variable is already
+bound by the write plan and that the function matches the element kind.
+Evaluation reuses the existing node/relationship label projection path, so
+concrete bindings, broad write rows, and row-producing relationship rows share
+the same behavior as `n.label` and `e.label` while exposing the Cypher-native
+function spelling.
+
+### Batch BV: Restricted Property-Map Introspection Functions
+
+Support Cypher property-map introspection over writable-result elements without
+opening arbitrary expression evaluation:
+
+```cypher
+MATCH (n:Person {status: 'active'}) SET n.seen = true
+RETURN properties(n) AS props, keys(n) AS keys;
+```
+
+Acceptance criteria:
+
+- Support `properties(element_variable)` as a scalar writable `RETURN`
+  projection when the argument is a concrete node/relationship variable or a
+  materialized row-node/row-relationship variable.
+- Support `keys(element_variable)` over the same element variables, returning
+  property keys in deterministic stored-property order.
+- Return JSON values: `properties(...)` returns the stored Grust property map
+  and `keys(...)` returns a JSON string array.
+- Reflect Grust's stored property model precisely. Node `id` is present in
+  stored node props because `Node::new` inserts it when missing; relationship
+  identity remains separate unless the write supplied an `id` property.
+- Support aggregate bodies over the same restricted forms through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, and
+  `COLLECT`. Numeric aggregates over JSON maps or arrays should fail through
+  the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject path variables, nested expressions, cross-variable expressions, and
+  general read-query function evaluation.
+
+Implementation status: implemented in the working tree after Batch BU.
+Writable `RETURN` now parses `properties(...)` and `keys(...)` through the
+same restricted element-function parser used by `labels(...)` and `type(...)`.
+Evaluation resolves the bound node or relationship value from the existing
+write-result table and serializes the stored `Props` map or its ordered keys as
+JSON. Aggregates reuse the scalar evaluator per materialized row, preserving
+the existing null filtering, distinct handling, grouping, and result controls.
+
+### Batch BW: Restricted Relationship Endpoint Functions
+
+Support Cypher endpoint functions for relationship values that are already
+bound by writable mutation execution:
+
+```cypher
+MATCH (:Person {status: 'active'})-[r:MEMBER_OF]->(:Team {id: 'eng'})
+SET r.checked = true
+RETURN startNode(r) AS person, endNode(r) AS team;
+```
+
+Acceptance criteria:
+
+- Support `startNode(relationship_variable)` and
+  `endNode(relationship_variable)` as scalar writable `RETURN` projections when
+  the argument is a concrete relationship variable or a materialized
+  row-relationship variable.
+- Materialize endpoint nodes through `GraphStore::get_node` using the bound
+  relationship's stored `from` or `to` IDs. Return the same JSON node shape as
+  existing `RETURN n` element projections.
+- Support aggregate bodies over the same restricted forms through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, and
+  `COLLECT`. Numeric aggregates over endpoint JSON values should fail through
+  the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject node variables, path variables, nested expressions, cross-variable
+  expressions, variable-length path endpoint semantics, and general read-query
+  traversal.
+
+Implementation status: implemented in the working tree after Batch BV.
+Writable `RETURN` now parses `startNode(...)` and `endNode(...)` through the
+same restricted element-function parser used by the other element
+introspection functions. Evaluation resolves the bound relationship row or
+concrete relationship identity, loads the endpoint node by ID from the store,
+and serializes it with the same node JSON path used by normal element
+projections. This intentionally does not add arbitrary traversal; it only
+exposes endpoints of relationship values already owned by the write result.
+
+### Batch BX: Restricted Element Identity Functions
+
+Support Cypher identity function spelling for element values that are already
+bound by writable mutation execution:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN id(n) AS id, elementId(n) AS element_id;
+```
+
+Acceptance criteria:
+
+- Support `id(element_variable)` and `elementId(element_variable)` as scalar
+  writable `RETURN` projections when the argument is a concrete node,
+  concrete relationship, materialized row-node, or materialized
+  row-relationship variable.
+- Return the Grust node ID string for node variables.
+- Return the explicit relationship ID string for relationship variables when
+  one exists; return `null` when the relationship has no explicit ID. This
+  matches existing `relationship.id` projection behavior and does not invent
+  generated structural relationship identity.
+- Support aggregate bodies over the same restricted forms through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over string or null identity values
+  should fail through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject path variables, literals, nested expressions, cross-variable
+  expressions, implicit generated relationship identity, and general read-query
+  function evaluation.
+
+Implementation status: implemented in the working tree after Batch BW.
+Writable `RETURN` now parses `id(...)` and `elementId(...)` through the same
+restricted element-function parser used by the other element introspection
+functions. Evaluation reuses the existing physical `id` projection path, so
+node identities and explicit relationship identities stay consistent with
+`n.id` and `r.id` while preserving `null` for relationships without explicit
+IDs.
+
+### Batch BY: Restricted Property Existence Projections
+
+Support the smallest useful property-existence function over values that are
+already bound by writable mutation execution:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN exists(n.nickname) AS has_nickname;
+```
+
+Acceptance criteria:
+
+- Support `exists(variable.property)` as a scalar writable `RETURN` projection
+  when the variable is a concrete node, concrete relationship, materialized
+  row-node, or materialized row-relationship variable.
+- Return `true` when the existing restricted property materializer returns a
+  non-null value, and `false` when the property is absent or explicitly null.
+  Physical `id` and `label` fields follow the same behavior as existing
+  `variable.id` and `variable.label` projections.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over boolean values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject whole-element arguments, path variables, path-pattern predicates,
+  nested expressions, cross-variable expressions, and general read-query
+  predicate evaluation.
+
+Implementation status: implemented in the working tree after Batch BX.
+Writable `RETURN` now parses `exists(variable.property)` into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and converts the materialized value to a boolean, keeping concrete
+bindings, broad write rows, and row-producing relationship rows aligned with
+the rest of writable `RETURN`.
+
+### Batch BZ: Restricted Property Size Projections
+
+Support the smallest useful size function over property values that are already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN size(n.nickname) AS nickname_size;
+```
+
+Acceptance criteria:
+
+- Support `size(variable.property)` as a scalar writable `RETURN` projection
+  when the variable is a concrete node, concrete relationship, materialized
+  row-node, or materialized row-relationship variable.
+- Return an integer length for strings, typed Grust arrays, and JSON string or
+  collection values. Return `null` when the property is absent or explicitly
+  null.
+- Reject numeric, boolean, and other unsupported scalar values rather than
+  adding implicit casts.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `SUM`,
+  `AVG`, `MIN`, `MAX`, and `COLLECT`.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject whole-element arguments, path variables, path-pattern expressions,
+  nested expressions, cross-variable expressions, and general read-query
+  expression evaluation.
+
+Implementation status: implemented in the working tree after Batch BY.
+Writable `RETURN` now parses `size(variable.property)` into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and computes a length only for string and array-like values,
+keeping the supported behavior narrow and type-aware.
+
+### Batch CA: Restricted String Normalization Projections
+
+Support the smallest useful string normalization functions over property values
+that are already available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN toLower(n.team) AS team_key, toUpper(n.code) AS code;
+```
+
+Acceptance criteria:
+
+- Support `toLower(variable.property)` and `toUpper(variable.property)` as
+  scalar writable `RETURN` projections when the variable is a concrete node,
+  concrete relationship, materialized row-node, or materialized
+  row-relationship variable.
+- Return normalized strings for string values and JSON string values. Return
+  `null` when the property is absent or explicitly null.
+- Reject numeric, boolean, array, map, whole-element, path, and other
+  unsupported values rather than adding implicit casts.
+- Support aggregate bodies over the same restricted forms through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over string values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject nested expressions, cross-variable expressions, path-pattern
+  expressions, and general read-query expression evaluation.
+
+Implementation status: implemented in the working tree after Batch BZ.
+Writable `RETURN` now parses `toLower(variable.property)` and
+`toUpper(variable.property)` into a dedicated restricted projection target.
+Evaluation reuses the existing property materializer and transforms only
+string-like values, keeping the supported behavior narrow and type-aware.
+
+### Batch CB: Restricted String Trim Projections
+
+Support the smallest useful string whitespace cleanup functions over property
+values already available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN trim(n.name) AS name, lTrim(n.code) AS code;
+```
+
+Acceptance criteria:
+
+- Support `trim(variable.property)`, `lTrim(variable.property)`, and
+  `rTrim(variable.property)` as scalar writable `RETURN` projections when the
+  variable is a concrete node, concrete relationship, materialized row-node,
+  or materialized row-relationship variable.
+- Return trimmed strings for string values and JSON string values. Return
+  `null` when the property is absent or explicitly null.
+- Reject numeric, boolean, array, map, whole-element, path, and other
+  unsupported values rather than adding implicit casts.
+- Support aggregate bodies over the same restricted forms through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over string values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject nested expressions, cross-variable expressions, path-pattern
+  expressions, and general read-query expression evaluation.
+
+Implementation status: implemented in the working tree after Batch CA.
+Writable `RETURN` now parses `trim(variable.property)`,
+`lTrim(variable.property)`, and `rTrim(variable.property)` into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and trims only string-like values, preserving the same narrow,
+type-aware behavior as the other restricted string functions.
+
+### Batch CC: Restricted String Substring Projections
+
+Support a bounded Cypher substring form over property values already available
+in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN substring(n.name, 0, 3) AS prefix;
+```
+
+Acceptance criteria:
+
+- Support `substring(variable.property, start)` and
+  `substring(variable.property, start, length)` as scalar writable `RETURN`
+  projections when the variable is a concrete node, concrete relationship,
+  materialized row-node, or materialized row-relationship variable.
+- Accept `start` and `length` only as non-negative integer literals or
+  parameters. Use zero-based character offsets and return the remainder of the
+  string when `length` is omitted.
+- Return substring values for string values and JSON string values. Return
+  `null` when the property is absent or explicitly null.
+- Reject numeric, boolean, array, map, whole-element, path, negative offsets,
+  and other unsupported values rather than adding implicit casts.
+- Support aggregate bodies over the same restricted forms through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over string values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject nested expressions, cross-variable expressions, path-pattern
+  expressions, and general read-query expression evaluation.
+
+Implementation status: implemented in the working tree after Batch CB.
+Writable `RETURN` now parses `substring(variable.property, start[, length])`
+into a dedicated restricted projection target. Evaluation reuses the existing
+property materializer and slices only string-like values with literal or
+parameter integer offsets, preserving the same narrow, type-aware behavior as
+the other restricted string functions.
+
+### Batch CD: Restricted String Replace Projections
+
+Support a bounded Cypher replacement form over property values already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN replace(n.team, '-team', '') AS team;
+```
+
+Acceptance criteria:
+
+- Support `replace(variable.property, search, replacement)` as a scalar
+  writable `RETURN` projection when the variable is a concrete node, concrete
+  relationship, materialized row-node, or materialized row-relationship
+  variable.
+- Accept `search` and `replacement` only as string literals or parameters.
+- Return replaced strings for string values and JSON string values. Return
+  `null` when the property is absent or explicitly null.
+- Reject numeric, boolean, array, map, whole-element, path, non-string search
+  or replacement arguments, and other unsupported values rather than adding
+  implicit casts.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over string values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject nested expressions, cross-variable expressions, path-pattern
+  expressions, and general read-query expression evaluation.
+
+Implementation status: implemented in the working tree after Batch CC.
+Writable `RETURN` now parses
+`replace(variable.property, search, replacement)` into a dedicated restricted
+projection target. Evaluation reuses the existing property materializer and
+replaces content only for string-like values with literal or parameter string
+arguments, preserving the same narrow, type-aware behavior as the other
+restricted string functions.
+
+### Batch CE: Restricted String Predicate Projections
+
+Support bounded string predicate helpers over property values already available
+in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN startsWith(n.team, 'eng') AS engineering;
+```
+
+Acceptance criteria:
+
+- Support `startsWith(variable.property, needle)`,
+  `endsWith(variable.property, needle)`, and
+  `contains(variable.property, needle)` as scalar writable `RETURN`
+  projections when the variable is a concrete node, concrete relationship,
+  materialized row-node, or materialized row-relationship variable.
+- Accept `needle` only as a string literal or parameter.
+- Return booleans for string values and JSON string values. Return `null` when
+  the property is absent or explicitly null.
+- Reject numeric, boolean, array, map, whole-element, path, non-string needle
+  arguments, and other unsupported values rather than adding implicit casts.
+- Support aggregate bodies over the same restricted forms through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over boolean values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject nested expressions, cross-variable expressions, path-pattern
+  expressions, and general read-query expression evaluation.
+
+Implementation status: implemented in the working tree after Batch CD.
+Writable `RETURN` now parses `startsWith(variable.property, needle)`,
+`endsWith(variable.property, needle)`, and
+`contains(variable.property, needle)` into a dedicated restricted projection
+target. Evaluation reuses the existing property materializer and evaluates
+only string-like values with literal or parameter string needles, preserving
+the same narrow, type-aware behavior as the other restricted string functions.
+
+### Batch CF: Restricted String Slice Projections
+
+Support bounded string slice helpers over property values already available in
+the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN left(n.team, 3) AS team_prefix, right(n.code, 2) AS code_suffix;
+```
+
+Acceptance criteria:
+
+- Support `left(variable.property, length)` and
+  `right(variable.property, length)` as scalar writable `RETURN` projections
+  when the variable is a concrete node, concrete relationship, materialized
+  row-node, or materialized row-relationship variable.
+- Accept `length` only as a non-negative integer literal or parameter.
+- Return string prefixes or suffixes by character count for string values and
+  JSON string values. Return `null` when the property is absent or explicitly
+  null.
+- Reject numeric, boolean, array, map, whole-element, path, negative or
+  non-integer lengths, and other unsupported values rather than adding
+  implicit casts.
+- Support aggregate bodies over the same restricted forms through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over string values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Reject nested expressions, cross-variable expressions, path-pattern
+  expressions, and general read-query expression evaluation.
+
+Implementation status: implemented in the working tree after Batch CE.
+Writable `RETURN` now parses `left(variable.property, length)` and
+`right(variable.property, length)` into a dedicated restricted projection
+target. Evaluation reuses the existing property materializer and slices only
+string-like values with literal or parameter integer lengths, preserving the
+same narrow, type-aware behavior as the other restricted string functions.
+
+### Batch CG: Restricted String Reverse Projections
+
+Support bounded string reversal over property values already available in the
+writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN reverse(n.code) AS reversed_code;
+```
+
+Acceptance criteria:
+
+- Support `reverse(variable.property)` as a scalar writable `RETURN`
+  projection when the variable is a concrete node, concrete relationship,
+  materialized row-node, or materialized row-relationship variable.
+- Return reversed strings by character order for string values and JSON string
+  values. Return `null` when the property is absent or explicitly null.
+- Reject numeric, boolean, array, map, whole-element, path, nested function,
+  cross-variable, and other unsupported values rather than adding implicit
+  casts.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over string values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `reverse(...)` as a string-only slice; list reversal remains deferred
+  until arbitrary list expressions have backend-neutral semantics.
+
+Implementation status: implemented in the working tree after Batch CF.
+Writable `RETURN` now parses `reverse(variable.property)` into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and reverses only string-like values, preserving the same narrow,
+type-aware behavior as the other restricted string functions.
+
+### Batch CH: Restricted String Split Projections
+
+Support bounded string splitting over property values already available in the
+writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN split(n.path, '/') AS path_parts;
+```
+
+Acceptance criteria:
+
+- Support `split(variable.property, delimiter)` as a scalar writable `RETURN`
+  projection when the variable is a concrete node, concrete relationship,
+  materialized row-node, or materialized row-relationship variable.
+- Accept `delimiter` only as a non-empty string literal or parameter.
+- Return a JSON string array for string values and JSON string values. Return
+  `null` when the property is absent or explicitly null.
+- Reject numeric, boolean, array, map, whole-element, path, empty delimiters,
+  non-string delimiters, nested function, cross-variable, and other
+  unsupported values rather than adding implicit casts.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over split arrays should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `split(...)` as a string-only helper that returns a JSON value; general
+  list expressions, list slicing, and list functions remain deferred.
+
+Implementation status: implemented in the working tree after Batch CG.
+Writable `RETURN` now parses `split(variable.property, delimiter)` into a
+dedicated restricted projection target. Evaluation reuses the existing property
+materializer and splits only string-like values with a non-empty literal or
+parameter string delimiter, returning a JSON string array while preserving the
+same narrow, type-aware behavior as the other restricted string functions.
+
+### Batch CI: Restricted Property Emptiness Projections
+
+Support bounded emptiness checks over property values already available in the
+writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN isEmpty(n.nickname) AS nickname_missing_or_blank;
+```
+
+Acceptance criteria:
+
+- Support `isEmpty(variable.property)` as a scalar writable `RETURN`
+  projection when the variable is a concrete node, concrete relationship,
+  materialized row-node, or materialized row-relationship variable.
+- Return booleans for empty/non-empty string values, array values, JSON string
+  values, JSON arrays, and JSON objects. Return `null` when the property is
+  absent or explicitly null.
+- Reject numeric, boolean, whole-element, path, nested function,
+  cross-variable, and other unsupported values rather than adding implicit
+  casts.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over boolean values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `isEmpty(...)` property-only; pattern predicates, list expressions, and
+  arbitrary expression evaluation remain deferred.
+
+Implementation status: implemented in the working tree after Batch CH.
+Writable `RETURN` now parses `isEmpty(variable.property)` into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and checks only string, array, and JSON collection values,
+preserving the same narrow, type-aware behavior as the other restricted
+property functions.
+
+### Batch CJ: Restricted Scalar String Conversion Projections
+
+Support explicit scalar string conversion over property values already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN toString(n.score) AS score_text;
+```
+
+Acceptance criteria:
+
+- Support `toString(variable.property)` as a scalar writable `RETURN`
+  projection when the variable is a concrete node, concrete relationship,
+  materialized row-node, or materialized row-relationship variable.
+- Return strings for scalar values: strings, booleans, integers, floats,
+  datetimes, and JSON scalar values. Return `null` when the property is absent
+  or explicitly null.
+- Reject arrays, JSON arrays, JSON objects, whole-element values, paths,
+  nested functions, cross-variable expressions, and other unsupported values
+  rather than adding broad serialization semantics.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over converted string values should
+  fail through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `toString(...)` property-only; arbitrary expression conversion and
+  array/map serialization remain deferred.
+
+Implementation status: implemented in the working tree after Batch CI.
+Writable `RETURN` now parses `toString(variable.property)` into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and converts only scalar values, preserving the same narrow,
+type-aware behavior as the other restricted property functions.
+
+### Batch CK: Restricted Numeric Absolute-Value Projections
+
+Support bounded numeric absolute-value projection over property values already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN abs(n.score) AS score_magnitude;
+```
+
+Acceptance criteria:
+
+- Support `abs(variable.property)` as a scalar writable `RETURN` projection
+  when the variable is a concrete node, concrete relationship, materialized
+  row-node, or materialized row-relationship variable.
+- Return integer or float absolute values for numeric values and JSON numeric
+  values. Return `null` when the property is absent or explicitly null.
+- Reject strings, booleans, arrays, JSON arrays, JSON objects, whole-element
+  values, paths, nested functions, cross-variable expressions, integer
+  overflow, and other unsupported values rather than adding implicit casts.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `SUM`,
+  `AVG`, `MIN`, `MAX`, and `COLLECT`.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `abs(...)` property-only; arbitrary numeric expressions remain limited
+  to the existing mutation-assignment path.
+
+Implementation status: implemented in the working tree after Batch CJ.
+Writable `RETURN` now parses `abs(variable.property)` into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and applies absolute-value conversion only to numeric values,
+preserving the same narrow, type-aware behavior as the other restricted
+property functions.

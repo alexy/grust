@@ -297,20 +297,29 @@ Open semantic decisions before accepting general Cypher writes:
 - ID policy: node IDs are explicit by default, and Sail writable Cypher now has
   an opt-in generated-ID policy for node `CREATE`; deriving IDs from
   labels/properties remains open.
-- `CREATE` versus `MERGE`: whether duplicate IDs are errors or replacement
-  upserts.
-- Property update mode: shallow map patching, literal assignment, and explicit
-  `REMOVE` exist for resolved identities, and broad node matches support map
-  patching plus literal property assignment/removal. Broad relationship
-  matches support delete, map patching, literal property assignment, and
-  explicit property removal over endpoint predicates; relationship property
-  predicates beyond explicit edge `id`, computed expressions, and
-  remove-on-null remain open.
+- `CREATE` versus `MERGE`: default execution stays upsert-compatible, while
+  strict `CREATE` conflict checks are available through explicit mutation
+  options.
+- Property update mode: shallow map patching, literal assignment, explicit
+  `REMOVE`, optional remove-on-null compatibility, and restricted numeric node
+  property updates now lower through Grust mutation semantics. Relationship
+  matches support endpoint predicates, relationship property predicates,
+  delete, map patching, literal property assignment, and explicit property
+  removal. Relationship arithmetic, `CASE`, path expressions, functions, and
+  arbitrary computed expressions remain open.
 - Parameters: Sail writable Cypher accepts `$name` placeholders only where
   literal values are already accepted, using `CypherMutationOptions` rather
   than expression evaluation.
 - Schema validation: mutations should validate through `GraphSchema` before
-  they reach backend SQL.
+  they reach backend SQL. Backend-native constraint or index DDL is an explicit
+  `GraphStore::apply_native_constraint` request, not an implied side effect of
+  Sail `apply_schema`.
+- Post-write results: writable Cypher supports restricted `RETURN` tables over
+  variables already bound by the write plan, including scalar property
+  projections, whole-element projections, restricted aggregates, grouping,
+  row-level `DISTINCT`, result controls, `RETURN *`, and restricted map/list
+  projections. Path returns and arbitrary read-query projection semantics
+  remain deferred.
 - Match cardinality: mutating `MATCH ... SET/DELETE` may affect zero, one, or
   many rows; broad node `MATCH ... DELETE` now reports matched rows and changed
   graph elements, and broad node `MATCH ... SET +=`, `SET n.key = value`, and

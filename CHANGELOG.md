@@ -6,15 +6,225 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added `CypherConstraintRegistry`, `NamedGraphConstraint`, and
+  `CypherDdlApplicationReport` for applying parsed Cypher constraint DDL to
+  named schema metadata before projecting the resulting `GraphConstraint`
+  values into `GraphSchema`, including `IF NOT EXISTS` and `IF EXISTS`
+  reporting and atomic multi-statement registry application while keeping
+  backend-native DDL and migrations deferred.
+- Added `CypherConstraintRegistry::from_schema` and `apply_to_schema` so parsed
+  Cypher constraint DDL can update a schema's constraint set while preserving
+  existing node and edge type metadata.
+- Fixed writable Cypher `RETURN` mutation report aggregation so precise
+  insert/update counters are preserved when returning execution runs and merges
+  per-operation mutation reports.
+- Added `apply_cypher_ddl_to_schema` and `CypherSchemaApplication` as a small
+  schema-management helper that parses Cypher constraint DDL, updates a
+  `CypherConstraintRegistry`, projects the resulting constraints onto an
+  existing `GraphSchema`, and calls `GraphStore::apply_schema`.
+- Fixed `apply_cypher_ddl_to_schema` to stage registry changes until
+  `GraphStore::apply_schema` succeeds, so backend schema-validation failures do
+  not leave the caller's named constraint registry ahead of the applied schema.
+- Added narrow writable Cypher `RETURN count(*)` support over the already
+  materialized restricted write-result table, while still rejecting mixed
+  aggregate and non-aggregate projections.
+- Extended narrow writable Cypher count support to `COUNT(variable)` for
+  variables bound by the write plan, including concrete and row-producing
+  variables, while rejecting unbound count targets.
+- Extended narrow writable Cypher count support to `COUNT(variable.property)`,
+  counting only non-null projected values over the restricted materialized
+  write-result table.
+- Extended narrow writable Cypher count support to `COUNT(DISTINCT variable)`
+  and `COUNT(DISTINCT variable.property)` over the restricted materialized
+  write-result table, while keeping grouping and `COUNT(DISTINCT *)` deferred.
+- Added restricted writable Cypher `RETURN` support for `SUM`, `AVG`, `MIN`,
+  and `MAX` over `variable.property` projections already present in the
+  materialized write-result table, including `DISTINCT` value deduplication and
+  null/missing-value exclusion.
+- Added restricted writable Cypher `RETURN collect(...)` support over
+  variables and `variable.property` values already present in the materialized
+  write-result table, returning a `Value::Json` array with optional
+  `DISTINCT` value deduplication.
+- Added restricted writable Cypher `RETURN collect(*)` support over the same
+  materialized write-result table, returning JSON row objects keyed by bound
+  variable name and supporting grouped collection.
+- Added restricted writable Cypher `RETURN *` support over variables already
+  bound by the write plan, expanding to deterministic element columns without
+  adding arbitrary read-query projection semantics.
+- Added endpoint-aligned row values for row-producing writable Cypher
+  relationship writes, so matched source and destination variables can be
+  returned alongside the produced relationship without independent node scans.
+- Added restricted writable Cypher map projections such as
+  `RETURN n { .id, .label }` over variables already bound by the write plan,
+  while keeping arbitrary map expressions deferred.
+- Added restricted writable Cypher list projections such as
+  `RETURN [n.id, n.label]` over one variable already bound by the write plan,
+  while keeping arbitrary list expressions deferred.
+- Updated the writable Cypher planning docs to reflect the post-review
+  implementation status and the next continuation batches for backend-native
+  constraints, shared write-result rows, and future expression slices.
+- Added an explicit backend-native graph constraint DDL surface in `grust-core`
+  through `GraphNativeConstraintCapability`,
+  `GraphNativeConstraintRequest`, `GraphNativeConstraintReport`, and
+  `GraphStore::apply_native_constraint`, keeping native constraint/index DDL
+  separate from portable `GraphStore::apply_schema`.
+- Added an explicit internal writable-Cypher write-result row model in
+  `grust-sail` for row-node and row-edge values, centralizing restricted
+  `RETURN` row-count validation and deterministic row-variable ordering for
+  `RETURN *` and `collect(*)`.
+- Added restricted writable Cypher `RETURN CASE WHEN variable.property =
+  literal THEN literal ELSE literal END` scalar projections over the existing
+  write-result row model while keeping general expression evaluation deferred.
+- Extended restricted writable Cypher `RETURN CASE` projections to accept
+  `CypherMutationOptions::parameters` in the equality value and literal branch
+  positions.
+- Added restricted writable Cypher aggregates over the existing restricted
+  `CASE WHEN variable.property = literal THEN literal ELSE literal END`
+  projection form, supporting `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, and
+  `COLLECT` while preserving the literal-only CASE grammar.
+- Added backend-neutral relationship numeric property updates for writable
+  Cypher, lowering `MATCH ... SET e.key = e.key + literal_or_parameter` and
+  the corresponding `-`, `*`, and `/` forms into explicit matched-edge
+  read-modify-write mutation operations for Memory and Sail.
+- Added strict multi-target `MATCH ... DELETE` support for relationship
+  patterns such as `DELETE e, a`, lowering relationship deletes and
+  ID-resolved endpoint node deletes into ordered Grust mutation operations.
+- Added restricted writable Cypher path-shaped `RETURN` support for
+  row-producing `MATCH ... CREATE/MERGE` relationship writes that bind a path
+  variable such as `CREATE p = (n)-[r:TYPE]->(t)`, returning aligned source
+  node, relationship, and target node JSON while keeping path properties and
+  resolved-edge paths deferred.
+- Extended restricted writable Cypher path-shaped `RETURN` support to
+  `count(p)`, `count(DISTINCT p)`, and `collect(p)` over row-producing path
+  variables, reusing the same aligned path materialization used by `RETURN p`.
+- Extended restricted writable Cypher path-shaped `RETURN` support to resolved
+  single-edge `MATCH ... CREATE/MERGE p = (a)-[r:TYPE]->(b)` writes, including
+  `RETURN p`, `count(p)`, and `collect(p)` over the concrete path binding.
+- Added restricted writable Cypher path introspection projections
+  `length(p)`, `nodes(p)`, and `relationships(p)` for writable path variables,
+  reusing the same path materialization as `RETURN p`.
+- Extended restricted writable Cypher aggregates to accept path introspection
+  projections such as `sum(length(p))`, `avg(length(p))`,
+  `collect(nodes(p))`, and `collect(relationships(p))` over writable path
+  variables.
+- Extended restricted writable Cypher `COUNT` and `COLLECT` aggregates to
+  accept the existing restricted map and list projection forms.
+- Added restricted writable Cypher literal `RETURN` projections and aggregate
+  bodies, including parameters in literal positions and `count(1)`,
+  `count(null)`, `sum(1)`, `avg(1)`, and `collect('value')` over the existing
+  materialized write-result table.
+- Added restricted writable Cypher `coalesce(...)` projections and aggregate
+  bodies over one bound variable's properties plus literal or parameter
+  fallbacks, while keeping nested functions and cross-variable expression
+  evaluation deferred.
+- Added restricted writable Cypher `labels(node)` and `type(relationship)`
+  projections and aggregate bodies over variables already bound by the
+  materialized write-result table.
+- Added restricted writable Cypher `properties(element)` and `keys(element)`
+  projections and aggregate bodies over bound node and relationship variables,
+  returning deterministic JSON values from Grust's stored property maps.
+- Added restricted writable Cypher `startNode(relationship)` and
+  `endNode(relationship)` projections and aggregate bodies over bound
+  relationship variables, materializing endpoint nodes through the existing
+  writable result table.
+- Added restricted writable Cypher `id(element)` and `elementId(element)`
+  projections and aggregate bodies over bound node and relationship variables,
+  reusing the existing physical identity projection semantics.
+- Added restricted writable Cypher `exists(variable.property)` projections and
+  aggregate bodies over bound node and relationship variables, returning
+  booleans from the existing property materialization path.
+- Added restricted writable Cypher `size(variable.property)` projections and
+  aggregate bodies over bound node and relationship variables, returning
+  lengths for string and array-like property values.
+- Added restricted writable Cypher `toLower(variable.property)` and
+  `toUpper(variable.property)` projections and aggregate bodies over bound
+  node and relationship variables, keeping string normalization explicit and
+  type-aware.
+- Added restricted writable Cypher `trim(variable.property)`,
+  `lTrim(variable.property)`, and `rTrim(variable.property)` projections and
+  aggregate bodies over bound node and relationship variables.
+- Added restricted writable Cypher `substring(variable.property, start[, length])`
+  projections and aggregate bodies with literal or parameter integer offsets.
+- Added restricted writable Cypher
+  `replace(variable.property, search, replacement)` projections and aggregate
+  bodies with literal or parameter string search and replacement values.
+- Added restricted writable Cypher `startsWith(variable.property, needle)`,
+  `endsWith(variable.property, needle)`, and
+  `contains(variable.property, needle)` projections and aggregate bodies with
+  literal or parameter string needles.
+- Added restricted writable Cypher `left(variable.property, length)` and
+  `right(variable.property, length)` projections and aggregate bodies with
+  literal or parameter integer lengths.
+- Added restricted writable Cypher `reverse(variable.property)` projections
+  and aggregate bodies over string property values.
+- Added restricted writable Cypher `split(variable.property, delimiter)`
+  projections and aggregate bodies with non-empty literal or parameter string
+  delimiters, returning JSON string arrays.
+- Added restricted writable Cypher `isEmpty(variable.property)` projections
+  and aggregate bodies over string, array, and JSON collection property
+  values.
+- Added restricted writable Cypher `toString(variable.property)` projections
+  and aggregate bodies over scalar property values.
+- Added restricted writable Cypher `abs(variable.property)` projections and
+  aggregate bodies over numeric property values.
+- Added restricted writable Cypher grouping for mixed scalar and aggregate
+  `RETURN` projections, grouping only by scalar projections over the
+  materialized write-result table and then applying the existing
+  `ORDER BY`/offset/limit controls.
+- Added restricted writable Cypher `RETURN` rows for broad
+  `MATCH ... DELETE` node and relationship writes by capturing the matched
+  rows before deletion and projecting those pre-delete values after execution.
+- Added ignored live Sail regression coverage for broad
+  `MATCH ... DELETE ... RETURN` node and relationship writes, covering the
+  native returning path in addition to the Memory/Sail helper path.
+- Added opt-in generated relationship IDs for row-producing
+  `MATCH ... CREATE` edge writes through
+  `CypherRelationshipIdPolicy::GenerateForRowCreate`, and for row-producing
+  `MATCH ... CREATE/MERGE` edge writes through
+  `GenerateForRowCreateAndMerge`, backed by
+  backend-neutral `GraphRowEdgeIdPolicy` metadata and deterministic
+  `generated_row_edge_id` generation shared by Sail and Memory.
+- Added row-level `RETURN DISTINCT` support for writable Cypher's restricted
+  materialized result tables, with deduplication applied before existing
+  `ORDER BY`, `SKIP`, and `LIMIT` controls.
+- Extended writable Cypher `RETURN ORDER BY` to accept returned projection
+  expressions, such as `ORDER BY n.name` when `n.name AS name` is projected,
+  while still rejecting non-returned expressions.
+- Added `OFFSET` as a writable Cypher `RETURN` control synonym for `SKIP` over
+  the restricted materialized result table.
+- Added explicit relationship `id` support for row-producing
+  `MATCH ... CREATE/MERGE` edge writes when the matched endpoint row set
+  produces exactly one edge, while rejecting multi-row fan-out with one literal
+  relationship id.
+- Fixed generic writable Cypher returning execution so
+  `collect_written_edge_identities` can report row-producing
+  `MATCH ... CREATE/MERGE` edge identities instead of rejecting that plan shape.
+- Added `LIMIT ALL` support to writable Cypher `RETURN` control clauses,
+  matching the existing read-query spelling while preserving numeric `LIMIT`
+  behavior.
+- Added serde serialization support for Cypher constraint DDL helper types,
+  including `CypherConstraintRegistry`, so callers can persist named
+  constraint metadata outside backend-native schema storage.
+- Added `CypherConstraintRegistry::to_json` and `from_json` convenience helpers
+  for caller-owned named constraint metadata persistence with Grust error
+  mapping.
+- Added Sail-owned `save_cypher_constraint_registry` and
+  `load_cypher_constraint_registry` helpers that persist named registry JSON in
+  a `grust_cypher_constraint_registry` table while keeping native backend
+  constraint/index DDL and migrations deferred.
+- Added `CypherSchemaManager` to keep a `GraphSchema` and named Cypher
+  constraint registry together while applying Cypher DDL through
+  `GraphStore::apply_schema` with success-only state updates.
 - Added precise insert-versus-update classification to `GraphMutationReport`
   through `node_inserts`, `node_updates`, `edge_inserts`, and `edge_updates`,
   populated during plan execution by backends that can distinguish create from
-  replace (the in-memory executor and row-producing MERGE/CREATE edges);
-  upsert-only backends such as Sail leave them zero and keep reporting through
-  the existing `*_upserts` totals.
+  replace (the in-memory executor, Sail resolved node/edge upserts, and Sail
+  and Memory row-producing MERGE/CREATE edges); unresolved upsert-only paths
+  continue to report through the existing `*_upserts` totals when the backend
+  cannot classify the write outcome.
 - Added `ORDER BY`, `SKIP`, and `LIMIT` support to the writable Cypher `RETURN`
   slice, applied as a stable post-materialization step shared by Sail and the
-  backend-neutral Memory returning helper, while still rejecting aggregation and
+  backend-neutral Memory returning helper, while still rejecting grouping and
   path returns.
 - Changed `SailGraphStore` to validate unique-property constraints before writes
   through a read-before-write existence check in `put_node`, `put_edge`, and

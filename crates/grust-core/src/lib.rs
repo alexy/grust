@@ -1876,6 +1876,39 @@ pub enum GraphConstraintCapability {
     EnforcedByBackend,
 }
 
+/// Backend-native DDL support for a portable graph constraint.
+///
+/// This is intentionally separate from [`GraphConstraintCapability`].
+/// A backend may validate a constraint before writes without having native DDL,
+/// or it may create a query index that helps lookups but does not enforce the
+/// constraint. Callers that need database-enforced guarantees should require
+/// [`GraphNativeConstraintCapability::NativeConstraint`] and use
+/// [`GraphStore::apply_native_constraint`] explicitly.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphNativeConstraintCapability {
+    /// The backend has no native DDL mapping for this constraint.
+    #[default]
+    Unsupported,
+    /// The backend can create a native index that may improve related lookups
+    /// but does not enforce the constraint.
+    NativeIndex,
+    /// The backend can create a native constraint or equivalent database
+    /// object that enforces the portable constraint.
+    NativeConstraint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GraphNativeConstraintRequest {
+    pub constraint: GraphConstraint,
+    pub if_not_exists: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GraphNativeConstraintReport {
+    pub applied: usize,
+    pub skipped: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Field {
     pub name: String,
@@ -2221,6 +2254,44 @@ pub trait GraphStore: Send + Sync {
         GraphConstraintCapability::MetadataOnly
     }
 
+    /// Reports whether this backend can turn a portable graph constraint into
+    /// backend-native DDL.
+    ///
+    /// This is an explicit opt-in surface. [`GraphStore::apply_schema`] remains
+    /// the portable schema/validation hook and must not be assumed to create
+    /// backend-native constraints. The default implementation reports no native
+    /// support.
+    fn native_constraint_capability(
+        &self,
+        _constraint: &GraphConstraint,
+    ) -> GraphNativeConstraintCapability {
+        GraphNativeConstraintCapability::Unsupported
+    }
+
+    /// Applies one backend-native constraint or index request.
+    ///
+    /// Backends should implement this only when they can describe the native
+    /// object they create and its enforcement behavior through
+    /// [`GraphNativeConstraintCapability`]. The default returns an explicit
+    /// unsupported error so callers cannot mistake metadata-only schema
+    /// application for native DDL.
+    async fn apply_native_constraint(
+        &self,
+        request: GraphNativeConstraintRequest,
+    ) -> Result<GraphNativeConstraintReport> {
+        match self.native_constraint_capability(&request.constraint) {
+            GraphNativeConstraintCapability::Unsupported => Err(GrustError::Unsupported(format!(
+                "backend-native DDL is not supported for graph constraint {:?}",
+                request.constraint
+            ))),
+            GraphNativeConstraintCapability::NativeIndex
+            | GraphNativeConstraintCapability::NativeConstraint => Err(GrustError::Unsupported(
+                "backend advertises native graph constraint support but does not implement apply_native_constraint"
+                    .to_string(),
+            )),
+        }
+    }
+
     /// Writes one node.
     ///
     /// The returned [`PutOutcome`] reports the most precise result the backend
@@ -2321,6 +2392,13 @@ pub enum GraphMutation {
         relationship: GraphRelationshipMatch,
         patch: Props,
     },
+    UpdateMatchingEdgeProperty {
+        relationship: GraphRelationshipMatch,
+        target_key: String,
+        source_key: String,
+        op: GraphNumericOp,
+        operand: Value,
+    },
     RemoveNodeProps {
         id: NodeId,
         keys: Vec<String>,
@@ -2355,6 +2433,7 @@ pub enum GraphMutation {
         to: GraphNodeMatch,
         label: Label,
         props: Props,
+        edge_id_policy: GraphRowEdgeIdPolicy,
     },
     DeleteEdge {
         from: NodeId,
@@ -2379,10 +2458,47 @@ pub enum GraphMutationPlanKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphRowEdgeIdPolicy {
+    ExplicitOnly,
+    GenerateForCreate,
+    GenerateForCreateAndMerge,
+}
+
+impl Default for GraphRowEdgeIdPolicy {
+    fn default() -> Self {
+        Self::ExplicitOnly
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GraphMutationCardinality {
     SingleIdentity,
     BoundedMany,
     UnboundedMany,
+}
+
+pub fn generated_row_edge_id(from: &NodeId, label: &Label, to: &NodeId, props: &Props) -> EdgeId {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    fn write_part(hash: &mut u64, value: &str) {
+        for byte in value.as_bytes() {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        *hash ^= 0xff;
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    let mut hash = FNV_OFFSET;
+    write_part(&mut hash, from.as_str());
+    write_part(&mut hash, label.as_str());
+    write_part(&mut hash, to.as_str());
+    for (key, value) in props {
+        write_part(&mut hash, key);
+        write_part(&mut hash, &value.to_json().to_string());
+    }
+    EdgeId::new(format!("edge-{hash:016x}"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2552,6 +2668,14 @@ pub enum GraphMutationPlanOp {
         patch: Props,
         cardinality: GraphMutationCardinality,
     },
+    UpdateMatchingEdgeProperty {
+        relationship: GraphRelationshipMatch,
+        target_key: String,
+        source_key: String,
+        op: GraphNumericOp,
+        operand: Value,
+        cardinality: GraphMutationCardinality,
+    },
     RemoveNodeProps {
         id: NodeId,
         keys: Vec<String>,
@@ -2591,6 +2715,7 @@ pub enum GraphMutationPlanOp {
         to: GraphNodeMatch,
         label: Label,
         props: Props,
+        edge_id_policy: GraphRowEdgeIdPolicy,
         cardinality: GraphMutationCardinality,
     },
     DeleteNode(NodeId),
@@ -2722,6 +2847,9 @@ impl GraphMutationReport {
             GraphMutationPlanOp::PatchMatchingEdges { .. } => {
                 self.patches += 1;
             }
+            GraphMutationPlanOp::UpdateMatchingEdgeProperty { .. } => {
+                self.patches += 1;
+            }
             GraphMutationPlanOp::RemoveNodeProps { .. } => {
                 self.property_removes += 1;
                 self.node_property_removes += 1;
@@ -2814,6 +2942,20 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 relationship,
                 patch,
             },
+            GraphMutationPlanOp::UpdateMatchingEdgeProperty {
+                relationship,
+                target_key,
+                source_key,
+                op,
+                operand,
+                ..
+            } => Self::UpdateMatchingEdgeProperty {
+                relationship,
+                target_key,
+                source_key,
+                op,
+                operand,
+            },
             GraphMutationPlanOp::RemoveNodeProps { id, keys } => Self::RemoveNodeProps { id, keys },
             GraphMutationPlanOp::RemoveEdgeProps {
                 from,
@@ -2860,6 +3002,7 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 to,
                 label,
                 props,
+                edge_id_policy,
                 ..
             } => Self::UpsertEdgesFromNodeMatches {
                 kind,
@@ -2867,6 +3010,7 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 to,
                 label,
                 props,
+                edge_id_policy,
             },
             GraphMutationPlanOp::DeleteNode(id) => Self::DeleteNode(id),
             GraphMutationPlanOp::DeleteEdge { from, label, to } => {
@@ -2919,6 +3063,12 @@ pub trait CypherMutationExecutor: GraphMutationStore {
                 GraphMutationPlanOp::PatchMatchingEdges { .. } => {
                     return Err(GrustError::CypherExecution(
                         "matched edge patches require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::UpdateMatchingEdgeProperty { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge expression updates require backend-specific query support"
+                            .to_string(),
                     ));
                 }
                 GraphMutationPlanOp::RemoveMatchingEdgeProps { .. } => {
@@ -3061,6 +3211,12 @@ pub trait GraphMutationStore: GraphStore {
                         "matched edge patches require backend-specific query support".to_string(),
                     ));
                 }
+                GraphMutation::UpdateMatchingEdgeProperty { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched edge expression updates require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
                 GraphMutation::RemoveNodeProps { id, keys } => {
                     if let Some(mut node) = self.get_node(id).await? {
                         for key in keys {
@@ -3149,11 +3305,13 @@ pub mod prelude {
         EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder, GraphConstraint,
         GraphConstraintCapability, GraphIndex, GraphMutation, GraphMutationAtomicity,
         GraphMutationCardinality, GraphMutationPlan, GraphMutationPlanKind, GraphMutationPlanOp,
-        GraphMutationReport, GraphMutationStore, GraphNodeMatch, GraphNumericOp, GraphPredicateOp,
-        GraphPropertyPredicate, GraphRelationshipMatch, GraphSchema, GraphSchemaBuilder,
-        GraphStore, GrustError, Label, LoadReport, Node, NodeId, NodeType, Props, PutOutcome,
-        Result, RfcDate, Start, Step, Traversal, Value, classify_edge_upsert, classify_node_upsert,
-        edge_key, evaluate_numeric_update, relationship_type, schema_identifier,
+        GraphMutationReport, GraphMutationStore, GraphNativeConstraintCapability,
+        GraphNativeConstraintReport, GraphNativeConstraintRequest, GraphNodeMatch, GraphNumericOp,
+        GraphPredicateOp, GraphPropertyPredicate, GraphRelationshipMatch, GraphRowEdgeIdPolicy,
+        GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId,
+        NodeType, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value,
+        classify_edge_upsert, classify_node_upsert, edge_key, evaluate_numeric_update,
+        generated_row_edge_id, relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

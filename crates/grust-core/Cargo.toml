@@ -23,3 +23,6 @@ zod-rs = { workspace = true, optional = true }
 default = []
 typed-garde = ["dep:garde"]
 typed-zod-rs = ["typed-garde", "dep:zod-rs"]
+
+[dev-dependencies]
+futures-executor.workspace = true

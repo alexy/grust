@@ -1052,12 +1052,12 @@ insert-versus-update outcomes on upsert backends. `MERGE` and edge endpoint
 patterns still require resolved IDs before writing.
 The first table-returning write path is deliberately smaller than general
 Cypher `RETURN`: `execute_cypher_mutation_returning_with_options` accepts a
-final element or property projection over node variables and concrete
-relationship variables already resolved by the write plan, including concrete
-edge upserts and edge patches. Sail and the backend-neutral Memory/Sail helper
-can also return one row per relationship variable produced by restricted
-row-producing `MATCH ... CREATE/MERGE` edge writes, plus portable broad node
-rows for restricted `MATCH ... SET/REMOVE` forms such as
+final projection over node variables and relationship variables already
+resolved by the write plan, including concrete edge upserts and edge patches.
+Sail and the backend-neutral Memory/Sail helper can also return one row per
+relationship variable produced by restricted row-producing
+`MATCH ... CREATE/MERGE` edge writes, plus portable broad node rows for
+restricted `MATCH ... SET/REMOVE` forms such as
 `MATCH (n:Person {status: 'active'}) SET n.seen = true RETURN n.id, n.seen`
 and portable broad relationship rows for restricted `MATCH ... SET/REMOVE`
 forms such as `MATCH (a)-[e:KNOWS]->(b) SET e.seen = true RETURN e.id, e.seen`.
@@ -1066,11 +1066,22 @@ Physical `id` and `label` fields are supported alongside stored properties, for 
 `RETURN e.id, e.label, e.weight`, or `RETURN e.label, e.source` after a
 row-producing edge write; whole elements can also be returned as `Value::Json`
 in the Grust `Node` / `Edge` serde shape with
-`RETURN n AS node, e AS relationship`. It returns
+`RETURN n AS node, e AS relationship`. Restricted Cypher function spelling is
+also available over those already-bound values, including `labels(n)`,
+`type(e)`, `properties(n)`, `keys(e)`, `id(n)`, `elementId(e)`,
+`exists(n.nickname)`, `size(n.nickname)`, `toLower(n.team)`,
+`isEmpty(n.nickname)`, `toString(n.score)`, `toUpper(n.code)`,
+`abs(n.score)`, `trim(n.name)`, `substring(n.name, 0, 3)`,
+`replace(n.team, '-team', '')`, `startsWith(n.team, 'eng')`,
+`left(n.team, 3)`, `right(n.code, 2)`, `reverse(n.code)`,
+`split(n.path, '/')`, `startNode(e)`, and `endNode(e)`.
+Relationship identity functions return an explicit
+relationship ID when one exists and `null` otherwise; they do not invent
+generated structural identity. The returning entrypoint returns
 `CypherMutationTableResult`, which keeps mutation reporting separate from
-`CypherResultTable`. Aggregation, paths, ordering, limiting, arbitrary
-read-query features, unrestricted broad row materialization, and path-style
-row projections remain rejected until a shared read/write row model owns those
+`CypherResultTable`. General expression evaluation, arbitrary read-query
+features, unrestricted broad row materialization, and variable-length path
+semantics remain rejected until a shared read/write row model owns those
 semantics.
 `CypherMutationOptions::parameters` binds Grust `Value`s to `$name`
 placeholders only where literals are already accepted: IDs, property maps, and

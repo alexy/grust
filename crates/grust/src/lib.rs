@@ -23,11 +23,13 @@ pub use grust_pggraph::*;
 
 #[cfg(feature = "sail")]
 pub use grust_sail::{
-    CypherCreateMode, CypherDdlStatement, CypherGeneratedNodeId, CypherMutationOptions,
-    CypherMutationReport, CypherMutationResult, CypherMutationTableResult, CypherNodeIdPolicy,
-    CypherNullAssignment, CypherResultTable, CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity,
-    SailConfig, SailDegreePairRow, SailDegreeRow, SailGraphPatternDirection, SailGraphStore,
-    SailGraphTypedTable, SailGraphTypedTableKind, SailTripletRow,
+    CypherConstraintRegistry, CypherCreateMode, CypherDdlApplicationReport, CypherDdlStatement,
+    CypherGeneratedNodeId, CypherMutationOptions, CypherMutationReport, CypherMutationResult,
+    CypherMutationTableResult, CypherNodeIdPolicy, CypherNullAssignment,
+    CypherRelationshipIdPolicy, CypherResultTable, CypherSchemaApplication, CypherSchemaManager,
+    CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity, NamedGraphConstraint, SailConfig,
+    SailDegreePairRow, SailDegreeRow, SailGraphPatternDirection, SailGraphStore,
+    SailGraphTypedTable, SailGraphTypedTableKind, SailTripletRow, apply_cypher_ddl_to_schema,
     execute_cypher_mutation_returning_with_options_on_store, sail_cypher_constraints,
     sail_cypher_ddl, sail_cypher_mutation_plan, sail_degree_pairs_sql, sail_degrees_sql,
     sail_graph_schema_typed_tables, sail_in_degrees_sql, sail_out_degrees_sql, sail_triplets_sql,
@@ -64,16 +66,19 @@ pub mod prelude {
 
     #[cfg(feature = "sail")]
     pub use grust_sail::{
-        CypherCreateMode, CypherDdlStatement, CypherGeneratedNodeId, CypherMutationOptions,
-        CypherMutationReport, CypherMutationResult, CypherMutationTableResult, CypherNodeIdPolicy,
-        CypherNullAssignment, CypherResultTable, CypherWrittenEdgeIdentity,
-        CypherWrittenNodeIdentity, SailConfig, SailDegreePairRow, SailDegreeRow,
+        CypherConstraintRegistry, CypherCreateMode, CypherDdlApplicationReport, CypherDdlStatement,
+        CypherGeneratedNodeId, CypherMutationOptions, CypherMutationReport, CypherMutationResult,
+        CypherMutationTableResult, CypherNodeIdPolicy, CypherNullAssignment,
+        CypherRelationshipIdPolicy, CypherResultTable, CypherSchemaApplication,
+        CypherSchemaManager, CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity,
+        NamedGraphConstraint, SailConfig, SailDegreePairRow, SailDegreeRow,
         SailGraphPatternDirection, SailGraphStore, SailGraphTypedTable, SailGraphTypedTableKind,
-        SailTripletRow, execute_cypher_mutation_returning_with_options_on_store,
-        sail_cypher_constraints, sail_cypher_ddl, sail_cypher_mutation_plan, sail_degree_pairs_sql,
-        sail_degrees_sql, sail_graph_schema_typed_tables, sail_in_degrees_sql,
-        sail_out_degrees_sql, sail_triplets_sql, sail_triplets_sql_for_direction,
-        sail_typed_edge_columns, sail_typed_edge_table_missing_fields, sail_typed_node_columns,
+        SailTripletRow, apply_cypher_ddl_to_schema,
+        execute_cypher_mutation_returning_with_options_on_store, sail_cypher_constraints,
+        sail_cypher_ddl, sail_cypher_mutation_plan, sail_degree_pairs_sql, sail_degrees_sql,
+        sail_graph_schema_typed_tables, sail_in_degrees_sql, sail_out_degrees_sql,
+        sail_triplets_sql, sail_triplets_sql_for_direction, sail_typed_edge_columns,
+        sail_typed_edge_table_missing_fields, sail_typed_node_columns,
         sail_typed_node_table_missing_fields,
     };
 

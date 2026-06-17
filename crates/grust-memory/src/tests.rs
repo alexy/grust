@@ -116,6 +116,24 @@ fn memory_reports_constraint_capabilities_and_validates_constraints() {
         store.constraint_capability(&unique),
         GraphConstraintCapability::ValidateBeforeWrite
     );
+    assert_eq!(
+        store.native_constraint_capability(&required),
+        GraphNativeConstraintCapability::Unsupported
+    );
+    assert_eq!(
+        store.native_constraint_capability(&unique),
+        GraphNativeConstraintCapability::Unsupported
+    );
+
+    let native_error =
+        futures_executor::block_on(store.apply_native_constraint(GraphNativeConstraintRequest {
+            constraint: unique.clone(),
+            if_not_exists: true,
+        }))
+        .expect_err("memory validates constraints but does not emit native DDL");
+    assert!(
+        matches!(native_error, GrustError::Unsupported(message) if message.contains("backend-native DDL"))
+    );
 
     futures_executor::block_on(store.apply_schema(&schema)).unwrap();
     let error =
@@ -775,6 +793,7 @@ fn row_producing_edge_create_matches_endpoint_nodes() {
             },
             label: Label::new("MEMBER_OF"),
             props: Props::from([("source".to_string(), Value::from("cypher"))]),
+            edge_id_policy: GraphRowEdgeIdPolicy::ExplicitOnly,
             cardinality: GraphMutationCardinality::BoundedMany,
         },
     ]);
@@ -831,6 +850,7 @@ fn row_producing_edge_create_matches_endpoint_nodes() {
         },
         label: Label::new("MEMBER_OF"),
         props: Props::from([("source".to_string(), Value::from("merge"))]),
+        edge_id_policy: GraphRowEdgeIdPolicy::ExplicitOnly,
         cardinality: GraphMutationCardinality::BoundedMany,
     }]);
     let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&merge)).unwrap();
@@ -855,6 +875,108 @@ fn row_producing_edge_create_matches_endpoint_nodes() {
     .unwrap();
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].props.get("source"), Some(&Value::from("merge")));
+
+    let generated_props = Props::from([("source".to_string(), Value::from("generated"))]);
+    let generated = GraphMutationPlan::new(vec![GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+        kind: GraphMutationPlanKind::Create,
+        from: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("active"))]),
+            predicates: vec![GraphPropertyPredicate {
+                key: "score".to_string(),
+                op: GraphPredicateOp::GreaterThanOrEqual,
+                value: Value::Int(10),
+            }],
+        },
+        to: GraphNodeMatch {
+            label: Some(Label::new("Team")),
+            props: Props::from([("id".to_string(), Value::from("eng"))]),
+            predicates: Vec::new(),
+        },
+        label: Label::new("GENERATED_MEMBER_OF"),
+        props: generated_props.clone(),
+        edge_id_policy: GraphRowEdgeIdPolicy::GenerateForCreate,
+        cardinality: GraphMutationCardinality::BoundedMany,
+    }]);
+    let report =
+        futures_executor::block_on(store.execute_cypher_mutation_plan(&generated)).unwrap();
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            creates: 1,
+            matched_rows: 1,
+            changed_edges: 1,
+            edge_upserts: 1,
+            edge_inserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    let edges = futures_executor::block_on(store.get_edges(EdgeQuery {
+        from: Some(NodeId::new("ada")),
+        to: Some(NodeId::new("eng")),
+        label: Some(Label::new("GENERATED_MEMBER_OF")),
+    }))
+    .unwrap();
+    assert_eq!(
+        edges[0].id,
+        Some(generated_row_edge_id(
+            &NodeId::new("ada"),
+            &Label::new("GENERATED_MEMBER_OF"),
+            &NodeId::new("eng"),
+            &generated_props
+        ))
+    );
+
+    let generated_merge_props =
+        Props::from([("source".to_string(), Value::from("generated-merge"))]);
+    let generated_merge =
+        GraphMutationPlan::new(vec![GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+            kind: GraphMutationPlanKind::Merge,
+            from: GraphNodeMatch {
+                label: Some(Label::new("Person")),
+                props: Props::from([("status".to_string(), Value::from("active"))]),
+                predicates: vec![GraphPropertyPredicate {
+                    key: "score".to_string(),
+                    op: GraphPredicateOp::GreaterThanOrEqual,
+                    value: Value::Int(10),
+                }],
+            },
+            to: GraphNodeMatch {
+                label: Some(Label::new("Team")),
+                props: Props::from([("id".to_string(), Value::from("eng"))]),
+                predicates: Vec::new(),
+            },
+            label: Label::new("GENERATED_MERGE_MEMBER_OF"),
+            props: generated_merge_props.clone(),
+            edge_id_policy: GraphRowEdgeIdPolicy::GenerateForCreateAndMerge,
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]);
+    let report =
+        futures_executor::block_on(store.execute_cypher_mutation_plan(&generated_merge)).unwrap();
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            merges: 1,
+            matched_rows: 1,
+            changed_edges: 1,
+            edge_upserts: 1,
+            edge_inserts: 1,
+            ..GraphMutationReport::default()
+        }
+    );
+    let report =
+        futures_executor::block_on(store.execute_cypher_mutation_plan(&generated_merge)).unwrap();
+    assert_eq!(
+        report,
+        GraphMutationReport {
+            merges: 1,
+            matched_rows: 1,
+            changed_edges: 1,
+            edge_upserts: 1,
+            edge_updates: 1,
+            ..GraphMutationReport::default()
+        }
+    );
 }
 
 #[test]
@@ -1367,11 +1489,20 @@ fn executor_classifies_inserts_and_updates_precisely() {
     let merge = GraphMutationPlan::new(vec![
         GraphMutationPlanOp::UpsertNode {
             kind: GraphMutationPlanKind::Merge,
-            node: Node::new("Person", "p1", Props::from([("seen".to_string(), Value::Bool(true))])),
+            node: Node::new(
+                "Person",
+                "p1",
+                Props::from([("seen".to_string(), Value::Bool(true))]),
+            ),
         },
         GraphMutationPlanOp::UpsertEdge {
             kind: GraphMutationPlanKind::Merge,
-            edge: Edge::new("KNOWS", "p1", "p2", Props::from([("weight".to_string(), Value::Int(1))])),
+            edge: Edge::new(
+                "KNOWS",
+                "p1",
+                "p2",
+                Props::from([("weight".to_string(), Value::Int(1))]),
+            ),
         },
     ]);
     let report = futures_executor::block_on(store.execute_cypher_mutation_plan(&merge)).unwrap();

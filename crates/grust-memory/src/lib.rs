@@ -534,6 +534,40 @@ impl CypherMutationExecutor for MemoryGraphStore {
                         inner.edges.insert(MemoryEdgeKey::from_edge(&edge), edge);
                     }
                 }
+                GraphMutationPlanOp::UpdateMatchingEdgeProperty {
+                    relationship,
+                    target_key,
+                    source_key,
+                    op,
+                    operand,
+                    ..
+                } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let edges = Self::matching_edges(&inner, relationship);
+                    report.matched_rows += edges.len();
+                    report.edge_patches += edges.len();
+                    report.changed_edges += edges.len();
+
+                    let mut updated = Vec::with_capacity(edges.len());
+                    for mut edge in edges {
+                        let current = edge.props.get(source_key).ok_or_else(|| {
+                            GrustError::CypherExecution(format!(
+                                "numeric expression source property '{source_key}' is missing"
+                            ))
+                        })?;
+                        let value = evaluate_numeric_update(current, *op, operand)?;
+                        edge.props.insert(target_key.clone(), value);
+                        if let Some(schema) = &inner.schema {
+                            schema.validate_edge_with(&edge, |id| {
+                                inner.nodes.get(id).map(|node| &node.label)
+                            })?;
+                        }
+                        updated.push(edge);
+                    }
+                    for edge in updated {
+                        inner.edges.insert(MemoryEdgeKey::from_edge(&edge), edge);
+                    }
+                }
                 GraphMutationPlanOp::RemoveMatchingEdgeProps {
                     relationship, keys, ..
                 } => {
@@ -570,10 +604,12 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     }
                 }
                 GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+                    kind,
                     from,
                     to,
                     label,
                     props,
+                    edge_id_policy,
                     ..
                 } => {
                     let mut inner = self.inner.write().expect("memory graph lock poisoned");
@@ -593,16 +629,28 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     report.matched_rows += matched_rows;
                     report.edge_upserts += matched_rows;
                     report.changed_edges += matched_rows;
+                    let explicit_edge_id = explicit_edge_id_from_props(props)?;
+                    if explicit_edge_id.is_some() && matched_rows > 1 {
+                        return Err(GrustError::CypherUnsupportedCardinality(
+                            "row-producing MATCH ... CREATE/MERGE with an explicit relationship id must produce exactly one edge".to_string(),
+                        ));
+                    }
 
                     let mut edges = Vec::with_capacity(matched_rows);
                     for from_id in &from_ids {
                         for to_id in &to_ids {
-                            let edge = Edge::new(
+                            let mut edge = Edge::new(
                                 label.clone(),
                                 from_id.clone(),
                                 to_id.clone(),
                                 props.clone(),
                             );
+                            if let Some(id) = explicit_edge_id.clone() {
+                                edge = edge.with_id(id);
+                            } else if row_edge_id_policy_generates(*kind, *edge_id_policy) {
+                                edge = edge
+                                    .with_id(generated_row_edge_id(from_id, label, to_id, props));
+                            }
                             if let Some(schema) = &inner.schema {
                                 schema.validate_edge_with(&edge, |id| {
                                     inner.nodes.get(id).map(|node| &node.label)
@@ -635,6 +683,30 @@ impl CypherMutationExecutor for MemoryGraphStore {
         }
         Ok(report)
     }
+}
+
+fn explicit_edge_id_from_props(props: &Props) -> Result<Option<String>> {
+    match props.get("id") {
+        Some(Value::String(id)) => Ok(Some(id.clone())),
+        Some(_) => Err(GrustError::CypherSyntax(
+            "relationship id property must be a string literal".to_string(),
+        )),
+        None => Ok(None),
+    }
+}
+
+fn row_edge_id_policy_generates(kind: GraphMutationPlanKind, policy: GraphRowEdgeIdPolicy) -> bool {
+    matches!(
+        (kind, policy),
+        (
+            GraphMutationPlanKind::Create,
+            GraphRowEdgeIdPolicy::GenerateForCreate
+                | GraphRowEdgeIdPolicy::GenerateForCreateAndMerge
+        ) | (
+            GraphMutationPlanKind::Merge,
+            GraphRowEdgeIdPolicy::GenerateForCreateAndMerge
+        )
+    )
 }
 
 #[cfg(test)]
