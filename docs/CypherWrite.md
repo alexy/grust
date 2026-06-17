@@ -2389,6 +2389,8 @@ remaining pieces should stay explicit:
   restricted `sign(variable.property)` projections and aggregate bodies, and
   restricted `toInteger(variable.property)` /
   `toFloat(variable.property)` projections and aggregate bodies, and
+  restricted `toBoolean(variable.property)` projections and aggregate bodies,
+  and
   restricted `isEmpty(variable.property)` projections and aggregate bodies,
   and
   restricted `toString(variable.property)` projections and aggregate bodies,
@@ -3752,3 +3754,42 @@ Writable `RETURN` now parses `toInteger(variable.property)` and
 Evaluation reuses the existing property materializer and performs only the
 explicit numeric conversions listed above, preserving the same narrow,
 type-aware behavior as the other restricted property functions.
+
+### Batch CO: Restricted Boolean Conversion Projections
+
+Support bounded boolean conversion projection over property values already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN toBoolean(n.active) AS active;
+```
+
+Acceptance criteria:
+
+- Support `toBoolean(variable.property)` as a scalar writable `RETURN`
+  projection when the variable is a concrete node, concrete relationship,
+  materialized row-node, or materialized row-relationship variable.
+- Return boolean values unchanged, accept JSON boolean values, and accept
+  case-insensitive `true` / `false` string or JSON string values. Return
+  `null` when the property is absent or explicitly null.
+- Reject numeric values, datetimes, arrays, JSON arrays, JSON objects,
+  non-boolean strings, whole-element values, paths, nested functions,
+  cross-variable expressions, and other unsupported values rather than adding
+  truthiness rules.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over boolean values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `toBoolean(...)` property-only; arbitrary expression conversion and
+  truthiness semantics remain deferred.
+
+Implementation status: implemented in the working tree after Batch CN.
+Writable `RETURN` now parses `toBoolean(variable.property)` into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and performs only explicit boolean or boolean-string conversion,
+preserving the same narrow, type-aware behavior as the other restricted
+property functions.

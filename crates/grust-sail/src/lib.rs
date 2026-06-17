@@ -2944,6 +2944,7 @@ enum CypherReturnTarget {
         key: String,
         cast: CypherReturnNumericCast,
     },
+    PropertyToBoolean(String),
     PropertyToString(String),
     PropertyStringTransform {
         key: String,
@@ -3211,6 +3212,8 @@ fn parse_cypher_return_clause(
                 variable,
                 CypherReturnTarget::PropertyNumericCast { key, cast },
             )
+        } else if let Some((variable, key)) = parse_return_to_boolean_projection(expression)? {
+            (variable, CypherReturnTarget::PropertyToBoolean(key))
         } else if let Some((variable, key)) = parse_return_to_string_projection(expression)? {
             (variable, CypherReturnTarget::PropertyToString(key))
         } else if let Some((variable, key, transform)) =
@@ -3560,6 +3563,14 @@ fn parse_aggregate_projection(
             aggregate,
             Some(variable),
             CypherReturnTarget::PropertyNumericCast { key, cast },
+            distinct,
+        )));
+    }
+    if let Some((variable, key)) = parse_return_to_boolean_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyToBoolean(key),
             distinct,
         )));
     }
@@ -3983,6 +3994,37 @@ fn parse_return_numeric_cast_projection(
         .map_err(|_| {
             cypher_unsupported_cardinality(
                 "writable Cypher RETURN toInteger/toFloat only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_to_boolean_projection(expression: &str) -> Result<Option<(String, String)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("toBoolean") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN toBoolean projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN toBoolean projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toBoolean only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN toBoolean projection")
+        .map(Some)
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN toBoolean only supports variable.property arguments",
             )
         })
 }
@@ -5722,6 +5764,22 @@ where
             )
             .await
         }
+        CypherReturnTarget::PropertyToBoolean(key) => {
+            materialize_return_property_to_boolean_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await
+        }
         CypherReturnTarget::PropertyToString(key) => {
             materialize_return_property_to_string_value_at(
                 store,
@@ -6148,6 +6206,23 @@ where
                 projection,
                 key,
                 *cast,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyToBoolean(key) => {
+            let value = materialize_return_property_to_boolean_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
                 row_index,
             )
             .await?;
@@ -7268,6 +7343,70 @@ fn parse_float_string_value(value: &str) -> Result<Value> {
                 "writable Cypher RETURN toFloat only supports finite numeric-string values",
             )
         })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_to_boolean_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_to_boolean_value(value)
+}
+
+fn restricted_to_boolean_value(value: Value) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Bool(value) => Ok(Value::Bool(value)),
+        Value::String(value) => parse_boolean_string_value(&value),
+        Value::Json(serde_json::Value::Null) => Ok(Value::Null),
+        Value::Json(serde_json::Value::Bool(value)) => Ok(Value::Bool(value)),
+        Value::Json(serde_json::Value::String(value)) => parse_boolean_string_value(&value),
+        Value::Int(_)
+        | Value::Float(_)
+        | Value::DateTime(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toBoolean only supports boolean or boolean-string values",
+        )),
+    }
+}
+
+fn parse_boolean_string_value(value: &str) -> Result<Value> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(Value::Bool(true)),
+        "false" => Ok(Value::Bool(false)),
+        _ => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toBoolean only supports true/false string values",
+        )),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8446,6 +8585,7 @@ where
             | CypherReturnTarget::PropertyNumericRound { .. }
             | CypherReturnTarget::PropertyNumericSign(_)
             | CypherReturnTarget::PropertyNumericCast { .. }
+            | CypherReturnTarget::PropertyToBoolean(_)
             | CypherReturnTarget::PropertyToString(_)
             | CypherReturnTarget::PropertyStringTransform { .. }
             | CypherReturnTarget::PropertyStringTrim { .. }
@@ -8807,6 +8947,21 @@ where
             .await?
         }
         CypherReturnTarget::PropertyNumericCast { .. } => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyToBoolean(_) => {
             materialize_return_projection_values(
                 store,
                 node_bindings,

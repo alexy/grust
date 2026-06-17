@@ -5557,6 +5557,136 @@ fn sail_cypher_returning_projects_restricted_numeric_casts_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_restricted_boolean_cast_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let concrete =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'bool-ada', active: true, enabled: 'FALSE'});
+            CREATE (b:Person {id: 'bool-bob'});
+            MATCH (a:Person {id: 'bool-ada'}), (b:Person {id: 'bool-bob'})
+            CREATE (a)-[e:KNOWS {id: 'bool-knows', trusted: 'true'}]->(b)
+            RETURN toBoolean(a.active) AS active,
+                   toBoolean(a.enabled) AS enabled,
+                   toBoolean(e.trusted) AS trusted,
+                   toBoolean(a.nickname) AS missing_name;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("concrete boolean cast projections");
+    assert_eq!(
+        concrete.table.rows,
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Null,
+        ]]
+    );
+
+    let broad =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'bool-cara', status: 'bool', active: 'true'});
+            CREATE (:Person {id: 'bool-dan', status: 'bool', active: 'false'});
+            MATCH (n:Person {status: 'bool'}) SET n.seen = true
+            RETURN n.id AS id, toBoolean(n.active) AS active
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("broad boolean cast projections");
+    assert_eq!(
+        broad.table.rows,
+        vec![
+            vec![Value::from("bool-cara"), Value::Bool(true)],
+            vec![Value::from("bool-dan"), Value::Bool(false)],
+        ]
+    );
+
+    let row_edges =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Team {id: 'bool-team'});
+            MATCH (n:Person {status: 'bool'}), (t:Team {id: 'bool-team'})
+            CREATE (n)-[r:MEMBER_OF {trusted: false}]->(t)
+            RETURN n.id AS id, toBoolean(r.trusted) AS trusted
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("row-producing relationship boolean cast projections");
+    assert_eq!(
+        row_edges.table.rows,
+        vec![
+            vec![Value::from("bool-cara"), Value::Bool(false)],
+            vec![Value::from("bool-dan"), Value::Bool(false)],
+        ]
+    );
+
+    let aggregates =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (n:Person {status: 'bool'}) SET n.bool_counted = true
+            RETURN count(toBoolean(n.active)) AS rows,
+                   count(DISTINCT toBoolean(n.active)) AS distinct_states,
+                   collect(toBoolean(n.active)) AS states;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("boolean cast aggregate projections");
+    assert_eq!(
+        aggregates.table.rows,
+        vec![vec![
+            Value::Int(2),
+            Value::Int(2),
+            Value::Json(serde_json::json!([true, false])),
+        ]]
+    );
+
+    let numeric_cast =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'bool-number', active: 1}) RETURN toBoolean(n.active);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("toBoolean over numeric values should stay rejected");
+    assert!(
+        matches!(numeric_cast, GrustError::CypherUnsupportedCardinality(_)),
+        "{numeric_cast:?}"
+    );
+
+    let invalid_string =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'bool-string', active: 'yes'}) RETURN toBoolean(n.active);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("toBoolean over non-boolean strings should stay rejected");
+    assert!(
+        matches!(invalid_string, GrustError::CypherUnsupportedCardinality(_)),
+        "{invalid_string:?}"
+    );
+
+    let nested_cast =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'bool-nested', active: true}) RETURN toBoolean(toString(n.active));",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("nested toBoolean arguments should stay rejected");
+    assert!(
+        matches!(nested_cast, GrustError::CypherUnsupportedCardinality(_)),
+        "{nested_cast:?}"
+    );
+}
+
+#[test]
 fn sail_cypher_returning_projects_restricted_string_transforms_on_memory_facade() {
     let store = MemoryGraphStore::new();
 
