@@ -1,25 +1,21 @@
 [package]
-name = "grust-ladybug"
+name = "grust-cypher"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "LadybugDB GraphStore backend for Grust."
+description = "Cypher parser, planner, and generic returning executor for Grust."
 keywords.workspace = true
 categories.workspace = true
 
-[features]
-default = []
-arrow = ["dep:arrow", "lbug/arrow"]
-
 [dependencies]
-arrow = { version = "55", optional = true }
-async-trait = { workspace = true }
+async-trait.workspace = true
 grust-core = { version = "0.9.0", path = "../grust-core" }
-lbug = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
-tempfile = { workspace = true }
-tokio = { workspace = true }
+futures-executor.workspace = true
+grust-memory = { version = "0.9.0", path = "../grust-memory" }

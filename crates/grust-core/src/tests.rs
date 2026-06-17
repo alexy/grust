@@ -92,6 +92,395 @@ fn edge_key_prefers_explicit_id_then_structural_identity() {
 }
 
 #[test]
+fn mutation_plan_reports_and_lowers_to_graph_mutations() {
+    let node = Node::new("Person", "person-1", Props::new());
+    let edge = Edge::new("KNOWS", "person-1", "person-2", Props::new()).with_id("edge-1");
+    let relationship = GraphRelationshipMatch {
+        from: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::from([("status".to_string(), Value::from("active"))]),
+            predicates: Vec::new(),
+        },
+        label: Label::new("KNOWS"),
+        to: GraphNodeMatch {
+            label: Some(Label::new("Person")),
+            props: Props::new(),
+            predicates: Vec::new(),
+        },
+        id: None,
+        props: Props::new(),
+        predicates: Vec::new(),
+    };
+    let plan = GraphMutationPlan::new(vec![
+        GraphMutationPlanOp::UpsertNode {
+            kind: GraphMutationPlanKind::Create,
+            node: node.clone(),
+        },
+        GraphMutationPlanOp::UpsertEdge {
+            kind: GraphMutationPlanKind::Merge,
+            edge: edge.clone(),
+        },
+        GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+            kind: GraphMutationPlanKind::Create,
+            from: GraphNodeMatch {
+                label: Some(Label::new("Person")),
+                props: Props::from([("status".to_string(), Value::from("active"))]),
+                predicates: Vec::new(),
+            },
+            to: GraphNodeMatch {
+                label: Some(Label::new("Team")),
+                props: Props::from([("id".to_string(), Value::from("team-1"))]),
+                predicates: Vec::new(),
+            },
+            label: Label::new("MEMBER_OF"),
+            props: Props::new(),
+            edge_id_policy: GraphRowEdgeIdPolicy::ExplicitOnly,
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::PatchNode {
+            id: NodeId::new("person-1"),
+            props: Props::from([("name".to_string(), Value::from("Ada"))]),
+        },
+        GraphMutationPlanOp::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("active".to_string(), Value::Bool(false))]),
+            predicates: Vec::new(),
+            patch: Props::from([("archived".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::UpdateMatchingNodeProperty {
+            label: Some(Label::new("Counter")),
+            props: Props::from([("active".to_string(), Value::Bool(true))]),
+            predicates: Vec::new(),
+            target_key: "count".to_string(),
+            source_key: "count".to_string(),
+            op: GraphNumericOp::Add,
+            operand: Value::Int(1),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::PatchEdge {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+            id: Some(EdgeId::new("edge-1")),
+            props: Props::from([("since".to_string(), Value::Int(2026))]),
+        },
+        GraphMutationPlanOp::PatchMatchingEdges {
+            relationship: relationship.clone(),
+            patch: Props::from([("seen".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::RemoveNodeProps {
+            id: NodeId::new("person-1"),
+            keys: vec!["nickname".to_string()],
+        },
+        GraphMutationPlanOp::RemoveMatchingNodeProps {
+            label: Some(Label::new("Person")),
+            props: Props::from([("active".to_string(), Value::Bool(false))]),
+            predicates: Vec::new(),
+            keys: vec!["nickname".to_string()],
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::RemoveEdgeProps {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+            id: Some(EdgeId::new("edge-1")),
+            keys: vec!["note".to_string()],
+        },
+        GraphMutationPlanOp::RemoveMatchingEdgeProps {
+            relationship: relationship.clone(),
+            keys: vec!["note".to_string()],
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::DeleteMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::from([("active".to_string(), Value::Bool(false))]),
+            predicates: Vec::new(),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::DeleteMatchingEdges {
+            relationship: relationship.clone(),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        },
+        GraphMutationPlanOp::DeleteEdge {
+            from: NodeId::new("person-1"),
+            label: Label::new("KNOWS"),
+            to: NodeId::new("person-2"),
+        },
+        GraphMutationPlanOp::DeleteNode(NodeId::new("person-3")),
+    ]);
+
+    assert_eq!(
+        plan.report(),
+        GraphMutationReport {
+            creates: 2,
+            merges: 1,
+            deletes: 4,
+            patches: 5,
+            property_removes: 4,
+            matched_rows: 0,
+            changed_nodes: 4,
+            changed_edges: 4,
+            node_upserts: 1,
+            edge_upserts: 1,
+            node_deletes: 1,
+            edge_deletes: 1,
+            node_patches: 1,
+            edge_patches: 1,
+            node_property_removes: 1,
+            edge_property_removes: 1,
+            // Precise insert/update counts are filled in only at execution
+            // time; a plan-derived report leaves them at zero.
+            node_inserts: 0,
+            node_updates: 0,
+            edge_inserts: 0,
+            edge_updates: 0,
+        }
+    );
+    assert_eq!(
+        plan.into_mutations(),
+        vec![
+            GraphMutation::UpsertNode(node),
+            GraphMutation::UpsertEdge(edge),
+            GraphMutation::UpsertEdgesFromNodeMatches {
+                kind: GraphMutationPlanKind::Create,
+                from: GraphNodeMatch {
+                    label: Some(Label::new("Person")),
+                    props: Props::from([("status".to_string(), Value::from("active"))]),
+                    predicates: Vec::new(),
+                },
+                to: GraphNodeMatch {
+                    label: Some(Label::new("Team")),
+                    props: Props::from([("id".to_string(), Value::from("team-1"))]),
+                    predicates: Vec::new(),
+                },
+                label: Label::new("MEMBER_OF"),
+                props: Props::new(),
+                edge_id_policy: GraphRowEdgeIdPolicy::ExplicitOnly,
+            },
+            GraphMutation::PatchNode {
+                id: NodeId::new("person-1"),
+                props: Props::from([("name".to_string(), Value::from("Ada"))]),
+            },
+            GraphMutation::PatchMatchingNodes {
+                label: Some(Label::new("Person")),
+                props: Props::from([("active".to_string(), Value::Bool(false))]),
+                predicates: Vec::new(),
+                patch: Props::from([("archived".to_string(), Value::Bool(true))]),
+            },
+            GraphMutation::UpdateMatchingNodeProperty {
+                label: Some(Label::new("Counter")),
+                props: Props::from([("active".to_string(), Value::Bool(true))]),
+                predicates: Vec::new(),
+                target_key: "count".to_string(),
+                source_key: "count".to_string(),
+                op: GraphNumericOp::Add,
+                operand: Value::Int(1),
+            },
+            GraphMutation::PatchEdge {
+                from: NodeId::new("person-1"),
+                label: Label::new("KNOWS"),
+                to: NodeId::new("person-2"),
+                id: Some(EdgeId::new("edge-1")),
+                props: Props::from([("since".to_string(), Value::Int(2026))]),
+            },
+            GraphMutation::PatchMatchingEdges {
+                relationship: relationship.clone(),
+                patch: Props::from([("seen".to_string(), Value::Bool(true))]),
+            },
+            GraphMutation::RemoveNodeProps {
+                id: NodeId::new("person-1"),
+                keys: vec!["nickname".to_string()],
+            },
+            GraphMutation::RemoveMatchingNodeProps {
+                label: Some(Label::new("Person")),
+                props: Props::from([("active".to_string(), Value::Bool(false))]),
+                predicates: Vec::new(),
+                keys: vec!["nickname".to_string()],
+            },
+            GraphMutation::RemoveEdgeProps {
+                from: NodeId::new("person-1"),
+                label: Label::new("KNOWS"),
+                to: NodeId::new("person-2"),
+                id: Some(EdgeId::new("edge-1")),
+                keys: vec!["note".to_string()],
+            },
+            GraphMutation::RemoveMatchingEdgeProps {
+                relationship: relationship.clone(),
+                keys: vec!["note".to_string()],
+            },
+            GraphMutation::DeleteMatchingNodes {
+                label: Some(Label::new("Person")),
+                props: Props::from([("active".to_string(), Value::Bool(false))]),
+                predicates: Vec::new(),
+            },
+            GraphMutation::DeleteMatchingEdges { relationship },
+            GraphMutation::DeleteEdge {
+                from: NodeId::new("person-1"),
+                label: Label::new("KNOWS"),
+                to: NodeId::new("person-2"),
+            },
+            GraphMutation::DeleteNode(NodeId::new("person-3")),
+        ]
+    );
+}
+
+#[test]
+fn property_predicates_are_type_aware_and_missing_safe() {
+    let active = GraphPropertyPredicate {
+        key: "status".to_string(),
+        op: GraphPredicateOp::Equal,
+        value: Value::from("active"),
+    };
+    assert!(active.matches(Some(&Value::from("active"))));
+    assert!(!active.matches(Some(&Value::from("inactive"))));
+    assert!(!active.matches(None));
+
+    let not_null = GraphPropertyPredicate {
+        key: "nickname".to_string(),
+        op: GraphPredicateOp::IsNotNull,
+        value: Value::Null,
+    };
+    assert!(not_null.matches(Some(&Value::from("ada"))));
+    assert!(!not_null.matches(Some(&Value::Null)));
+    assert!(!not_null.matches(None));
+
+    let is_null = GraphPropertyPredicate {
+        key: "nickname".to_string(),
+        op: GraphPredicateOp::IsNull,
+        value: Value::Null,
+    };
+    assert!(!is_null.matches(Some(&Value::from("ada"))));
+    assert!(is_null.matches(Some(&Value::Null)));
+    assert!(is_null.matches(None));
+
+    let score_at_least = GraphPropertyPredicate {
+        key: "score".to_string(),
+        op: GraphPredicateOp::GreaterThanOrEqual,
+        value: Value::Float(10.5),
+    };
+    assert!(score_at_least.matches(Some(&Value::Int(11))));
+    assert!(score_at_least.matches(Some(&Value::Float(10.5))));
+    assert!(!score_at_least.matches(Some(&Value::Int(10))));
+    assert!(!score_at_least.matches(Some(&Value::from("11"))));
+
+    let name_before = GraphPropertyPredicate {
+        key: "name".to_string(),
+        op: GraphPredicateOp::LessThan,
+        value: Value::from("M"),
+    };
+    assert!(name_before.matches(Some(&Value::from("Ada"))));
+    assert!(!name_before.matches(Some(&Value::from("Zoe"))));
+
+    let name_starts = GraphPropertyPredicate {
+        key: "name".to_string(),
+        op: GraphPredicateOp::StartsWith,
+        value: Value::from("Ad"),
+    };
+    assert!(name_starts.matches(Some(&Value::from("Ada"))));
+    assert!(!name_starts.matches(Some(&Value::from("Grace"))));
+    assert!(!name_starts.matches(Some(&Value::Int(42))));
+    assert!(!name_starts.matches(None));
+
+    let name_not_contains = GraphPropertyPredicate {
+        key: "name".to_string(),
+        op: GraphPredicateOp::NotContains,
+        value: Value::from("x"),
+    };
+    assert!(name_not_contains.matches(Some(&Value::from("Ada"))));
+    assert!(!name_not_contains.matches(Some(&Value::from("Max"))));
+    assert!(!name_not_contains.matches(None));
+
+    let name_starts_any = GraphPropertyPredicate {
+        key: "name".to_string(),
+        op: GraphPredicateOp::StartsWithAny,
+        value: Value::from(vec!["Ad".to_string(), "Gr".to_string()]),
+    };
+    assert!(name_starts_any.matches(Some(&Value::from("Ada"))));
+    assert!(name_starts_any.matches(Some(&Value::from("Grace"))));
+    assert!(!name_starts_any.matches(Some(&Value::from("Max"))));
+    assert!(!name_starts_any.matches(None));
+
+    let name_not_ends_any = GraphPropertyPredicate {
+        key: "name".to_string(),
+        op: GraphPredicateOp::NotEndsWithAny,
+        value: Value::from(vec!["x".to_string(), "z".to_string()]),
+    };
+    assert!(name_not_ends_any.matches(Some(&Value::from("Ada"))));
+    assert!(!name_not_ends_any.matches(Some(&Value::from("Max"))));
+    assert!(!name_not_ends_any.matches(None));
+
+    let team_in = GraphPropertyPredicate {
+        key: "team".to_string(),
+        op: GraphPredicateOp::In,
+        value: Value::Json(serde_json::json!(["eng", "data"])),
+    };
+    assert!(team_in.matches(Some(&Value::from("eng"))));
+    assert!(!team_in.matches(Some(&Value::from("ops"))));
+    assert!(!team_in.matches(None));
+
+    let team_not_in = GraphPropertyPredicate {
+        key: "team".to_string(),
+        op: GraphPredicateOp::NotIn,
+        value: Value::from(vec!["eng".to_string(), "data".to_string()]),
+    };
+    assert!(team_not_in.matches(Some(&Value::from("ops"))));
+    assert!(!team_not_in.matches(Some(&Value::from("eng"))));
+    assert!(!team_not_in.matches(None));
+
+    let empty_in = GraphPropertyPredicate {
+        key: "team".to_string(),
+        op: GraphPredicateOp::In,
+        value: Value::Json(serde_json::json!([])),
+    };
+    assert!(!empty_in.matches(Some(&Value::from("eng"))));
+}
+
+#[test]
+fn numeric_update_evaluator_is_type_checked_and_overflow_safe() {
+    assert_eq!(
+        evaluate_numeric_update(&Value::Int(2), GraphNumericOp::Add, &Value::Int(3)).unwrap(),
+        Value::Int(5)
+    );
+    assert_eq!(
+        evaluate_numeric_update(&Value::Int(5), GraphNumericOp::Subtract, &Value::Int(3)).unwrap(),
+        Value::Int(2)
+    );
+    assert_eq!(
+        evaluate_numeric_update(&Value::Int(4), GraphNumericOp::Multiply, &Value::Int(3)).unwrap(),
+        Value::Int(12)
+    );
+    assert_eq!(
+        evaluate_numeric_update(&Value::Int(5), GraphNumericOp::Divide, &Value::Int(2)).unwrap(),
+        Value::Float(2.5)
+    );
+    assert_eq!(
+        evaluate_numeric_update(&Value::Float(1.5), GraphNumericOp::Add, &Value::Int(2)).unwrap(),
+        Value::Float(3.5)
+    );
+
+    let overflow =
+        evaluate_numeric_update(&Value::Int(i64::MAX), GraphNumericOp::Add, &Value::Int(1))
+            .expect_err("integer overflow should fail");
+    assert!(matches!(overflow, GrustError::CypherExecution(_)));
+    assert!(overflow.to_string().contains("overflow"));
+
+    let division_by_zero =
+        evaluate_numeric_update(&Value::Int(1), GraphNumericOp::Divide, &Value::Int(0))
+            .expect_err("division by zero should fail");
+    assert!(division_by_zero.to_string().contains("division by zero"));
+
+    let null = evaluate_numeric_update(&Value::Null, GraphNumericOp::Add, &Value::Int(1))
+        .expect_err("null should fail");
+    assert!(null.to_string().contains("null"));
+
+    let string = evaluate_numeric_update(&Value::from("1"), GraphNumericOp::Add, &Value::Int(1))
+        .expect_err("string should fail");
+    assert!(string.to_string().contains("integer or float"));
+}
+
+#[test]
 fn graph_loads_from_yaml() {
     let graph = Graph::from_yaml(
         r#"
@@ -362,6 +751,186 @@ fn graph_schema_validates_labels_fields_and_edge_endpoints() {
     schema
         .validate_graph(&builder.build())
         .expect("graph should match schema");
+}
+
+#[test]
+fn graph_schema_carries_and_validates_required_constraints() {
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .node("Project", Vec::<Field>::new())
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            Vec::<Field>::new(),
+        )
+        .required_node_property("Person", "email")
+        .required_edge_property("WORKS_ON", "role")
+        .unique_node_property("Person", "email")
+        .build();
+
+    assert_eq!(
+        schema.constraints_for_label(&Label::new("Person")),
+        vec![
+            &GraphConstraint::NodePropertyRequired {
+                label: Label::new("Person"),
+                key: "email".to_string(),
+            },
+            &GraphConstraint::NodePropertyUnique {
+                label: Label::new("Person"),
+                key: "email".to_string(),
+            },
+        ]
+    );
+
+    let mut missing_node_prop = Graph::builder();
+    let _ = missing_node_prop.node("Person", "person:ada").finish();
+    let _ = missing_node_prop.node("Project", "project:grust").finish();
+    let _ = missing_node_prop
+        .edge("WORKS_ON", "person:ada", "project:grust")
+        .prop("role", "maintainer")
+        .finish();
+    let error = schema
+        .validate_graph(&missing_node_prop.build())
+        .expect_err("required node constraint should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("missing required constrained property 'email'")
+    );
+
+    let mut missing_edge_prop = Graph::builder();
+    let _ = missing_edge_prop
+        .node("Person", "person:ada")
+        .prop("email", "ada@example.com")
+        .finish();
+    let _ = missing_edge_prop.node("Project", "project:grust").finish();
+    let _ = missing_edge_prop
+        .edge("WORKS_ON", "person:ada", "project:grust")
+        .finish();
+    let error = schema
+        .validate_graph(&missing_edge_prop.build())
+        .expect_err("required edge constraint should fail");
+    assert!(
+        error
+            .to_string()
+            .contains("missing required constrained property 'role'")
+    );
+}
+
+#[derive(Clone, Debug)]
+struct MetadataOnlyStore;
+
+#[async_trait::async_trait]
+impl GraphStore for MetadataOnlyStore {
+    async fn put_node(&self, _node: &Node) -> Result<PutOutcome> {
+        Err(GrustError::Unsupported(
+            "metadata-only test store does not write nodes".to_string(),
+        ))
+    }
+
+    async fn put_edge(&self, _edge: &Edge) -> Result<PutOutcome> {
+        Err(GrustError::Unsupported(
+            "metadata-only test store does not write edges".to_string(),
+        ))
+    }
+
+    async fn get_node(&self, _id: &NodeId) -> Result<Option<Node>> {
+        Ok(None)
+    }
+
+    async fn get_edges(&self, _query: EdgeQuery) -> Result<Vec<Edge>> {
+        Ok(Vec::new())
+    }
+
+    async fn traverse(&self, _traversal: Traversal) -> Result<Vec<Node>> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn native_constraint_ddl_is_explicitly_unsupported_by_default() {
+    let store = MetadataOnlyStore;
+    let constraint = GraphConstraint::NodePropertyUnique {
+        label: Label::new("Person"),
+        key: "email".to_string(),
+    };
+
+    assert_eq!(
+        store.constraint_capability(&constraint),
+        GraphConstraintCapability::MetadataOnly
+    );
+    assert_eq!(
+        store.native_constraint_capability(&constraint),
+        GraphNativeConstraintCapability::Unsupported
+    );
+
+    let error =
+        futures_executor::block_on(store.apply_native_constraint(GraphNativeConstraintRequest {
+            constraint,
+            if_not_exists: true,
+        }))
+        .expect_err("metadata-only store should reject native DDL");
+
+    assert!(
+        matches!(error, GrustError::Unsupported(message) if message.contains("backend-native DDL"))
+    );
+}
+
+#[test]
+fn graph_schema_validates_unique_property_constraints() {
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .node("Project", Vec::<Field>::new())
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            Vec::<Field>::new(),
+        )
+        .unique_node_property("Person", "email")
+        .unique_edge_property("WORKS_ON", "role")
+        .build();
+
+    let mut duplicate_nodes = Graph::builder();
+    let _ = duplicate_nodes
+        .node("Person", "person:ada")
+        .prop("email", "ada@example.com")
+        .finish();
+    let _ = duplicate_nodes
+        .node("Person", "person:grace")
+        .prop("email", "ada@example.com")
+        .finish();
+    let error = schema
+        .validate_graph(&duplicate_nodes.build())
+        .expect_err("duplicate node property should violate unique constraint");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicates unique constrained property 'email'")
+    );
+
+    let mut duplicate_edges = Graph::builder();
+    let _ = duplicate_edges.node("Person", "person:ada").finish();
+    let _ = duplicate_edges.node("Person", "person:grace").finish();
+    let _ = duplicate_edges.node("Project", "project:grust").finish();
+    let _ = duplicate_edges.node("Project", "project:sail").finish();
+    let _ = duplicate_edges
+        .edge("WORKS_ON", "person:ada", "project:grust")
+        .prop("role", "maintainer")
+        .finish();
+    let _ = duplicate_edges
+        .edge("WORKS_ON", "person:grace", "project:sail")
+        .prop("role", "maintainer")
+        .finish();
+    let error = schema
+        .validate_graph(&duplicate_edges.build())
+        .expect_err("duplicate edge property should violate unique constraint");
+    assert!(
+        error
+            .to_string()
+            .contains("duplicates unique constrained property 'role'")
+    );
 }
 
 #[test]

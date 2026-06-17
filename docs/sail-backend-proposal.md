@@ -235,6 +235,9 @@ client uses `tonic_prost::ProstCodec`.
 
 ### 2.4 Cypher Mutation Proposal
 
+See [Writable Cypher Implementation Plan](CypherWrite.md) for the concrete
+implementation plan derived from this proposal.
+
 Sail's first Cypher integration is read-only by design: `MATCH ... RETURN`
 lowers cleanly to relational scans, joins, filters, projections, ordering, and
 limits over `grust_nodes`, `grust_edges`, and typed schema tables. Cypher writes
@@ -278,19 +281,52 @@ This keeps mutation behavior portable across backends. Backends that support
 transactions can override `apply_mutations` atomically. Backends that use the
 default implementation remain ordered but not atomic, and Cypher mutation
 planning must not promise stronger behavior than the target store can provide.
+The shared `GraphMutationAtomicity` marker makes that contract inspectable:
+Sail keeps the default ordered/non-atomic capability until the active table mode
+can prove stronger guarantees.
+Writable Cypher text execution remains a Sail entrypoint at this stage; the
+shared cross-backend contract is the Grust mutation plan, report, structured
+Cypher error categories, and `CypherMutationExecutor` for resolved plans.
+Memory implements that plan executor for deterministic non-Sail tests.
+Within Sail, a small internal parser front-door classifies top-level mutation
+statements before lowering; a shared parser crate remains deferred until there
+is a second Cypher text parser consumer.
 
 Open semantic decisions before accepting general Cypher writes:
 
-- ID policy: whether node IDs must be supplied, generated, or derived from
-  labels/properties.
-- `CREATE` versus `MERGE`: whether duplicate IDs are errors or replacement
-  upserts.
-- Property update mode: replacement, shallow patch, remove-on-null, or explicit
-  `REMOVE` support.
+- ID policy: node IDs are explicit by default, and Sail writable Cypher now has
+  an opt-in generated-ID policy for node `CREATE`; deriving IDs from
+  labels/properties remains open.
+- `CREATE` versus `MERGE`: default execution stays upsert-compatible, while
+  strict `CREATE` conflict checks are available through explicit mutation
+  options.
+- Property update mode: shallow map patching, literal assignment, explicit
+  `REMOVE`, optional remove-on-null compatibility, and restricted numeric node
+  property updates now lower through Grust mutation semantics. Relationship
+  matches support endpoint predicates, relationship property predicates,
+  delete, map patching, literal property assignment, and explicit property
+  removal. Relationship arithmetic, `CASE`, path expressions, functions, and
+  arbitrary computed expressions remain open.
+- Parameters: Sail writable Cypher accepts `$name` placeholders only where
+  literal values are already accepted, using `CypherMutationOptions` rather
+  than expression evaluation.
 - Schema validation: mutations should validate through `GraphSchema` before
-  they reach backend SQL.
+  they reach backend SQL. Backend-native constraint or index DDL is an explicit
+  `GraphStore::apply_native_constraint` request, not an implied side effect of
+  Sail `apply_schema`.
+- Post-write results: writable Cypher supports restricted `RETURN` tables over
+  variables already bound by the write plan, including scalar property
+  projections, whole-element projections, restricted aggregates, grouping,
+  row-level `DISTINCT`, result controls, `RETURN *`, and restricted map/list
+  projections. Path returns and arbitrary read-query projection semantics
+  remain deferred.
 - Match cardinality: mutating `MATCH ... SET/DELETE` may affect zero, one, or
-  many rows; the result shape and error policy must be explicit.
+  many rows; broad node `MATCH ... DELETE` now reports matched rows and changed
+  graph elements, and broad node `MATCH ... SET +=`, `SET n.key = value`, and
+  `REMOVE n.key` use the same matched-row reporting model for node changes.
+  ID-resolved edge patches use structural edge identity plus optional explicit
+  edge `id`; broad relationship mutations use a `GraphRelationshipMatch`
+  descriptor and report matched rows plus changed edge counts.
 - Atomicity: Sail/Delta operations may need staged Arrow temp views and grouped
   `MERGE`/`DELETE` commands, but multi-statement Spark SQL should not be
   described as transactional unless Sail can prove it for the active table

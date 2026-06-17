@@ -237,6 +237,10 @@ impl GraphAdminStore for SurrealHttpGraphStore {
 
 #[async_trait]
 impl GraphMutationStore for SurrealHttpGraphStore {
+    fn mutation_atomicity(&self) -> GraphMutationAtomicity {
+        GraphMutationAtomicity::Transactional
+    }
+
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
         self.post(&surreal_delete_node_query(id, &self.config)?)
             .await
@@ -413,6 +417,10 @@ impl GraphAdminStore for SurrealSdkGraphStore {
 
 #[async_trait]
 impl GraphMutationStore for SurrealSdkGraphStore {
+    fn mutation_atomicity(&self) -> GraphMutationAtomicity {
+        GraphMutationAtomicity::Transactional
+    }
+
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
         self.query(&surreal_delete_node_query(id, &self.config)?)
             .await
@@ -850,6 +858,30 @@ fn surreal_delete_node_query(id: &NodeId, config: &SurrealConfig) -> Result<Stri
     Ok(statements.join("\n"))
 }
 
+fn surreal_patch_node_query(id: &NodeId, props: &Props, config: &SurrealConfig) -> Result<String> {
+    let assignments = props
+        .iter()
+        .filter(|(key, _)| key.as_str() != "labels")
+        .map(|(key, value)| Ok(format!("{key} = {}", surreal_value(value)?)))
+        .collect::<Result<Vec<_>>>()?
+        .join(", ");
+    if assignments.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(surreal_node_tables_for_id(id, config)
+        .into_iter()
+        .map(|table| {
+            format!(
+                "UPDATE type::record({}, {}) SET {};",
+                surreal_string(&table),
+                surreal_string(id.as_str()),
+                assignments
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
 fn surreal_delete_edge_query(
     from: &NodeId,
     label: &Label,
@@ -880,13 +912,47 @@ fn surreal_delete_edge_query(
 fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> Result<String> {
     match mutation {
         GraphMutation::UpsertNode(node) => surreal_upsert_nodes_query(std::slice::from_ref(node)),
+        GraphMutation::PatchNode { id, props } => surreal_patch_node_query(id, props, config),
+        GraphMutation::PatchMatchingNodes { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched node patches are not implemented yet".to_string(),
+        )),
+        GraphMutation::UpdateMatchingNodeProperty { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched node expression updates are not implemented yet".to_string(),
+        )),
+        GraphMutation::PatchEdge { .. } => Err(GrustError::Unsupported(
+            "SurrealDB edge patches are not implemented yet".to_string(),
+        )),
+        GraphMutation::PatchMatchingEdges { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched edge patches are not implemented yet".to_string(),
+        )),
+        GraphMutation::RemoveNodeProps { .. } => Err(GrustError::Unsupported(
+            "SurrealDB node property removals are not implemented yet".to_string(),
+        )),
+        GraphMutation::RemoveMatchingNodeProps { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched node property removals are not implemented yet".to_string(),
+        )),
+        GraphMutation::RemoveEdgeProps { .. } => Err(GrustError::Unsupported(
+            "SurrealDB edge property removals are not implemented yet".to_string(),
+        )),
+        GraphMutation::RemoveMatchingEdgeProps { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched edge property removals are not implemented yet".to_string(),
+        )),
+        GraphMutation::DeleteMatchingNodes { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched node deletes are not implemented yet".to_string(),
+        )),
         GraphMutation::DeleteNode(id) => surreal_delete_node_query(id, config),
         GraphMutation::UpsertEdge(edge) => {
             surreal_relate_edges_query(std::slice::from_ref(edge), &edge_id_tables(edge))
         }
+        GraphMutation::UpsertEdgesFromNodeMatches { .. } => Err(GrustError::Unsupported(
+            "SurrealDB row-producing edge upserts are not implemented yet".to_string(),
+        )),
         GraphMutation::DeleteEdge { from, label, to } => {
             Ok(surreal_delete_edge_query(from, label, to, config))
         }
+        GraphMutation::DeleteMatchingEdges { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched edge deletes are not implemented yet".to_string(),
+        )),
     }
 }
 

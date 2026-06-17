@@ -3,6 +3,7 @@ members = [
     "crates/grust",
     "crates/grust-cocoindex",
     "crates/grust-core",
+    "crates/grust-cypher",
     "crates/grust-falkor",
     "crates/grust-helix",
     "crates/grust-ladybug",
@@ -15,7 +16,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.8.1"
+version = "0.9.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/querygraph/grust"

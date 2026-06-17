@@ -103,6 +103,10 @@ fn mutation_batch_sql_wraps_ordered_mutations_in_transaction() {
         GraphMutation::UpsertNode(Node::new("Person", "person-1", Props::new())),
         GraphMutation::UpsertNode(Node::new("Talk", "talk-1", Props::new())),
         GraphMutation::UpsertEdge(Edge::new("PRESENTS", "person-1", "talk-1", Props::new())),
+        GraphMutation::PatchNode {
+            id: NodeId::new("person-1"),
+            props: Props::from([("name".to_string(), Value::from("Ada"))]),
+        },
         GraphMutation::DeleteEdge {
             from: NodeId::new("person-1"),
             label: Label::new("PRESENTS"),
@@ -122,6 +126,8 @@ fn mutation_batch_sql_wraps_ordered_mutations_in_transaction() {
     assert!(sql.ends_with(";\nCOMMIT"));
     assert!(sql.contains("INSERT INTO \"public\".\"grust_nodes\""));
     assert!(sql.contains("INSERT INTO \"public\".\"grust_edges\""));
+    assert!(sql.contains("UPDATE \"public\".\"grust_nodes\" SET props = props ||"));
+    assert!(sql.contains("'person-1'"));
     assert!(sql.contains("DELETE FROM \"public\".\"grust_edges\" WHERE from_id = 'person-1' AND label = 'PRESENTS' AND to_id = 'talk-1'"));
     assert!(sql.contains("DELETE FROM \"public\".\"grust_nodes\" WHERE id = 'person-1'"));
 }

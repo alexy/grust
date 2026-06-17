@@ -285,7 +285,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.1", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.9.0", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -293,7 +293,7 @@ grust = { package = "grust-graph", version = "0.8.1", features = ["typed-garde"]
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.1", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.9.0", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -851,9 +851,11 @@ project, and the trait makes the maturity boundary explicit.
 ## Memory
 
 `grust-memory` is the deterministic local backend. It stores nodes in a
-`BTreeMap<NodeId, Node>` and edges in a `BTreeMap<(NodeId, Label, NodeId), Edge>`.
-Reads and traversals scan those maps. It is the best backend for tests, examples,
-and local workflows that need no external service.
+`BTreeMap<NodeId, Node>` and stores edges by source, label, destination, and
+optional explicit edge ID. That means structural edges still behave
+deterministically, while id-bearing parallel edges between the same endpoints
+can coexist. Reads and traversals scan those maps. It is the best backend for
+tests, examples, and local workflows that need no external service.
 When a `GraphSchema` is applied, the memory backend validates writes against it,
 which makes it a useful conformance harness for typed storage behavior before a
 database enters the picture.
@@ -1013,6 +1015,156 @@ outgoing, incoming, or undirected pairs. That is the shared primitive needed by
 distributed triplet filters, motif expansion, and aggregate-message style
 passes without making the backend-neutral store trait depend on those higher
 level algorithms.
+
+Writable Cypher in Sail follows the same rule. `sail_cypher_mutation_plan`
+accepts only a strict v1 mutation subset: explicit-ID node `CREATE` and
+`MERGE`, edge `CREATE` and `MERGE` when both endpoint IDs are resolved, and
+resolved node or edge `DELETE`. It also accepts ordered multi-statement
+batches, local node variables bound by explicit-ID node patterns, ID-resolved
+`MATCH ... DELETE`, edge `MATCH ... CREATE` / `MATCH ... MERGE`, and
+cardinality-aware broad node
+`MATCH ... DELETE` / `MATCH ... SET n += { ... }` / `MATCH ... SET n.key = value`
+/ `MATCH ... REMOVE n.key` forms, plus ID-resolved edge
+`MATCH ... SET e += { ... }`, literal property assignment, and explicit
+property `REMOVE` when the node or edge identity is resolved, row-producing
+edge `MATCH ... CREATE` and `MATCH ... MERGE` when both endpoints come from
+matched node variables, plus broad
+relationship `MATCH ... DELETE` / `MATCH ... SET e += { ... }` /
+`MATCH ... SET e.key = value` / `MATCH ... REMOVE e.key` over endpoint
+predicates. It lowers those
+statements into `GraphMutationPlan` and then ordinary `GraphMutation` values.
+The execution entrypoint, `SailGraphStore::execute_cypher_mutation`, runs those
+mutations through `GraphMutationStore`, so Cypher writes use the same staged
+Arrow, `MERGE INTO`, typed-table mirror, and delete paths as normal Grust
+writes. When callers need stricter Cypher compatibility, the options entrypoint
+can make `CREATE` fail if the target node or edge identity already exists. That
+mode performs a read-before-write check, rejects duplicate concrete node or
+edge `CREATE` identities inside one planned batch before any writes run, and
+therefore keeps the default entrypoint on the lower-friction upsert-compatible
+path. Generated node IDs are also caller-selected rather than implicit:
+`CypherNodeIdPolicy::GenerateForCreate`
+allows node `CREATE` without an `id`, and the result API returns generated IDs
+separately from the count-oriented mutation report. Callers can also opt into
+written node and edge identity payloads. Node payloads cover explicit and
+generated node writes; edge payloads cover resolved and row-producing edge
+writes. These payloads describe accepted writes rather than exact
+insert-versus-update outcomes on upsert backends. `MERGE` and edge endpoint
+patterns still require resolved IDs before writing.
+The first table-returning write path is deliberately smaller than general
+Cypher `RETURN`: `execute_cypher_mutation_returning_with_options` accepts a
+final projection over node variables and relationship variables already
+resolved by the write plan, including concrete edge upserts and edge patches.
+Sail and the backend-neutral Memory/Sail helper can also return one row per
+relationship variable produced by restricted row-producing
+`MATCH ... CREATE/MERGE` edge writes, plus portable broad node rows for
+restricted `MATCH ... SET/REMOVE` forms such as
+`MATCH (n:Person {status: 'active'}) SET n.seen = true RETURN n.id, n.seen`
+and portable broad relationship rows for restricted `MATCH ... SET/REMOVE`
+forms such as `MATCH (a)-[e:KNOWS]->(b) SET e.seen = true RETURN e.id, e.seen`.
+Physical `id` and `label` fields are supported alongside stored properties, for example
+`RETURN n.id, n.label, n.seen`,
+`RETURN e.id, e.label, e.weight`, or `RETURN e.label, e.source` after a
+row-producing edge write; whole elements can also be returned as `Value::Json`
+in the Grust `Node` / `Edge` serde shape with
+`RETURN n AS node, e AS relationship`. Restricted Cypher function spelling is
+also available over those already-bound values, including `labels(n)`,
+`type(e)`, `properties(n)`, `keys(e)`, `id(n)`, `elementId(e)`,
+`exists(n.nickname)`, `size(n.nickname)`, `toLower(n.team)`,
+`n.tags[0]`, `n.tags[0..2]`, `'speaker' IN n.tags`, `head(n.tags)`,
+`last(n.scores)`, `tail(n.tags)`,
+`any(t IN n.tags WHERE t = 'speaker')`,
+`n { .id, kind: 'person', team: n.team }`,
+`[n.id, 'team', n.team]`,
+`toStringList(n.scores)`, `toIntegerList(n.score_strings)`,
+`isEmpty(n.nickname)`,
+`toString(n.score)`, `toUpper(n.code)`,
+`abs(n.score)`, `ceil(n.score)`, `floor(n.score)`, `sign(n.score)`,
+`toInteger(n.score)`, `toFloat(n.score)`, `toBoolean(n.active)`,
+`trim(n.name)`,
+`substring(n.name, 0, 3)`,
+`replace(n.team, '-team', '')`, `startsWith(n.team, 'eng')`,
+`left(n.team, 3)`, `right(n.code, 2)`, `reverse(n.code)`,
+`reverse(n.tags)`,
+`split(n.path, '/')`, `range(1, 5)`, `startNode(e)`, and `endNode(e)`.
+Relationship identity functions return an explicit
+relationship ID when one exists and `null` otherwise; they do not invent
+generated structural identity. The returning entrypoint returns
+`CypherMutationTableResult`, which keeps mutation reporting separate from
+`CypherResultTable`. General expression evaluation, arbitrary read-query
+features, unrestricted broad row materialization, and variable-length path
+semantics remain rejected until a shared read/write row model owns those
+semantics.
+`CypherMutationOptions::parameters` binds Grust `Value`s to `$name`
+placeholders only where literals are already accepted: IDs, property maps, and
+literal property assignments. Quoted `'$name'` remains ordinary string text
+rather than a parameter reference. Mutating `MATCH` clauses can use a bounded
+`WHERE` grammar: property comparisons against literals or parameters joined by
+`AND`, with one leading `NOT` allowed before a single comparison, for example
+`WHERE n.status = 'inactive' AND NOT n.active = true`. They also accept
+`variable.property IS NULL` and `variable.property IS NOT NULL` for explicit
+null checks, `STARTS WITH`, `ENDS WITH`, and `CONTAINS` over string properties,
+restricted `variable.property IN [...]` membership checks over scalar list
+items, parenthesized same-property equality, membership, or matching string
+predicate `OR` groups folded to backend-neutral grouped predicates,
+`NOT (...)` around those groups folded to grouped exclusions, and parentheses
+around supported predicate terms or `AND` groups.
+Predicates lower to backend-neutral `GraphPropertyPredicate` values, so Memory
+evaluates the same resolved plan that Sail lowers to SQL. Ordinary comparison
+predicates never match missing properties; `IS NULL` matches missing or
+explicit-null properties, and `IS NOT NULL` requires a present non-null
+property. Ordered comparisons are limited to numbers or strings, and string
+predicates require present string values and string needles.
+`CypherMutationOptions::null_assignment`
+defaults to storing `SET x.key = null` as `Value::Null`, but callers can choose
+`CypherNullAssignment::RemoveProperty` to lower explicit null assignment to the
+same property-removal operations used by `REMOVE`; map patches such as
+`SET x += {key: null}` always store `Value::Null`. `MATCH ... SET` clauses can
+contain comma-separated assignments, and each assignment is lowered as its own
+ordered plan operation so repeated property targets preserve source order while
+still using only the supported literal, map patch, remove-on-null, and numeric
+node update forms. The first expression form is deliberately small: node
+property assignment can read a property on the same node variable and apply
+`+`, `-`, `*`, or `/` with an integer or float literal or parameter. That
+lowers to an explicit read-modify-write mutation plan instead of hidden
+parser-side arithmetic. Resolved mutation-plan execution is
+backend-neutral through `CypherMutationExecutor`: Sail still owns text parsing, but the
+resulting `GraphMutationPlan` can execute on Sail or on the in-memory backend
+for deterministic tests. Backends that cannot execute a plan operation report
+a structured Cypher execution error. The Sail parser has an internal
+front-door boundary that classifies top-level mutation statements before
+lowering; a shared parser crate remains deferred until there is a second
+Cypher text parser consumer. Mutation batch
+atomicity is explicit through `GraphMutationAtomicity`: the default path is
+ordered but not atomic, while pgGraph and SurrealDB report transactional batch
+execution because they wrap mutation batches in backend transactions.
+ID-resolved and broad
+node `MATCH ... SET n += { ... }` lower to node patch mutations; `null` in the
+patch map is stored as `Value::Null` rather than treated as property removal.
+ID-resolved edge `MATCH ... SET e += { ... }` lowers to an edge patch mutation
+and reuses the same typed-edge mirror writes as ordinary edge upserts.
+Row-producing edge `MATCH ... CREATE` and `MATCH ... MERGE` materialize matched
+endpoint node pairs before writing, report matched rows separately from
+attempted edge upserts, and still reject trailing node creation or explicit
+relationship IDs in the row-producing form. The current report does not
+distinguish newly inserted merge rows from rows that already existed.
+Literal `SET n.key = value` and `SET e.key = value` lower to one-key patches,
+while `REMOVE n.key` and `REMOVE e.key` lower to explicit property-remove
+mutations. Node forms can target either a resolved identity or a broad node
+match; edge forms can target either a resolved identity or a broad relationship
+match. Broad relationship matches can filter on relationship property
+predicates beyond `id`; explicit edge `id` remains a separate identity filter
+and can be combined with ordinary relationship predicates. Relationship
+expression updates and general computed expressions remain deferred.
+For broad node and relationship deletes, patches, and property removals, the
+report records matched rows and changed graph elements, and Sail stages matched
+IDs before using the same delete or load helpers that keep generic and typed
+tables consistent. The
+mutation parser keeps top-level
+keywords case-insensitive and strips Cypher comments outside string literals.
+Callers can distinguish Cypher syntax, unresolved identity, unsupported
+cardinality, and execution failures through structured `GrustError` variants.
+Execution remains Sail-specific for now, while the mutation plan and report
+types stay backend-neutral.
 
 ## FalkorDB, HelixDB, and SurrealDB
 
@@ -1224,14 +1376,15 @@ flowchart LR
 # 10. Schema and Validation Direction
 
 Grust has schema types: `GraphSchema`, `NodeType`, `EdgeType`, `Field`,
-`FieldType`, and `EdgeUniqueness`. `GraphSchema` validates labels, required
-fields, field value types, edge endpoint labels, edge direction, and declared
-edge uniqueness. `FieldType` includes scalar strings, integers, floats,
-booleans, RFC 3339 date-times, string/int/float arrays, and JSON. Date-time
-values use the opaque `RfcDate` type internally; construct them through
-`Value::datetime` or `RfcDate::parse` so invalid strings cannot bypass
-validation. The default `GraphStore::apply_schema` implementation remains a
-no-op, which lets schemaless or schema-later backends work without ceremony.
+`FieldType`, `EdgeUniqueness`, and `GraphConstraint`. `GraphSchema` validates
+labels, required fields, field value types, edge endpoint labels, edge
+direction, declared edge uniqueness, and required-property constraints.
+`FieldType` includes scalar strings, integers, floats, booleans, RFC 3339
+date-times, string/int/float arrays, and JSON. Date-time values use the opaque
+`RfcDate` type internally; construct them through `Value::datetime` or
+`RfcDate::parse` so invalid strings cannot bypass validation. The default
+`GraphStore::apply_schema` implementation remains a no-op, which lets
+schemaless or schema-later backends work without ceremony.
 
 Schema becomes more important for backends that want typed tables, indexes, or
 label-partitioned layouts. The current schema-capable backends use it in
@@ -1259,6 +1412,12 @@ writes. Memory and LadybugDB enforce the applied schema on subsequent local
 writes; Sail and LanceDB validate writes before mirroring them into typed
 tables. FalkorDB, Helix, pgGraph, and SurrealDB currently use schema primarily
 for indexes, query-shape validation, views, or backend-native definitions.
+Constraint handling follows the same honest-capability rule. Required-property
+constraints validate through `GraphSchema`; unique-property constraints validate
+inside `GraphSchema::validate_graph`, and the memory backend reports
+validate-before-write behavior for them. Backends that have not added a
+read-before-write preflight or native enforcement should continue reporting
+metadata-only behavior through `GraphStore::constraint_capability`.
 
 A flexible backend can keep universal node and edge tables as the portable
 interchange surface. A typed backend can add native tables, fields, indexes, or
