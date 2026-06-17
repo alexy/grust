@@ -191,6 +191,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added restricted mutating `MATCH ... WHERE NOT (...)` support for those same
   same-property equality `OR` groups by folding them into backend-neutral
   membership exclusion predicates.
+- Extended the restricted mutating `MATCH ... WHERE` `OR` fold to combine
+  same-property equality and membership predicates into one backend-neutral
+  membership predicate, including the matching negated exclusion form.
 - Added restricted writable Cypher `left(variable.property, length)` and
   `right(variable.property, length)` projections and aggregate bodies with
   literal or parameter integer lengths.

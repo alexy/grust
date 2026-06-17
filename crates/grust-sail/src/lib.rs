@@ -2738,25 +2738,41 @@ fn parse_where_or_fold_terms(
     let first = parsed
         .first()
         .ok_or_else(|| cypher_syntax("MATCH WHERE OR requires at least one predicate"))?;
-    if first.predicate.op != GraphPredicateOp::Equal {
+    if !matches!(
+        first.predicate.op,
+        GraphPredicateOp::Equal | GraphPredicateOp::In
+    ) {
         return Err(cypher_syntax(
-            "MATCH WHERE OR only supports same-property equality disjunctions",
+            "MATCH WHERE OR only supports same-property equality or membership disjunctions",
         ));
     }
     let target = first.target.clone();
     let key = first.predicate.key.clone();
     let mut values = Vec::with_capacity(parsed.len());
     for predicate in parsed.drain(..) {
-        if predicate.target != target
-            || predicate.predicate.key != key
-            || predicate.predicate.op != GraphPredicateOp::Equal
-        {
+        if predicate.target != target || predicate.predicate.key != key {
             return Err(cypher_syntax(
-                "MATCH WHERE OR only supports same-property equality disjunctions",
+                "MATCH WHERE OR only supports same-property equality or membership disjunctions",
             ));
         }
-        validate_cypher_in_item(&predicate.predicate.value)?;
-        values.push(predicate.predicate.value.to_json());
+        match predicate.predicate.op {
+            GraphPredicateOp::Equal => {
+                validate_cypher_in_item(&predicate.predicate.value)?;
+                values.push(predicate.predicate.value.to_json());
+            }
+            GraphPredicateOp::In => {
+                values.extend(
+                    cypher_in_predicate_values(&predicate.predicate.value)?
+                        .into_iter()
+                        .map(|value| value.to_json()),
+                );
+            }
+            _ => {
+                return Err(cypher_syntax(
+                    "MATCH WHERE OR only supports same-property equality or membership disjunctions",
+                ));
+            }
+        }
     }
 
     Ok(ParsedWherePredicate {

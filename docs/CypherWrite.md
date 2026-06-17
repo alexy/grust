@@ -103,9 +103,9 @@ describe unreleased working-tree additions:
   parameters, optionally prefix one comparison, null check, string predicate,
   or membership predicate with `NOT`, wrap supported
   predicate terms in parentheses, combine predicates with `AND`, and fold
-  same-property equality `OR` groups into membership predicates, including
-  `NOT (...)` exclusion groups. When a folded `OR` group is combined with
-  `AND`, the `OR` group must be parenthesized.
+  same-property equality or membership `OR` groups into membership predicates,
+  including `NOT (...)` exclusion groups. When a folded `OR` group is combined
+  with `AND`, the `OR` group must be parenthesized.
 - `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
   operation when the source is a property on the same node variable and the
@@ -4615,3 +4615,44 @@ same-target, same-key equality `OR` group and lowers it to
 `GraphPredicateOp::NotIn`. Ambiguous unparenthesized `NOT ... OR ...` forms
 continue through the ordinary restricted parser and are rejected, so the Sail
 SQL lowering and Memory execution still reuse the membership predicate path.
+
+### Batch DI: Same-Property Equality/Membership `OR` Predicates
+
+Extend the bounded mutating `MATCH ... WHERE` `OR` fold to accept membership
+terms alongside equality terms when every term still targets the same matched
+variable and property:
+
+```cypher
+MATCH (n:Person)
+WHERE n.status IN ['active', 'pending'] OR n.status = 'review'
+SET n.reviewed = true;
+```
+
+Acceptance criteria:
+
+- Support top-level `OR` groups where every term is either
+  `variable.property = scalar` or `variable.property IN scalar_list` over the
+  same matched variable and property.
+- Support the matching negated form
+  `NOT (variable.property IN [...] OR variable.property = value)` by folding it
+  to `GraphPredicateOp::NotIn`.
+- Expand scalar list literals, list-valued parameters, scalar literals, and
+  scalar parameters into one backend-neutral membership predicate.
+- Preserve the same scalar restrictions as Batch DF: only string, integer,
+  float, and boolean values participate; nulls, maps, nested lists, computed
+  expressions, and property references remain rejected.
+- Preserve missing-property semantics through the folded `In` / `NotIn`
+  operators: missing properties do not match.
+- Continue rejecting mixed-property `OR`, mixed-variable `OR`, non-equality or
+  non-membership `OR`, `NOT IN` spellings, unparenthesized mixed `OR`/`AND`,
+  pattern predicates, functions, arbitrary expressions, and general boolean
+  combinations.
+- Add planner tests for positive and negated folds, rejection tests for
+  deferred forms, and Memory-facade execution coverage.
+
+Implementation status: implemented in the working tree after Batch DH.
+`grust-sail` now accepts `Equal` and `In` predicate terms in the same-property
+`OR` fold, expands membership values through the existing restricted
+membership parser, and lowers positive groups to `GraphPredicateOp::In` or
+negated parenthesized groups to `GraphPredicateOp::NotIn`. Sail SQL lowering
+and Memory execution continue to reuse the membership predicate path.

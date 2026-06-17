@@ -1,6 +1,6 @@
 # Restart Checkpoint
 
-Generated: 2026-06-17 04:31:08 PDT
+Generated: 2026-06-17 04:34:45 PDT
 
 ## Current Goal
 
@@ -25,35 +25,35 @@ Continue implementing bounded writable Cypher features from
 - Branch: `codex/cypher-write`
 - Remote tracking branch: `origin/codex/cypher-write`
 - Expected untracked file: `OPUS1.md`
-- Latest completed slice before this checkpoint: Batch DH, restricted negated
-  same-property equality `OR` predicates in mutating `MATCH ... WHERE`.
+- Latest completed slice before this checkpoint: Batch DI, restricted
+  same-property equality/membership `OR` predicates in mutating
+  `MATCH ... WHERE`.
 
 ## Latest Completed Work
 
-Batch DH added restricted negated same-property equality `OR` predicates to
-bounded mutating Cypher `MATCH ... WHERE`:
+Batch DI extended restricted same-property `OR` predicates to combine equality
+and membership terms in bounded mutating Cypher `MATCH ... WHERE`:
 
 ```cypher
 MATCH (n:Person)
-WHERE NOT (n.status = 'blocked' OR n.status = 'archived')
+WHERE n.status IN ['active', 'pending'] OR n.status = 'review'
 SET n.reviewed = true;
 ```
 
 Implemented behavior:
 
-- `grust-sail` recognizes `NOT (...)` around Batch DG-compatible
-  same-property equality `OR` groups.
-- Accepted negated groups must consist only of equality predicates over the
-  same matched variable and property.
-- Literal and parameter equality values are accepted only when they are scalar
-  string, integer, float, or boolean values compatible with restricted
-  membership predicates.
-- Accepted groups fold to one backend-neutral `GraphPredicateOp::NotIn`
-  predicate, reusing Sail SQL membership lowering and Memory execution.
-- Ambiguous unparenthesized `NOT a = x OR a = y`, mixed-property,
-  mixed-variable, non-equality, null-valued, nested-`NOT`, function, pattern,
-  arbitrary-expression, and general boolean-expression `OR` forms remain
-  deferred and rejected.
+- `grust-sail` accepts same-property `OR` groups whose terms are either
+  equality predicates or restricted `IN` membership predicates.
+- Positive groups fold to one backend-neutral `GraphPredicateOp::In`
+  predicate; `NOT (...)` groups fold to `GraphPredicateOp::NotIn`.
+- Literal values, scalar parameters, scalar list literals, and list-valued
+  parameters are expanded through the same restricted membership parser.
+- Only scalar string, integer, float, and boolean values participate. Nulls,
+  maps, nested lists, computed expressions, and property references remain
+  rejected.
+- Mixed-property, mixed-variable, non-equality/non-membership, `NOT IN`,
+  unparenthesized mixed `OR`/`AND`, function, pattern, arbitrary-expression,
+  and general boolean-expression forms remain deferred and rejected.
 - Missing properties keep the existing folded-membership behavior and do not
   match.
 
@@ -68,7 +68,7 @@ Files updated:
 
 ## Verification State
 
-The following commands passed after Batch DH:
+The following commands passed after Batch DI:
 
 ```sh
 cargo fmt --all
@@ -82,7 +82,7 @@ git diff --check
 
 Observed test summaries:
 
-- `cargo test -p grust-sail --lib`: 189 passed, 25 ignored
+- `cargo test -p grust-sail --lib`: 192 passed, 25 ignored
 - `cargo test -p grust-core --lib`: 35 passed
 - `cargo test -p grust-memory --lib`: 20 passed
 
