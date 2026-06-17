@@ -5184,6 +5184,124 @@ fn sail_cypher_returning_projects_restricted_abs_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_restricted_numeric_rounds_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let concrete =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'round-ada', debt: -3.2, ratio: 2.1});
+            CREATE (b:Person {id: 'round-bob'});
+            MATCH (a:Person {id: 'round-ada'}), (b:Person {id: 'round-bob'})
+            CREATE (a)-[e:KNOWS {id: 'round-knows', weight: -4.8}]->(b)
+            RETURN ceil(a.debt) AS debt_ceiling,
+                   floor(a.ratio) AS ratio_floor,
+                   floor(e.weight) AS weight_floor,
+                   ceil(a.nickname) AS missing_name;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("concrete numeric rounding projections");
+    assert_eq!(
+        concrete.table.rows,
+        vec![vec![
+            Value::Float(-3.0),
+            Value::Float(2.0),
+            Value::Float(-5.0),
+            Value::Null,
+        ]]
+    );
+
+    let broad =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'round-cara', status: 'round', score: 7.2});
+            CREATE (:Person {id: 'round-dan', status: 'round', score: 11.8});
+            MATCH (n:Person {status: 'round'}) SET n.seen = true
+            RETURN n.id AS id, ceil(n.score) AS score
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("broad numeric rounding projections");
+    assert_eq!(
+        broad.table.rows,
+        vec![
+            vec![Value::from("round-cara"), Value::Float(8.0)],
+            vec![Value::from("round-dan"), Value::Float(12.0)],
+        ]
+    );
+
+    let row_edges =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Team {id: 'round-team'});
+            MATCH (n:Person {status: 'round'}), (t:Team {id: 'round-team'})
+            CREATE (n)-[r:MEMBER_OF {rank: -5.3}]->(t)
+            RETURN n.id AS id, floor(r.rank) AS rank
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("row-producing relationship numeric rounding projections");
+    assert_eq!(
+        row_edges.table.rows,
+        vec![
+            vec![Value::from("round-cara"), Value::Float(-6.0)],
+            vec![Value::from("round-dan"), Value::Float(-6.0)],
+        ]
+    );
+
+    let aggregates =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (n:Person {status: 'round'}) SET n.round_counted = true
+            RETURN count(ceil(n.score)) AS rows,
+                   sum(ceil(n.score)) AS total_scores,
+                   collect(ceil(n.score)) AS scores;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("numeric rounding aggregate projections");
+    assert_eq!(
+        aggregates.table.rows,
+        vec![vec![
+            Value::Int(2),
+            Value::Float(20.0),
+            Value::Json(serde_json::json!([8.0, 12.0])),
+        ]]
+    );
+
+    let string_round =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'round-string', score: '3'}) RETURN ceil(n.score);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("ceil over string values should stay rejected");
+    assert!(
+        matches!(string_round, GrustError::CypherUnsupportedCardinality(_)),
+        "{string_round:?}"
+    );
+
+    let nested_round =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'round-nested', score: -3.2}) RETURN ceil(abs(n.score));",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("nested ceil arguments should stay rejected");
+    assert!(
+        matches!(nested_round, GrustError::CypherUnsupportedCardinality(_)),
+        "{nested_round:?}"
+    );
+}
+
+#[test]
 fn sail_cypher_returning_projects_restricted_string_transforms_on_memory_facade() {
     let store = MemoryGraphStore::new();
 

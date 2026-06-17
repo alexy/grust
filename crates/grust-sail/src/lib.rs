@@ -2935,6 +2935,10 @@ enum CypherReturnTarget {
     PropertyExists(String),
     PropertySize(String),
     PropertyAbs(String),
+    PropertyNumericRound {
+        key: String,
+        round: CypherReturnNumericRound,
+    },
     PropertyToString(String),
     PropertyStringTransform {
         key: String,
@@ -2986,6 +2990,12 @@ enum CypherReturnStringTrim {
     Both,
     Left,
     Right,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CypherReturnNumericRound {
+    Ceil,
+    Floor,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3174,6 +3184,13 @@ fn parse_cypher_return_clause(
             (variable, CypherReturnTarget::PropertySize(key))
         } else if let Some((variable, key)) = parse_return_abs_projection(expression)? {
             (variable, CypherReturnTarget::PropertyAbs(key))
+        } else if let Some((variable, key, round)) =
+            parse_return_numeric_round_projection(expression)?
+        {
+            (
+                variable,
+                CypherReturnTarget::PropertyNumericRound { key, round },
+            )
         } else if let Some((variable, key)) = parse_return_to_string_projection(expression)? {
             (variable, CypherReturnTarget::PropertyToString(key))
         } else if let Some((variable, key, transform)) =
@@ -3502,6 +3519,14 @@ fn parse_aggregate_projection(
             distinct,
         )));
     }
+    if let Some((variable, key, round)) = parse_return_numeric_round_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyNumericRound { key, round },
+            distinct,
+        )));
+    }
     if let Some((variable, key)) = parse_return_to_string_projection(body)? {
         return Ok(Some((
             aggregate,
@@ -3817,6 +3842,43 @@ fn parse_return_abs_projection(expression: &str) -> Result<Option<(String, Strin
         .map_err(|_| {
             cypher_unsupported_cardinality(
                 "writable Cypher RETURN abs only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_numeric_round_projection(
+    expression: &str,
+) -> Result<Option<(String, String, CypherReturnNumericRound)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    let round = match expression[..open].trim().to_ascii_lowercase().as_str() {
+        "ceil" => CypherReturnNumericRound::Ceil,
+        "floor" => CypherReturnNumericRound::Floor,
+        _ => return Ok(None),
+    };
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(
+            "RETURN numeric rounding projection is missing ')'",
+        ));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN numeric rounding projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN ceil/floor only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN numeric rounding projection")
+        .map(|(variable, key)| Some((variable, key, round)))
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN ceil/floor only supports variable.property arguments",
             )
         })
 }
@@ -5506,6 +5568,23 @@ where
             )
             .await
         }
+        CypherReturnTarget::PropertyNumericRound { key, round } => {
+            materialize_return_property_numeric_round_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *round,
+                row_index,
+            )
+            .await
+        }
         CypherReturnTarget::PropertyToString(key) => {
             materialize_return_property_to_string_value_at(
                 store,
@@ -5879,6 +5958,24 @@ where
                 edges,
                 projection,
                 key,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyNumericRound { key, round } => {
+            let value = materialize_return_property_numeric_round_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *round,
                 row_index,
             )
             .await?;
@@ -6711,6 +6808,82 @@ fn restricted_abs_value(value: Value) -> Result<Value> {
         | Value::FloatArray(_)
         | Value::Json(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN abs only supports numeric values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_numeric_round_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    round: CypherReturnNumericRound,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_numeric_round_value(value, round)
+}
+
+fn restricted_numeric_round_value(value: Value, round: CypherReturnNumericRound) -> Result<Value> {
+    let round_float = |value: f64| match round {
+        CypherReturnNumericRound::Ceil => value.ceil(),
+        CypherReturnNumericRound::Floor => value.floor(),
+    };
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Int(value) => Ok(Value::Int(value)),
+        Value::Float(value) => {
+            let value = round_float(value);
+            if value.is_finite() {
+                Ok(Value::Float(value))
+            } else {
+                Err(GrustError::CypherExecution(
+                    "RETURN ceil/floor produced non-finite float".to_string(),
+                ))
+            }
+        }
+        Value::Json(serde_json::Value::Number(value)) => {
+            if let Some(value) = value.as_i64() {
+                Ok(Value::Int(value))
+            } else if let Some(value) = value.as_f64() {
+                restricted_numeric_round_value(Value::Float(value), round)
+            } else {
+                Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN ceil/floor only supports finite numeric values",
+                ))
+            }
+        }
+        Value::Bool(_)
+        | Value::String(_)
+        | Value::DateTime(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN ceil/floor only supports numeric values",
         )),
     }
 }
@@ -7888,6 +8061,7 @@ where
             | CypherReturnTarget::PropertyExists(_)
             | CypherReturnTarget::PropertySize(_)
             | CypherReturnTarget::PropertyAbs(_)
+            | CypherReturnTarget::PropertyNumericRound { .. }
             | CypherReturnTarget::PropertyToString(_)
             | CypherReturnTarget::PropertyStringTransform { .. }
             | CypherReturnTarget::PropertyStringTrim { .. }
@@ -8204,6 +8378,21 @@ where
             .await?
         }
         CypherReturnTarget::PropertyAbs(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyNumericRound { .. } => {
             materialize_return_projection_values(
                 store,
                 node_bindings,

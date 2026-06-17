@@ -2384,6 +2384,8 @@ remaining pieces should stay explicit:
   restricted `exists(variable.property)` projections and aggregate bodies, and
   restricted `size(variable.property)` projections and aggregate bodies, and
   restricted `abs(variable.property)` projections and aggregate bodies, and
+  restricted `ceil(variable.property)` / `floor(variable.property)`
+  projections and aggregate bodies, and
   restricted `isEmpty(variable.property)` projections and aggregate bodies,
   and
   restricted `toString(variable.property)` projections and aggregate bodies,
@@ -3626,3 +3628,42 @@ restricted projection target. Evaluation reuses the existing property
 materializer and applies absolute-value conversion only to numeric values,
 preserving the same narrow, type-aware behavior as the other restricted
 property functions.
+
+### Batch CL: Restricted Numeric Rounding Projections
+
+Support bounded numeric rounding projection over property values already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN ceil(n.score) AS score_ceiling, floor(n.score) AS score_floor;
+```
+
+Acceptance criteria:
+
+- Support `ceil(variable.property)` and `floor(variable.property)` as scalar
+  writable `RETURN` projections when the variable is a concrete node, concrete
+  relationship, materialized row-node, or materialized row-relationship
+  variable.
+- Return integer values unchanged and rounded float values for floating-point
+  numeric values and JSON numeric values. Return `null` when the property is
+  absent or explicitly null.
+- Reject strings, booleans, arrays, JSON arrays, JSON objects, whole-element
+  values, paths, nested functions, cross-variable expressions, non-finite
+  numeric results, and other unsupported values rather than adding implicit
+  casts.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `SUM`,
+  `AVG`, `MIN`, `MAX`, and `COLLECT`.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `ceil(...)` and `floor(...)` property-only; arbitrary numeric
+  expressions remain limited to the existing mutation-assignment path.
+
+Implementation status: implemented in the working tree after Batch CK.
+Writable `RETURN` now parses `ceil(variable.property)` and
+`floor(variable.property)` into a dedicated restricted projection target.
+Evaluation reuses the existing property materializer and applies rounding only
+to numeric values, preserving the same narrow, type-aware behavior as the
+other restricted property functions.
