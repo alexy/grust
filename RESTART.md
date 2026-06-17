@@ -1,6 +1,6 @@
 # Restart Checkpoint
 
-Generated: 2026-06-17 04:07:56 PDT
+Generated: 2026-06-17 04:14:05 PDT
 
 ## Current Goal
 
@@ -25,38 +25,38 @@ Continue implementing bounded writable Cypher features from
 - Branch: `codex/cypher-write`
 - Remote tracking branch: `origin/codex/cypher-write`
 - Expected untracked file: `OPUS1.md`
-- Latest completed slice before this checkpoint: Batch DD, parenthesized
-  mutating `MATCH ... WHERE` predicate terms and `AND` groups.
+- Latest completed slice before this checkpoint: Batch DE, restricted string
+  predicates in mutating `MATCH ... WHERE`.
 
 ## Latest Completed Work
 
-Batch DD added parentheses around otherwise-supported bounded mutating Cypher
-`MATCH ... WHERE` predicate terms and `AND` groups:
+Batch DE added restricted string predicates to bounded mutating Cypher
+`MATCH ... WHERE`:
 
 ```cypher
 MATCH (n:Person)
-WHERE (n.status = 'inactive' AND n.score >= 10) AND NOT (n.active = true)
-SET n.archived = true;
+WHERE n.name STARTS WITH 'Ad' AND NOT n.name ENDS WITH 'bot'
+SET n.reviewed = true;
 ```
 
 Implemented behavior:
 
-- `grust-sail` splits mutating `WHERE` clauses only on top-level `AND`.
-- Enclosing parentheses around supported predicate terms are stripped before
-  lowering.
-- Enclosing parentheses around supported `AND` groups are recursively
-  flattened into the same backend-neutral predicate vectors as the
-  unparenthesized form.
-- `NOT (supported predicate)` is accepted and still lowers through the existing
-  operator-inversion path.
-- Parentheses remain semantic-free: `OR`, nested `NOT`, function calls,
-  pattern predicates, list predicates, cross-variable comparisons, and
-  arbitrary expressions are still rejected when parenthesized.
-- Planner and Memory-facade tests cover parenthesized node, edge, endpoint,
-  and negated predicates.
+- `grust-core` exposes explicit string predicate operators for
+  `STARTS WITH`, `ENDS WITH`, and `CONTAINS`, plus negated variants.
+- `grust-sail` parses `variable.property STARTS WITH value`,
+  `variable.property ENDS WITH value`, and `variable.property CONTAINS value`
+  for node, relationship, and endpoint variables.
+- String predicate needles must be string literals or string parameters.
+- One leading `NOT` inverts the string predicate operator.
+- Missing properties, nulls, and non-string values never match positive or
+  negated string predicates.
+- Sail SQL lowering and Memory execution both use the backend-neutral
+  `GraphPropertyPredicate` path.
 
 Files updated:
 
+- `crates/grust-core/src/lib.rs`
+- `crates/grust-core/src/tests.rs`
 - `crates/grust-sail/src/lib.rs`
 - `crates/grust-sail/src/tests.rs`
 - `docs/CypherWrite.md`
@@ -66,7 +66,7 @@ Files updated:
 
 ## Verification State
 
-The following commands passed after Batch DD:
+The following commands passed after Batch DE:
 
 ```sh
 cargo fmt --all
@@ -80,7 +80,7 @@ git diff --check
 
 Observed test summaries:
 
-- `cargo test -p grust-sail --lib`: 183 passed, 25 ignored
+- `cargo test -p grust-sail --lib`: 184 passed, 25 ignored
 - `cargo test -p grust-core --lib`: 35 passed
 - `cargo test -p grust-memory --lib`: 20 passed
 

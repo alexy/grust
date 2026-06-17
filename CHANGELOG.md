@@ -347,7 +347,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   `GraphPropertyPredicate` values that Memory can evaluate and Sail can lower
   to SQL, now including one leading `NOT` before a supported comparison and
   explicit `IS NULL` / `IS NOT NULL` property checks, with parentheses around
-  supported predicate terms and `AND` groups.
+  supported predicate terms and `AND` groups, and restricted string predicates
+  using `STARTS WITH`, `ENDS WITH`, and `CONTAINS`.
 - Added opt-in strict `CREATE` execution for Sail writable Cypher through
   `CypherMutationOptions` and `CypherCreateMode::ErrorIfExists`, preserving the
   default upsert-compatible path.

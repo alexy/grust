@@ -2567,6 +2567,12 @@ pub enum GraphPredicateOp {
     NotEqual,
     IsNull,
     IsNotNull,
+    StartsWith,
+    NotStartsWith,
+    EndsWith,
+    NotEndsWith,
+    Contains,
+    NotContains,
     GreaterThan,
     GreaterThanOrEqual,
     LessThan,
@@ -2593,6 +2599,18 @@ impl GraphPropertyPredicate {
             GraphPredicateOp::NotEqual => actual != &self.value,
             GraphPredicateOp::IsNull => matches!(actual, Value::Null),
             GraphPredicateOp::IsNotNull => !matches!(actual, Value::Null),
+            GraphPredicateOp::StartsWith => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| actual.starts_with(needle)),
+            GraphPredicateOp::NotStartsWith => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| !actual.starts_with(needle)),
+            GraphPredicateOp::EndsWith => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| actual.ends_with(needle)),
+            GraphPredicateOp::NotEndsWith => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| !actual.ends_with(needle)),
+            GraphPredicateOp::Contains => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| actual.contains(needle)),
+            GraphPredicateOp::NotContains => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| !actual.contains(needle)),
             GraphPredicateOp::GreaterThan
             | GraphPredicateOp::GreaterThanOrEqual
             | GraphPredicateOp::LessThan
@@ -2605,9 +2623,22 @@ impl GraphPropertyPredicate {
                     GraphPredicateOp::Equal
                     | GraphPredicateOp::NotEqual
                     | GraphPredicateOp::IsNull
-                    | GraphPredicateOp::IsNotNull => unreachable!(),
+                    | GraphPredicateOp::IsNotNull
+                    | GraphPredicateOp::StartsWith
+                    | GraphPredicateOp::NotStartsWith
+                    | GraphPredicateOp::EndsWith
+                    | GraphPredicateOp::NotEndsWith
+                    | GraphPredicateOp::Contains
+                    | GraphPredicateOp::NotContains => unreachable!(),
                 }),
         }
+    }
+}
+
+fn string_predicate_values<'a>(actual: &'a Value, value: &'a Value) -> Option<(&'a str, &'a str)> {
+    match (actual, value) {
+        (Value::String(actual), Value::String(needle)) => Some((actual.as_str(), needle.as_str())),
+        _ => None,
     }
 }
 

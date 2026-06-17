@@ -97,9 +97,10 @@ describe unreleased working-tree additions:
   node or relationship properties. Supported predicates compare one matched
   variable property to a literal or parameter with `=`, `<>`, `!=`, `>`, `>=`,
   `<`, or `<=`, check `variable.property IS NULL` or
-  `variable.property IS NOT NULL`, optionally prefix one comparison or null
-  check with `NOT`, wrap supported predicate terms in parentheses, and combine
-  predicates with `AND`.
+  `variable.property IS NOT NULL`, evaluate `STARTS WITH`, `ENDS WITH`, and
+  `CONTAINS` against string literals or parameters, optionally prefix one
+  comparison, null check, or string predicate with `NOT`, wrap supported
+  predicate terms in parentheses, and combine predicates with `AND`.
 - `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
   operation when the source is a property on the same node variable and the
@@ -1214,10 +1215,13 @@ unsupported ordered operand types fail planning in Sail instead of relying on
 backend casts. `IS NULL` and `IS NOT NULL` lower through explicit
 backend-neutral null-check predicate operators so Memory and Sail agree that
 `IS NULL` matches missing or explicit-null properties and `IS NOT NULL`
-requires a present non-null property. Parentheses are accepted around supported
-predicate terms and supported `AND` groups. `OR`, nested `NOT`, function calls,
-list predicates, pattern predicates, arbitrary expressions, and cross-variable
-comparisons remain deferred.
+requires a present non-null property. `STARTS WITH`, `ENDS WITH`, and
+`CONTAINS` lower through explicit backend-neutral string predicate operators
+and match only present string properties against string literal or parameter
+needles. Parentheses are accepted around supported predicate terms and
+supported `AND` groups. `OR`, nested `NOT`, function calls, list predicates,
+pattern predicates, arbitrary expressions, and cross-variable comparisons
+remain deferred.
 
 ### Batch W: Read-then-write `MATCH ... CREATE`
 
@@ -4447,3 +4451,42 @@ and strips enclosing parentheses around individual predicate terms before
 lowering them through the existing `GraphPropertyPredicate` path. Memory
 execution is unchanged because the resolved predicate vectors are the same as
 the unparenthesized form.
+
+### Batch DE: Restricted String `WHERE` Predicates
+
+Extend the bounded mutating `MATCH ... WHERE` grammar to accept common Cypher
+string predicates over one property and one literal or parameter needle:
+
+```cypher
+MATCH (n:Person)
+WHERE n.name STARTS WITH 'Ad' AND NOT n.name ENDS WITH 'bot'
+SET n.reviewed = true;
+```
+
+Acceptance criteria:
+
+- Support `variable.property STARTS WITH literal_or_parameter`,
+  `variable.property ENDS WITH literal_or_parameter`, and
+  `variable.property CONTAINS literal_or_parameter` on matched node,
+  relationship, and endpoint variables.
+- Require the needle to be a string literal or string parameter. Reject
+  numeric, boolean, null, list, map, computed, property, or cross-variable
+  needles.
+- Lower each accepted predicate to explicit backend-neutral
+  `GraphPredicateOp` values, including negated variants for one leading `NOT`.
+- Preserve existing missing-property and type behavior: missing properties,
+  nulls, and non-string values never match either positive or negated string
+  predicates.
+- Preserve the existing `AND`-only predicate combination model and the
+  parenthesized-term support from Batch DD. `OR` remains deferred.
+- Add core predicate tests, Sail SQL-lowering assertions, planner tests, and
+  Memory-facade execution coverage.
+
+Implementation status: implemented in the working tree after Batch DD.
+`grust-core` now includes explicit string predicate operators for
+`STARTS WITH`, `ENDS WITH`, and `CONTAINS`, plus their negated forms.
+`grust-sail` parses the bounded Cypher spellings, requires string literal or
+parameter needles, lowers leading `NOT` by inverting the string predicate
+operator, and emits Sail SQL string predicate conditions. Memory execution
+uses the same `GraphPropertyPredicate` evaluator, so only present string
+properties participate.

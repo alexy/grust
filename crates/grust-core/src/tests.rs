@@ -372,6 +372,25 @@ fn property_predicates_are_type_aware_and_missing_safe() {
     };
     assert!(name_before.matches(Some(&Value::from("Ada"))));
     assert!(!name_before.matches(Some(&Value::from("Zoe"))));
+
+    let name_starts = GraphPropertyPredicate {
+        key: "name".to_string(),
+        op: GraphPredicateOp::StartsWith,
+        value: Value::from("Ad"),
+    };
+    assert!(name_starts.matches(Some(&Value::from("Ada"))));
+    assert!(!name_starts.matches(Some(&Value::from("Grace"))));
+    assert!(!name_starts.matches(Some(&Value::Int(42))));
+    assert!(!name_starts.matches(None));
+
+    let name_not_contains = GraphPropertyPredicate {
+        key: "name".to_string(),
+        op: GraphPredicateOp::NotContains,
+        value: Value::from("x"),
+    };
+    assert!(name_not_contains.matches(Some(&Value::from("Ada"))));
+    assert!(!name_not_contains.matches(Some(&Value::from("Max"))));
+    assert!(!name_not_contains.matches(None));
 }
 
 #[test]

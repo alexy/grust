@@ -2698,6 +2698,31 @@ fn parse_where_predicate(
             },
         });
     }
+    for (keyword, op) in [
+        ("STARTS WITH", GraphPredicateOp::StartsWith),
+        ("ENDS WITH", GraphPredicateOp::EndsWith),
+        ("CONTAINS", GraphPredicateOp::Contains),
+    ] {
+        if let Some(index) = find_top_level_keyword_sequence(predicate, keyword)? {
+            let (target, key) =
+                parse_property_ref(&predicate[..index], "MATCH WHERE string predicate")?;
+            let value = parse_cypher_literal(&predicate[index + keyword.len()..], parameters)?;
+            if !matches!(value, Value::String(_)) {
+                return Err(cypher_syntax(
+                    "MATCH WHERE string predicates require string literals or parameters",
+                ));
+            }
+            let op = if negated {
+                inverted_graph_predicate_op(op)
+            } else {
+                op
+            };
+            return Ok(ParsedWherePredicate {
+                target,
+                predicate: GraphPropertyPredicate { key, op, value },
+            });
+        }
+    }
     for (token, op) in [
         (">=", GraphPredicateOp::GreaterThanOrEqual),
         ("<=", GraphPredicateOp::LessThanOrEqual),
@@ -2749,6 +2774,12 @@ fn inverted_graph_predicate_op(op: GraphPredicateOp) -> GraphPredicateOp {
         GraphPredicateOp::NotEqual => GraphPredicateOp::Equal,
         GraphPredicateOp::IsNull => GraphPredicateOp::IsNotNull,
         GraphPredicateOp::IsNotNull => GraphPredicateOp::IsNull,
+        GraphPredicateOp::StartsWith => GraphPredicateOp::NotStartsWith,
+        GraphPredicateOp::NotStartsWith => GraphPredicateOp::StartsWith,
+        GraphPredicateOp::EndsWith => GraphPredicateOp::NotEndsWith,
+        GraphPredicateOp::NotEndsWith => GraphPredicateOp::EndsWith,
+        GraphPredicateOp::Contains => GraphPredicateOp::NotContains,
+        GraphPredicateOp::NotContains => GraphPredicateOp::Contains,
         GraphPredicateOp::GreaterThan => GraphPredicateOp::LessThanOrEqual,
         GraphPredicateOp::GreaterThanOrEqual => GraphPredicateOp::LessThan,
         GraphPredicateOp::LessThan => GraphPredicateOp::GreaterThanOrEqual,
@@ -12649,6 +12680,10 @@ fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
 }
 
 fn find_top_level_keyword(value: &str, keyword: &str) -> Result<Option<usize>> {
+    find_top_level_keyword_sequence(value, keyword)
+}
+
+fn find_top_level_keyword_sequence(value: &str, keyword: &str) -> Result<Option<usize>> {
     let mut quote = None;
     let mut escaped = false;
     let mut paren_depth = 0usize;
@@ -15147,6 +15182,18 @@ fn append_property_predicate_conditions(
             )?,
             GraphPredicateOp::IsNull => conditions.push(format!("{json_value} IS NULL")),
             GraphPredicateOp::IsNotNull => conditions.push(format!("{json_value} IS NOT NULL")),
+            GraphPredicateOp::StartsWith
+            | GraphPredicateOp::NotStartsWith
+            | GraphPredicateOp::EndsWith
+            | GraphPredicateOp::NotEndsWith
+            | GraphPredicateOp::Contains
+            | GraphPredicateOp::NotContains => append_property_string_predicate_condition(
+                &json_value,
+                predicate.op,
+                &predicate.value,
+                conditions,
+                args,
+            )?,
             GraphPredicateOp::GreaterThan
             | GraphPredicateOp::GreaterThanOrEqual
             | GraphPredicateOp::LessThan
@@ -15227,6 +15274,61 @@ fn append_property_inequality_condition(
     Ok(())
 }
 
+fn append_property_string_predicate_condition(
+    json_value: &str,
+    op: GraphPredicateOp,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    let Some(needle) = value.as_str() else {
+        return Err(cypher_syntax(
+            "MATCH WHERE string predicates require string literals or parameters",
+        ));
+    };
+    match op {
+        GraphPredicateOp::StartsWith => {
+            conditions.push(format!("STARTSWITH({json_value}, ?)"));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::NotStartsWith => {
+            conditions.push(format!(
+                "{json_value} IS NOT NULL AND NOT STARTSWITH({json_value}, ?)"
+            ));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::EndsWith => {
+            conditions.push(format!("ENDSWITH({json_value}, ?)"));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::NotEndsWith => {
+            conditions.push(format!(
+                "{json_value} IS NOT NULL AND NOT ENDSWITH({json_value}, ?)"
+            ));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::Contains => {
+            conditions.push(format!("CONTAINS({json_value}, ?)"));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::NotContains => {
+            conditions.push(format!(
+                "{json_value} IS NOT NULL AND NOT CONTAINS({json_value}, ?)"
+            ));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::Equal
+        | GraphPredicateOp::NotEqual
+        | GraphPredicateOp::IsNull
+        | GraphPredicateOp::IsNotNull
+        | GraphPredicateOp::GreaterThan
+        | GraphPredicateOp::GreaterThanOrEqual
+        | GraphPredicateOp::LessThan
+        | GraphPredicateOp::LessThanOrEqual => unreachable!(),
+    }
+    Ok(())
+}
+
 fn append_property_order_condition(
     json_value: &str,
     op: GraphPredicateOp,
@@ -15242,7 +15344,13 @@ fn append_property_order_condition(
         GraphPredicateOp::Equal
         | GraphPredicateOp::NotEqual
         | GraphPredicateOp::IsNull
-        | GraphPredicateOp::IsNotNull => unreachable!(),
+        | GraphPredicateOp::IsNotNull
+        | GraphPredicateOp::StartsWith
+        | GraphPredicateOp::NotStartsWith
+        | GraphPredicateOp::EndsWith
+        | GraphPredicateOp::NotEndsWith
+        | GraphPredicateOp::Contains
+        | GraphPredicateOp::NotContains => unreachable!(),
     };
     match value {
         Value::Int(n) => {
