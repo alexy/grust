@@ -3719,16 +3719,19 @@ fn sail_cypher_returning_projects_restricted_lists_on_memory_facade() {
             &store,
             "
             CREATE (n:Person {id: 'list-ada', name: 'Ada'})
-            RETURN [n.id, n.label, n.name, n.missing] AS person;
+            RETURN [n.id, n.label, n.name, 'seen', 1, true, null, $marker, n.missing] AS person;
             ",
-            CypherMutationOptions::default(),
+            CypherMutationOptions {
+                parameters: CypherParameters::from([("marker".to_string(), Value::from("param"))]),
+                ..CypherMutationOptions::default()
+            },
         ))
         .expect("concrete list projection");
     assert_eq!(concrete.table.columns, vec!["person"]);
     assert_eq!(
         concrete.table.rows,
         vec![vec![Value::Json(serde_json::json!([
-            "list-ada", "Person", "Ada", null
+            "list-ada", "Person", "Ada", "seen", 1, true, null, "param", null
         ]))]]
     );
 
@@ -3739,7 +3742,7 @@ fn sail_cypher_returning_projects_restricted_lists_on_memory_facade() {
             CREATE (:Person {id: 'list-bob', status: 'active', team: 'eng'});
             CREATE (:Person {id: 'list-cara', status: 'active', team: 'ops'});
             MATCH (n:Person {status: 'active'}) SET n.seen = true
-            RETURN n.id AS id, [n.id, n.team, n.seen] AS person ORDER BY id;
+            RETURN n.id AS id, [n.id, 'team', n.team, n.seen] AS person ORDER BY id;
             ",
             CypherMutationOptions::default(),
         ))
@@ -3750,11 +3753,11 @@ fn sail_cypher_returning_projects_restricted_lists_on_memory_facade() {
         vec![
             vec![
                 Value::from("list-bob"),
-                Value::Json(serde_json::json!(["list-bob", "eng", true]))
+                Value::Json(serde_json::json!(["list-bob", "team", "eng", true]))
             ],
             vec![
                 Value::from("list-cara"),
-                Value::Json(serde_json::json!(["list-cara", "ops", true]))
+                Value::Json(serde_json::json!(["list-cara", "team", "ops", true]))
             ]
         ]
     );
@@ -3766,7 +3769,7 @@ fn sail_cypher_returning_projects_restricted_lists_on_memory_facade() {
             CREATE (:Team {id: 'list-team'});
             MATCH (n:Person {status: 'active'}), (t:Team {id: 'list-team'})
             CREATE (n)-[r:MEMBER_OF {source: 'list'}]->(t)
-            RETURN n.id AS id, [n.id, n.team] AS person, [r.label, r.source] AS membership
+            RETURN n.id AS id, [n.id, 'team', n.team] AS person, [r.label, 'source', r.source] AS membership
             ORDER BY id;
             ",
             CypherMutationOptions::default(),
@@ -3785,9 +3788,26 @@ fn sail_cypher_returning_projects_restricted_lists_on_memory_facade() {
         row_edge.table.rows[0],
         vec![
             Value::from("list-bob"),
-            Value::Json(serde_json::json!(["list-bob", "eng"])),
-            Value::Json(serde_json::json!(["MEMBER_OF", "list"]))
+            Value::Json(serde_json::json!(["list-bob", "team", "eng"])),
+            Value::Json(serde_json::json!(["MEMBER_OF", "source", "list"]))
         ]
+    );
+
+    let literal_only =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (n:Person {id: 'list-literal-only'})
+            RETURN ['literal', 1, false, null] AS values;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("literal-only list projection");
+    assert_eq!(
+        literal_only.table.rows,
+        vec![vec![Value::Json(serde_json::json!([
+            "literal", 1, false, null
+        ]))]]
     );
 
     let aggregates =
@@ -3795,9 +3815,9 @@ fn sail_cypher_returning_projects_restricted_lists_on_memory_facade() {
             &store,
             "
             MATCH (n:Person {status: 'active'}) SET n.list_aggregated = true
-            RETURN count([n.team]) AS listed_rows,
-                   count(DISTINCT [n.team]) AS distinct_lists,
-                   collect([n.id, n.team]) AS people;
+            RETURN count([n.team, 'seen']) AS listed_rows,
+                   count(DISTINCT [n.team, 'seen']) AS distinct_lists,
+                   collect([n.id, 'team', n.team]) AS people;
             ",
             CypherMutationOptions::default(),
         ))
@@ -3831,6 +3851,21 @@ fn sail_cypher_returning_projects_restricted_lists_on_memory_facade() {
     assert!(
         matches!(error, GrustError::CypherUnsupportedCardinality(_)),
         "{error:?}"
+    );
+
+    let nested =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (n:Person {id: 'list-nested'})
+            RETURN [n.id, [1, 2]];
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("nested list projections should stay restricted");
+    assert!(
+        matches!(nested, GrustError::CypherUnsupportedCardinality(_)),
+        "{nested:?}"
     );
 }
 

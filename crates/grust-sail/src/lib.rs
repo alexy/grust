@@ -2929,7 +2929,7 @@ enum CypherReturnTarget {
     Literal(Value),
     Property(String),
     MapProjection(Vec<String>),
-    ListProjection(Vec<String>),
+    ListProjection(CypherReturnListProjection),
     Case(CypherReturnCase),
     Coalesce(CypherReturnCoalesce),
     PropertyExists(String),
@@ -2997,6 +2997,18 @@ struct CypherReturnCoalesce {
 
 #[derive(Clone, Debug, PartialEq)]
 enum CypherReturnCoalesceTerm {
+    Property(String),
+    Literal(Value),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnListProjection {
+    variable: Option<String>,
+    terms: Vec<CypherReturnListProjectionTerm>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CypherReturnListProjectionTerm {
     Property(String),
     Literal(Value),
 }
@@ -3359,8 +3371,11 @@ fn parse_cypher_return_clause(
             (variable, CypherReturnTarget::Case(case))
         } else if let Some(literal) = parse_return_literal_projection(expression, parameters)? {
             (String::new(), CypherReturnTarget::Literal(literal))
-        } else if let Some((variable, keys)) = parse_return_list_projection(expression)? {
-            (variable, CypherReturnTarget::ListProjection(keys))
+        } else if let Some(list) = parse_return_list_projection(expression, parameters)? {
+            (
+                list.variable.clone().unwrap_or_default(),
+                CypherReturnTarget::ListProjection(list),
+            )
         } else if let Some((variable, keys)) = parse_return_map_projection(expression)? {
             (variable, CypherReturnTarget::MapProjection(keys))
         } else if let Ok((variable, key)) = parse_property_ref(expression, "RETURN projection") {
@@ -3375,6 +3390,10 @@ fn parse_cypher_return_clause(
             || matches!(
                 target,
                 CypherReturnTarget::Coalesce(CypherReturnCoalesce { variable: None, .. })
+                    | CypherReturnTarget::ListProjection(CypherReturnListProjection {
+                        variable: None,
+                        ..
+                    })
             ) {
             CypherReturnElement::Literal
         } else {
@@ -3821,11 +3840,11 @@ fn parse_aggregate_projection(
             distinct,
         )));
     }
-    if let Some((variable, keys)) = parse_return_list_projection(body)? {
+    if let Some(list) = parse_return_list_projection(body, parameters)? {
         return Ok(Some((
             aggregate,
-            Some(variable),
-            CypherReturnTarget::ListProjection(keys),
+            list.variable.clone(),
+            CypherReturnTarget::ListProjection(list),
             distinct,
         )));
     }
@@ -5117,7 +5136,10 @@ fn parse_return_map_projection(expression: &str) -> Result<Option<(String, Vec<S
     Ok(Some((variable, keys)))
 }
 
-fn parse_return_list_projection(expression: &str) -> Result<Option<(String, Vec<String>)>> {
+fn parse_return_list_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<CypherReturnListProjection>> {
     let expression = expression.trim();
     if !expression.starts_with('[') {
         return Ok(None);
@@ -5128,28 +5150,43 @@ fn parse_return_list_projection(expression: &str) -> Result<Option<(String, Vec<
     let body = expression[1..expression.len() - 1].trim();
     if body.is_empty() {
         return Err(cypher_syntax(
-            "RETURN list projection requires at least one property reference",
+            "RETURN list projection requires at least one item",
+        ));
+    }
+    if find_unquoted(body, '[').is_some()
+        || find_unquoted(body, ']').is_some()
+        || find_unquoted(body, '(').is_some()
+        || find_unquoted(body, ')').is_some()
+    {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN list projections only support same-variable properties and literals",
         ));
     }
     let mut variable = None;
-    let mut keys = Vec::new();
+    let mut terms = Vec::new();
     for item in split_top_level_commas(body)? {
-        let (item_variable, key) = parse_property_ref(item.trim(), "RETURN list projection")?;
-        if let Some(variable) = &variable {
-            if variable != &item_variable {
-                return Err(cypher_unsupported_cardinality(
-                    "writable Cypher RETURN list projections must reference one variable",
-                ));
+        let item = item.trim();
+        if let Ok((item_variable, key)) = parse_property_ref(item, "RETURN list projection") {
+            if let Some(variable) = &variable {
+                if variable != &item_variable {
+                    return Err(cypher_unsupported_cardinality(
+                        "writable Cypher RETURN list projections must reference one variable",
+                    ));
+                }
+            } else {
+                variable = Some(item_variable);
             }
+            terms.push(CypherReturnListProjectionTerm::Property(key));
         } else {
-            variable = Some(item_variable);
+            let literal = parse_cypher_literal(item, parameters).map_err(|_| {
+                cypher_unsupported_cardinality(
+                    "writable Cypher RETURN list projections only support same-variable properties and literals",
+                )
+            })?;
+            terms.push(CypherReturnListProjectionTerm::Literal(literal));
         }
-        keys.push(key);
     }
-    Ok(Some((
-        variable.expect("list projection contains at least one item"),
-        keys,
-    )))
+    Ok(Some(CypherReturnListProjection { variable, terms }))
 }
 
 fn parse_return_case_projection(
@@ -6191,7 +6228,7 @@ where
             )
             .await
         }
-        CypherReturnTarget::ListProjection(keys) => {
+        CypherReturnTarget::ListProjection(list) => {
             materialize_return_list_projection_value_at(
                 store,
                 node_bindings,
@@ -6202,7 +6239,7 @@ where
                 nodes,
                 edges,
                 projection,
-                keys,
+                list,
                 row_index,
             )
             .await
@@ -7557,29 +7594,34 @@ async fn materialize_return_list_projection_value_at<S>(
     nodes: &mut HashMap<String, Node>,
     edges: &mut HashMap<String, Edge>,
     projection: &CypherReturnProjection,
-    keys: &[String],
+    list: &CypherReturnListProjection,
     row_index: usize,
 ) -> Result<Value>
 where
     S: GraphStore + Sync,
 {
-    let mut values = Vec::with_capacity(keys.len());
-    for key in keys {
-        let value = materialize_return_property_value_at(
-            store,
-            node_bindings,
-            edge_bindings,
-            row_node_values,
-            row_edge_values,
-            row_path_bindings,
-            nodes,
-            edges,
-            projection,
-            key,
-            row_index,
-        )
-        .await?;
-        values.push(value.to_json());
+    let mut values = Vec::with_capacity(list.terms.len());
+    for term in &list.terms {
+        match term {
+            CypherReturnListProjectionTerm::Property(key) => {
+                let value = materialize_return_property_value_at(
+                    store,
+                    node_bindings,
+                    edge_bindings,
+                    row_node_values,
+                    row_edge_values,
+                    row_path_bindings,
+                    nodes,
+                    edges,
+                    projection,
+                    key,
+                    row_index,
+                )
+                .await?;
+                values.push(value.to_json());
+            }
+            CypherReturnListProjectionTerm::Literal(value) => values.push(value.to_json()),
+        }
     }
     Ok(Value::Json(serde_json::Value::Array(values)))
 }

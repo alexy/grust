@@ -59,7 +59,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   while keeping arbitrary map expressions deferred.
 - Added restricted writable Cypher list projections such as
   `RETURN [n.id, n.label]` over one variable already bound by the write plan,
-  while keeping arbitrary list expressions deferred.
+  now extended to allow literal and parameter items in the same restricted
+  single-variable list while keeping arbitrary list expressions deferred.
 - Updated the writable Cypher planning docs to reflect the post-review
   implementation status and the next continuation batches for backend-native
   constraints, shared write-result rows, and future expression slices.
