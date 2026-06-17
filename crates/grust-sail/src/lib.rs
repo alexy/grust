@@ -2939,6 +2939,7 @@ enum CypherReturnTarget {
         index: usize,
     },
     PropertyListSlice(CypherReturnListSlice),
+    PropertyListContains(CypherReturnListContains),
     PropertyListElement {
         key: String,
         element: CypherReturnListElement,
@@ -3059,6 +3060,12 @@ struct CypherReturnListSlice {
     key: String,
     start: Option<usize>,
     end: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnListContains {
+    key: String,
+    needle: Value,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3221,6 +3228,10 @@ fn parse_cypher_return_clause(
             parse_return_list_slice_projection(expression, parameters)?
         {
             (variable, CypherReturnTarget::PropertyListSlice(slice))
+        } else if let Some((variable, contains)) =
+            parse_return_list_contains_projection(expression, parameters)?
+        {
+            (variable, CypherReturnTarget::PropertyListContains(contains))
         } else if let Some((variable, key, index)) =
             parse_return_list_index_projection(expression, parameters)?
         {
@@ -3547,19 +3558,27 @@ fn parse_aggregate_projection(
         }
         return Ok(Some((aggregate, None, CypherReturnTarget::All, distinct)));
     }
-    if let Some(literal) = parse_return_literal_projection(body, parameters)? {
-        return Ok(Some((
-            aggregate,
-            None,
-            CypherReturnTarget::Literal(literal),
-            distinct,
-        )));
-    }
     if let Some(range) = parse_return_range_projection(body, parameters)? {
         return Ok(Some((
             aggregate,
             None,
             CypherReturnTarget::Literal(range),
+            distinct,
+        )));
+    }
+    if let Some((variable, contains)) = parse_return_list_contains_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyListContains(contains),
+            distinct,
+        )));
+    }
+    if let Some(literal) = parse_return_literal_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            None,
+            CypherReturnTarget::Literal(literal),
             distinct,
         )));
     }
@@ -3952,6 +3971,40 @@ fn parse_optional_non_negative_usize_bound(
         return Ok(None);
     }
     parse_non_negative_usize_literal(expression, parameters, context).map(Some)
+}
+
+fn parse_return_list_contains_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<(String, CypherReturnListContains)>> {
+    let expression = expression.trim();
+    let Some(in_index) = find_unquoted_keyword(expression, "IN") else {
+        return Ok(None);
+    };
+    if expression.contains('(') || expression.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN IN only supports literal IN variable.property",
+        ));
+    }
+    let needle = expression[..in_index].trim();
+    let haystack = expression[in_index + "IN".len()..].trim();
+    if needle.is_empty() || haystack.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN list membership projection requires needle IN variable.property",
+        ));
+    }
+    let needle = parse_cypher_literal(needle, parameters).map_err(|_| {
+        cypher_unsupported_cardinality(
+            "writable Cypher RETURN IN needle must be a literal or parameter",
+        )
+    })?;
+    let (variable, key) = parse_property_ref(haystack, "RETURN list membership projection")
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN IN requires a variable.property haystack",
+            )
+        })?;
+    Ok(Some((variable, CypherReturnListContains { key, needle })))
 }
 
 fn parse_return_list_index_projection(
@@ -6068,6 +6121,22 @@ where
             )
             .await
         }
+        CypherReturnTarget::PropertyListContains(contains) => {
+            materialize_return_property_list_contains_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                contains,
+                row_index,
+            )
+            .await
+        }
         CypherReturnTarget::PropertyListElement { key, element } => {
             materialize_return_property_list_element_value_at(
                 store,
@@ -6574,6 +6643,23 @@ where
                 edges,
                 projection,
                 slice,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyListContains(contains) => {
+            let value = materialize_return_property_list_contains_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                contains,
                 row_index,
             )
             .await?;
@@ -7595,6 +7681,76 @@ fn restricted_list_slice_value(value: Value, slice: &CypherReturnListSlice) -> R
         | Value::DateTime(_)
         | Value::Json(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN list slices only support array values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_list_contains_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    contains: &CypherReturnListContains,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        &contains.key,
+        row_index,
+    )
+    .await?;
+    restricted_list_contains_value(value, &contains.needle)
+}
+
+fn restricted_list_contains_value(value: Value, needle: &Value) -> Result<Value> {
+    if matches!(needle, Value::Null) {
+        return Ok(Value::Null);
+    }
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::StringArray(values) => {
+            Ok(Value::Bool(needle.as_str().is_some_and(|needle| {
+                values.iter().any(|value| value == needle)
+            })))
+        }
+        Value::IntArray(values) => Ok(Value::Bool(matches!(
+            needle,
+            Value::Int(needle) if values.iter().any(|value| value == needle)
+        ))),
+        Value::FloatArray(values) => Ok(Value::Bool(matches!(
+            needle,
+            Value::Float(needle) if values.iter().any(|value| value == needle)
+        ))),
+        Value::Json(serde_json::Value::Array(values)) => Ok(Value::Bool(
+            values
+                .into_iter()
+                .map(Value::from_json)
+                .any(|value| &value == needle),
+        )),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::DateTime(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN IN only supports array values",
         )),
     }
 }
@@ -9331,6 +9487,7 @@ where
             | CypherReturnTarget::PropertySize(_)
             | CypherReturnTarget::PropertyListIndex { .. }
             | CypherReturnTarget::PropertyListSlice(_)
+            | CypherReturnTarget::PropertyListContains(_)
             | CypherReturnTarget::PropertyListElement { .. }
             | CypherReturnTarget::PropertyListTail(_)
             | CypherReturnTarget::PropertyAbs(_)
@@ -9669,6 +9826,21 @@ where
             .await?
         }
         CypherReturnTarget::PropertyListSlice(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyListContains(_) => {
             materialize_return_projection_values(
                 store,
                 node_bindings,

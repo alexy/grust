@@ -2386,6 +2386,8 @@ remaining pieces should stay explicit:
   restricted `variable.property[index]` projections and aggregate bodies, and
   restricted `variable.property[start..end]` projections and aggregate bodies,
   and
+  restricted `needle IN variable.property` projections and aggregate bodies,
+  and
   restricted `head(variable.property)` / `last(variable.property)`
   projections and aggregate bodies, and
   restricted `tail(variable.property)` projections and aggregate bodies, and
@@ -4049,3 +4051,50 @@ Writable `RETURN variable.property[start..end]` now parses into a dedicated
 restricted projection target. Evaluation reuses the existing property
 materializer and slices only typed arrays or JSON arrays, preserving the same
 narrow, type-aware behavior as the other restricted property functions.
+
+### Batch CV: Restricted List Membership Projections
+
+Support bounded membership checks over array-like property values already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN 'speaker' IN n.tags AS has_speaker;
+```
+
+Acceptance criteria:
+
+- Support `needle IN variable.property` as a scalar writable `RETURN`
+  projection when the variable is a concrete node, concrete relationship,
+  materialized row-node, or materialized row-relationship variable.
+- Accept only literal or parameter scalar needles. Reject computed needles,
+  property needles, cross-variable expressions, nested functions, maps, lists,
+  and arbitrary expressions.
+- Compare typed Grust arrays type-aware: string needles match only string
+  arrays, integer needles match only integer arrays, and float needles match
+  only float arrays. Type mismatches return `false`.
+- For JSON arrays, convert each JSON element through `Value::from_json` and
+  compare to the needle using the existing Grust `Value` equality semantics.
+- Return `null` when the property is absent or explicitly null. Return `null`
+  for a null needle rather than adding full Cypher null-propagation semantics.
+- Reject strings, numeric values, booleans, datetimes, JSON objects,
+  whole-element values, paths, nested functions, cross-variable expressions,
+  and other unsupported haystacks rather than adding general list-expression
+  semantics.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over membership booleans should
+  fail through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep membership checks property-only; list literals, list comprehensions,
+  property needles, computed needles, nested expressions, and arbitrary
+  expression evaluation remain deferred.
+
+Implementation status: implemented in the working tree after Batch CU.
+Writable `RETURN needle IN variable.property` now parses into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and performs type-aware membership checks only over typed arrays
+or JSON arrays, preserving the same narrow behavior as the other restricted
+property functions.

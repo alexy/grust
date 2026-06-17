@@ -142,6 +142,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added restricted writable Cypher `variable.property[start..end]` projections
   and aggregate bodies over array-like property values with literal or
   parameter non-negative integer bounds.
+- Added restricted writable Cypher `needle IN variable.property` projections
+  and aggregate bodies over array-like property values with literal or
+  parameter scalar needles.
 - Added restricted writable Cypher `head(variable.property)` and
   `last(variable.property)` projections and aggregate bodies over array-like
   property values.

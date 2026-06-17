@@ -5074,6 +5074,193 @@ fn sail_cypher_returning_projects_restricted_list_slices_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_restricted_list_membership_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let concrete =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'membership-ada', tags: $tags, scores: $scores});
+            CREATE (b:Person {id: 'membership-bob'});
+            MATCH (a:Person {id: 'membership-ada'}), (b:Person {id: 'membership-bob'})
+            CREATE (a)-[e:KNOWS {id: 'membership-knows', weights: $weights}]->(b)
+            RETURN 'speaker' IN a.tags AS has_speaker,
+                   $needle_score IN a.scores AS has_score,
+                   4.5 IN e.weights AS has_weight,
+                   'missing' IN a.tags AS missing_tag,
+                   null IN a.tags AS null_needle,
+                   'speaker' IN a.nickname AS missing_name;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    (
+                        "tags".to_string(),
+                        Value::StringArray(vec!["engineer".to_string(), "speaker".to_string()]),
+                    ),
+                    ("scores".to_string(), Value::IntArray(vec![7, 11])),
+                    ("weights".to_string(), Value::FloatArray(vec![2.5, 4.5])),
+                    ("needle_score".to_string(), Value::Int(11)),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("concrete list membership projections");
+    assert_eq!(
+        concrete.table.rows,
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Null,
+            Value::Null,
+        ]]
+    );
+
+    let broad =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'membership-cara', status: 'membership', tags: $tags_a});
+            CREATE (:Person {id: 'membership-dan', status: 'membership', tags: $tags_b});
+            MATCH (n:Person {status: 'membership'}) SET n.membership_checked = true
+            RETURN n.id AS id, 'speaker' IN n.tags AS has_speaker
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    (
+                        "tags_a".to_string(),
+                        Value::StringArray(vec!["speaker".to_string(), "mentor".to_string()]),
+                    ),
+                    (
+                        "tags_b".to_string(),
+                        Value::StringArray(vec!["writer".to_string(), "mentor".to_string()]),
+                    ),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("broad list membership projections");
+    assert_eq!(
+        broad.table.rows,
+        vec![
+            vec![Value::from("membership-cara"), Value::Bool(true)],
+            vec![Value::from("membership-dan"), Value::Bool(false)],
+        ]
+    );
+
+    let row_edges =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Team {id: 'membership-team'});
+            MATCH (n:Person {status: 'membership'}), (t:Team {id: 'membership-team'})
+            CREATE (n)-[r:MEMBER_OF {rankings: $rankings}]->(t)
+            RETURN n.id AS id, 2 IN r.rankings AS has_rank
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "rankings".to_string(),
+                    Value::IntArray(vec![1, 2, 3]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("row-producing relationship list membership projections");
+    assert_eq!(
+        row_edges.table.rows,
+        vec![
+            vec![Value::from("membership-cara"), Value::Bool(true)],
+            vec![Value::from("membership-dan"), Value::Bool(true)],
+        ]
+    );
+
+    let aggregates =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (n:Person {status: 'membership'}) SET n.membership_counted = true
+            RETURN count('speaker' IN n.tags) AS rows,
+                   count(DISTINCT 'speaker' IN n.tags) AS states,
+                   collect('speaker' IN n.tags) AS memberships;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("list membership aggregate projections");
+    assert_eq!(
+        aggregates.table.rows,
+        vec![vec![
+            Value::Int(2),
+            Value::Int(2),
+            Value::Json(serde_json::json!([true, false])),
+        ]]
+    );
+
+    let numeric_membership_aggregate =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "MATCH (n:Person {status: 'membership'}) SET n.membership_summed = true RETURN sum('speaker' IN n.tags);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("numeric aggregates over membership booleans should stay rejected");
+    assert!(
+        matches!(
+            numeric_membership_aggregate,
+            GrustError::CypherUnsupportedCardinality(_)
+        ),
+        "{numeric_membership_aggregate:?}"
+    );
+
+    let type_mismatch =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'membership-type', scores: $scores}) RETURN '11' IN n.scores;",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "scores".to_string(),
+                    Value::IntArray(vec![11]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("type mismatched list membership should evaluate false");
+    assert_eq!(type_mismatch.table.rows, vec![vec![Value::Bool(false)]]);
+
+    let non_array =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'membership-string', name: 'Ada'}) RETURN 'A' IN n.name;",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("list membership over strings should stay rejected");
+    assert!(
+        matches!(non_array, GrustError::CypherUnsupportedCardinality(_)),
+        "{non_array:?}"
+    );
+
+    let computed_needle =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'membership-computed', tags: $tags}) RETURN toLower('SPEAKER') IN n.tags;",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "tags".to_string(),
+                    Value::StringArray(vec!["speaker".to_string()]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("computed list membership needles should stay rejected");
+    assert!(
+        matches!(computed_needle, GrustError::CypherUnsupportedCardinality(_)),
+        "{computed_needle:?}"
+    );
+}
+
+#[test]
 fn sail_cypher_returning_projects_restricted_list_indexes_on_memory_facade() {
     let store = MemoryGraphStore::new();
 
