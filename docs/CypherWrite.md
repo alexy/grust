@@ -2385,6 +2385,7 @@ remaining pieces should stay explicit:
   restricted `size(variable.property)` projections and aggregate bodies, and
   restricted `head(variable.property)` / `last(variable.property)`
   projections and aggregate bodies, and
+  restricted `tail(variable.property)` projections and aggregate bodies, and
   restricted `abs(variable.property)` projections and aggregate bodies, and
   restricted `ceil(variable.property)` / `floor(variable.property)`
   projections and aggregate bodies, and
@@ -3835,3 +3836,43 @@ Writable `RETURN` now parses `head(variable.property)` and
 Evaluation reuses the existing property materializer and extracts only typed
 array or JSON-array elements, preserving the same narrow, type-aware behavior
 as the other restricted property functions.
+
+### Batch CQ: Restricted List Tail Projections
+
+Support bounded list-tail projection over property values already available in
+the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN tail(n.tags) AS remaining_tags;
+```
+
+Acceptance criteria:
+
+- Support `tail(variable.property)` as a scalar writable `RETURN` projection
+  when the variable is a concrete node, concrete relationship, materialized
+  row-node, or materialized row-relationship variable.
+- Return the same typed Grust array kind without the first element for typed
+  arrays. For JSON arrays, drop the first element and convert the remaining
+  JSON array through `Value::from_json`. Return `null` when the property is
+  absent or explicitly null; return an empty array for empty or single-element
+  arrays.
+- Reject strings, numeric values, booleans, datetimes, JSON objects,
+  whole-element values, paths, nested functions, cross-variable expressions,
+  and other unsupported values rather than adding string slicing or general
+  list-expression semantics.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over array values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `tail(...)` property-only; list literals, list comprehensions, slices,
+  and arbitrary expression evaluation remain deferred.
+
+Implementation status: implemented in the working tree after Batch CP.
+Writable `RETURN` now parses `tail(variable.property)` into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and returns only typed array or JSON-array tails, preserving the
+same narrow, type-aware behavior as the other restricted property functions.

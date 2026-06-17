@@ -2938,6 +2938,7 @@ enum CypherReturnTarget {
         key: String,
         element: CypherReturnListElement,
     },
+    PropertyListTail(String),
     PropertyAbs(String),
     PropertyNumericRound {
         key: String,
@@ -3211,6 +3212,8 @@ fn parse_cypher_return_clause(
                 variable,
                 CypherReturnTarget::PropertyListElement { key, element },
             )
+        } else if let Some((variable, key)) = parse_return_list_tail_projection(expression)? {
+            (variable, CypherReturnTarget::PropertyListTail(key))
         } else if let Some((variable, key)) = parse_return_abs_projection(expression)? {
             (variable, CypherReturnTarget::PropertyAbs(key))
         } else if let Some((variable, key, round)) =
@@ -3556,6 +3559,14 @@ fn parse_aggregate_projection(
             aggregate,
             Some(variable),
             CypherReturnTarget::PropertyListElement { key, element },
+            distinct,
+        )));
+    }
+    if let Some((variable, key)) = parse_return_list_tail_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyListTail(key),
             distinct,
         )));
     }
@@ -3920,6 +3931,37 @@ fn parse_return_list_element_projection(
         .map_err(|_| {
             cypher_unsupported_cardinality(
                 "writable Cypher RETURN head/last only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_list_tail_projection(expression: &str) -> Result<Option<(String, String)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("tail") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN tail projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN tail projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN tail only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN tail projection")
+        .map(Some)
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN tail only supports variable.property arguments",
             )
         })
 }
@@ -5777,6 +5819,22 @@ where
             )
             .await
         }
+        CypherReturnTarget::PropertyListTail(key) => {
+            materialize_return_property_list_tail_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await
+        }
         CypherReturnTarget::PropertyAbs(key) => {
             materialize_return_property_abs_value_at(
                 store,
@@ -6233,6 +6291,23 @@ where
                 projection,
                 key,
                 *element,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyListTail(key) => {
+            let value = materialize_return_property_list_tail_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
                 row_index,
             )
             .await?;
@@ -7150,6 +7225,66 @@ fn restricted_list_element_value(value: Value, element: CypherReturnListElement)
         | Value::DateTime(_)
         | Value::Json(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN head/last only supports array values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_list_tail_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_list_tail_value(value)
+}
+
+fn restricted_list_tail_value(value: Value) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::StringArray(values) => Ok(Value::StringArray(
+            values.into_iter().skip(1).collect::<Vec<_>>(),
+        )),
+        Value::IntArray(values) => Ok(Value::IntArray(
+            values.into_iter().skip(1).collect::<Vec<_>>(),
+        )),
+        Value::FloatArray(values) => Ok(Value::FloatArray(
+            values.into_iter().skip(1).collect::<Vec<_>>(),
+        )),
+        Value::Json(serde_json::Value::Array(values)) => Ok(Value::from_json(
+            serde_json::Value::Array(values.into_iter().skip(1).collect()),
+        )),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::DateTime(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN tail only supports array values",
         )),
     }
 }
@@ -8751,6 +8886,7 @@ where
             | CypherReturnTarget::PropertyExists(_)
             | CypherReturnTarget::PropertySize(_)
             | CypherReturnTarget::PropertyListElement { .. }
+            | CypherReturnTarget::PropertyListTail(_)
             | CypherReturnTarget::PropertyAbs(_)
             | CypherReturnTarget::PropertyNumericRound { .. }
             | CypherReturnTarget::PropertyNumericSign(_)
@@ -9072,6 +9208,21 @@ where
             .await?
         }
         CypherReturnTarget::PropertyListElement { .. } => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyListTail(_) => {
             materialize_return_projection_values(
                 store,
                 node_bindings,

@@ -4953,6 +4953,147 @@ fn sail_cypher_returning_projects_restricted_list_elements_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_restricted_list_tail_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let concrete =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'tail-ada', tags: $tags, scores: $scores, empty: $empty});
+            CREATE (b:Person {id: 'tail-bob'});
+            MATCH (a:Person {id: 'tail-ada'}), (b:Person {id: 'tail-bob'})
+            CREATE (a)-[e:KNOWS {id: 'tail-knows', weights: $weights}]->(b)
+            RETURN tail(a.tags) AS tag_tail,
+                   tail(a.scores) AS score_tail,
+                   tail(a.empty) AS empty_tail,
+                   tail(e.weights) AS weight_tail,
+                   tail(a.nickname) AS missing_name;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    (
+                        "tags".to_string(),
+                        Value::StringArray(vec!["engineer".to_string(), "speaker".to_string()]),
+                    ),
+                    ("scores".to_string(), Value::IntArray(vec![7, 11])),
+                    ("empty".to_string(), Value::StringArray(Vec::new())),
+                    ("weights".to_string(), Value::FloatArray(vec![2.5, 4.5])),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("concrete list tail projections");
+    assert_eq!(
+        concrete.table.rows,
+        vec![vec![
+            Value::StringArray(vec!["speaker".to_string()]),
+            Value::IntArray(vec![11]),
+            Value::StringArray(Vec::new()),
+            Value::FloatArray(vec![4.5]),
+            Value::Null,
+        ]]
+    );
+
+    let broad =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'tail-cara', status: 'tail', scores: $scores_a});
+            CREATE (:Person {id: 'tail-dan', status: 'tail', scores: $scores_b});
+            MATCH (n:Person {status: 'tail'}) SET n.seen = true
+            RETURN n.id AS id, tail(n.scores) AS scores
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    ("scores_a".to_string(), Value::IntArray(vec![3, 5])),
+                    ("scores_b".to_string(), Value::IntArray(vec![7, 9])),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("broad list tail projections");
+    assert_eq!(
+        broad.table.rows,
+        vec![
+            vec![Value::from("tail-cara"), Value::IntArray(vec![5])],
+            vec![Value::from("tail-dan"), Value::IntArray(vec![9])],
+        ]
+    );
+
+    let row_edges =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Team {id: 'tail-team'});
+            MATCH (n:Person {status: 'tail'}), (t:Team {id: 'tail-team'})
+            CREATE (n)-[r:MEMBER_OF {rankings: $rankings}]->(t)
+            RETURN n.id AS id, tail(r.rankings) AS ranks
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "rankings".to_string(),
+                    Value::IntArray(vec![1, 2]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("row-producing relationship list tail projections");
+    assert_eq!(
+        row_edges.table.rows,
+        vec![
+            vec![Value::from("tail-cara"), Value::IntArray(vec![2])],
+            vec![Value::from("tail-dan"), Value::IntArray(vec![2])],
+        ]
+    );
+
+    let aggregates =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (n:Person {status: 'tail'}) SET n.tail_counted = true
+            RETURN count(tail(n.scores)) AS rows,
+                   collect(tail(n.scores)) AS score_tails;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("list tail aggregate projections");
+    assert_eq!(
+        aggregates.table.rows,
+        vec![vec![
+            Value::Int(2),
+            Value::Json(serde_json::json!([[5], [9]])),
+        ]]
+    );
+
+    let string_tail =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'tail-string', name: 'Ada'}) RETURN tail(n.name);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("tail over string values should stay rejected");
+    assert!(
+        matches!(string_tail, GrustError::CypherUnsupportedCardinality(_)),
+        "{string_tail:?}"
+    );
+
+    let nested_tail =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'tail-nested', path: 'a/b'}) RETURN tail(split(n.path, '/'));",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("nested tail arguments should stay rejected");
+    assert!(
+        matches!(nested_tail, GrustError::CypherUnsupportedCardinality(_)),
+        "{nested_tail:?}"
+    );
+}
+
+#[test]
 fn sail_cypher_returning_projects_restricted_is_empty_on_memory_facade() {
     let store = MemoryGraphStore::new();
 
