@@ -1105,7 +1105,8 @@ rather than a parameter reference. Mutating `MATCH` clauses can use a bounded
 null checks, `STARTS WITH`, `ENDS WITH`, and `CONTAINS` over string properties,
 restricted `variable.property IN [...]` membership checks over scalar list
 items, parenthesized same-property equality `OR` groups folded to membership
-predicates, and parentheses around supported predicate terms or `AND` groups.
+predicates, `NOT (...)` around those groups folded to membership exclusions,
+and parentheses around supported predicate terms or `AND` groups.
 Predicates lower to backend-neutral `GraphPropertyPredicate` values, so Memory
 evaluates the same resolved plan that Sail lowers to SQL. Ordinary comparison
 predicates never match missing properties; `IS NULL` matches missing or

@@ -103,8 +103,9 @@ describe unreleased working-tree additions:
   parameters, optionally prefix one comparison, null check, string predicate,
   or membership predicate with `NOT`, wrap supported
   predicate terms in parentheses, combine predicates with `AND`, and fold
-  same-property equality `OR` groups into membership predicates. When a folded
-  `OR` group is combined with `AND`, the `OR` group must be parenthesized.
+  same-property equality `OR` groups into membership predicates, including
+  `NOT (...)` exclusion groups. When a folded `OR` group is combined with
+  `AND`, the `OR` group must be parenthesized.
 - `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
   operation when the source is a property on the same node variable and the
@@ -4578,3 +4579,39 @@ terms through the existing restricted predicate parser, and accepts only
 same-target, same-key equality predicates. Accepted `OR` groups lower to the
 existing `GraphPredicateOp::In` operator, so Sail SQL lowering and Memory
 execution reuse the membership predicate path.
+
+### Batch DH: Negated Same-Property Equality `OR` Predicates
+
+Extend the bounded mutating `MATCH ... WHERE` grammar to accept the matching
+negated form of the Batch DG equality disjunction:
+
+```cypher
+MATCH (n:Person)
+WHERE NOT (n.status = 'blocked' OR n.status = 'archived')
+SET n.reviewed = true;
+```
+
+Acceptance criteria:
+
+- Support `NOT (...)` only when the parenthesized body is a same-property
+  equality `OR` group accepted by Batch DG.
+- Lower the negated group to one backend-neutral `GraphPredicateOp::NotIn`
+  predicate rather than adding a general boolean negation tree.
+- Allow literal and parameter equality values when each value is a scalar
+  string, integer, float, or boolean compatible with restricted membership
+  predicate values.
+- Preserve existing missing-property semantics through the folded `NotIn`
+  operator: missing properties do not match.
+- Reject unparenthesized `NOT a = x OR a = y`, mixed-property `OR`,
+  mixed-variable `OR`, non-equality `OR`, null values, nested `NOT`, pattern
+  predicates, function calls, arbitrary expressions, and general boolean
+  combinations.
+- Add planner tests proving the `NotIn` fold, rejection tests for ambiguous or
+  deferred forms, and Memory-facade execution coverage.
+
+Implementation status: implemented in the working tree after Batch DG.
+`grust-sail` now recognizes `NOT (...)` around a Batch DG-compatible
+same-target, same-key equality `OR` group and lowers it to
+`GraphPredicateOp::NotIn`. Ambiguous unparenthesized `NOT ... OR ...` forms
+continue through the ordinary restricted parser and are rejected, so the Sail
+SQL lowering and Memory execution still reuse the membership predicate path.

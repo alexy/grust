@@ -2708,11 +2708,29 @@ fn parse_where_predicate_or_fold(
     predicate: &str,
     parameters: &CypherParameters,
 ) -> Result<ParsedWherePredicate> {
+    let trimmed = predicate.trim();
+    if let Some(after_not) = strip_leading_keyword(trimmed, "NOT") {
+        let inner = after_not.trim();
+        let stripped = strip_enclosing_parentheses(inner)?;
+        if stripped != inner && find_top_level_keyword(stripped, "OR")?.is_some() {
+            let terms = split_top_level_or(stripped)?;
+            return parse_where_or_fold_terms(terms, parameters, GraphPredicateOp::NotIn);
+        }
+    }
+
     let terms = split_top_level_or(predicate)?;
     if terms.len() == 1 {
         return parse_where_predicate(predicate, parameters);
     }
 
+    parse_where_or_fold_terms(terms, parameters, GraphPredicateOp::In)
+}
+
+fn parse_where_or_fold_terms(
+    terms: Vec<&str>,
+    parameters: &CypherParameters,
+    op: GraphPredicateOp,
+) -> Result<ParsedWherePredicate> {
     let mut parsed = terms
         .into_iter()
         .map(|term| parse_where_predicate(term, parameters))
@@ -2745,7 +2763,7 @@ fn parse_where_predicate_or_fold(
         target,
         predicate: GraphPropertyPredicate {
             key,
-            op: GraphPredicateOp::In,
+            op,
             value: Value::Json(serde_json::Value::Array(values)),
         },
     })

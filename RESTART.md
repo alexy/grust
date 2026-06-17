@@ -1,6 +1,6 @@
 # Restart Checkpoint
 
-Generated: 2026-06-17 04:25:24 PDT
+Generated: 2026-06-17 04:31:08 PDT
 
 ## Current Goal
 
@@ -25,41 +25,40 @@ Continue implementing bounded writable Cypher features from
 - Branch: `codex/cypher-write`
 - Remote tracking branch: `origin/codex/cypher-write`
 - Expected untracked file: `OPUS1.md`
-- Latest completed slice before this checkpoint: Batch DG, restricted
+- Latest completed slice before this checkpoint: Batch DH, restricted negated
   same-property equality `OR` predicates in mutating `MATCH ... WHERE`.
 
 ## Latest Completed Work
 
-Batch DG added restricted same-property equality `OR` predicates to bounded
-mutating Cypher
-`MATCH ... WHERE`:
+Batch DH added restricted negated same-property equality `OR` predicates to
+bounded mutating Cypher `MATCH ... WHERE`:
 
 ```cypher
 MATCH (n:Person)
-WHERE n.status = 'active' OR n.status = 'pending'
+WHERE NOT (n.status = 'blocked' OR n.status = 'archived')
 SET n.reviewed = true;
 ```
 
 Implemented behavior:
 
-- `grust-sail` splits each top-level `AND` term on top-level `OR`.
-- Accepted `OR` groups must consist only of equality predicates over the same
-  matched variable and property.
+- `grust-sail` recognizes `NOT (...)` around Batch DG-compatible
+  same-property equality `OR` groups.
+- Accepted negated groups must consist only of equality predicates over the
+  same matched variable and property.
 - Literal and parameter equality values are accepted only when they are scalar
   string, integer, float, or boolean values compatible with restricted
   membership predicates.
-- Accepted groups fold to one backend-neutral `GraphPredicateOp::In`
+- Accepted groups fold to one backend-neutral `GraphPredicateOp::NotIn`
   predicate, reusing Sail SQL membership lowering and Memory execution.
-- Mixed-property, mixed-variable, non-equality, null-valued, nested-`NOT`,
-  function, pattern, arbitrary-expression, and general boolean-expression `OR`
-  forms remain deferred and rejected.
+- Ambiguous unparenthesized `NOT a = x OR a = y`, mixed-property,
+  mixed-variable, non-equality, null-valued, nested-`NOT`, function, pattern,
+  arbitrary-expression, and general boolean-expression `OR` forms remain
+  deferred and rejected.
 - Missing properties keep the existing folded-membership behavior and do not
   match.
 
 Files updated:
 
-- `crates/grust-core/src/lib.rs`
-- `crates/grust-core/src/tests.rs`
 - `crates/grust-sail/src/lib.rs`
 - `crates/grust-sail/src/tests.rs`
 - `docs/CypherWrite.md`
@@ -69,7 +68,7 @@ Files updated:
 
 ## Verification State
 
-The following commands passed after Batch DG:
+The following commands passed after Batch DH:
 
 ```sh
 cargo fmt --all
@@ -83,7 +82,7 @@ git diff --check
 
 Observed test summaries:
 
-- `cargo test -p grust-sail --lib`: 187 passed, 25 ignored
+- `cargo test -p grust-sail --lib`: 189 passed, 25 ignored
 - `cargo test -p grust-core --lib`: 35 passed
 - `cargo test -p grust-memory --lib`: 20 passed
 

@@ -1487,6 +1487,41 @@ fn cypher_match_where_folds_same_property_or_to_in_predicate() {
 }
 
 #[test]
+fn cypher_match_where_folds_negated_same_property_or_to_not_in_predicate() {
+    let plan = sail_cypher_mutation_plan_with_options(
+        "MATCH (n:Person) WHERE NOT (n.status = 'blocked' OR n.status = $status) AND n.kind = 'person' SET n.reviewed = true",
+        CypherMutationOptions {
+            parameters: CypherParameters::from([("status".to_string(), Value::from("archived"))]),
+            ..CypherMutationOptions::default()
+        },
+    )
+    .unwrap()
+    .0;
+
+    assert_eq!(
+        plan.operations,
+        vec![GraphMutationPlanOp::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::new(),
+            predicates: vec![
+                GraphPropertyPredicate {
+                    key: "status".to_string(),
+                    op: GraphPredicateOp::NotIn,
+                    value: Value::Json(serde_json::json!(["blocked", "archived"])),
+                },
+                GraphPropertyPredicate {
+                    key: "kind".to_string(),
+                    op: GraphPredicateOp::Equal,
+                    value: Value::from("person"),
+                }
+            ],
+            patch: Props::from([("reviewed".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+}
+
+#[test]
 fn cypher_match_where_keeps_predicated_identity_matches_on_matching_path() {
     let plan = sail_cypher_mutation_plan(
         "MATCH (n:Person {id: 'person-1'}) WHERE n.status <> 'deleted' REMOVE n.nickname",
@@ -1577,6 +1612,10 @@ fn cypher_match_where_rejects_deferred_predicate_forms() {
         "MATCH (n:Person) WHERE n.status = 'inactive' OR n.active = true SET n.archived = true",
         "MATCH (n:Person) WHERE n.status = 'inactive' OR n.status = null SET n.archived = true",
         "MATCH (n:Person) WHERE n.status = 'active' OR n.status = 'pending' AND n.kind = 'person' SET n.archived = true",
+        "MATCH (n:Person) WHERE NOT n.status = 'active' OR n.status = 'pending' SET n.archived = true",
+        "MATCH (n:Person) WHERE NOT (n.status <> 'inactive' OR n.status <> 'deleted') SET n.archived = true",
+        "MATCH (n:Person) WHERE NOT (n.status = 'inactive' OR n.active = true) SET n.archived = true",
+        "MATCH (n:Person) WHERE NOT (n.status = 'inactive' OR n.status = null) SET n.archived = true",
         "MATCH (n:Person) WHERE NOT NOT n.active = true SET n.archived = true",
         "MATCH (n:Person) WHERE (n.status = 'inactive' SET n.archived = true",
         "MATCH (n:Person) WHERE size(n.tags) = 2 SET n.archived = true",
@@ -1591,6 +1630,38 @@ fn cypher_match_where_rejects_deferred_predicate_forms() {
             sail_cypher_mutation_plan(cypher).expect_err("unsupported WHERE predicate should fail");
         assert!(is_cypher_planning_error(&error) || matches!(error, GrustError::CypherSyntax(_)));
     }
+}
+
+#[test]
+fn sail_cypher_match_where_negated_or_predicates_execute_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'where-not-or-ada', status: 'active'});
+            CREATE (:Person {id: 'where-not-or-bob', status: 'pending'});
+            CREATE (:Person {id: 'where-not-or-cara', status: 'blocked'});
+            CREATE (:Person {id: 'where-not-or-dan', status: 'archived'});
+            CREATE (:Person {id: 'where-not-or-missing'});
+            MATCH (n:Person)
+            WHERE NOT (n.status = 'blocked' OR n.status = 'archived')
+            SET n.selected = true
+            RETURN n.id AS id, n.selected AS selected
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("restricted negated OR WHERE predicates should execute on memory facade");
+
+    assert_eq!(
+        result.table.rows,
+        vec![
+            vec![Value::from("where-not-or-ada"), Value::Bool(true)],
+            vec![Value::from("where-not-or-bob"), Value::Bool(true)],
+        ]
+    );
 }
 
 #[test]
