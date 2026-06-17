@@ -2411,8 +2411,8 @@ remaining pieces should stay explicit:
   `contains(variable.property, needle)` projections and aggregate bodies, and
   restricted `left(variable.property, length)` /
   `right(variable.property, length)` projections and aggregate bodies, and
-  restricted `reverse(variable.property)` projections and aggregate bodies,
-  and
+  restricted `reverse(variable.property)` projections and aggregate bodies over
+  string and array values, and
   restricted `split(variable.property, delimiter)` projections and aggregate
   bodies, and
   restricted `startNode(relationship)` / `endNode(relationship)` projections
@@ -3479,8 +3479,8 @@ Acceptance criteria:
   through the existing type-aware aggregate checks.
 - Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
   `LIMIT` behavior through the existing restricted return-table machinery.
-- Keep `reverse(...)` as a string-only slice; list reversal remains deferred
-  until arbitrary list expressions have backend-neutral semantics.
+- Keep this batch string-only; list reversal is handled later in Batch CR
+  without adding arbitrary list-expression semantics.
 
 Implementation status: implemented in the working tree after Batch CF.
 Writable `RETURN` now parses `reverse(variable.property)` into a dedicated
@@ -3876,3 +3876,43 @@ Writable `RETURN` now parses `tail(variable.property)` into a dedicated
 restricted projection target. Evaluation reuses the existing property
 materializer and returns only typed array or JSON-array tails, preserving the
 same narrow, type-aware behavior as the other restricted property functions.
+
+### Batch CR: Restricted Array Reverse Projections
+
+Extend the existing bounded `reverse(variable.property)` projection to
+array-like property values already available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN reverse(n.tags) AS reversed_tags;
+```
+
+Acceptance criteria:
+
+- Keep the existing string behavior for `reverse(variable.property)`.
+- Add typed Grust array and JSON array support when the variable is a concrete
+  node, concrete relationship, materialized row-node, or materialized
+  row-relationship variable.
+- Return the same typed Grust array kind in reverse order for typed arrays.
+  For JSON arrays, reverse the elements and convert the resulting JSON array
+  through `Value::from_json`. Return `null` when the property is absent or
+  explicitly null.
+- Continue rejecting numeric values, booleans, JSON objects, whole-element
+  values, paths, nested functions, cross-variable expressions, and other
+  unsupported values rather than adding general list-expression semantics.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over array values should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `reverse(...)` property-only; list literals, list comprehensions,
+  slices, and arbitrary expression evaluation remain deferred.
+
+Implementation status: implemented in the working tree after Batch CQ.
+Writable `RETURN reverse(variable.property)` now reverses both string-like
+values and array-like values through the same restricted projection target.
+Evaluation reuses the existing property materializer and keeps the syntax
+property-only, preserving the same narrow, type-aware behavior as the other
+restricted property functions.

@@ -6774,22 +6774,38 @@ fn sail_cypher_returning_projects_restricted_string_reverse_on_memory_facade() {
         futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
             &store,
             "
-            CREATE (a:Person {id: 'reverse-ada', name: 'Ada Lovelace'});
+            CREATE (a:Person {id: 'reverse-ada', name: 'Ada Lovelace', tags: $tags, scores: $scores});
             CREATE (b:Person {id: 'reverse-bob'});
             MATCH (a:Person {id: 'reverse-ada'}), (b:Person {id: 'reverse-bob'})
-            CREATE (a)-[e:KNOWS {id: 'reverse-knows', source: 'Conference'}]->(b)
+            CREATE (a)-[e:KNOWS {id: 'reverse-knows', source: 'Conference', weights: $weights}]->(b)
             RETURN reverse(a.name) AS reversed_name,
                    reverse(e.source) AS reversed_source,
+                   reverse(a.tags) AS reversed_tags,
+                   reverse(a.scores) AS reversed_scores,
+                   reverse(e.weights) AS reversed_weights,
                    reverse(a.nickname) AS missing_name;
             ",
-            CypherMutationOptions::default(),
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    (
+                        "tags".to_string(),
+                        Value::StringArray(vec!["engineer".to_string(), "speaker".to_string()]),
+                    ),
+                    ("scores".to_string(), Value::IntArray(vec![7, 11])),
+                    ("weights".to_string(), Value::FloatArray(vec![2.5, 4.5])),
+                ]),
+                ..CypherMutationOptions::default()
+            },
         ))
-        .expect("concrete string reverse projections");
+        .expect("concrete string and array reverse projections");
     assert_eq!(
         concrete.table.rows,
         vec![vec![
             Value::from("ecalevoL adA"),
             Value::from("ecnerefnoC"),
+            Value::StringArray(vec!["speaker".to_string(), "engineer".to_string()]),
+            Value::IntArray(vec![11, 7]),
+            Value::FloatArray(vec![4.5, 2.5]),
             Value::Null,
         ]]
     );
@@ -6863,7 +6879,7 @@ fn sail_cypher_returning_projects_restricted_string_reverse_on_memory_facade() {
             "CREATE (n:Person {id: 'reverse-number', score: 3}) RETURN reverse(n.score);",
             CypherMutationOptions::default(),
         ))
-        .expect_err("string reverse over numeric values should stay rejected");
+        .expect_err("reverse over numeric values should stay rejected");
     assert!(
         matches!(numeric_reverse, GrustError::CypherUnsupportedCardinality(_)),
         "{numeric_reverse:?}"

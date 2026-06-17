@@ -161,7 +161,7 @@ reconstructed from Git history, release commits, and the shipped docs.
   `right(variable.property, length)` projections and aggregate bodies with
   literal or parameter integer lengths.
 - Added restricted writable Cypher `reverse(variable.property)` projections
-  and aggregate bodies over string property values.
+  and aggregate bodies over string and array property values.
 - Added restricted writable Cypher `split(variable.property, delimiter)`
   projections and aggregate bodies with non-empty literal or parameter string
   delimiters, returning JSON string arrays.

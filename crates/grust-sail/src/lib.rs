@@ -7981,15 +7981,17 @@ fn restricted_string_reverse_value(value: Value) -> Result<Value> {
         Value::String(value) => Ok(Value::from(reverse_value(value))),
         Value::DateTime(value) => Ok(Value::from(reverse_value(value.as_str().to_string()))),
         Value::Json(serde_json::Value::String(value)) => Ok(Value::from(reverse_value(value))),
-        Value::Bool(_)
-        | Value::Int(_)
-        | Value::Float(_)
-        | Value::StringArray(_)
-        | Value::IntArray(_)
-        | Value::FloatArray(_)
-        | Value::Json(_) => Err(cypher_unsupported_cardinality(
-            "writable Cypher RETURN reverse only supports string values",
+        Value::StringArray(values) => Ok(Value::StringArray(values.into_iter().rev().collect())),
+        Value::IntArray(values) => Ok(Value::IntArray(values.into_iter().rev().collect())),
+        Value::FloatArray(values) => Ok(Value::FloatArray(values.into_iter().rev().collect())),
+        Value::Json(serde_json::Value::Array(values)) => Ok(Value::from_json(
+            serde_json::Value::Array(values.into_iter().rev().collect()),
         )),
+        Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Json(_) => {
+            Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN reverse only supports string or array values",
+            ))
+        }
     }
 }
 

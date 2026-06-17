@@ -1078,6 +1078,7 @@ also available over those already-bound values, including `labels(n)`,
 `substring(n.name, 0, 3)`,
 `replace(n.team, '-team', '')`, `startsWith(n.team, 'eng')`,
 `left(n.team, 3)`, `right(n.code, 2)`, `reverse(n.code)`,
+`reverse(n.tags)`,
 `split(n.path, '/')`, `startNode(e)`, and `endNode(e)`.
 Relationship identity functions return an explicit
 relationship ID when one exists and `null` otherwise; they do not invent
