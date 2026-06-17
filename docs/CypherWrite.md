@@ -96,7 +96,8 @@ describe unreleased working-tree additions:
 - Mutating `MATCH` clauses accept a bounded `WHERE` predicate grammar over
   node or relationship properties. Supported predicates compare one matched
   variable property to a literal or parameter with `=`, `<>`, `!=`, `>`, `>=`,
-  `<`, or `<=`, and combine predicates with `AND`.
+  `<`, or `<=`, optionally prefix one comparison with `NOT`, and combine
+  predicates with `AND`.
 - `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
   operation when the source is a property on the same node variable and the
@@ -120,7 +121,7 @@ The v1 implementation should reject, with clear errors:
   aggregate slice, `CASE` in mutation assignments, arbitrary list/map
   expressions beyond the restricted projection forms, cross-variable
   expressions, or general computed expression evaluation;
-- `WHERE` forms using `OR`, `NOT`, pattern predicates, list predicates,
+- `WHERE` forms using `OR`, nested `NOT`, pattern predicates, list predicates,
   functions, arbitrary expressions, or cross-variable property comparisons;
 - trailing node creation in row-producing `MATCH ... CREATE`, relationship
   IDs on multi-row row-producing `CREATE` / `MERGE`, and general path-style
@@ -1181,7 +1182,8 @@ Acceptance criteria:
 - Support comparisons against literals or parameters for properties of the
   matched node or relationship variable.
 - Support `AND` first; defer `OR`, `NOT`, pattern predicates, list predicates,
-  functions, and arbitrary expressions.
+  functions, and arbitrary expressions. A later bounded slice adds one leading
+  `NOT` before a single comparison.
 - Represent predicates in a backend-neutral AST that can be evaluated by
   Memory and lowered by Sail.
 - Keep predicate evaluation type-aware and document how missing properties and
@@ -1202,7 +1204,7 @@ The comparison semantics are intentionally shared: a missing property never
 matches; `null` participates only in equality or inequality with
 `Value::Null`; integer and float values compare numerically; strings compare
 lexicographically; and unsupported ordered operand types fail planning in Sail
-instead of relying on backend casts. `OR`, `NOT`, function calls, list
+instead of relying on backend casts. `OR`, nested `NOT`, function calls, list
 predicates, pattern predicates, arbitrary expressions, and cross-variable
 comparisons remain deferred.
 
@@ -4286,3 +4288,40 @@ now parses into a structured restricted map projection containing property and
 literal entries. Evaluation reuses the existing property materializer for
 property entries and serializes literal entries directly into the returned JSON
 object.
+
+### Batch DA: Restricted `NOT` Comparison Predicates
+
+Extend the bounded mutating `MATCH ... WHERE` grammar to allow one leading
+`NOT` before a single supported property comparison:
+
+```cypher
+MATCH (n:Person)
+WHERE NOT n.active = true AND n.score >= 10
+SET n.archived = true;
+```
+
+Acceptance criteria:
+
+- Support `NOT variable.property <op> literal_or_parameter` where `<op>` is one
+  of the existing supported comparison operators: `=`, `<>`, `!=`, `>`, `>=`,
+  `<`, or `<=`.
+- Lower `NOT` by inverting the comparison operator in the existing
+  backend-neutral `GraphPropertyPredicate`: equality becomes inequality,
+  inequality becomes equality, greater-than becomes less-than-or-equal, and so
+  on.
+- Preserve the existing `AND`-only predicate combination model. `OR` remains
+  deferred.
+- Preserve existing missing-property semantics: a missing property never
+  matches, even when the comparison is negated.
+- Reject nested `NOT`, parenthesized predicates, functions, pattern
+  predicates, list predicates, cross-variable comparisons, and arbitrary
+  expressions.
+- Add planner and Memory-facade tests proving that Sail parsing and Memory
+  execution share the same restricted semantics.
+
+Implementation status: implemented in the working tree after Batch CZ.
+`grust-sail` now strips one leading `NOT` from each `AND`-separated predicate,
+inverts the supported comparison operator, and lowers the result through the
+existing `GraphPropertyPredicate` model. Memory execution reuses the same
+predicate evaluator, so negated comparisons keep the same missing-property and
+type-aware comparison behavior as ordinary comparisons.

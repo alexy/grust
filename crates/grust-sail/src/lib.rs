@@ -2647,6 +2647,22 @@ fn parse_where_predicate(
     predicate: &str,
     parameters: &CypherParameters,
 ) -> Result<ParsedWherePredicate> {
+    let predicate = predicate.trim();
+    let (predicate, negated) = if let Some(after_not) = strip_leading_keyword(predicate, "NOT") {
+        let predicate = after_not.trim();
+        if predicate.is_empty()
+            || strip_leading_keyword(predicate, "NOT").is_some()
+            || find_unquoted(predicate, '(').is_some()
+            || find_unquoted(predicate, ')').is_some()
+        {
+            return Err(cypher_syntax(
+                "MATCH WHERE NOT only supports a single property comparison",
+            ));
+        }
+        (predicate, true)
+    } else {
+        (predicate, false)
+    };
     for (token, op) in [
         (">=", GraphPredicateOp::GreaterThanOrEqual),
         ("<=", GraphPredicateOp::LessThanOrEqual),
@@ -2664,6 +2680,11 @@ fn parse_where_predicate(
         if let Some(index) = index {
             let (target, key) = parse_property_ref(&predicate[..index], "MATCH WHERE predicate")?;
             let value = parse_cypher_literal(&predicate[index + token.len()..], parameters)?;
+            let op = if negated {
+                inverted_graph_predicate_op(op)
+            } else {
+                op
+            };
             if matches!(
                 op,
                 GraphPredicateOp::GreaterThan
@@ -2685,6 +2706,17 @@ fn parse_where_predicate(
     Err(cypher_syntax(
         "MATCH WHERE only supports property comparisons against literals or parameters",
     ))
+}
+
+fn inverted_graph_predicate_op(op: GraphPredicateOp) -> GraphPredicateOp {
+    match op {
+        GraphPredicateOp::Equal => GraphPredicateOp::NotEqual,
+        GraphPredicateOp::NotEqual => GraphPredicateOp::Equal,
+        GraphPredicateOp::GreaterThan => GraphPredicateOp::LessThanOrEqual,
+        GraphPredicateOp::GreaterThanOrEqual => GraphPredicateOp::LessThan,
+        GraphPredicateOp::LessThan => GraphPredicateOp::GreaterThanOrEqual,
+        GraphPredicateOp::LessThanOrEqual => GraphPredicateOp::GreaterThan,
+    }
 }
 
 fn apply_node_where_predicates(
