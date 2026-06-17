@@ -4884,6 +4884,173 @@ fn sail_cypher_returning_projects_restricted_size_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_restricted_list_indexes_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let concrete =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'index-ada', tags: $tags, scores: $scores});
+            CREATE (b:Person {id: 'index-bob'});
+            MATCH (a:Person {id: 'index-ada'}), (b:Person {id: 'index-bob'})
+            CREATE (a)-[e:KNOWS {id: 'index-knows', weights: $weights}]->(b)
+            RETURN a.tags[0] AS first_tag,
+                   a.scores[$score_index] AS second_score,
+                   e.weights[1] AS second_weight,
+                   a.tags[9] AS missing_tag,
+                   a.nickname[0] AS missing_name;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    (
+                        "tags".to_string(),
+                        Value::StringArray(vec!["engineer".to_string(), "speaker".to_string()]),
+                    ),
+                    ("scores".to_string(), Value::IntArray(vec![7, 11])),
+                    ("weights".to_string(), Value::FloatArray(vec![2.5, 4.5])),
+                    ("score_index".to_string(), Value::Int(1)),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("concrete list index projections");
+    assert_eq!(
+        concrete.table.rows,
+        vec![vec![
+            Value::from("engineer"),
+            Value::Int(11),
+            Value::Float(4.5),
+            Value::Null,
+            Value::Null,
+        ]]
+    );
+
+    let broad =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'index-cara', status: 'index', scores: $scores_a});
+            CREATE (:Person {id: 'index-dan', status: 'index', scores: $scores_b});
+            MATCH (n:Person {status: 'index'}) SET n.indexed = true
+            RETURN n.id AS id, n.scores[0] AS score
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    ("scores_a".to_string(), Value::IntArray(vec![3, 5])),
+                    ("scores_b".to_string(), Value::IntArray(vec![7, 9])),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("broad list index projections");
+    assert_eq!(
+        broad.table.rows,
+        vec![
+            vec![Value::from("index-cara"), Value::Int(3)],
+            vec![Value::from("index-dan"), Value::Int(7)],
+        ]
+    );
+
+    let row_edges =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Team {id: 'index-team'});
+            MATCH (n:Person {status: 'index'}), (t:Team {id: 'index-team'})
+            CREATE (n)-[r:MEMBER_OF {rankings: $rankings}]->(t)
+            RETURN n.id AS id, r.rankings[1] AS rank
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "rankings".to_string(),
+                    Value::IntArray(vec![1, 2]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("row-producing relationship list index projections");
+    assert_eq!(
+        row_edges.table.rows,
+        vec![
+            vec![Value::from("index-cara"), Value::Int(2)],
+            vec![Value::from("index-dan"), Value::Int(2)],
+        ]
+    );
+
+    let aggregates =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (n:Person {status: 'index'}) SET n.index_counted = true
+            RETURN count(n.scores[0]) AS rows,
+                   sum(n.scores[0]) AS total_scores,
+                   collect(n.scores[0]) AS scores;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("list index aggregate projections");
+    assert_eq!(
+        aggregates.table.rows,
+        vec![vec![
+            Value::Int(2),
+            Value::Int(10),
+            Value::Json(serde_json::json!([3, 7])),
+        ]]
+    );
+
+    let non_array =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'index-string', name: 'Ada'}) RETURN n.name[0];",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("list indexes over strings should stay rejected");
+    assert!(
+        matches!(non_array, GrustError::CypherUnsupportedCardinality(_)),
+        "{non_array:?}"
+    );
+
+    let negative_index =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'index-negative', scores: $scores}) RETURN n.scores[-1];",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "scores".to_string(),
+                    Value::IntArray(vec![1]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("negative list indexes should stay rejected");
+    assert!(
+        matches!(negative_index, GrustError::CypherUnsupportedCardinality(_)),
+        "{negative_index:?}"
+    );
+
+    let nested_index =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'index-nested', scores: $scores}) RETURN n.scores[head(n.scores)];",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "scores".to_string(),
+                    Value::IntArray(vec![1]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("nested list index expressions should stay rejected");
+    assert!(
+        matches!(nested_index, GrustError::CypherUnsupportedCardinality(_)),
+        "{nested_index:?}"
+    );
+}
+
+#[test]
 fn sail_cypher_returning_projects_restricted_list_elements_on_memory_facade() {
     let store = MemoryGraphStore::new();
 

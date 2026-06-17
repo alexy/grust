@@ -2934,6 +2934,10 @@ enum CypherReturnTarget {
     Coalesce(CypherReturnCoalesce),
     PropertyExists(String),
     PropertySize(String),
+    PropertyListIndex {
+        key: String,
+        index: usize,
+    },
     PropertyListElement {
         key: String,
         element: CypherReturnListElement,
@@ -3205,6 +3209,13 @@ fn parse_cypher_return_clause(
             (variable, CypherReturnTarget::PropertyExists(key))
         } else if let Some((variable, key)) = parse_return_size_projection(expression)? {
             (variable, CypherReturnTarget::PropertySize(key))
+        } else if let Some((variable, key, index)) =
+            parse_return_list_index_projection(expression, parameters)?
+        {
+            (
+                variable,
+                CypherReturnTarget::PropertyListIndex { key, index },
+            )
         } else if let Some((variable, key, element)) =
             parse_return_list_element_projection(expression)?
         {
@@ -3564,6 +3575,14 @@ fn parse_aggregate_projection(
             distinct,
         )));
     }
+    if let Some((variable, key, index)) = parse_return_list_index_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyListIndex { key, index },
+            distinct,
+        )));
+    }
     if let Some((variable, key, element)) = parse_return_list_element_projection(body)? {
         return Ok(Some((
             aggregate,
@@ -3844,6 +3863,47 @@ fn restricted_range_value(start: i64, end: i64, step: i64) -> Result<Value> {
         current = next;
     }
     Ok(Value::IntArray(values))
+}
+
+fn parse_return_list_index_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<(String, String, usize)>> {
+    let expression = expression.trim();
+    let Some(open) = find_unquoted(expression, '[') else {
+        return Ok(None);
+    };
+    if open == 0 {
+        return Ok(None);
+    }
+    if !expression.ends_with(']') {
+        return Err(cypher_syntax("RETURN list index projection is missing ']'"));
+    }
+    if expression.contains('(') || expression.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN list indexes only support variable.property[index]",
+        ));
+    }
+    let target = expression[..open].trim();
+    let index = expression[open + 1..expression.len() - 1].trim();
+    if target.is_empty() || index.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN list index projection requires variable.property[index]",
+        ));
+    }
+    if index.contains('[') || index.contains(']') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN list indexes only support a single integer index",
+        ));
+    }
+    let (variable, key) =
+        parse_property_ref(target, "RETURN list index projection").map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN list indexes require a variable.property target",
+            )
+        })?;
+    let index = parse_non_negative_usize_literal(index, parameters, "RETURN list index")?;
+    Ok(Some((variable, key, index)))
 }
 
 fn is_return_literal_candidate(expression: &str) -> bool {
@@ -5886,6 +5946,23 @@ where
             )
             .await
         }
+        CypherReturnTarget::PropertyListIndex { key, index } => {
+            materialize_return_property_list_index_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *index,
+                row_index,
+            )
+            .await
+        }
         CypherReturnTarget::PropertyListElement { key, element } => {
             materialize_return_property_list_element_value_at(
                 store,
@@ -6357,6 +6434,24 @@ where
                 edges,
                 projection,
                 key,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyListIndex { key, index } => {
+            let value = materialize_return_property_list_index_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *index,
                 row_index,
             )
             .await?;
@@ -7238,6 +7333,71 @@ fn restricted_size_value(value: Value) -> Result<Value> {
                 "writable Cypher RETURN size only supports string, array, or JSON collection values",
             ))
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_list_index_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    index: usize,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_list_index_value(value, index)
+}
+
+fn restricted_list_index_value(value: Value, index: usize) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::StringArray(values) => Ok(values.get(index).map(Value::from).unwrap_or(Value::Null)),
+        Value::IntArray(values) => Ok(values
+            .get(index)
+            .copied()
+            .map(Value::Int)
+            .unwrap_or(Value::Null)),
+        Value::FloatArray(values) => Ok(values
+            .get(index)
+            .copied()
+            .map(Value::Float)
+            .unwrap_or(Value::Null)),
+        Value::Json(serde_json::Value::Array(values)) => Ok(values
+            .get(index)
+            .cloned()
+            .map(Value::from_json)
+            .unwrap_or(Value::Null)),
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::DateTime(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN list indexes only support array values",
+        )),
     }
 }
 
@@ -8971,6 +9131,7 @@ where
             | CypherReturnTarget::Coalesce(_)
             | CypherReturnTarget::PropertyExists(_)
             | CypherReturnTarget::PropertySize(_)
+            | CypherReturnTarget::PropertyListIndex { .. }
             | CypherReturnTarget::PropertyListElement { .. }
             | CypherReturnTarget::PropertyListTail(_)
             | CypherReturnTarget::PropertyAbs(_)
@@ -9279,6 +9440,21 @@ where
             .await?
         }
         CypherReturnTarget::PropertySize(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyListIndex { .. } => {
             materialize_return_projection_values(
                 store,
                 node_bindings,

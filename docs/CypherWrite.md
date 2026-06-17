@@ -2383,6 +2383,7 @@ remaining pieces should stay explicit:
   bodies, and
   restricted `exists(variable.property)` projections and aggregate bodies, and
   restricted `size(variable.property)` projections and aggregate bodies, and
+  restricted `variable.property[index]` projections and aggregate bodies, and
   restricted `head(variable.property)` / `last(variable.property)`
   projections and aggregate bodies, and
   restricted `tail(variable.property)` projections and aggregate bodies, and
@@ -3956,3 +3957,45 @@ Writable `RETURN range(start, end[, step])` now parses into a literal
 `Value::IntArray` projection. Evaluation reuses the existing literal projection
 and literal aggregate machinery, keeping the implementation bounded while
 making a standard Cypher list constructor available after writes.
+
+### Batch CT: Restricted List Index Projections
+
+Support bounded direct index access over array-like property values already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN n.tags[0] AS first_tag;
+```
+
+Acceptance criteria:
+
+- Support `variable.property[index]` as a scalar writable `RETURN` projection
+  when the variable is a concrete node, concrete relationship, materialized
+  row-node, or materialized row-relationship variable.
+- Accept only non-negative integer literal or parameter indexes. Reject
+  negative indexes, floats, strings, booleans, nulls, nested functions,
+  property references as indexes, cross-variable expressions, and arbitrary
+  expressions.
+- Return the indexed element for typed Grust arrays and JSON arrays,
+  converting JSON scalar elements through `Value::from_json`. Return `null`
+  when the property is absent, explicitly null, or the index is out of range.
+- Reject strings, numeric values, booleans, datetimes, JSON objects,
+  whole-element values, paths, nested functions, cross-variable expressions,
+  and other unsupported values rather than adding general list-expression
+  semantics.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `SUM`,
+  `AVG`, `MIN`, `MAX`, and `COLLECT`.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep index access property-only; list literals, list comprehensions, slices,
+  negative indexes, and arbitrary expression evaluation remain deferred.
+
+Implementation status: implemented in the working tree after Batch CS.
+Writable `RETURN variable.property[index]` now parses into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and extracts only typed array or JSON-array elements, preserving
+the same narrow, type-aware behavior as the other restricted property
+functions.

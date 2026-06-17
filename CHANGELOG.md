@@ -136,6 +136,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added restricted writable Cypher `size(variable.property)` projections and
   aggregate bodies over bound node and relationship variables, returning
   lengths for string and array-like property values.
+- Added restricted writable Cypher `variable.property[index]` projections and
+  aggregate bodies over array-like property values with literal or parameter
+  non-negative integer indexes.
 - Added restricted writable Cypher `head(variable.property)` and
   `last(variable.property)` projections and aggregate bodies over array-like
   property values.
