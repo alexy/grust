@@ -2356,7 +2356,7 @@ evaluator materializes list items through the existing scalar property
 projection path, preserving the same restricted result-table semantics as map
 projections.
 
-## Remaining Work Snapshot: 2026-06-16 16:21:11 PDT
+## Remaining Work Snapshot: 2026-06-17 PDT
 
 The writable Cypher implementation is now broad enough for strict write
 syntax, cardinality-aware mutations, restricted row-producing edge writes, and
@@ -2376,9 +2376,12 @@ remaining pieces should stay explicit:
   path. Sail also has a backend-owned save/load helper for named registry JSON
   in `grust_cypher_constraint_registry`, but loading that metadata does not
   apply constraints by itself.
-- Native backend index and constraint creation plus automatic migrations remain
-  deferred. Sail uniqueness is validated read-before-write, not enforced by a
-  backend-native unique index.
+- `GraphNativeConstraintCapability` and `GraphStore::apply_native_constraint`
+  are implemented in `grust-core`. All current backends return `Unsupported`
+  from `native_constraint_capability` and reject explicit native DDL requests
+  with a structured error. Sail uniqueness remains read-before-write, not
+  enforced by a backend-native unique index. Native index creation and
+  automatic migrations remain deferred.
 - Exact insert-versus-update classification is available only where execution
   can observe the outcome. Memory, Sail resolved node/edge upserts, and
   Sail/Memory row-producing edge writes can populate `node_inserts`,

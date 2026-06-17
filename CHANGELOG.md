@@ -14,6 +14,13 @@ reconstructed from Git history, release commits, and the shipped docs.
   SparkConnect execution and depends on `grust-cypher` for all Cypher types.
   The `grust-graph` facade exposes a new `cypher` feature that pulls in
   `grust-cypher` without requiring the full `sail` feature.
+- Added `GraphNativeConstraintCapability` and
+  `GraphStore::apply_native_constraint` to `grust-core` so backends can
+  declare whether they support native index or native-enforcing constraint DDL
+  for a given `GraphConstraint` and then handle explicit native DDL requests
+  independently of `apply_schema`. The default implementation returns
+  `Unsupported`, keeping Sail's read-before-write uniqueness honest until a
+  backend-native unique constraint implementation exists.
 - Added a reusable LakeCat catalog-event graph projection helper in the
   `grust-graph` facade, covering event, warehouse, namespace, and table nodes
   with stable catalog containment edges.
