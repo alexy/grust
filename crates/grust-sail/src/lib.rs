@@ -2731,10 +2731,34 @@ fn parse_where_or_fold_terms(
     parameters: &CypherParameters,
     op: GraphPredicateOp,
 ) -> Result<ParsedWherePredicate> {
-    let mut parsed = terms
+    let parsed = terms
         .into_iter()
         .map(|term| parse_where_predicate(term, parameters))
         .collect::<Result<Vec<_>>>()?;
+    let first = parsed
+        .first()
+        .ok_or_else(|| cypher_syntax("MATCH WHERE OR requires at least one predicate"))?;
+    if matches!(
+        first.predicate.op,
+        GraphPredicateOp::Equal | GraphPredicateOp::In
+    ) {
+        return parse_where_or_membership_fold_terms(parsed, op);
+    }
+    if matches!(
+        first.predicate.op,
+        GraphPredicateOp::StartsWith | GraphPredicateOp::EndsWith | GraphPredicateOp::Contains
+    ) {
+        return parse_where_or_string_fold_terms(parsed, op);
+    }
+    Err(cypher_syntax(
+        "MATCH WHERE OR only supports same-property equality, membership, or matching string predicate disjunctions",
+    ))
+}
+
+fn parse_where_or_membership_fold_terms(
+    mut parsed: Vec<ParsedWherePredicate>,
+    op: GraphPredicateOp,
+) -> Result<ParsedWherePredicate> {
     let first = parsed
         .first()
         .ok_or_else(|| cypher_syntax("MATCH WHERE OR requires at least one predicate"))?;
@@ -2774,13 +2798,64 @@ fn parse_where_or_fold_terms(
             }
         }
     }
-
     Ok(ParsedWherePredicate {
         target,
         predicate: GraphPropertyPredicate {
             key,
             op,
             value: Value::Json(serde_json::Value::Array(values)),
+        },
+    })
+}
+
+fn parse_where_or_string_fold_terms(
+    mut parsed: Vec<ParsedWherePredicate>,
+    op: GraphPredicateOp,
+) -> Result<ParsedWherePredicate> {
+    let first = parsed
+        .first()
+        .ok_or_else(|| cypher_syntax("MATCH WHERE OR requires at least one predicate"))?;
+    let target = first.target.clone();
+    let key = first.predicate.key.clone();
+    let string_op = first.predicate.op;
+    let folded_op = match (op, string_op) {
+        (GraphPredicateOp::In, GraphPredicateOp::StartsWith) => GraphPredicateOp::StartsWithAny,
+        (GraphPredicateOp::NotIn, GraphPredicateOp::StartsWith) => {
+            GraphPredicateOp::NotStartsWithAny
+        }
+        (GraphPredicateOp::In, GraphPredicateOp::EndsWith) => GraphPredicateOp::EndsWithAny,
+        (GraphPredicateOp::NotIn, GraphPredicateOp::EndsWith) => GraphPredicateOp::NotEndsWithAny,
+        (GraphPredicateOp::In, GraphPredicateOp::Contains) => GraphPredicateOp::ContainsAny,
+        (GraphPredicateOp::NotIn, GraphPredicateOp::Contains) => GraphPredicateOp::NotContainsAny,
+        _ => {
+            return Err(cypher_syntax(
+                "MATCH WHERE OR only supports matching string predicate disjunctions",
+            ));
+        }
+    };
+    let mut needles = Vec::with_capacity(parsed.len());
+    for predicate in parsed.drain(..) {
+        if predicate.target != target
+            || predicate.predicate.key != key
+            || predicate.predicate.op != string_op
+        {
+            return Err(cypher_syntax(
+                "MATCH WHERE OR only supports matching same-property string predicate disjunctions",
+            ));
+        }
+        let Some(needle) = predicate.predicate.value.as_str() else {
+            return Err(cypher_syntax(
+                "MATCH WHERE string predicates require string literals or parameters",
+            ));
+        };
+        needles.push(needle.to_string());
+    }
+    Ok(ParsedWherePredicate {
+        target,
+        predicate: GraphPropertyPredicate {
+            key,
+            op: folded_op,
+            value: Value::from(needles),
         },
     })
 }
@@ -2922,10 +2997,16 @@ fn inverted_graph_predicate_op(op: GraphPredicateOp) -> GraphPredicateOp {
         GraphPredicateOp::IsNotNull => GraphPredicateOp::IsNull,
         GraphPredicateOp::StartsWith => GraphPredicateOp::NotStartsWith,
         GraphPredicateOp::NotStartsWith => GraphPredicateOp::StartsWith,
+        GraphPredicateOp::StartsWithAny => GraphPredicateOp::NotStartsWithAny,
+        GraphPredicateOp::NotStartsWithAny => GraphPredicateOp::StartsWithAny,
         GraphPredicateOp::EndsWith => GraphPredicateOp::NotEndsWith,
         GraphPredicateOp::NotEndsWith => GraphPredicateOp::EndsWith,
+        GraphPredicateOp::EndsWithAny => GraphPredicateOp::NotEndsWithAny,
+        GraphPredicateOp::NotEndsWithAny => GraphPredicateOp::EndsWithAny,
         GraphPredicateOp::Contains => GraphPredicateOp::NotContains,
         GraphPredicateOp::NotContains => GraphPredicateOp::Contains,
+        GraphPredicateOp::ContainsAny => GraphPredicateOp::NotContainsAny,
+        GraphPredicateOp::NotContainsAny => GraphPredicateOp::ContainsAny,
         GraphPredicateOp::In => GraphPredicateOp::NotIn,
         GraphPredicateOp::NotIn => GraphPredicateOp::In,
         GraphPredicateOp::GreaterThan => GraphPredicateOp::LessThanOrEqual,
@@ -15401,10 +15482,16 @@ fn append_property_predicate_conditions(
             GraphPredicateOp::IsNotNull => conditions.push(format!("{json_value} IS NOT NULL")),
             GraphPredicateOp::StartsWith
             | GraphPredicateOp::NotStartsWith
+            | GraphPredicateOp::StartsWithAny
+            | GraphPredicateOp::NotStartsWithAny
             | GraphPredicateOp::EndsWith
             | GraphPredicateOp::NotEndsWith
+            | GraphPredicateOp::EndsWithAny
+            | GraphPredicateOp::NotEndsWithAny
             | GraphPredicateOp::Contains
-            | GraphPredicateOp::NotContains => append_property_string_predicate_condition(
+            | GraphPredicateOp::NotContains
+            | GraphPredicateOp::ContainsAny
+            | GraphPredicateOp::NotContainsAny => append_property_string_predicate_condition(
                 &json_value,
                 predicate.op,
                 &predicate.value,
@@ -15505,42 +15592,71 @@ fn append_property_string_predicate_condition(
     conditions: &mut Vec<String>,
     args: &mut Vec<expression::Literal>,
 ) -> Result<()> {
-    let Some(needle) = value.as_str() else {
-        return Err(cypher_syntax(
-            "MATCH WHERE string predicates require string literals or parameters",
-        ));
-    };
     match op {
         GraphPredicateOp::StartsWith => {
+            let needle = cypher_string_predicate_needle(value)?;
             conditions.push(format!("STARTSWITH({json_value}, ?)"));
             args.push(lit_str(needle));
         }
         GraphPredicateOp::NotStartsWith => {
+            let needle = cypher_string_predicate_needle(value)?;
             conditions.push(format!(
                 "{json_value} IS NOT NULL AND NOT STARTSWITH({json_value}, ?)"
             ));
             args.push(lit_str(needle));
         }
+        GraphPredicateOp::StartsWithAny => append_property_string_any_condition(
+            json_value,
+            "STARTSWITH",
+            false,
+            value,
+            conditions,
+            args,
+        )?,
+        GraphPredicateOp::NotStartsWithAny => append_property_string_any_condition(
+            json_value,
+            "STARTSWITH",
+            true,
+            value,
+            conditions,
+            args,
+        )?,
         GraphPredicateOp::EndsWith => {
+            let needle = cypher_string_predicate_needle(value)?;
             conditions.push(format!("ENDSWITH({json_value}, ?)"));
             args.push(lit_str(needle));
         }
         GraphPredicateOp::NotEndsWith => {
+            let needle = cypher_string_predicate_needle(value)?;
             conditions.push(format!(
                 "{json_value} IS NOT NULL AND NOT ENDSWITH({json_value}, ?)"
             ));
             args.push(lit_str(needle));
         }
+        GraphPredicateOp::EndsWithAny => append_property_string_any_condition(
+            json_value, "ENDSWITH", false, value, conditions, args,
+        )?,
+        GraphPredicateOp::NotEndsWithAny => append_property_string_any_condition(
+            json_value, "ENDSWITH", true, value, conditions, args,
+        )?,
         GraphPredicateOp::Contains => {
+            let needle = cypher_string_predicate_needle(value)?;
             conditions.push(format!("CONTAINS({json_value}, ?)"));
             args.push(lit_str(needle));
         }
         GraphPredicateOp::NotContains => {
+            let needle = cypher_string_predicate_needle(value)?;
             conditions.push(format!(
                 "{json_value} IS NOT NULL AND NOT CONTAINS({json_value}, ?)"
             ));
             args.push(lit_str(needle));
         }
+        GraphPredicateOp::ContainsAny => append_property_string_any_condition(
+            json_value, "CONTAINS", false, value, conditions, args,
+        )?,
+        GraphPredicateOp::NotContainsAny => append_property_string_any_condition(
+            json_value, "CONTAINS", true, value, conditions, args,
+        )?,
         GraphPredicateOp::Equal
         | GraphPredicateOp::NotEqual
         | GraphPredicateOp::IsNull
@@ -15551,6 +15667,53 @@ fn append_property_string_predicate_condition(
         | GraphPredicateOp::GreaterThanOrEqual
         | GraphPredicateOp::LessThan
         | GraphPredicateOp::LessThanOrEqual => unreachable!(),
+    }
+    Ok(())
+}
+
+fn cypher_string_predicate_needle(value: &Value) -> Result<&str> {
+    value.as_str().ok_or_else(|| {
+        cypher_syntax("MATCH WHERE string predicates require string literals or parameters")
+    })
+}
+
+fn cypher_string_predicate_needles(value: &Value) -> Result<&[String]> {
+    value.as_string_array().ok_or_else(|| {
+        cypher_syntax(
+            "MATCH WHERE string predicate OR groups require string literals or parameters",
+        )
+    })
+}
+
+fn append_property_string_any_condition(
+    json_value: &str,
+    sql_function: &str,
+    negated: bool,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    let needles = cypher_string_predicate_needles(value)?;
+    if needles.is_empty() {
+        conditions.push(if negated {
+            format!("{json_value} IS NOT NULL")
+        } else {
+            "1 = 0".to_string()
+        });
+        return Ok(());
+    }
+    let inner = needles
+        .iter()
+        .map(|_| format!("{sql_function}({json_value}, ?)"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    if negated {
+        conditions.push(format!("{json_value} IS NOT NULL AND NOT ({inner})"));
+    } else {
+        conditions.push(format!("({inner})"));
+    }
+    for needle in needles {
+        args.push(lit_str(needle));
     }
     Ok(())
 }
@@ -15640,10 +15803,16 @@ fn append_property_order_condition(
         | GraphPredicateOp::IsNotNull
         | GraphPredicateOp::StartsWith
         | GraphPredicateOp::NotStartsWith
+        | GraphPredicateOp::StartsWithAny
+        | GraphPredicateOp::NotStartsWithAny
         | GraphPredicateOp::EndsWith
         | GraphPredicateOp::NotEndsWith
+        | GraphPredicateOp::EndsWithAny
+        | GraphPredicateOp::NotEndsWithAny
         | GraphPredicateOp::Contains
         | GraphPredicateOp::NotContains
+        | GraphPredicateOp::ContainsAny
+        | GraphPredicateOp::NotContainsAny
         | GraphPredicateOp::In
         | GraphPredicateOp::NotIn => unreachable!(),
     };

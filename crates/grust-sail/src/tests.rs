@@ -1338,6 +1338,11 @@ fn matching_nodes_sql_filters_by_property_predicates() {
             value: Value::from("Ad"),
         },
         GraphPropertyPredicate {
+            key: "alias".to_string(),
+            op: GraphPredicateOp::StartsWithAny,
+            value: Value::from(vec!["A".to_string(), "G".to_string()]),
+        },
+        GraphPropertyPredicate {
             key: "team".to_string(),
             op: GraphPredicateOp::In,
             value: Value::Json(serde_json::json!(["eng", "data"])),
@@ -1353,9 +1358,12 @@ fn matching_nodes_sql_filters_by_property_predicates() {
     assert!(sql.contains("GET_JSON_OBJECT(props, '$.retired') IS NULL"));
     assert!(sql.contains("STARTSWITH(GET_JSON_OBJECT(props, '$.name'), ?)"));
     assert!(sql.contains(
+        "(STARTSWITH(GET_JSON_OBJECT(props, '$.alias'), ?) OR STARTSWITH(GET_JSON_OBJECT(props, '$.alias'), ?))"
+    ));
+    assert!(sql.contains(
         "(GET_JSON_OBJECT(props, '$.team') = ? OR GET_JSON_OBJECT(props, '$.team') = ?)"
     ));
-    assert_eq!(args.len(), 6);
+    assert_eq!(args.len(), 8);
 }
 
 #[test]
@@ -1573,6 +1581,57 @@ fn cypher_match_where_folds_negated_same_property_in_or_equal_predicates() {
 }
 
 #[test]
+fn cypher_match_where_folds_same_property_string_or_predicates() {
+    let plan = sail_cypher_mutation_plan_with_options(
+        "MATCH (n:Person) WHERE (n.name STARTS WITH 'Ad' OR n.name STARTS WITH $prefix) SET n.reviewed = true",
+        CypherMutationOptions {
+            parameters: CypherParameters::from([("prefix".to_string(), Value::from("Gr"))]),
+            ..CypherMutationOptions::default()
+        },
+    )
+    .unwrap()
+    .0;
+
+    assert_eq!(
+        plan.operations,
+        vec![GraphMutationPlanOp::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::new(),
+            predicates: vec![GraphPropertyPredicate {
+                key: "name".to_string(),
+                op: GraphPredicateOp::StartsWithAny,
+                value: Value::from(vec!["Ad".to_string(), "Gr".to_string()]),
+            }],
+            patch: Props::from([("reviewed".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+}
+
+#[test]
+fn cypher_match_where_folds_negated_same_property_string_or_predicates() {
+    let plan = sail_cypher_mutation_plan(
+        "MATCH (n:Person) WHERE NOT (n.name CONTAINS 'bot' OR n.name CONTAINS 'test') SET n.reviewed = true",
+    )
+    .unwrap();
+
+    assert_eq!(
+        plan.operations,
+        vec![GraphMutationPlanOp::PatchMatchingNodes {
+            label: Some(Label::new("Person")),
+            props: Props::new(),
+            predicates: vec![GraphPropertyPredicate {
+                key: "name".to_string(),
+                op: GraphPredicateOp::NotContainsAny,
+                value: Value::from(vec!["bot".to_string(), "test".to_string()]),
+            }],
+            patch: Props::from([("reviewed".to_string(), Value::Bool(true))]),
+            cardinality: GraphMutationCardinality::BoundedMany,
+        }]
+    );
+}
+
+#[test]
 fn cypher_match_where_keeps_predicated_identity_matches_on_matching_path() {
     let plan = sail_cypher_mutation_plan(
         "MATCH (n:Person {id: 'person-1'}) WHERE n.status <> 'deleted' REMOVE n.nickname",
@@ -1669,6 +1728,9 @@ fn cypher_match_where_rejects_deferred_predicate_forms() {
         "MATCH (n:Person) WHERE n.status NOT IN ['inactive'] OR n.status = 'deleted' SET n.archived = true",
         "MATCH (n:Person) WHERE NOT (n.status = 'inactive' OR n.active = true) SET n.archived = true",
         "MATCH (n:Person) WHERE NOT (n.status = 'inactive' OR n.status = null) SET n.archived = true",
+        "MATCH (n:Person) WHERE n.name STARTS WITH 'A' OR n.name CONTAINS 'a' SET n.archived = true",
+        "MATCH (n:Person) WHERE n.name STARTS WITH 'A' OR n.alias STARTS WITH 'A' SET n.archived = true",
+        "MATCH (n:Person) WHERE n.name STARTS WITH 'A' OR n.name STARTS WITH 1 SET n.archived = true",
         "MATCH (n:Person) WHERE NOT NOT n.active = true SET n.archived = true",
         "MATCH (n:Person) WHERE (n.status = 'inactive' SET n.archived = true",
         "MATCH (n:Person) WHERE size(n.tags) = 2 SET n.archived = true",
@@ -1683,6 +1745,68 @@ fn cypher_match_where_rejects_deferred_predicate_forms() {
             sail_cypher_mutation_plan(cypher).expect_err("unsupported WHERE predicate should fail");
         assert!(is_cypher_planning_error(&error) || matches!(error, GrustError::CypherSyntax(_)));
     }
+}
+
+#[test]
+fn sail_cypher_match_where_string_or_predicates_execute_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'where-string-or-ada', name: 'Ada Lovelace'});
+            CREATE (:Person {id: 'where-string-or-grace', name: 'Grace Hopper'});
+            CREATE (:Person {id: 'where-string-or-alan', name: 'Alan Turing'});
+            CREATE (:Person {id: 'where-string-or-missing'});
+            MATCH (n:Person)
+            WHERE n.name STARTS WITH 'Ad' OR n.name STARTS WITH 'Gr'
+            SET n.selected = true
+            RETURN n.id AS id, n.selected AS selected
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("restricted string OR WHERE predicates should execute on memory facade");
+
+    assert_eq!(
+        result.table.rows,
+        vec![
+            vec![Value::from("where-string-or-ada"), Value::Bool(true)],
+            vec![Value::from("where-string-or-grace"), Value::Bool(true)],
+        ]
+    );
+}
+
+#[test]
+fn sail_cypher_match_where_negated_string_or_predicates_execute_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'where-not-string-or-ada', name: 'Ada Lovelace'});
+            CREATE (:Person {id: 'where-not-string-or-bot', name: 'Ada Bot'});
+            CREATE (:Person {id: 'where-not-string-or-test', name: 'Test User'});
+            CREATE (:Person {id: 'where-not-string-or-missing'});
+            MATCH (n:Person)
+            WHERE NOT (n.name CONTAINS 'Bot' OR n.name CONTAINS 'Test')
+            SET n.selected = true
+            RETURN n.id AS id, n.selected AS selected
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("restricted negated string OR WHERE predicates should execute on memory facade");
+
+    assert_eq!(
+        result.table.rows,
+        vec![vec![
+            Value::from("where-not-string-or-ada"),
+            Value::Bool(true)
+        ]]
+    );
 }
 
 #[test]

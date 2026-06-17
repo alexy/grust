@@ -1,6 +1,6 @@
 # Restart Checkpoint
 
-Generated: 2026-06-17 04:34:45 PDT
+Generated: 2026-06-17 04:40:37 PDT
 
 ## Current Goal
 
@@ -25,42 +25,41 @@ Continue implementing bounded writable Cypher features from
 - Branch: `codex/cypher-write`
 - Remote tracking branch: `origin/codex/cypher-write`
 - Expected untracked file: `OPUS1.md`
-- Latest completed slice before this checkpoint: Batch DI, restricted
-  same-property equality/membership `OR` predicates in mutating
-  `MATCH ... WHERE`.
+- Latest completed slice before this checkpoint: Batch DJ, restricted
+  same-property string predicate `OR` groups in mutating `MATCH ... WHERE`.
 
 ## Latest Completed Work
 
-Batch DI extended restricted same-property `OR` predicates to combine equality
-and membership terms in bounded mutating Cypher `MATCH ... WHERE`:
+Batch DJ added restricted same-property string predicate `OR` groups in
+bounded mutating Cypher `MATCH ... WHERE`:
 
 ```cypher
 MATCH (n:Person)
-WHERE n.status IN ['active', 'pending'] OR n.status = 'review'
+WHERE n.name STARTS WITH 'Ad' OR n.name STARTS WITH 'Gr'
 SET n.reviewed = true;
 ```
 
 Implemented behavior:
 
-- `grust-sail` accepts same-property `OR` groups whose terms are either
-  equality predicates or restricted `IN` membership predicates.
-- Positive groups fold to one backend-neutral `GraphPredicateOp::In`
-  predicate; `NOT (...)` groups fold to `GraphPredicateOp::NotIn`.
-- Literal values, scalar parameters, scalar list literals, and list-valued
-  parameters are expanded through the same restricted membership parser.
-- Only scalar string, integer, float, and boolean values participate. Nulls,
-  maps, nested lists, computed expressions, and property references remain
-  rejected.
-- Mixed-property, mixed-variable, non-equality/non-membership, `NOT IN`,
-  unparenthesized mixed `OR`/`AND`, function, pattern, arbitrary-expression,
-  and general boolean-expression forms remain deferred and rejected.
-- Missing properties keep the existing folded-membership behavior and do not
-  match.
+- `grust-core` exposes grouped string predicate operators:
+  `StartsWithAny`, `EndsWithAny`, `ContainsAny`, and negated variants.
+- `grust-sail` accepts same-property `OR` groups whose terms repeat the same
+  string predicate operator (`STARTS WITH`, `ENDS WITH`, or `CONTAINS`).
+- Positive groups fold to the matching grouped string predicate; `NOT (...)`
+  groups fold to the negated grouped string predicate.
+- Needles must be string literals or string parameters.
+- Mixed operators, mixed properties, mixed variables, non-string needles,
+  equality/membership mixed with string predicates, functions, patterns,
+  arbitrary expressions, and general boolean-expression forms remain rejected.
+- Missing properties, nulls, and non-string values do not match positive or
+  negated grouped string predicates.
 
 Files updated:
 
 - `crates/grust-sail/src/lib.rs`
 - `crates/grust-sail/src/tests.rs`
+- `crates/grust-core/src/lib.rs`
+- `crates/grust-core/src/tests.rs`
 - `docs/CypherWrite.md`
 - `CHANGELOG.md`
 - `docs/book/manuscript.md`
@@ -68,7 +67,7 @@ Files updated:
 
 ## Verification State
 
-The following commands passed after Batch DI:
+The following commands passed after Batch DJ:
 
 ```sh
 cargo fmt --all
@@ -82,7 +81,7 @@ git diff --check
 
 Observed test summaries:
 
-- `cargo test -p grust-sail --lib`: 192 passed, 25 ignored
+- `cargo test -p grust-sail --lib`: 196 passed, 25 ignored
 - `cargo test -p grust-core --lib`: 35 passed
 - `cargo test -p grust-memory --lib`: 20 passed
 

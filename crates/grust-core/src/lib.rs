@@ -2569,10 +2569,16 @@ pub enum GraphPredicateOp {
     IsNotNull,
     StartsWith,
     NotStartsWith,
+    StartsWithAny,
+    NotStartsWithAny,
     EndsWith,
     NotEndsWith,
+    EndsWithAny,
+    NotEndsWithAny,
     Contains,
     NotContains,
+    ContainsAny,
+    NotContainsAny,
     In,
     NotIn,
     GreaterThan,
@@ -2605,14 +2611,38 @@ impl GraphPropertyPredicate {
                 .is_some_and(|(actual, needle)| actual.starts_with(needle)),
             GraphPredicateOp::NotStartsWith => string_predicate_values(actual, &self.value)
                 .is_some_and(|(actual, needle)| !actual.starts_with(needle)),
+            GraphPredicateOp::StartsWithAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().any(|needle| actual.starts_with(needle))
+                }),
+            GraphPredicateOp::NotStartsWithAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().all(|needle| !actual.starts_with(needle))
+                }),
             GraphPredicateOp::EndsWith => string_predicate_values(actual, &self.value)
                 .is_some_and(|(actual, needle)| actual.ends_with(needle)),
             GraphPredicateOp::NotEndsWith => string_predicate_values(actual, &self.value)
                 .is_some_and(|(actual, needle)| !actual.ends_with(needle)),
+            GraphPredicateOp::EndsWithAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().any(|needle| actual.ends_with(needle))
+                }),
+            GraphPredicateOp::NotEndsWithAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().all(|needle| !actual.ends_with(needle))
+                }),
             GraphPredicateOp::Contains => string_predicate_values(actual, &self.value)
                 .is_some_and(|(actual, needle)| actual.contains(needle)),
             GraphPredicateOp::NotContains => string_predicate_values(actual, &self.value)
                 .is_some_and(|(actual, needle)| !actual.contains(needle)),
+            GraphPredicateOp::ContainsAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().any(|needle| actual.contains(needle))
+                }),
+            GraphPredicateOp::NotContainsAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().all(|needle| !actual.contains(needle))
+                }),
             GraphPredicateOp::In => list_predicate_values(&self.value)
                 .is_some_and(|values| values.iter().any(|value| actual == value)),
             GraphPredicateOp::NotIn => list_predicate_values(&self.value)
@@ -2632,10 +2662,16 @@ impl GraphPropertyPredicate {
                     | GraphPredicateOp::IsNotNull
                     | GraphPredicateOp::StartsWith
                     | GraphPredicateOp::NotStartsWith
+                    | GraphPredicateOp::StartsWithAny
+                    | GraphPredicateOp::NotStartsWithAny
                     | GraphPredicateOp::EndsWith
                     | GraphPredicateOp::NotEndsWith
+                    | GraphPredicateOp::EndsWithAny
+                    | GraphPredicateOp::NotEndsWithAny
                     | GraphPredicateOp::Contains
                     | GraphPredicateOp::NotContains
+                    | GraphPredicateOp::ContainsAny
+                    | GraphPredicateOp::NotContainsAny
                     | GraphPredicateOp::In
                     | GraphPredicateOp::NotIn => unreachable!(),
                 }),
@@ -2646,6 +2682,19 @@ impl GraphPropertyPredicate {
 fn string_predicate_values<'a>(actual: &'a Value, value: &'a Value) -> Option<(&'a str, &'a str)> {
     match (actual, value) {
         (Value::String(actual), Value::String(needle)) => Some((actual.as_str(), needle.as_str())),
+        _ => None,
+    }
+}
+
+fn string_list_predicate_values<'a>(
+    actual: &'a Value,
+    value: &'a Value,
+) -> Option<(&'a str, Vec<&'a str>)> {
+    match (actual, value) {
+        (Value::String(actual), Value::StringArray(needles)) => Some((
+            actual.as_str(),
+            needles.iter().map(String::as_str).collect(),
+        )),
         _ => None,
     }
 }

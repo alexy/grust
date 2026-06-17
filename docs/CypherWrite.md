@@ -103,9 +103,10 @@ describe unreleased working-tree additions:
   parameters, optionally prefix one comparison, null check, string predicate,
   or membership predicate with `NOT`, wrap supported
   predicate terms in parentheses, combine predicates with `AND`, and fold
-  same-property equality or membership `OR` groups into membership predicates,
-  including `NOT (...)` exclusion groups. When a folded `OR` group is combined
-  with `AND`, the `OR` group must be parenthesized.
+  same-property equality, membership, or matching string-predicate `OR` groups
+  into backend-neutral grouped predicates, including `NOT (...)` exclusion
+  groups. When a folded `OR` group is combined with `AND`, the `OR` group must
+  be parenthesized.
 - `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
   operation when the source is a property on the same node variable and the
@@ -4656,3 +4657,45 @@ Implementation status: implemented in the working tree after Batch DH.
 membership parser, and lowers positive groups to `GraphPredicateOp::In` or
 negated parenthesized groups to `GraphPredicateOp::NotIn`. Sail SQL lowering
 and Memory execution continue to reuse the membership predicate path.
+
+### Batch DJ: Same-Property String Predicate `OR` Groups
+
+Extend the bounded mutating `MATCH ... WHERE` `OR` fold to accept repeated
+string predicates over the same matched variable, property, and string
+operator:
+
+```cypher
+MATCH (n:Person)
+WHERE n.name STARTS WITH 'Ad' OR n.name STARTS WITH 'Gr'
+SET n.reviewed = true;
+```
+
+Acceptance criteria:
+
+- Support top-level `OR` groups where every term is the same string predicate
+  operator (`STARTS WITH`, `ENDS WITH`, or `CONTAINS`) over the same matched
+  variable and property.
+- Support the matching negated form
+  `NOT (variable.property CONTAINS a OR variable.property CONTAINS b)` by
+  folding it to a negated grouped string predicate.
+- Require every needle to be a string literal or string parameter.
+- Lower accepted groups to explicit backend-neutral grouped string predicate
+  operators: `StartsWithAny`, `EndsWithAny`, `ContainsAny`, and their negated
+  variants.
+- Preserve missing-property and type behavior: missing properties, nulls, and
+  non-string values do not match positive or negated grouped string predicates.
+- Continue rejecting mixed string operators, mixed properties, mixed
+  variables, non-string needles, equality/membership mixed with string
+  predicates, unparenthesized mixed `OR`/`AND`, pattern predicates, functions,
+  arbitrary expressions, and general boolean combinations.
+- Add core predicate tests, Sail SQL-lowering assertions, planner tests,
+  rejection tests, and Memory-facade execution coverage.
+
+Implementation status: implemented in the working tree after Batch DJ.
+`grust-core` now includes grouped string predicate operators for
+`STARTS WITH`, `ENDS WITH`, and `CONTAINS`, plus negated variants.
+`grust-sail` folds matching same-property string `OR` groups to those
+operators, lowers negated parenthesized groups to the negated variants, and
+emits Sail SQL as an `OR` of the existing string predicate calls guarded by
+present-property checks for negated groups. Memory execution uses the same
+`GraphPropertyPredicate` evaluator.

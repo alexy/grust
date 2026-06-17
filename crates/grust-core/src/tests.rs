@@ -392,6 +392,25 @@ fn property_predicates_are_type_aware_and_missing_safe() {
     assert!(!name_not_contains.matches(Some(&Value::from("Max"))));
     assert!(!name_not_contains.matches(None));
 
+    let name_starts_any = GraphPropertyPredicate {
+        key: "name".to_string(),
+        op: GraphPredicateOp::StartsWithAny,
+        value: Value::from(vec!["Ad".to_string(), "Gr".to_string()]),
+    };
+    assert!(name_starts_any.matches(Some(&Value::from("Ada"))));
+    assert!(name_starts_any.matches(Some(&Value::from("Grace"))));
+    assert!(!name_starts_any.matches(Some(&Value::from("Max"))));
+    assert!(!name_starts_any.matches(None));
+
+    let name_not_ends_any = GraphPropertyPredicate {
+        key: "name".to_string(),
+        op: GraphPredicateOp::NotEndsWithAny,
+        value: Value::from(vec!["x".to_string(), "z".to_string()]),
+    };
+    assert!(name_not_ends_any.matches(Some(&Value::from("Ada"))));
+    assert!(!name_not_ends_any.matches(Some(&Value::from("Max"))));
+    assert!(!name_not_ends_any.matches(None));
+
     let team_in = GraphPropertyPredicate {
         key: "team".to_string(),
         op: GraphPredicateOp::In,
