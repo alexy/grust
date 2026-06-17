@@ -340,7 +340,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added a bounded writable Cypher `MATCH ... WHERE` predicate grammar for Sail,
   lowering `AND`-joined property comparisons into backend-neutral
   `GraphPropertyPredicate` values that Memory can evaluate and Sail can lower
-  to SQL, now including one leading `NOT` before a supported comparison.
+  to SQL, now including one leading `NOT` before a supported comparison and
+  `IS NOT NULL` property checks.
 - Added opt-in strict `CREATE` execution for Sail writable Cypher through
   `CypherMutationOptions` and `CypherCreateMode::ErrorIfExists`, preserving the
   default upsert-compatible path.

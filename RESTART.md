@@ -1,78 +1,68 @@
 # Restart Checkpoint
 
-Generated: 2026-06-16 18:48:57 PDT
+Generated: 2026-06-17 03:56:02 PDT
 
 ## Current Goal
 
-Continue implementing the new parts of `docs/CypherWrite.md` on branch
-`codex/cypher-write`, without publishing crates until explicitly instructed.
+Continue implementing bounded writable Cypher features from
+`docs/CypherWrite.md` on branch `codex/cypher-write`.
+
+## Current Instructions
+
+- Keep committing locally.
+- Push is allowed now that GitHub SSH access is available.
+- Do not publish crates until the next major checkpoint and explicit release
+  direction.
+- When publishing the new crates, bump the version, publish in dependency
+  order, verify the published crates with `cargo info <crate>@<version>` from
+  outside the workspace, and notify the active TypeSec and Lakecat goal threads
+  to rebuild against the published versions. Lakecat especially should rebuild
+  in GitHub CI after pushing.
+- Do not stage or modify untracked `OPUS1.md` unless explicitly asked.
 
 ## Branch And Worktree
 
 - Branch: `codex/cypher-write`
-- Remote status at checkpoint: `ahead 6` relative to
-  `origin/codex/cypher-write`
-- Worktree is intentionally dirty with accumulated writable Cypher work.
-- Untracked file present: `OPUS1.md`
-- No commit, push, tag, or crate publish was performed during the latest
-  continuation work.
-
-Files shown modified at checkpoint:
-
-- `CHANGELOG.md`
-- `Cargo.lock`
-- `crates/grust-core/Cargo.toml`
-- `crates/grust-core/src/lib.rs`
-- `crates/grust-core/src/tests.rs`
-- `crates/grust-memory/src/lib.rs`
-- `crates/grust-memory/src/tests.rs`
-- `crates/grust-sail/Cargo.toml`
-- `crates/grust-sail/src/lib.rs`
-- `crates/grust-sail/src/tests.rs`
-- `crates/grust/src/lib.rs`
-- `docs/CypherWrite.md`
-- `docs/book/build/dist/VERSION.md`
-- `docs/book/build/dist/grust.epub`
-- `docs/book/build/dist/grust.mobi`
-- `docs/book/build/dist/grust.pdf`
-- `docs/book/manuscript.md`
-- `docs/sail-backend-proposal.md`
+- Remote tracking branch: `origin/codex/cypher-write`
+- Expected untracked file: `OPUS1.md`
+- Latest completed slice before this checkpoint: Batch DB, restricted
+  mutating `MATCH ... WHERE variable.property IS NOT NULL` predicates.
 
 ## Latest Completed Work
 
-The latest continuation batches extended restricted writable Cypher `RETURN`
-over the existing materialized write-result table. Each slice has code,
-focused Memory-facade coverage, changelog entry, `docs/CypherWrite.md` entry,
-book manuscript update, and rebuilt book artifacts.
+Batch DB added explicit non-null predicates to the bounded mutating Cypher
+`MATCH ... WHERE` grammar:
 
-Completed recent batches:
+```cypher
+MATCH (n:Person)
+WHERE n.nickname IS NOT NULL
+SET n.seen = true;
+```
 
-- Batch CF: `left(variable.property, length)` and
-  `right(variable.property, length)`
-- Batch CG: `reverse(variable.property)`
-- Batch CH: `split(variable.property, delimiter)`
-- Batch CI: `isEmpty(variable.property)`
-- Batch CJ: `toString(variable.property)`
-- Batch CK: `abs(variable.property)`
+Implemented behavior:
 
-Latest implemented code markers:
+- `grust-sail` parses `variable.property IS NOT NULL`.
+- The syntax lowers to the existing backend-neutral predicate:
+  `GraphPredicateOp::NotEqual` with `Value::Null`.
+- Node, relationship, and endpoint variables can use the predicate wherever
+  ordinary `AND`-joined mutating `WHERE` predicates are accepted.
+- `IS NULL` remains deferred because explicit-null versus missing-property
+  behavior needs backend-consistent specification before exposing it.
+- `NOT variable.property IS NOT NULL` remains deferred for the same reason.
+- Planner and Memory-facade tests cover lowering and execution.
+
+Files updated:
 
 - `crates/grust-sail/src/lib.rs`
-  - `CypherReturnTarget::PropertyAbs`
-  - `parse_return_abs_projection`
-  - `restricted_abs_value`
 - `crates/grust-sail/src/tests.rs`
-  - `sail_cypher_returning_projects_restricted_abs_on_memory_facade`
 - `docs/CypherWrite.md`
-  - `### Batch CK: Restricted Numeric Absolute-Value Projections`
 - `CHANGELOG.md`
-  - Unreleased entry for `abs(variable.property)`
 - `docs/book/manuscript.md`
-  - supported restricted-function list includes `abs(n.score)`
+- rebuilt book artifacts under `docs/book/build/dist/`
 
 ## Verification State
 
-The following commands passed after Batch CK:
+The following commands passed after Batch DB:
 
 ```sh
 cargo fmt --all
@@ -80,13 +70,13 @@ cargo test -p grust-sail --lib
 cargo test -p grust-core --lib
 cargo test -p grust-memory --lib
 cargo check -p grust-graph --features sail,memory
-git diff --check
 docs/book/build.sh
+git diff --check
 ```
 
 Observed test summaries:
 
-- `cargo test -p grust-sail --lib`: 167 passed, 25 ignored
+- `cargo test -p grust-sail --lib`: 180 passed, 25 ignored
 - `cargo test -p grust-core --lib`: 35 passed
 - `cargo test -p grust-memory --lib`: 20 passed
 
@@ -100,39 +90,23 @@ Book rebuild output confirmed:
 
 ## Next Safe Continuation
 
-Continue only if asked. The next slice should stay small and should preserve
-the current invariant:
+Keep the next slice small and continue preserving these invariants:
 
-- Cypher remains a syntax layer.
+- Cypher remains a syntax layer over Grust-owned mutation semantics.
 - Writable `RETURN` helpers operate only over already-bound/materialized write
   result rows.
+- Mutating `WHERE` stays backend-neutral through `GraphPropertyPredicate`.
 - No arbitrary expression engine, cross-variable expressions, path-pattern
   predicates, or list/map expression evaluation should be introduced.
-- Add a dedicated target, parser helper, evaluator, aggregate/count wiring,
-  Memory-facade tests, changelog entry, `docs/CypherWrite.md` batch, book
-  manuscript update, and book rebuild for each new slice.
 
-Potential next bounded numeric/property slices:
+Potential next bounded slices:
 
-- `ceil(variable.property)` / `floor(variable.property)` over numeric values.
-- `round(variable.property)` over numeric values, but only after deciding exact
-  integer/float return semantics and tie behavior.
-- `sign(variable.property)` over numeric values, returning `-1`, `0`, or `1`.
+- Add a backend-consistent `IS NULL` design only after deciding whether missing
+  properties should match the syntax in every backend.
+- Extend mutating `WHERE` with a tiny, explicit `OR` representation if the core
+  predicate model grows disjunction support.
+- Add another restricted writable `RETURN` helper from the remaining batches in
+  `docs/CypherWrite.md`.
 
-Recommended next batch:
-
-- Batch CL: restricted `ceil(variable.property)` and
-  `floor(variable.property)` projections and aggregate bodies over numeric
-  property values.
-- Keep missing/null as `null`.
-- Reject strings, booleans, arrays, maps, nested expressions, paths, and
-  non-finite numeric results.
-- Verify with the same command set listed above.
-
-## Important Constraints
-
-- Do not publish crates until explicitly instructed.
-- Do not tag, commit, or push unless explicitly asked.
-- Do not revert unrelated dirty work.
-- Treat `OPUS1.md` as an existing untracked review artifact unless the user
-  asks otherwise.
+For each slice, update code, tests, `CHANGELOG.md`, `docs/CypherWrite.md`, book
+manuscript, rebuilt book artifacts, then commit and push.

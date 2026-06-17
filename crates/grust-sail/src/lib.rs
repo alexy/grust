@@ -2663,6 +2663,35 @@ fn parse_where_predicate(
     } else {
         (predicate, false)
     };
+    if let Some(index) = find_unquoted_keyword(predicate, "IS") {
+        let rest = predicate[index + "IS".len()..].trim();
+        let words = rest.split_whitespace().collect::<Vec<_>>();
+        if words.len() == 2
+            && words[0].eq_ignore_ascii_case("NOT")
+            && words[1].eq_ignore_ascii_case("NULL")
+        {
+            if negated {
+                return Err(cypher_syntax(
+                    "MATCH WHERE NOT ... IS NOT NULL remains deferred",
+                ));
+            }
+            let (target, key) = parse_property_ref(&predicate[..index], "MATCH WHERE predicate")?;
+            return Ok(ParsedWherePredicate {
+                target,
+                predicate: GraphPropertyPredicate {
+                    key,
+                    op: GraphPredicateOp::NotEqual,
+                    value: Value::Null,
+                },
+            });
+        }
+        if words.len() == 1 && words[0].eq_ignore_ascii_case("NULL") {
+            return Err(cypher_syntax("MATCH WHERE IS NULL remains deferred"));
+        }
+        return Err(cypher_syntax(
+            "MATCH WHERE IS predicates only support IS NOT NULL",
+        ));
+    }
     for (token, op) in [
         (">=", GraphPredicateOp::GreaterThanOrEqual),
         ("<=", GraphPredicateOp::LessThanOrEqual),
