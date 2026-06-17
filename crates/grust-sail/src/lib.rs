@@ -2928,7 +2928,7 @@ enum CypherReturnTarget {
     Element,
     Literal(Value),
     Property(String),
-    MapProjection(Vec<String>),
+    MapProjection(CypherReturnMapProjection),
     ListProjection(CypherReturnListProjection),
     Case(CypherReturnCase),
     Coalesce(CypherReturnCoalesce),
@@ -3009,6 +3009,24 @@ struct CypherReturnListProjection {
 
 #[derive(Clone, Debug, PartialEq)]
 enum CypherReturnListProjectionTerm {
+    Property(String),
+    Literal(Value),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnMapProjection {
+    variable: String,
+    entries: Vec<CypherReturnMapProjectionEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnMapProjectionEntry {
+    output_key: String,
+    value: CypherReturnMapProjectionValue,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum CypherReturnMapProjectionValue {
     Property(String),
     Literal(Value),
 }
@@ -3376,8 +3394,8 @@ fn parse_cypher_return_clause(
                 list.variable.clone().unwrap_or_default(),
                 CypherReturnTarget::ListProjection(list),
             )
-        } else if let Some((variable, keys)) = parse_return_map_projection(expression)? {
-            (variable, CypherReturnTarget::MapProjection(keys))
+        } else if let Some(map) = parse_return_map_projection(expression, parameters)? {
+            (map.variable.clone(), CypherReturnTarget::MapProjection(map))
         } else if let Ok((variable, key)) = parse_property_ref(expression, "RETURN projection") {
             (variable, CypherReturnTarget::Property(key))
         } else {
@@ -3848,11 +3866,11 @@ fn parse_aggregate_projection(
             distinct,
         )));
     }
-    if let Some((variable, keys)) = parse_return_map_projection(body)? {
+    if let Some(map) = parse_return_map_projection(body, parameters)? {
         return Ok(Some((
             aggregate,
-            Some(variable),
-            CypherReturnTarget::MapProjection(keys),
+            Some(map.variable.clone()),
+            CypherReturnTarget::MapProjection(map),
             distinct,
         )));
     }
@@ -5103,7 +5121,10 @@ fn parse_return_element_function_projection(
     Ok(Some((variable, target)))
 }
 
-fn parse_return_map_projection(expression: &str) -> Result<Option<(String, Vec<String>)>> {
+fn parse_return_map_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<CypherReturnMapProjection>> {
     let expression = expression.trim();
     let Some(open) = find_unquoted(expression, '{') else {
         return Ok(None);
@@ -5118,22 +5139,88 @@ fn parse_return_map_projection(expression: &str) -> Result<Option<(String, Vec<S
     let body = expression[open + 1..expression.len() - 1].trim();
     if body.is_empty() {
         return Err(cypher_syntax(
-            "RETURN map projection requires at least one property selector",
+            "RETURN map projection requires at least one entry",
         ));
     }
-    let mut keys = Vec::new();
+    let mut entries = Vec::new();
     for selector in split_top_level_commas(body)? {
         let selector = selector.trim();
-        let Some(key) = selector.strip_prefix('.') else {
-            return Err(cypher_unsupported_cardinality(
-                "writable Cypher RETURN map projections only support .property selectors",
+        if selector.is_empty() {
+            return Err(cypher_syntax(
+                "RETURN map projection contains an empty entry",
             ));
+        }
+        let entry = if let Some(key) = selector.strip_prefix('.') {
+            let key = key.trim();
+            validate_json_key(key)?;
+            CypherReturnMapProjectionEntry {
+                output_key: key.to_string(),
+                value: CypherReturnMapProjectionValue::Property(key.to_string()),
+            }
+        } else {
+            let Some(colon) = find_unquoted(selector, ':') else {
+                return Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN map projections only support .property selectors and key: literal/property entries",
+                ));
+            };
+            if find_unquoted(&selector[colon + 1..], ':').is_some() {
+                return Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN map projection entries only support one ':' separator",
+                ));
+            }
+            let output_key = selector[..colon].trim();
+            validate_json_key(output_key)?;
+            let value = selector[colon + 1..].trim();
+            if value.is_empty() {
+                return Err(cypher_syntax(
+                    "RETURN map projection entry requires a value",
+                ));
+            }
+            if find_unquoted(value, '{').is_some()
+                || find_unquoted(value, '}').is_some()
+                || find_unquoted(value, '[').is_some()
+                || find_unquoted(value, ']').is_some()
+                || find_unquoted(value, '(').is_some()
+                || find_unquoted(value, ')').is_some()
+            {
+                return Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN map projection entries only support literals and same-variable properties",
+                ));
+            }
+            let value = if let Ok((value_variable, key)) =
+                parse_property_ref(value, "RETURN map projection entry")
+            {
+                if value_variable != variable {
+                    return Err(cypher_unsupported_cardinality(
+                        "writable Cypher RETURN map projection property entries must reference the projection variable",
+                    ));
+                }
+                CypherReturnMapProjectionValue::Property(key)
+            } else {
+                CypherReturnMapProjectionValue::Literal(parse_cypher_literal(value, parameters).map_err(|_| {
+                    cypher_unsupported_cardinality(
+                        "writable Cypher RETURN map projection entries only support literals and same-variable properties",
+                    )
+                })?)
+            };
+            CypherReturnMapProjectionEntry {
+                output_key: output_key.to_string(),
+                value,
+            }
         };
-        let key = key.trim();
-        validate_json_key(key)?;
-        keys.push(key.to_string());
+        if entries
+            .iter()
+            .any(|existing: &CypherReturnMapProjectionEntry| {
+                existing.output_key == entry.output_key
+            })
+        {
+            return Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN map projection entries must have unique output keys",
+            ));
+        }
+        entries.push(entry);
     }
-    Ok(Some((variable, keys)))
+    Ok(Some(CypherReturnMapProjection { variable, entries }))
 }
 
 fn parse_return_list_projection(
@@ -6212,7 +6299,7 @@ where
             )
             .await
         }
-        CypherReturnTarget::MapProjection(keys) => {
+        CypherReturnTarget::MapProjection(map) => {
             materialize_return_map_projection_value_at(
                 store,
                 node_bindings,
@@ -6223,7 +6310,7 @@ where
                 nodes,
                 edges,
                 projection,
-                keys,
+                map,
                 row_index,
             )
             .await
@@ -7556,31 +7643,35 @@ async fn materialize_return_map_projection_value_at<S>(
     nodes: &mut HashMap<String, Node>,
     edges: &mut HashMap<String, Edge>,
     projection: &CypherReturnProjection,
-    keys: &[String],
+    map: &CypherReturnMapProjection,
     row_index: usize,
 ) -> Result<Value>
 where
     S: GraphStore + Sync,
 {
-    let mut map = serde_json::Map::new();
-    for key in keys {
-        let value = materialize_return_property_value_at(
-            store,
-            node_bindings,
-            edge_bindings,
-            row_node_values,
-            row_edge_values,
-            row_path_bindings,
-            nodes,
-            edges,
-            projection,
-            key,
-            row_index,
-        )
-        .await?;
-        map.insert(key.clone(), value.to_json());
+    let mut output = serde_json::Map::new();
+    for entry in &map.entries {
+        let value = match &entry.value {
+            CypherReturnMapProjectionValue::Property(key) => materialize_return_property_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await?
+            .to_json(),
+            CypherReturnMapProjectionValue::Literal(value) => value.to_json(),
+        };
+        output.insert(entry.output_key.clone(), value);
     }
-    Ok(Value::Json(serde_json::Value::Object(map)))
+    Ok(Value::Json(serde_json::Value::Object(output)))
 }
 
 #[allow(clippy::too_many_arguments)]

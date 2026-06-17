@@ -56,6 +56,7 @@ reconstructed from Git history, release commits, and the shipped docs.
   returned alongside the produced relationship without independent node scans.
 - Added restricted writable Cypher map projections such as
   `RETURN n { .id, .label }` over variables already bound by the write plan,
+  now extended to allow literal, parameter, and same-variable property entries
   while keeping arbitrary map expressions deferred.
 - Added restricted writable Cypher list projections such as
   `RETURN [n.id, n.label]` over one variable already bound by the write plan,

@@ -4246,3 +4246,43 @@ structured restricted list projection containing property and literal terms.
 Evaluation reuses the existing property materializer for property terms and
 serializes literal terms directly into the returned JSON array; literal-only
 lists are handled through the literal row model.
+
+### Batch CZ: Mixed Map Projection Entries
+
+Extend the existing restricted map projection support so writable `RETURN` can
+mix property selectors, literal entries, and explicit same-variable property
+entries:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN n { .id, kind: 'person', team: n.team, seen: n.seen } AS person;
+```
+
+Acceptance criteria:
+
+- Support `.property` selectors, `key: literal`, `key: $parameter`, and
+  `key: variable.property` entries inside a map projection whose prefix is the
+  same bound variable.
+- Preserve the existing projection-variable restriction. Reject
+  `a { other: b.id }` and other cross-variable entries.
+- Require unique output keys within one map projection.
+- Serialize returned map values as JSON objects, using the same
+  `Value::to_json` conversion already used by the existing property-only map
+  projection.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, and
+  `COLLECT`. Numeric aggregates over map JSON values should fail through the
+  existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep nested maps, nested lists, nested functions, computed expressions,
+  dynamic output keys, cross-variable terms, and arbitrary expression
+  evaluation deferred.
+
+Implementation status: implemented in the working tree after Batch CY.
+Writable `RETURN variable { .property, key: literal, key: variable.property }`
+now parses into a structured restricted map projection containing property and
+literal entries. Evaluation reuses the existing property materializer for
+property entries and serializes literal entries directly into the returned JSON
+object.

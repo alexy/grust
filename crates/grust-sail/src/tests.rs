@@ -3586,9 +3586,15 @@ fn sail_cypher_returning_projects_restricted_maps_on_memory_facade() {
             &store,
             "
             CREATE (n:Person {id: 'map-ada', name: 'Ada'})
-            RETURN n { .id, .label, .name, .missing } AS person;
+            RETURN n { .id, .label, display: n.name, marker: 'seen', rank: 1, active: true, fallback: $fallback, empty: null, .missing } AS person;
             ",
-            CypherMutationOptions::default(),
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "fallback".to_string(),
+                    Value::from("provided"),
+                )]),
+                ..CypherMutationOptions::default()
+            },
         ))
         .expect("concrete map projection");
     assert_eq!(concrete.table.columns, vec!["person"]);
@@ -3597,7 +3603,12 @@ fn sail_cypher_returning_projects_restricted_maps_on_memory_facade() {
         vec![vec![Value::Json(serde_json::json!({
             "id": "map-ada",
             "label": "Person",
-            "name": "Ada",
+            "display": "Ada",
+            "marker": "seen",
+            "rank": 1,
+            "active": true,
+            "fallback": "provided",
+            "empty": null,
             "missing": null
         }))]]
     );
@@ -3609,7 +3620,7 @@ fn sail_cypher_returning_projects_restricted_maps_on_memory_facade() {
             CREATE (:Person {id: 'map-bob', status: 'active', team: 'eng'});
             CREATE (:Person {id: 'map-cara', status: 'active', team: 'ops'});
             MATCH (n:Person {status: 'active'}) SET n.seen = true
-            RETURN n.id AS id, n { .id, .team, .seen } AS person ORDER BY id;
+            RETURN n.id AS id, n { .id, kind: 'person', team: n.team, .seen } AS person ORDER BY id;
             ",
             CypherMutationOptions::default(),
         ))
@@ -3622,6 +3633,7 @@ fn sail_cypher_returning_projects_restricted_maps_on_memory_facade() {
                 Value::from("map-bob"),
                 Value::Json(serde_json::json!({
                     "id": "map-bob",
+                    "kind": "person",
                     "team": "eng",
                     "seen": true
                 }))
@@ -3630,6 +3642,7 @@ fn sail_cypher_returning_projects_restricted_maps_on_memory_facade() {
                 Value::from("map-cara"),
                 Value::Json(serde_json::json!({
                     "id": "map-cara",
+                    "kind": "person",
                     "team": "ops",
                     "seen": true
                 }))
@@ -3645,8 +3658,8 @@ fn sail_cypher_returning_projects_restricted_maps_on_memory_facade() {
             MATCH (n:Person {status: 'active'}), (t:Team {id: 'map-team'})
             CREATE (n)-[r:MEMBER_OF {source: 'map'}]->(t)
             RETURN n.id AS id,
-                   n { .id, .team } AS person,
-                   r { .label, .source } AS membership
+                   n { .id, kind: 'person', team: n.team } AS person,
+                   r { .label, source: r.source, static: 'map-entry' } AS membership
             ORDER BY id;
             ",
             CypherMutationOptions::default(),
@@ -3665,8 +3678,10 @@ fn sail_cypher_returning_projects_restricted_maps_on_memory_facade() {
         row_edge.table.rows[0],
         vec![
             Value::from("map-bob"),
-            Value::Json(serde_json::json!({"id": "map-bob", "team": "eng"})),
-            Value::Json(serde_json::json!({"label": "MEMBER_OF", "source": "map"}))
+            Value::Json(serde_json::json!({"id": "map-bob", "kind": "person", "team": "eng"})),
+            Value::Json(
+                serde_json::json!({"label": "MEMBER_OF", "source": "map", "static": "map-entry"})
+            )
         ]
     );
 
@@ -3675,9 +3690,9 @@ fn sail_cypher_returning_projects_restricted_maps_on_memory_facade() {
             &store,
             "
             MATCH (n:Person {status: 'active'}) SET n.map_aggregated = true
-            RETURN count(n { .team }) AS mapped_rows,
-                   count(DISTINCT n { .team }) AS distinct_maps,
-                   collect(n { .id, .team }) AS people;
+            RETURN count(n { team: n.team, marker: 'seen' }) AS mapped_rows,
+                   count(DISTINCT n { team: n.team, marker: 'seen' }) AS distinct_maps,
+                   collect(n { .id, kind: 'person', team: n.team }) AS people;
             ",
             CypherMutationOptions::default(),
         ))
@@ -3707,6 +3722,46 @@ fn sail_cypher_returning_projects_restricted_maps_on_memory_facade() {
     assert!(
         matches!(error, GrustError::CypherUnsupportedCardinality(_)),
         "{error:?}"
+    );
+
+    let cross_variable =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'map-cross-a'});
+            CREATE (b:Person {id: 'map-cross-b'})
+            RETURN a { other: b.id };
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("map projection entries should reject cross-variable properties");
+    assert!(
+        matches!(cross_variable, GrustError::CypherUnsupportedCardinality(_)),
+        "{cross_variable:?}"
+    );
+
+    let duplicate_key =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'map-duplicate', team: 'eng'}) RETURN n { .team, team: 'dup' };",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("map projection entries should reject duplicate output keys");
+    assert!(
+        matches!(duplicate_key, GrustError::CypherUnsupportedCardinality(_)),
+        "{duplicate_key:?}"
+    );
+
+    let nested =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'map-nested'}) RETURN n { nested: {value: 1} };",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("map projection entries should reject nested maps");
+    assert!(
+        matches!(nested, GrustError::CypherUnsupportedCardinality(_)),
+        "{nested:?}"
     );
 }
 
