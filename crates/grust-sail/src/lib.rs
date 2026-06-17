@@ -2938,6 +2938,7 @@ enum CypherReturnTarget {
         key: String,
         index: usize,
     },
+    PropertyListSlice(CypherReturnListSlice),
     PropertyListElement {
         key: String,
         element: CypherReturnListElement,
@@ -3051,6 +3052,13 @@ struct CypherReturnStringSlice {
     key: String,
     side: CypherReturnStringSliceSide,
     length: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CypherReturnListSlice {
+    key: String,
+    start: Option<usize>,
+    end: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3209,6 +3217,10 @@ fn parse_cypher_return_clause(
             (variable, CypherReturnTarget::PropertyExists(key))
         } else if let Some((variable, key)) = parse_return_size_projection(expression)? {
             (variable, CypherReturnTarget::PropertySize(key))
+        } else if let Some((variable, slice)) =
+            parse_return_list_slice_projection(expression, parameters)?
+        {
+            (variable, CypherReturnTarget::PropertyListSlice(slice))
         } else if let Some((variable, key, index)) =
             parse_return_list_index_projection(expression, parameters)?
         {
@@ -3575,6 +3587,14 @@ fn parse_aggregate_projection(
             distinct,
         )));
     }
+    if let Some((variable, slice)) = parse_return_list_slice_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyListSlice(slice),
+            distinct,
+        )));
+    }
     if let Some((variable, key, index)) = parse_return_list_index_projection(body, parameters)? {
         return Ok(Some((
             aggregate,
@@ -3863,6 +3883,75 @@ fn restricted_range_value(start: i64, end: i64, step: i64) -> Result<Value> {
         current = next;
     }
     Ok(Value::IntArray(values))
+}
+
+fn parse_return_list_slice_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<(String, CypherReturnListSlice)>> {
+    let expression = expression.trim();
+    let Some(open) = find_unquoted(expression, '[') else {
+        return Ok(None);
+    };
+    if open == 0 {
+        return Ok(None);
+    }
+    if !expression.ends_with(']') {
+        return Err(cypher_syntax("RETURN list slice projection is missing ']'"));
+    }
+    if expression.contains('(') || expression.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN list slices only support variable.property[start..end]",
+        ));
+    }
+    let target = expression[..open].trim();
+    let bounds = expression[open + 1..expression.len() - 1].trim();
+    let Some(dotdot) = find_unquoted_sequence(bounds, "..") else {
+        return Ok(None);
+    };
+    if find_unquoted_sequence(&bounds[dotdot + 2..], "..").is_some() {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN list slices only support one '..' range",
+        ));
+    }
+    if target.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN list slice projection requires variable.property[start..end]",
+        ));
+    }
+    if bounds.contains('[') || bounds.contains(']') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN list slices only support integer bounds",
+        ));
+    }
+    let start = parse_optional_non_negative_usize_bound(
+        bounds[..dotdot].trim(),
+        parameters,
+        "RETURN list slice start",
+    )?;
+    let end = parse_optional_non_negative_usize_bound(
+        bounds[dotdot + 2..].trim(),
+        parameters,
+        "RETURN list slice end",
+    )?;
+    let (variable, key) =
+        parse_property_ref(target, "RETURN list slice projection").map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN list slices require a variable.property target",
+            )
+        })?;
+    Ok(Some((variable, CypherReturnListSlice { key, start, end })))
+}
+
+fn parse_optional_non_negative_usize_bound(
+    expression: &str,
+    parameters: &CypherParameters,
+    context: &str,
+) -> Result<Option<usize>> {
+    if expression.is_empty() {
+        return Ok(None);
+    }
+    parse_non_negative_usize_literal(expression, parameters, context).map(Some)
 }
 
 fn parse_return_list_index_projection(
@@ -5963,6 +6052,22 @@ where
             )
             .await
         }
+        CypherReturnTarget::PropertyListSlice(slice) => {
+            materialize_return_property_list_slice_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                slice,
+                row_index,
+            )
+            .await
+        }
         CypherReturnTarget::PropertyListElement { key, element } => {
             materialize_return_property_list_element_value_at(
                 store,
@@ -6452,6 +6557,23 @@ where
                 projection,
                 key,
                 *index,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyListSlice(slice) => {
+            let value = materialize_return_property_list_slice_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                slice,
                 row_index,
             )
             .await?;
@@ -7397,6 +7519,82 @@ fn restricted_list_index_value(value: Value, index: usize) -> Result<Value> {
         | Value::DateTime(_)
         | Value::Json(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN list indexes only support array values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_list_slice_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    slice: &CypherReturnListSlice,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        &slice.key,
+        row_index,
+    )
+    .await?;
+    restricted_list_slice_value(value, slice)
+}
+
+fn bounded_list_slice_indexes(len: usize, slice: &CypherReturnListSlice) -> (usize, usize) {
+    let start = slice.start.unwrap_or(0).min(len);
+    let end = slice.end.unwrap_or(len).min(len);
+    if end < start {
+        (start, start)
+    } else {
+        (start, end)
+    }
+}
+
+fn restricted_list_slice_value(value: Value, slice: &CypherReturnListSlice) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::StringArray(values) => {
+            let (start, end) = bounded_list_slice_indexes(values.len(), slice);
+            Ok(Value::StringArray(values[start..end].to_vec()))
+        }
+        Value::IntArray(values) => {
+            let (start, end) = bounded_list_slice_indexes(values.len(), slice);
+            Ok(Value::IntArray(values[start..end].to_vec()))
+        }
+        Value::FloatArray(values) => {
+            let (start, end) = bounded_list_slice_indexes(values.len(), slice);
+            Ok(Value::FloatArray(values[start..end].to_vec()))
+        }
+        Value::Json(serde_json::Value::Array(values)) => {
+            let (start, end) = bounded_list_slice_indexes(values.len(), slice);
+            Ok(Value::from_json(serde_json::Value::Array(
+                values[start..end].to_vec(),
+            )))
+        }
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::DateTime(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN list slices only support array values",
         )),
     }
 }
@@ -9132,6 +9330,7 @@ where
             | CypherReturnTarget::PropertyExists(_)
             | CypherReturnTarget::PropertySize(_)
             | CypherReturnTarget::PropertyListIndex { .. }
+            | CypherReturnTarget::PropertyListSlice(_)
             | CypherReturnTarget::PropertyListElement { .. }
             | CypherReturnTarget::PropertyListTail(_)
             | CypherReturnTarget::PropertyAbs(_)
@@ -9455,6 +9654,21 @@ where
             .await?
         }
         CypherReturnTarget::PropertyListIndex { .. } => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyListSlice(_) => {
             materialize_return_projection_values(
                 store,
                 node_bindings,

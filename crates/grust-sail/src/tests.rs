@@ -4884,6 +4884,196 @@ fn sail_cypher_returning_projects_restricted_size_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_restricted_list_slices_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let concrete =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'slice-ada', tags: $tags, scores: $scores});
+            CREATE (b:Person {id: 'slice-bob'});
+            MATCH (a:Person {id: 'slice-ada'}), (b:Person {id: 'slice-bob'})
+            CREATE (a)-[e:KNOWS {id: 'slice-knows', weights: $weights}]->(b)
+            RETURN a.tags[0..2] AS first_tags,
+                   a.scores[$start..$end] AS middle_scores,
+                   e.weights[1..] AS trailing_weights,
+                   a.tags[..1] AS leading_tag,
+                   a.tags[9..12] AS empty_tags,
+                   a.nickname[0..1] AS missing_name;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    (
+                        "tags".to_string(),
+                        Value::StringArray(vec![
+                            "engineer".to_string(),
+                            "speaker".to_string(),
+                            "writer".to_string(),
+                        ]),
+                    ),
+                    ("scores".to_string(), Value::IntArray(vec![5, 7, 11, 13])),
+                    (
+                        "weights".to_string(),
+                        Value::FloatArray(vec![2.5, 4.5, 6.5]),
+                    ),
+                    ("start".to_string(), Value::Int(1)),
+                    ("end".to_string(), Value::Int(3)),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("concrete list slice projections");
+    assert_eq!(
+        concrete.table.rows,
+        vec![vec![
+            Value::StringArray(vec!["engineer".to_string(), "speaker".to_string()]),
+            Value::IntArray(vec![7, 11]),
+            Value::FloatArray(vec![4.5, 6.5]),
+            Value::StringArray(vec!["engineer".to_string()]),
+            Value::StringArray(vec![]),
+            Value::Null,
+        ]]
+    );
+
+    let broad =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'slice-cara', status: 'slice', scores: $scores_a});
+            CREATE (:Person {id: 'slice-dan', status: 'slice', scores: $scores_b});
+            MATCH (n:Person {status: 'slice'}) SET n.sliced = true
+            RETURN n.id AS id, n.scores[1..3] AS scores
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    ("scores_a".to_string(), Value::IntArray(vec![3, 5, 8])),
+                    ("scores_b".to_string(), Value::IntArray(vec![7, 9, 13])),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("broad list slice projections");
+    assert_eq!(
+        broad.table.rows,
+        vec![
+            vec![Value::from("slice-cara"), Value::IntArray(vec![5, 8])],
+            vec![Value::from("slice-dan"), Value::IntArray(vec![9, 13])],
+        ]
+    );
+
+    let row_edges =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Team {id: 'slice-team'});
+            MATCH (n:Person {status: 'slice'}), (t:Team {id: 'slice-team'})
+            CREATE (n)-[r:MEMBER_OF {rankings: $rankings}]->(t)
+            RETURN n.id AS id, r.rankings[..2] AS ranks
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "rankings".to_string(),
+                    Value::IntArray(vec![1, 2, 3]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("row-producing relationship list slice projections");
+    assert_eq!(
+        row_edges.table.rows,
+        vec![
+            vec![Value::from("slice-cara"), Value::IntArray(vec![1, 2])],
+            vec![Value::from("slice-dan"), Value::IntArray(vec![1, 2])],
+        ]
+    );
+
+    let aggregates =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (n:Person {status: 'slice'}) SET n.slice_counted = true
+            RETURN count(n.scores[1..3]) AS rows,
+                   collect(n.scores[1..3]) AS score_slices;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("list slice aggregate projections");
+    assert_eq!(
+        aggregates.table.rows,
+        vec![vec![
+            Value::Int(2),
+            Value::Json(serde_json::json!([[5, 8], [9, 13]])),
+        ]]
+    );
+
+    let numeric_slice_aggregate =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "MATCH (n:Person {status: 'slice'}) SET n.slice_summed = true RETURN sum(n.scores[1..3]);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("numeric aggregates over list slices should stay rejected");
+    assert!(
+        matches!(
+            numeric_slice_aggregate,
+            GrustError::CypherUnsupportedCardinality(_)
+        ),
+        "{numeric_slice_aggregate:?}"
+    );
+
+    let non_array =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'slice-string', name: 'Ada'}) RETURN n.name[0..1];",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("list slices over strings should stay rejected");
+    assert!(
+        matches!(non_array, GrustError::CypherUnsupportedCardinality(_)),
+        "{non_array:?}"
+    );
+
+    let negative_bound =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'slice-negative', scores: $scores}) RETURN n.scores[-1..2];",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "scores".to_string(),
+                    Value::IntArray(vec![1, 2]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("negative list slice bounds should stay rejected");
+    assert!(
+        matches!(negative_bound, GrustError::CypherUnsupportedCardinality(_)),
+        "{negative_bound:?}"
+    );
+
+    let nested_bound =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'slice-nested', scores: $scores}) RETURN n.scores[0..head(n.scores)];",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "scores".to_string(),
+                    Value::IntArray(vec![1, 2]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("nested list slice bounds should stay rejected");
+    assert!(
+        matches!(nested_bound, GrustError::CypherUnsupportedCardinality(_)),
+        "{nested_bound:?}"
+    );
+}
+
+#[test]
 fn sail_cypher_returning_projects_restricted_list_indexes_on_memory_facade() {
     let store = MemoryGraphStore::new();
 

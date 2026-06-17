@@ -1070,7 +1070,7 @@ in the Grust `Node` / `Edge` serde shape with
 also available over those already-bound values, including `labels(n)`,
 `type(e)`, `properties(n)`, `keys(e)`, `id(n)`, `elementId(e)`,
 `exists(n.nickname)`, `size(n.nickname)`, `toLower(n.team)`,
-`n.tags[0]`, `head(n.tags)`, `last(n.scores)`, `tail(n.tags)`,
+`n.tags[0]`, `n.tags[0..2]`, `head(n.tags)`, `last(n.scores)`, `tail(n.tags)`,
 `isEmpty(n.nickname)`,
 `toString(n.score)`, `toUpper(n.code)`,
 `abs(n.score)`, `ceil(n.score)`, `floor(n.score)`, `sign(n.score)`,

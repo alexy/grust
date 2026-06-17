@@ -2384,6 +2384,8 @@ remaining pieces should stay explicit:
   restricted `exists(variable.property)` projections and aggregate bodies, and
   restricted `size(variable.property)` projections and aggregate bodies, and
   restricted `variable.property[index]` projections and aggregate bodies, and
+  restricted `variable.property[start..end]` projections and aggregate bodies,
+  and
   restricted `head(variable.property)` / `last(variable.property)`
   projections and aggregate bodies, and
   restricted `tail(variable.property)` projections and aggregate bodies, and
@@ -3999,3 +4001,51 @@ restricted projection target. Evaluation reuses the existing property
 materializer and extracts only typed array or JSON-array elements, preserving
 the same narrow, type-aware behavior as the other restricted property
 functions.
+
+### Batch CU: Restricted List Slice Projections
+
+Support bounded slice access over array-like property values already available
+in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN n.tags[0..2] AS first_tags;
+```
+
+Acceptance criteria:
+
+- Support `variable.property[start..end]`, `variable.property[..end]`, and
+  `variable.property[start..]` as scalar writable `RETURN` projections when
+  the variable is a concrete node, concrete relationship, materialized
+  row-node, or materialized row-relationship variable.
+- Accept only non-negative integer literal or parameter bounds. Reject
+  negative bounds, floats, strings, booleans, nulls, nested functions,
+  property references as bounds, cross-variable expressions, multiple `..`
+  ranges, and arbitrary expressions.
+- Use inclusive start and exclusive end semantics. Clamp bounds to the array
+  length and return an empty array when the effective end is before the
+  effective start.
+- Return the same typed Grust array kind for typed arrays. For JSON arrays,
+  slice the elements and convert the resulting JSON array through
+  `Value::from_json`. Return `null` when the property is absent or explicitly
+  null.
+- Reject strings, numeric values, booleans, datetimes, JSON objects,
+  whole-element values, paths, nested functions, cross-variable expressions,
+  and other unsupported values rather than adding general list-expression
+  semantics.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over sliced arrays should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep slice access property-only; list literals, list comprehensions,
+  negative bounds, stepped slices, and arbitrary expression evaluation remain
+  deferred.
+
+Implementation status: implemented in the working tree after Batch CT.
+Writable `RETURN variable.property[start..end]` now parses into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and slices only typed arrays or JSON arrays, preserving the same
+narrow, type-aware behavior as the other restricted property functions.
