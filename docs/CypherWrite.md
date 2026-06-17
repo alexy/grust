@@ -2386,6 +2386,8 @@ remaining pieces should stay explicit:
   restricted `head(variable.property)` / `last(variable.property)`
   projections and aggregate bodies, and
   restricted `tail(variable.property)` projections and aggregate bodies, and
+  restricted `range(start, end[, step])` literal list projections and
+  aggregate bodies, and
   restricted `abs(variable.property)` projections and aggregate bodies, and
   restricted `ceil(variable.property)` / `floor(variable.property)`
   projections and aggregate bodies, and
@@ -3916,3 +3918,41 @@ values and array-like values through the same restricted projection target.
 Evaluation reuses the existing property materializer and keeps the syntax
 property-only, preserving the same narrow, type-aware behavior as the other
 restricted property functions.
+
+### Batch CS: Restricted Range Literal Projections
+
+Support bounded `range(start, end[, step])` list construction over literal or
+parameter integer arguments in writable `RETURN`:
+
+```cypher
+CREATE (:Run {id: 'r1'})
+RETURN range(1, 5) AS attempts, range(5, 1, -2) AS countdown;
+```
+
+Acceptance criteria:
+
+- Support `range(start, end)` and `range(start, end, step)` as scalar writable
+  `RETURN` projections without requiring a bound variable.
+- Accept only integer literals or parameters for `start`, `end`, and `step`.
+  Reject floats, strings, booleans, nulls, property references, nested
+  functions, and arbitrary expressions.
+- Return a typed `Value::IntArray` using inclusive Cypher-style endpoints.
+  Default `step` to `1`; return an empty array when the step direction cannot
+  reach the endpoint.
+- Support negative explicit steps for descending ranges. Reject a zero step and
+  reject ranges that would materialize too many values.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over range arrays should fail
+  through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `range(...)` literal-only; property-driven bounds, expression bounds,
+  nested calls, list comprehensions, and arbitrary expression evaluation remain
+  deferred.
+
+Implementation status: implemented in the working tree after Batch CR.
+Writable `RETURN range(start, end[, step])` now parses into a literal
+`Value::IntArray` projection. Evaluation reuses the existing literal projection
+and literal aggregate machinery, keeping the implementation bounded while
+making a standard Cypher list constructor available after writes.

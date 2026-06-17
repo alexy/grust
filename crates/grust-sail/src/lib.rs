@@ -3276,6 +3276,8 @@ fn parse_cypher_return_clause(
                 variable,
                 CypherReturnTarget::PropertyStringPredicate(predicate),
             )
+        } else if let Some(range) = parse_return_range_projection(expression, parameters)? {
+            (String::new(), CypherReturnTarget::Literal(range))
         } else if expression.contains('(') || expression.contains(')') {
             return Err(cypher_unsupported_cardinality(
                 "writable Cypher RETURN only supports bound element, property, and restricted path projections",
@@ -3530,6 +3532,14 @@ fn parse_aggregate_projection(
             distinct,
         )));
     }
+    if let Some(range) = parse_return_range_projection(body, parameters)? {
+        return Ok(Some((
+            aggregate,
+            None,
+            CypherReturnTarget::Literal(range),
+            distinct,
+        )));
+    }
     if let Some((variable, coalesce)) = parse_return_coalesce_projection(body, parameters)? {
         return Ok(Some((
             aggregate,
@@ -3760,6 +3770,80 @@ fn parse_return_literal_projection(
         return Ok(None);
     }
     parse_cypher_literal(expression, parameters).map(Some)
+}
+
+fn parse_return_range_projection(
+    expression: &str,
+    parameters: &CypherParameters,
+) -> Result<Option<Value>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("range") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN range projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax("RETURN range projection requires arguments"));
+    }
+    let arguments = split_top_level_commas(body)?;
+    if !(2..=3).contains(&arguments.len()) {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN range requires start, end, and optional step",
+        ));
+    }
+    let start = parse_integer_literal_argument(arguments[0], parameters, "RETURN range start")?;
+    let end = parse_integer_literal_argument(arguments[1], parameters, "RETURN range end")?;
+    let step = if let Some(step) = arguments.get(2) {
+        parse_integer_literal_argument(step, parameters, "RETURN range step")?
+    } else {
+        1
+    };
+    restricted_range_value(start, end, step).map(Some)
+}
+
+fn parse_integer_literal_argument(
+    expression: &str,
+    parameters: &CypherParameters,
+    context: &str,
+) -> Result<i64> {
+    let value = parse_cypher_literal(expression.trim(), parameters)?;
+    let Value::Int(value) = value else {
+        return Err(cypher_unsupported_cardinality(format!(
+            "{context} must be an integer literal or parameter"
+        )));
+    };
+    Ok(value)
+}
+
+fn restricted_range_value(start: i64, end: i64, step: i64) -> Result<Value> {
+    const MAX_RANGE_VALUES: usize = 1_000_000;
+
+    if step == 0 {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN range step must be non-zero",
+        ));
+    }
+
+    let mut values = Vec::new();
+    let mut current = start;
+    while (step > 0 && current <= end) || (step < 0 && current >= end) {
+        if values.len() == MAX_RANGE_VALUES {
+            return Err(cypher_unsupported_cardinality(
+                "writable Cypher RETURN range would produce too many values",
+            ));
+        }
+        values.push(current);
+        let Some(next) = current.checked_add(step) else {
+            break;
+        };
+        current = next;
+    }
+    Ok(Value::IntArray(values))
 }
 
 fn is_return_literal_candidate(expression: &str) -> bool {

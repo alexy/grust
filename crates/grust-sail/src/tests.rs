@@ -3893,6 +3893,34 @@ fn sail_cypher_returning_projects_restricted_literals_on_memory_facade() {
         ]]
     );
 
+    let ranges =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (n:RangeProbe {id: 'literal-range'})
+            RETURN range(1, 4) AS ascending,
+                   range($start, $end, $step) AS descending,
+                   range(4, 1) AS empty_range;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    ("start".to_string(), Value::Int(5)),
+                    ("end".to_string(), Value::Int(1)),
+                    ("step".to_string(), Value::Int(-2)),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("range literal projections");
+    assert_eq!(
+        ranges.table.rows,
+        vec![vec![
+            Value::IntArray(vec![1, 2, 3, 4]),
+            Value::IntArray(vec![5, 3, 1]),
+            Value::IntArray(vec![]),
+        ]]
+    );
+
     let broad =
         futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
             &store,
@@ -3922,7 +3950,9 @@ fn sail_cypher_returning_projects_restricted_literals_on_memory_facade() {
                    count(null) AS non_null,
                    sum(1) AS summed,
                    avg(2) AS averaged,
-                   collect('x') AS collected;
+                   collect('x') AS collected,
+                   count(range(1, 2)) AS range_count,
+                   collect(range(1, 2)) AS ranges;
             ",
             CypherMutationOptions::default(),
         ))
@@ -3935,6 +3965,50 @@ fn sail_cypher_returning_projects_restricted_literals_on_memory_facade() {
     assert_eq!(
         aggregates.table.rows[0][5],
         Value::Json(serde_json::json!(["x", "x"]))
+    );
+    assert_eq!(aggregates.table.rows[0][6], Value::Int(2));
+    assert_eq!(
+        aggregates.table.rows[0][7],
+        Value::Json(serde_json::json!([[1, 2], [1, 2]]))
+    );
+
+    let zero_step =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:RangeProbe {id: 'literal-range-zero'}) RETURN range(1, 3, 0);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("range zero step should stay rejected");
+    assert!(
+        matches!(zero_step, GrustError::CypherUnsupportedCardinality(_)),
+        "{zero_step:?}"
+    );
+
+    let non_integer =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:RangeProbe {id: 'literal-range-float'}) RETURN range(1.5, 3);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("range float arguments should stay rejected");
+    assert!(
+        matches!(non_integer, GrustError::CypherUnsupportedCardinality(_)),
+        "{non_integer:?}"
+    );
+
+    let numeric_range_aggregate =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "MATCH (n:Person) SET n.literal_range_sum = true RETURN sum(range(1, 2));",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("numeric aggregates over range arrays should stay rejected");
+    assert!(
+        matches!(
+            numeric_range_aggregate,
+            GrustError::CypherUnsupportedCardinality(_)
+        ),
+        "{numeric_range_aggregate:?}"
     );
 
     let missing_parameter =

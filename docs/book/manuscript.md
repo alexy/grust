@@ -1079,7 +1079,7 @@ also available over those already-bound values, including `labels(n)`,
 `replace(n.team, '-team', '')`, `startsWith(n.team, 'eng')`,
 `left(n.team, 3)`, `right(n.code, 2)`, `reverse(n.code)`,
 `reverse(n.tags)`,
-`split(n.path, '/')`, `startNode(e)`, and `endNode(e)`.
+`split(n.path, '/')`, `range(1, 5)`, `startNode(e)`, and `endNode(e)`.
 Relationship identity functions return an explicit
 relationship ID when one exists and `null` otherwise; they do not invent
 generated structural identity. The returning entrypoint returns

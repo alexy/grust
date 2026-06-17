@@ -141,6 +141,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   property values.
 - Added restricted writable Cypher `tail(variable.property)` projections and
   aggregate bodies over array-like property values.
+- Added restricted writable Cypher `range(start, end[, step])` literal list
+  projections and aggregate bodies with integer literal or parameter bounds.
 - Added restricted writable Cypher `toLower(variable.property)` and
   `toUpper(variable.property)` projections and aggregate bodies over bound
   node and relationship variables, keeping string normalization explicit and
