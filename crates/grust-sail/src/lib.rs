@@ -2939,6 +2939,7 @@ enum CypherReturnTarget {
         key: String,
         round: CypherReturnNumericRound,
     },
+    PropertyNumericSign(String),
     PropertyToString(String),
     PropertyStringTransform {
         key: String,
@@ -3191,6 +3192,8 @@ fn parse_cypher_return_clause(
                 variable,
                 CypherReturnTarget::PropertyNumericRound { key, round },
             )
+        } else if let Some((variable, key)) = parse_return_numeric_sign_projection(expression)? {
+            (variable, CypherReturnTarget::PropertyNumericSign(key))
         } else if let Some((variable, key)) = parse_return_to_string_projection(expression)? {
             (variable, CypherReturnTarget::PropertyToString(key))
         } else if let Some((variable, key, transform)) =
@@ -3524,6 +3527,14 @@ fn parse_aggregate_projection(
             aggregate,
             Some(variable),
             CypherReturnTarget::PropertyNumericRound { key, round },
+            distinct,
+        )));
+    }
+    if let Some((variable, key)) = parse_return_numeric_sign_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyNumericSign(key),
             distinct,
         )));
     }
@@ -3879,6 +3890,37 @@ fn parse_return_numeric_round_projection(
         .map_err(|_| {
             cypher_unsupported_cardinality(
                 "writable Cypher RETURN ceil/floor only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_numeric_sign_projection(expression: &str) -> Result<Option<(String, String)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    if !expression[..open].trim().eq_ignore_ascii_case("sign") {
+        return Ok(None);
+    }
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN sign projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN sign projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN sign only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN sign projection")
+        .map(Some)
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN sign only supports variable.property arguments",
             )
         })
 }
@@ -5585,6 +5627,22 @@ where
             )
             .await
         }
+        CypherReturnTarget::PropertyNumericSign(key) => {
+            materialize_return_property_numeric_sign_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                row_index,
+            )
+            .await
+        }
         CypherReturnTarget::PropertyToString(key) => {
             materialize_return_property_to_string_value_at(
                 store,
@@ -5976,6 +6034,23 @@ where
                 projection,
                 key,
                 *round,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyNumericSign(key) => {
+            let value = materialize_return_property_numeric_sign_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
                 row_index,
             )
             .await?;
@@ -6884,6 +6959,82 @@ fn restricted_numeric_round_value(value: Value, round: CypherReturnNumericRound)
         | Value::FloatArray(_)
         | Value::Json(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN ceil/floor only supports numeric values",
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_numeric_sign_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_numeric_sign_value(value)
+}
+
+fn restricted_numeric_sign_value(value: Value) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Int(value) => Ok(Value::Int(value.signum())),
+        Value::Float(value) => {
+            if !value.is_finite() {
+                return Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN sign only supports finite numeric values",
+                ));
+            }
+            let sign = if value > 0.0 {
+                1.0
+            } else if value < 0.0 {
+                -1.0
+            } else {
+                0.0
+            };
+            Ok(Value::Float(sign))
+        }
+        Value::Json(serde_json::Value::Number(value)) => {
+            if let Some(value) = value.as_i64() {
+                restricted_numeric_sign_value(Value::Int(value))
+            } else if let Some(value) = value.as_f64() {
+                restricted_numeric_sign_value(Value::Float(value))
+            } else {
+                Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN sign only supports finite numeric values",
+                ))
+            }
+        }
+        Value::Bool(_)
+        | Value::String(_)
+        | Value::DateTime(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN sign only supports numeric values",
         )),
     }
 }
@@ -8062,6 +8213,7 @@ where
             | CypherReturnTarget::PropertySize(_)
             | CypherReturnTarget::PropertyAbs(_)
             | CypherReturnTarget::PropertyNumericRound { .. }
+            | CypherReturnTarget::PropertyNumericSign(_)
             | CypherReturnTarget::PropertyToString(_)
             | CypherReturnTarget::PropertyStringTransform { .. }
             | CypherReturnTarget::PropertyStringTrim { .. }
@@ -8393,6 +8545,21 @@ where
             .await?
         }
         CypherReturnTarget::PropertyNumericRound { .. } => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyNumericSign(_) => {
             materialize_return_projection_values(
                 store,
                 node_bindings,

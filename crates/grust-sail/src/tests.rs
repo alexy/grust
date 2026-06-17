@@ -5302,6 +5302,126 @@ fn sail_cypher_returning_projects_restricted_numeric_rounds_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_restricted_numeric_sign_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let concrete =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'sign-ada', debt: -3, ratio: 2.1, zero: 0});
+            CREATE (b:Person {id: 'sign-bob'});
+            MATCH (a:Person {id: 'sign-ada'}), (b:Person {id: 'sign-bob'})
+            CREATE (a)-[e:KNOWS {id: 'sign-knows', weight: -4.8}]->(b)
+            RETURN sign(a.debt) AS debt_sign,
+                   sign(a.ratio) AS ratio_sign,
+                   sign(a.zero) AS zero_sign,
+                   sign(e.weight) AS weight_sign,
+                   sign(a.nickname) AS missing_name;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("concrete numeric sign projections");
+    assert_eq!(
+        concrete.table.rows,
+        vec![vec![
+            Value::Int(-1),
+            Value::Float(1.0),
+            Value::Int(0),
+            Value::Float(-1.0),
+            Value::Null,
+        ]]
+    );
+
+    let broad =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'sign-cara', status: 'sign', score: -7});
+            CREATE (:Person {id: 'sign-dan', status: 'sign', score: 11});
+            MATCH (n:Person {status: 'sign'}) SET n.seen = true
+            RETURN n.id AS id, sign(n.score) AS score
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("broad numeric sign projections");
+    assert_eq!(
+        broad.table.rows,
+        vec![
+            vec![Value::from("sign-cara"), Value::Int(-1)],
+            vec![Value::from("sign-dan"), Value::Int(1)],
+        ]
+    );
+
+    let row_edges =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Team {id: 'sign-team'});
+            MATCH (n:Person {status: 'sign'}), (t:Team {id: 'sign-team'})
+            CREATE (n)-[r:MEMBER_OF {rank: -5.3}]->(t)
+            RETURN n.id AS id, sign(r.rank) AS rank
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("row-producing relationship numeric sign projections");
+    assert_eq!(
+        row_edges.table.rows,
+        vec![
+            vec![Value::from("sign-cara"), Value::Float(-1.0)],
+            vec![Value::from("sign-dan"), Value::Float(-1.0)],
+        ]
+    );
+
+    let aggregates =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (n:Person {status: 'sign'}) SET n.sign_counted = true
+            RETURN count(sign(n.score)) AS rows,
+                   sum(sign(n.score)) AS total_scores,
+                   collect(sign(n.score)) AS scores;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("numeric sign aggregate projections");
+    assert_eq!(
+        aggregates.table.rows,
+        vec![vec![
+            Value::Int(2),
+            Value::Int(0),
+            Value::Json(serde_json::json!([-1, 1])),
+        ]]
+    );
+
+    let string_sign =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'sign-string', score: '3'}) RETURN sign(n.score);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("sign over string values should stay rejected");
+    assert!(
+        matches!(string_sign, GrustError::CypherUnsupportedCardinality(_)),
+        "{string_sign:?}"
+    );
+
+    let nested_sign =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'sign-nested', score: -3}) RETURN sign(abs(n.score));",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("nested sign arguments should stay rejected");
+    assert!(
+        matches!(nested_sign, GrustError::CypherUnsupportedCardinality(_)),
+        "{nested_sign:?}"
+    );
+}
+
+#[test]
 fn sail_cypher_returning_projects_restricted_string_transforms_on_memory_facade() {
     let store = MemoryGraphStore::new();
 

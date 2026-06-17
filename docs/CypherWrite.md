@@ -2386,6 +2386,7 @@ remaining pieces should stay explicit:
   restricted `abs(variable.property)` projections and aggregate bodies, and
   restricted `ceil(variable.property)` / `floor(variable.property)`
   projections and aggregate bodies, and
+  restricted `sign(variable.property)` projections and aggregate bodies, and
   restricted `isEmpty(variable.property)` projections and aggregate bodies,
   and
   restricted `toString(variable.property)` projections and aggregate bodies,
@@ -3667,3 +3668,41 @@ Writable `RETURN` now parses `ceil(variable.property)` and
 Evaluation reuses the existing property materializer and applies rounding only
 to numeric values, preserving the same narrow, type-aware behavior as the
 other restricted property functions.
+
+### Batch CM: Restricted Numeric Sign Projections
+
+Support bounded numeric sign projection over property values already available
+in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN sign(n.score) AS score_sign;
+```
+
+Acceptance criteria:
+
+- Support `sign(variable.property)` as a scalar writable `RETURN` projection
+  when the variable is a concrete node, concrete relationship, materialized
+  row-node, or materialized row-relationship variable.
+- Return `-1`, `0`, or `1` for integer values and `-1.0`, `0.0`, or `1.0`
+  for floating-point values and JSON numeric values. Return `null` when the
+  property is absent or explicitly null.
+- Reject strings, booleans, arrays, JSON arrays, JSON objects, whole-element
+  values, paths, nested functions, cross-variable expressions, non-finite
+  numeric values, and other unsupported values rather than adding implicit
+  casts.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `SUM`,
+  `AVG`, `MIN`, `MAX`, and `COLLECT`.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `sign(...)` property-only; arbitrary numeric expressions remain
+  limited to the existing mutation-assignment path.
+
+Implementation status: implemented in the working tree after Batch CL.
+Writable `RETURN` now parses `sign(variable.property)` into a dedicated
+restricted projection target. Evaluation reuses the existing property
+materializer and applies sign conversion only to numeric values, preserving
+the same narrow, type-aware behavior as the other restricted property
+functions.
