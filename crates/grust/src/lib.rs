@@ -1,7 +1,11 @@
 pub use grust_core::*;
 
 pub mod lakecat;
-pub use lakecat::{LakeCatCatalogGraph, lakecat_catalog_graph_from_json_value};
+pub use lakecat::{
+    LakeCatCatalogEvent, LakeCatCatalogGraph, LakeCatTableRef, lakecat_catalog_event_graph,
+    lakecat_catalog_graph_from_json_value, lakecat_event_id, lakecat_namespace_id,
+    lakecat_warehouse_id,
+};
 
 #[cfg(feature = "cocoindex")]
 pub use grust_cocoindex::*;
@@ -44,7 +48,11 @@ pub use grust_sail::{
 pub use grust_surreal::*;
 
 pub mod prelude {
-    pub use crate::lakecat::{LakeCatCatalogGraph, lakecat_catalog_graph_from_json_value};
+    pub use crate::lakecat::{
+        LakeCatCatalogEvent, LakeCatCatalogGraph, LakeCatTableRef, lakecat_catalog_event_graph,
+        lakecat_catalog_graph_from_json_value, lakecat_event_id, lakecat_namespace_id,
+        lakecat_warehouse_id,
+    };
     pub use grust_core::prelude::*;
 
     #[cfg(feature = "cocoindex")]

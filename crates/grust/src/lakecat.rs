@@ -56,6 +56,109 @@ pub fn lakecat_catalog_graph_from_json_value(value: &JsonValue) -> Result<Graph>
     Ok(Graph::new(nodes, edges))
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct LakeCatCatalogEvent {
+    pub event_id: Option<String>,
+    pub subject: String,
+    pub label: String,
+    pub action: String,
+    pub emitted_at: String,
+    pub properties: JsonValue,
+    pub table: Option<LakeCatTableRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LakeCatTableRef {
+    pub stable_id: String,
+    pub warehouse: String,
+    pub namespace: Vec<String>,
+    pub name: String,
+}
+
+impl LakeCatTableRef {
+    pub fn namespace_path(&self) -> String {
+        self.namespace.join(".")
+    }
+
+    pub fn warehouse_id(&self) -> String {
+        lakecat_warehouse_id(&self.warehouse)
+    }
+
+    pub fn namespace_id(&self) -> String {
+        lakecat_namespace_id(&self.warehouse, &self.namespace)
+    }
+}
+
+pub fn lakecat_catalog_event_graph(event: &LakeCatCatalogEvent) -> Graph {
+    let mut builder = Graph::builder();
+    let event_id = event
+        .event_id
+        .clone()
+        .unwrap_or_else(|| lakecat_event_id(&event.subject, &event.action, &event.emitted_at));
+    let _ = builder
+        .node("CatalogEvent", event_id.clone())
+        .prop("subject", event.subject.clone())
+        .prop("label", event.label.clone())
+        .prop("action", event.action.clone())
+        .prop("emitted_at", event.emitted_at.clone())
+        .prop("properties", event.properties.clone())
+        .finish();
+
+    if let Some(table) = &event.table {
+        let warehouse_id = table.warehouse_id();
+        let namespace_id = table.namespace_id();
+        let namespace_path = table.namespace_path();
+        let _ = builder
+            .node("Warehouse", warehouse_id.clone())
+            .prop("name", table.warehouse.clone())
+            .finish();
+        let _ = builder
+            .node("Namespace", namespace_id.clone())
+            .prop("warehouse", table.warehouse.clone())
+            .prop("path", namespace_path.clone())
+            .prop("segments", JsonValue::from(table.namespace.clone()))
+            .finish();
+        let _ = builder
+            .node("Table", table.stable_id.clone())
+            .prop("warehouse", table.warehouse.clone())
+            .prop("namespace", namespace_path)
+            .prop("name", table.name.clone())
+            .finish();
+        let _ = builder
+            .edge(
+                "CONTAINS_NAMESPACE",
+                warehouse_id.clone(),
+                namespace_id.clone(),
+            )
+            .finish();
+        let _ = builder
+            .edge("CONTAINS_TABLE", namespace_id, table.stable_id.clone())
+            .finish();
+        let _ = builder
+            .edge("AFFECTS_TABLE", event_id, table.stable_id.clone())
+            .prop("action", event.action.clone())
+            .finish();
+    }
+
+    builder.build()
+}
+
+pub fn lakecat_warehouse_id(warehouse: &str) -> String {
+    format!("lakecat:warehouse:{warehouse}")
+}
+
+pub fn lakecat_namespace_id(warehouse: &str, namespace: &[String]) -> String {
+    format!(
+        "{}:namespace:{}",
+        lakecat_warehouse_id(warehouse),
+        namespace.join(".")
+    )
+}
+
+pub fn lakecat_event_id(subject: &str, action: &str, emitted_at: &str) -> String {
+    format!("lakecat:event:{subject}:{action}:{emitted_at}")
+}
+
 fn lakecat_node_from_json_value(value: &JsonValue) -> Result<Node> {
     let object = value.as_object().ok_or_else(|| {
         GrustError::Serialization("LakeCat catalog graph node must be a JSON object".to_string())
@@ -111,7 +214,17 @@ fn string_field(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grust_core::NodeId;
     use serde_json::json;
+
+    fn has_edge(graph: &Graph, label: &str, from: &str, to: &str) -> bool {
+        let from = NodeId::new(from);
+        let to = NodeId::new(to);
+        graph
+            .edges
+            .iter()
+            .any(|edge| edge.label.as_str() == label && edge.from == from && edge.to == to)
+    }
 
     #[test]
     fn imports_lakecat_catalog_graph_envelope() {
@@ -177,5 +290,50 @@ mod tests {
             .to_string();
         assert!(err.contains("edge destination"));
         assert!(err.contains("is not present in vertices"));
+    }
+
+    #[test]
+    fn projects_lakecat_catalog_event_taxonomy() {
+        let event = LakeCatCatalogEvent {
+            event_id: Some("lakecat:outbox:evt-1".to_string()),
+            subject: "lakecat:table:local:default:events".to_string(),
+            label: "Table".to_string(),
+            action: "created".to_string(),
+            emitted_at: "2026-06-17T12:00:00Z".to_string(),
+            properties: json!({"metadata-location": "file:///tmp/events/metadata/00000.json"}),
+            table: Some(LakeCatTableRef {
+                stable_id: "lakecat:table:local:default:events".to_string(),
+                warehouse: "local".to_string(),
+                namespace: vec!["default".to_string()],
+                name: "events".to_string(),
+            }),
+        };
+
+        let graph = lakecat_catalog_event_graph(&event);
+        let catalog_graph = LakeCatCatalogGraph {
+            index: GraphIndex::new(&graph).unwrap(),
+            graph,
+        };
+
+        assert_eq!(catalog_graph.node_count(), 4);
+        assert_eq!(catalog_graph.edge_count(), 3);
+        assert!(has_edge(
+            &catalog_graph.graph,
+            "CONTAINS_NAMESPACE",
+            "lakecat:warehouse:local",
+            "lakecat:warehouse:local:namespace:default"
+        ));
+        assert!(has_edge(
+            &catalog_graph.graph,
+            "CONTAINS_TABLE",
+            "lakecat:warehouse:local:namespace:default",
+            "lakecat:table:local:default:events"
+        ));
+        assert!(has_edge(
+            &catalog_graph.graph,
+            "AFFECTS_TABLE",
+            "lakecat:outbox:evt-1",
+            "lakecat:table:local:default:events"
+        ));
     }
 }

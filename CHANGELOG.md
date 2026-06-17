@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added a reusable LakeCat catalog-event graph projection helper in the
+  `grust-graph` facade, covering event, warehouse, namespace, and table nodes
+  with stable catalog containment edges.
 - Added a LakeCat catalog graph adapter in the `grust-graph` facade that
   converts LakeCat `nodes`/`edges` envelopes into validated Grust graphs.
 - Added `CypherConstraintRegistry`, `NamedGraphConstraint`, and
