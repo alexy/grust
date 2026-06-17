@@ -1101,11 +1101,13 @@ rather than a parameter reference. Mutating `MATCH` clauses can use a bounded
 `WHERE` grammar: property comparisons against literals or parameters joined by
 `AND`, with one leading `NOT` allowed before a single comparison, for example
 `WHERE n.status = 'inactive' AND NOT n.active = true`. They also accept
-`variable.property IS NOT NULL` for explicit non-null checks.
+`variable.property IS NULL` and `variable.property IS NOT NULL` for explicit
+null checks.
 Predicates lower to backend-neutral `GraphPropertyPredicate` values, so Memory
-evaluates the same resolved plan that Sail lowers to SQL. Missing properties
-never match; `null` only matches equality or inequality against `Value::Null`,
-and ordered comparisons are limited to numbers or strings.
+evaluates the same resolved plan that Sail lowers to SQL. Ordinary comparison
+predicates never match missing properties; `IS NULL` matches missing or
+explicit-null properties, and `IS NOT NULL` requires a present non-null
+property. Ordered comparisons are limited to numbers or strings.
 `CypherMutationOptions::null_assignment`
 defaults to storing `SET x.key = null` as `Value::Null`, but callers can choose
 `CypherNullAssignment::RemoveProperty` to lower explicit null assignment to the

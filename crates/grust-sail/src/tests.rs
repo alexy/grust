@@ -1324,7 +1324,12 @@ fn matching_nodes_sql_filters_by_property_predicates() {
         },
         GraphPropertyPredicate {
             key: "nickname".to_string(),
-            op: GraphPredicateOp::NotEqual,
+            op: GraphPredicateOp::IsNotNull,
+            value: Value::Null,
+        },
+        GraphPropertyPredicate {
+            key: "retired".to_string(),
+            op: GraphPredicateOp::IsNull,
             value: Value::Null,
         },
     ];
@@ -1335,6 +1340,7 @@ fn matching_nodes_sql_filters_by_property_predicates() {
     assert!(sql.contains("GET_JSON_OBJECT(props, '$.status') = ?"));
     assert!(sql.contains("CAST(GET_JSON_OBJECT(props, '$.score') AS BIGINT) >= ?"));
     assert!(sql.contains("GET_JSON_OBJECT(props, '$.nickname') IS NOT NULL"));
+    assert!(sql.contains("GET_JSON_OBJECT(props, '$.retired') IS NULL"));
     assert_eq!(args.len(), 3);
 }
 
@@ -1405,7 +1411,7 @@ fn cypher_match_where_lowers_node_predicates() {
                 },
                 GraphPropertyPredicate {
                     key: "nickname".to_string(),
-                    op: GraphPredicateOp::NotEqual,
+                    op: GraphPredicateOp::IsNotNull,
                     value: Value::Null,
                 },
             ],
@@ -1474,9 +1480,9 @@ fn cypher_match_where_lowers_edge_and_endpoint_predicates() {
                     },
                     GraphPropertyPredicate {
                         key: "source".to_string(),
-                        op: GraphPredicateOp::NotEqual,
+                        op: GraphPredicateOp::IsNotNull,
                         value: Value::Null,
-                    }
+                    },
                 ],
             },
             patch: Props::from([("seen".to_string(), Value::Bool(true))]),
@@ -1490,8 +1496,6 @@ fn cypher_match_where_rejects_deferred_predicate_forms() {
     for cypher in [
         "MATCH (n:Person) WHERE n.status = 'inactive' OR n.score >= 10 SET n.archived = true",
         "MATCH (n:Person) WHERE NOT NOT n.active = true SET n.archived = true",
-        "MATCH (n:Person) WHERE n.nickname IS NULL SET n.archived = true",
-        "MATCH (n:Person) WHERE NOT n.nickname IS NOT NULL SET n.archived = true",
         "MATCH (n:Person) WHERE size(n.tags) = 2 SET n.archived = true",
         "MATCH (n:Person) WHERE n.active > true SET n.archived = true",
         "MATCH (n:Person) WHERE m.status = 'inactive' SET n.archived = true",
@@ -1524,6 +1528,65 @@ fn sail_cypher_match_where_not_executes_on_memory_facade() {
     assert_eq!(
         result.table.rows,
         vec![vec![Value::from("where-not-bob"), Value::Bool(true)]]
+    );
+}
+
+#[test]
+fn sail_cypher_match_where_is_null_executes_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'where-null-ada', nickname: 'Ada'});
+            CREATE (:Person {id: 'where-null-bob', nickname: null});
+            CREATE (:Person {id: 'where-null-cara'});
+            MATCH (n:Person) WHERE n.nickname IS NULL SET n.unset = true
+            RETURN n.id AS id, n.unset AS unset
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("restricted IS NULL WHERE should execute on memory facade");
+
+    assert_eq!(
+        result.table.rows,
+        vec![
+            vec![Value::from("where-null-bob"), Value::Bool(true)],
+            vec![Value::from("where-null-cara"), Value::Bool(true)],
+        ]
+    );
+}
+
+#[test]
+fn sail_cypher_match_where_negated_null_checks_execute_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'where-not-null-negated-ada', nickname: 'Ada'});
+            CREATE (:Person {id: 'where-not-null-negated-bob', nickname: null});
+            CREATE (:Person {id: 'where-not-null-negated-cara'});
+            MATCH (n:Person) WHERE NOT n.nickname IS NOT NULL SET n.unset = true
+            RETURN n.id AS id, n.unset AS unset
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("negated restricted IS NOT NULL WHERE should execute on memory facade");
+
+    assert_eq!(
+        result.table.rows,
+        vec![
+            vec![Value::from("where-not-null-negated-bob"), Value::Bool(true),],
+            vec![
+                Value::from("where-not-null-negated-cara"),
+                Value::Bool(true),
+            ],
+        ]
     );
 }
 

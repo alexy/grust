@@ -2565,6 +2565,8 @@ fn numeric_float_result(lhs: f64, op: GraphNumericOp, rhs: f64) -> Result<Value>
 pub enum GraphPredicateOp {
     Equal,
     NotEqual,
+    IsNull,
+    IsNotNull,
     GreaterThan,
     GreaterThanOrEqual,
     LessThan,
@@ -2580,12 +2582,17 @@ pub struct GraphPropertyPredicate {
 
 impl GraphPropertyPredicate {
     pub fn matches(&self, actual: Option<&Value>) -> bool {
+        if matches!(self.op, GraphPredicateOp::IsNull) {
+            return actual.is_none_or(|value| matches!(value, Value::Null));
+        }
         let Some(actual) = actual else {
             return false;
         };
         match self.op {
             GraphPredicateOp::Equal => actual == &self.value,
             GraphPredicateOp::NotEqual => actual != &self.value,
+            GraphPredicateOp::IsNull => matches!(actual, Value::Null),
+            GraphPredicateOp::IsNotNull => !matches!(actual, Value::Null),
             GraphPredicateOp::GreaterThan
             | GraphPredicateOp::GreaterThanOrEqual
             | GraphPredicateOp::LessThan
@@ -2595,7 +2602,10 @@ impl GraphPropertyPredicate {
                     GraphPredicateOp::GreaterThanOrEqual => ordering.is_gt() || ordering.is_eq(),
                     GraphPredicateOp::LessThan => ordering.is_lt(),
                     GraphPredicateOp::LessThanOrEqual => ordering.is_lt() || ordering.is_eq(),
-                    GraphPredicateOp::Equal | GraphPredicateOp::NotEqual => unreachable!(),
+                    GraphPredicateOp::Equal
+                    | GraphPredicateOp::NotEqual
+                    | GraphPredicateOp::IsNull
+                    | GraphPredicateOp::IsNotNull => unreachable!(),
                 }),
         }
     }

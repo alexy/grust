@@ -1,6 +1,6 @@
 # Restart Checkpoint
 
-Generated: 2026-06-17 03:56:02 PDT
+Generated: 2026-06-17 04:02:09 PDT
 
 ## Current Goal
 
@@ -25,34 +25,43 @@ Continue implementing bounded writable Cypher features from
 - Branch: `codex/cypher-write`
 - Remote tracking branch: `origin/codex/cypher-write`
 - Expected untracked file: `OPUS1.md`
-- Latest completed slice before this checkpoint: Batch DB, restricted
-  mutating `MATCH ... WHERE variable.property IS NOT NULL` predicates.
+- Latest completed slice before this checkpoint: Batch DC, restricted
+  mutating `MATCH ... WHERE variable.property IS NULL` predicates and explicit
+  null-check predicate operators.
 
 ## Latest Completed Work
 
-Batch DB added explicit non-null predicates to the bounded mutating Cypher
-`MATCH ... WHERE` grammar:
+Batch DC completed explicit null-check predicates in the bounded mutating
+Cypher `MATCH ... WHERE` grammar:
 
 ```cypher
 MATCH (n:Person)
-WHERE n.nickname IS NOT NULL
-SET n.seen = true;
+WHERE n.nickname IS NULL
+SET n.needs_nickname = true;
 ```
 
 Implemented behavior:
 
-- `grust-sail` parses `variable.property IS NOT NULL`.
-- The syntax lowers to the existing backend-neutral predicate:
-  `GraphPredicateOp::NotEqual` with `Value::Null`.
+- `grust-core` exposes explicit `GraphPredicateOp::IsNull` and
+  `GraphPredicateOp::IsNotNull` operators.
+- `grust-sail` parses `variable.property IS NULL`,
+  `variable.property IS NOT NULL`, `NOT variable.property IS NULL`, and
+  `NOT variable.property IS NOT NULL`.
+- Null-check syntax lowers to the explicit backend-neutral predicate operators
+  with `Value::Null`.
 - Node, relationship, and endpoint variables can use the predicate wherever
   ordinary `AND`-joined mutating `WHERE` predicates are accepted.
-- `IS NULL` remains deferred because explicit-null versus missing-property
-  behavior needs backend-consistent specification before exposing it.
-- `NOT variable.property IS NOT NULL` remains deferred for the same reason.
-- Planner and Memory-facade tests cover lowering and execution.
+- `IS NULL` matches missing properties and explicit `Value::Null` properties.
+- `IS NOT NULL` requires a present non-null property.
+- Ordinary equality and inequality remain missing-safe exact `Value`
+  comparisons.
+- Core predicate tests plus Sail planner and Memory-facade tests cover the
+  semantics.
 
 Files updated:
 
+- `crates/grust-core/src/lib.rs`
+- `crates/grust-core/src/tests.rs`
 - `crates/grust-sail/src/lib.rs`
 - `crates/grust-sail/src/tests.rs`
 - `docs/CypherWrite.md`
@@ -62,7 +71,7 @@ Files updated:
 
 ## Verification State
 
-The following commands passed after Batch DB:
+The following commands passed after Batch DC:
 
 ```sh
 cargo fmt --all
@@ -76,7 +85,7 @@ git diff --check
 
 Observed test summaries:
 
-- `cargo test -p grust-sail --lib`: 180 passed, 25 ignored
+- `cargo test -p grust-sail --lib`: 182 passed, 25 ignored
 - `cargo test -p grust-core --lib`: 35 passed
 - `cargo test -p grust-memory --lib`: 20 passed
 
@@ -101,8 +110,6 @@ Keep the next slice small and continue preserving these invariants:
 
 Potential next bounded slices:
 
-- Add a backend-consistent `IS NULL` design only after deciding whether missing
-  properties should match the syntax in every backend.
 - Extend mutating `WHERE` with a tiny, explicit `OR` representation if the core
   predicate model grows disjunction support.
 - Add another restricted writable `RETURN` helper from the remaining batches in

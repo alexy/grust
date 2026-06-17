@@ -339,12 +339,21 @@ fn property_predicates_are_type_aware_and_missing_safe() {
 
     let not_null = GraphPropertyPredicate {
         key: "nickname".to_string(),
-        op: GraphPredicateOp::NotEqual,
+        op: GraphPredicateOp::IsNotNull,
         value: Value::Null,
     };
     assert!(not_null.matches(Some(&Value::from("ada"))));
     assert!(!not_null.matches(Some(&Value::Null)));
     assert!(!not_null.matches(None));
+
+    let is_null = GraphPropertyPredicate {
+        key: "nickname".to_string(),
+        op: GraphPredicateOp::IsNull,
+        value: Value::Null,
+    };
+    assert!(!is_null.matches(Some(&Value::from("ada"))));
+    assert!(is_null.matches(Some(&Value::Null)));
+    assert!(is_null.matches(None));
 
     let score_at_least = GraphPropertyPredicate {
         key: "score".to_string(),

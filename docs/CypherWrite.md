@@ -96,8 +96,9 @@ describe unreleased working-tree additions:
 - Mutating `MATCH` clauses accept a bounded `WHERE` predicate grammar over
   node or relationship properties. Supported predicates compare one matched
   variable property to a literal or parameter with `=`, `<>`, `!=`, `>`, `>=`,
-  `<`, or `<=`, check `variable.property IS NOT NULL`, optionally prefix one
-  comparison with `NOT`, and combine predicates with `AND`.
+  `<`, or `<=`, check `variable.property IS NULL` or
+  `variable.property IS NOT NULL`, optionally prefix one comparison or null
+  check with `NOT`, and combine predicates with `AND`.
 - `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
   operation when the source is a property on the same node variable and the
@@ -121,9 +122,8 @@ The v1 implementation should reject, with clear errors:
   aggregate slice, `CASE` in mutation assignments, arbitrary list/map
   expressions beyond the restricted projection forms, cross-variable
   expressions, or general computed expression evaluation;
-- `WHERE` forms using `OR`, nested `NOT`, `IS NULL`, pattern predicates, list
-  predicates, functions, arbitrary expressions, or cross-variable property
-  comparisons;
+- `WHERE` forms using `OR`, nested `NOT`, pattern predicates, list predicates,
+  functions, arbitrary expressions, or cross-variable property comparisons;
 - trailing node creation in row-producing `MATCH ... CREATE`, relationship
   IDs on multi-row row-producing `CREATE` / `MERGE`, and general path-style
   binding for row-producing writes;
@@ -202,14 +202,17 @@ to backend-neutral Grust mutation concepts:
   `GraphRelationshipMatch` descriptor and cardinality metadata retained in
   `GraphMutationPlanOp`.
 
-`GraphPropertyPredicate` is deliberately small and type-aware. Missing
-properties never match any predicate, including inequality. Equality and
-inequality use exact `Value` equality, so `Value::Null` only matches explicit
-`null` and `x <> null` requires a present non-null value. Ordered comparisons
-support integer/float numeric comparisons and string comparisons; booleans,
-arrays, JSON objects, datetimes, and mixed ordered types do not match in
-backend execution and are rejected by Sail planning when they appear as ordered
-literal or parameter operands.
+`GraphPropertyPredicate` is deliberately small and type-aware. Ordinary
+comparison predicates are missing-safe: missing properties never match equality,
+inequality, or ordered comparisons. Equality and inequality use exact `Value`
+equality, so `Value::Null` only matches explicit `null` and `x <> null`
+requires a present non-null value. Cypher null-check predicates are explicit
+operators: `IS NULL` matches missing or explicit-null properties, while
+`IS NOT NULL` requires a present non-null value. Ordered comparisons support
+integer/float numeric comparisons and string comparisons; booleans, arrays,
+JSON objects, datetimes, and mixed ordered types do not match in backend
+execution and are rejected by Sail planning when they appear as ordered literal
+or parameter operands.
 
 `grust-sail` should not emit independent ad hoc table edits from Cypher syntax.
 It should reuse the same persistence path used by `put_node`, `put_edge`,
@@ -1184,7 +1187,8 @@ Acceptance criteria:
   matched node or relationship variable.
 - Support `AND` first; defer `OR`, `NOT`, pattern predicates, list predicates,
   functions, and arbitrary expressions. Later bounded slices add one leading
-  `NOT` before a single comparison and `IS NOT NULL` predicates.
+  `NOT` before a single comparison and explicit `IS NULL` / `IS NOT NULL`
+  predicates.
 - Represent predicates in a backend-neutral AST that can be evaluated by
   Memory and lowered by Sail.
 - Keep predicate evaluation type-aware and document how missing properties and
@@ -1201,14 +1205,17 @@ mutating `MATCH ... WHERE`, binds literal or parameter right-hand sides, lowers
 them into the neutral predicate AST, and emits SQL predicates for node,
 relationship, and endpoint matching.
 
-The comparison semantics are intentionally shared: a missing property never
-matches; `null` participates only in equality or inequality with
-`Value::Null`; integer and float values compare numerically; strings compare
-lexicographically; and unsupported ordered operand types fail planning in Sail
-instead of relying on backend casts. `IS NOT NULL` lowers through the same
-backend-neutral null-inequality predicate. `IS NULL`, `OR`, nested `NOT`,
-function calls, list predicates, pattern predicates, arbitrary expressions, and
-cross-variable comparisons remain deferred.
+The comparison semantics are intentionally shared: ordinary equality,
+inequality, and ordered comparisons never match a missing property; `null`
+participates only in equality or inequality with `Value::Null`; integer and
+float values compare numerically; strings compare lexicographically; and
+unsupported ordered operand types fail planning in Sail instead of relying on
+backend casts. `IS NULL` and `IS NOT NULL` lower through explicit
+backend-neutral null-check predicate operators so Memory and Sail agree that
+`IS NULL` matches missing or explicit-null properties and `IS NOT NULL`
+requires a present non-null property. `OR`, nested `NOT`, function calls, list
+predicates, pattern predicates, arbitrary expressions, and cross-variable
+comparisons remain deferred.
 
 ### Batch W: Read-then-write `MATCH ... CREATE`
 
@@ -4344,21 +4351,62 @@ Acceptance criteria:
 - Support `variable.property IS NOT NULL` on matched node, relationship, and
   endpoint variables anywhere ordinary `AND`-joined `WHERE` predicates are
   accepted.
-- Lower the syntax to the existing backend-neutral null-inequality predicate:
-  `GraphPropertyPredicate { op: NotEqual, value: Value::Null }`.
+- Lower the syntax to the explicit backend-neutral null-check predicate:
+  `GraphPropertyPredicate { op: IsNotNull, value: Value::Null }`.
 - Preserve existing predicate semantics: a missing property never matches, and
   an explicit `Value::Null` does not match `IS NOT NULL`.
 - Keep `IS NULL` deferred until explicit-null and missing-property behavior can
   be specified and verified consistently across Memory and Sail SQL lowering.
-- Keep `NOT variable.property IS NOT NULL` deferred because it would currently
-  require the same explicit-null versus missing-property semantics as
+- Keep `NOT variable.property IS NOT NULL` deferred for this batch because it
+  requires the same explicit-null versus missing-property semantics as
   `IS NULL`.
 - Add planner and Memory-facade tests proving the syntax reuses the existing
   predicate path.
 
 Implementation status: implemented in the working tree after Batch DA.
-`grust-sail` recognizes `IS NOT NULL` during bounded `WHERE` parsing, lowers it
-to `GraphPredicateOp::NotEqual` with `Value::Null`, and rejects `IS NULL` plus
-negated `IS NOT NULL` forms with explicit deferred-syntax errors. Memory
+`grust-sail` recognizes `IS NOT NULL` during bounded `WHERE` parsing and now
+lowers it to `GraphPredicateOp::IsNotNull` with `Value::Null`. Memory
 execution reuses the existing predicate evaluator, so explicit nulls and
-missing properties do not match.
+missing properties do not match. Batch DC completes the matching `IS NULL` and
+negated-null-check forms.
+
+### Batch DC: Restricted `IS NULL` Predicates
+
+Extend the bounded mutating `MATCH ... WHERE` grammar to accept explicit null
+checks:
+
+```cypher
+MATCH (n:Person)
+WHERE n.nickname IS NULL
+SET n.needs_nickname = true;
+```
+
+Acceptance criteria:
+
+- Support `variable.property IS NULL` on matched node, relationship, and
+  endpoint variables anywhere ordinary `AND`-joined `WHERE` predicates are
+  accepted.
+- Lower `IS NULL` to `GraphPropertyPredicate { op: IsNull, value:
+  Value::Null }` and `IS NOT NULL` to `GraphPropertyPredicate { op:
+  IsNotNull, value: Value::Null }`.
+- Treat `IS NULL` as a Cypher null check over property values: it matches
+  missing properties and explicit `Value::Null` properties. Treat
+  `IS NOT NULL` as the inverse for present non-null values.
+- Allow one leading `NOT` before null-check predicates by inverting the
+  explicit null-check operator.
+- Keep ordinary equality and inequality semantics unchanged: `x = null` and
+  `x <> null` still use exact `Value` comparison and do not match missing
+  properties.
+- Preserve the existing `AND`-only predicate combination model. `OR` remains
+  deferred.
+- Add core predicate tests plus Sail planner and Memory-facade tests proving
+  the null-check syntax is backend neutral.
+
+Implementation status: implemented in the working tree after Batch DB.
+`grust-core` now has explicit `GraphPredicateOp::IsNull` and
+`GraphPredicateOp::IsNotNull` operators. `grust-sail` parses `IS NULL`,
+`IS NOT NULL`, `NOT ... IS NULL`, and `NOT ... IS NOT NULL`, lowers them into
+those explicit predicate operators, and emits direct Sail SQL `IS NULL` /
+`IS NOT NULL` predicates. Memory execution uses the same predicate evaluator,
+so missing and explicit-null properties match `IS NULL`, while only present
+non-null properties match `IS NOT NULL`.

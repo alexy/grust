@@ -2666,31 +2666,32 @@ fn parse_where_predicate(
     if let Some(index) = find_unquoted_keyword(predicate, "IS") {
         let rest = predicate[index + "IS".len()..].trim();
         let words = rest.split_whitespace().collect::<Vec<_>>();
-        if words.len() == 2
+        let op = if words.len() == 2
             && words[0].eq_ignore_ascii_case("NOT")
             && words[1].eq_ignore_ascii_case("NULL")
         {
-            if negated {
-                return Err(cypher_syntax(
-                    "MATCH WHERE NOT ... IS NOT NULL remains deferred",
-                ));
-            }
-            let (target, key) = parse_property_ref(&predicate[..index], "MATCH WHERE predicate")?;
-            return Ok(ParsedWherePredicate {
-                target,
-                predicate: GraphPropertyPredicate {
-                    key,
-                    op: GraphPredicateOp::NotEqual,
-                    value: Value::Null,
-                },
-            });
-        }
-        if words.len() == 1 && words[0].eq_ignore_ascii_case("NULL") {
-            return Err(cypher_syntax("MATCH WHERE IS NULL remains deferred"));
-        }
-        return Err(cypher_syntax(
-            "MATCH WHERE IS predicates only support IS NOT NULL",
-        ));
+            GraphPredicateOp::IsNotNull
+        } else if words.len() == 1 && words[0].eq_ignore_ascii_case("NULL") {
+            GraphPredicateOp::IsNull
+        } else {
+            return Err(cypher_syntax(
+                "MATCH WHERE IS predicates only support IS NULL or IS NOT NULL",
+            ));
+        };
+        let op = if negated {
+            inverted_graph_predicate_op(op)
+        } else {
+            op
+        };
+        let (target, key) = parse_property_ref(&predicate[..index], "MATCH WHERE predicate")?;
+        return Ok(ParsedWherePredicate {
+            target,
+            predicate: GraphPropertyPredicate {
+                key,
+                op,
+                value: Value::Null,
+            },
+        });
     }
     for (token, op) in [
         (">=", GraphPredicateOp::GreaterThanOrEqual),
@@ -2741,6 +2742,8 @@ fn inverted_graph_predicate_op(op: GraphPredicateOp) -> GraphPredicateOp {
     match op {
         GraphPredicateOp::Equal => GraphPredicateOp::NotEqual,
         GraphPredicateOp::NotEqual => GraphPredicateOp::Equal,
+        GraphPredicateOp::IsNull => GraphPredicateOp::IsNotNull,
+        GraphPredicateOp::IsNotNull => GraphPredicateOp::IsNull,
         GraphPredicateOp::GreaterThan => GraphPredicateOp::LessThanOrEqual,
         GraphPredicateOp::GreaterThanOrEqual => GraphPredicateOp::LessThan,
         GraphPredicateOp::LessThan => GraphPredicateOp::GreaterThanOrEqual,
@@ -15010,6 +15013,8 @@ fn append_property_predicate_conditions(
                 conditions,
                 args,
             )?,
+            GraphPredicateOp::IsNull => conditions.push(format!("{json_value} IS NULL")),
+            GraphPredicateOp::IsNotNull => conditions.push(format!("{json_value} IS NOT NULL")),
             GraphPredicateOp::GreaterThan
             | GraphPredicateOp::GreaterThanOrEqual
             | GraphPredicateOp::LessThan
@@ -15102,7 +15107,10 @@ fn append_property_order_condition(
         GraphPredicateOp::GreaterThanOrEqual => ">=",
         GraphPredicateOp::LessThan => "<",
         GraphPredicateOp::LessThanOrEqual => "<=",
-        GraphPredicateOp::Equal | GraphPredicateOp::NotEqual => unreachable!(),
+        GraphPredicateOp::Equal
+        | GraphPredicateOp::NotEqual
+        | GraphPredicateOp::IsNull
+        | GraphPredicateOp::IsNotNull => unreachable!(),
     };
     match value {
         Value::Int(n) => {
