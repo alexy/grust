@@ -2940,6 +2940,10 @@ enum CypherReturnTarget {
         round: CypherReturnNumericRound,
     },
     PropertyNumericSign(String),
+    PropertyNumericCast {
+        key: String,
+        cast: CypherReturnNumericCast,
+    },
     PropertyToString(String),
     PropertyStringTransform {
         key: String,
@@ -2997,6 +3001,12 @@ enum CypherReturnStringTrim {
 enum CypherReturnNumericRound {
     Ceil,
     Floor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CypherReturnNumericCast {
+    Integer,
+    Float,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -3194,6 +3204,13 @@ fn parse_cypher_return_clause(
             )
         } else if let Some((variable, key)) = parse_return_numeric_sign_projection(expression)? {
             (variable, CypherReturnTarget::PropertyNumericSign(key))
+        } else if let Some((variable, key, cast)) =
+            parse_return_numeric_cast_projection(expression)?
+        {
+            (
+                variable,
+                CypherReturnTarget::PropertyNumericCast { key, cast },
+            )
         } else if let Some((variable, key)) = parse_return_to_string_projection(expression)? {
             (variable, CypherReturnTarget::PropertyToString(key))
         } else if let Some((variable, key, transform)) =
@@ -3535,6 +3552,14 @@ fn parse_aggregate_projection(
             aggregate,
             Some(variable),
             CypherReturnTarget::PropertyNumericSign(key),
+            distinct,
+        )));
+    }
+    if let Some((variable, key, cast)) = parse_return_numeric_cast_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyNumericCast { key, cast },
             distinct,
         )));
     }
@@ -3921,6 +3946,43 @@ fn parse_return_numeric_sign_projection(expression: &str) -> Result<Option<(Stri
         .map_err(|_| {
             cypher_unsupported_cardinality(
                 "writable Cypher RETURN sign only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_numeric_cast_projection(
+    expression: &str,
+) -> Result<Option<(String, String, CypherReturnNumericCast)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    let cast = match expression[..open].trim().to_ascii_lowercase().as_str() {
+        "tointeger" => CypherReturnNumericCast::Integer,
+        "tofloat" => CypherReturnNumericCast::Float,
+        _ => return Ok(None),
+    };
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax(
+            "RETURN numeric cast projection is missing ')'",
+        ));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN numeric cast projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toInteger/toFloat only supports variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN numeric cast projection")
+        .map(|(variable, key)| Some((variable, key, cast)))
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN toInteger/toFloat only supports variable.property arguments",
             )
         })
 }
@@ -5643,6 +5705,23 @@ where
             )
             .await
         }
+        CypherReturnTarget::PropertyNumericCast { key, cast } => {
+            materialize_return_property_numeric_cast_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *cast,
+                row_index,
+            )
+            .await
+        }
         CypherReturnTarget::PropertyToString(key) => {
             materialize_return_property_to_string_value_at(
                 store,
@@ -6051,6 +6130,24 @@ where
                 edges,
                 projection,
                 key,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyNumericCast { key, cast } => {
+            let value = materialize_return_property_numeric_cast_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *cast,
                 row_index,
             )
             .await?;
@@ -7037,6 +7134,140 @@ fn restricted_numeric_sign_value(value: Value) -> Result<Value> {
             "writable Cypher RETURN sign only supports numeric values",
         )),
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_numeric_cast_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    cast: CypherReturnNumericCast,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_numeric_cast_value(value, cast)
+}
+
+fn restricted_numeric_cast_value(value: Value, cast: CypherReturnNumericCast) -> Result<Value> {
+    match cast {
+        CypherReturnNumericCast::Integer => restricted_to_integer_value(value),
+        CypherReturnNumericCast::Float => restricted_to_float_value(value),
+    }
+}
+
+fn restricted_to_integer_value(value: Value) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Int(value) => Ok(Value::Int(value)),
+        Value::Float(value) => float_to_integer_value(value),
+        Value::String(value) => parse_integer_string_value(&value),
+        Value::Json(serde_json::Value::Null) => Ok(Value::Null),
+        Value::Json(serde_json::Value::Number(value)) => {
+            if let Some(value) = value.as_i64() {
+                Ok(Value::Int(value))
+            } else if let Some(value) = value.as_f64() {
+                float_to_integer_value(value)
+            } else {
+                Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN toInteger only supports finite numeric values",
+                ))
+            }
+        }
+        Value::Json(serde_json::Value::String(value)) => parse_integer_string_value(&value),
+        Value::Bool(_)
+        | Value::DateTime(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toInteger only supports numeric or integer-string values",
+        )),
+    }
+}
+
+fn restricted_to_float_value(value: Value) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::Int(value) => Ok(Value::Float(value as f64)),
+        Value::Float(value) if value.is_finite() => Ok(Value::Float(value)),
+        Value::Float(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toFloat only supports finite numeric values",
+        )),
+        Value::String(value) => parse_float_string_value(&value),
+        Value::Json(serde_json::Value::Null) => Ok(Value::Null),
+        Value::Json(serde_json::Value::Number(value)) => value
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(Value::Float)
+            .ok_or_else(|| {
+                cypher_unsupported_cardinality(
+                    "writable Cypher RETURN toFloat only supports finite numeric values",
+                )
+            }),
+        Value::Json(serde_json::Value::String(value)) => parse_float_string_value(&value),
+        Value::Bool(_)
+        | Value::DateTime(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toFloat only supports numeric or numeric-string values",
+        )),
+    }
+}
+
+fn float_to_integer_value(value: f64) -> Result<Value> {
+    if !value.is_finite() || value.trunc() < i64::MIN as f64 || value.trunc() > i64::MAX as f64 {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toInteger only supports finite in-range numeric values",
+        ));
+    }
+    Ok(Value::Int(value.trunc() as i64))
+}
+
+fn parse_integer_string_value(value: &str) -> Result<Value> {
+    value.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+        cypher_unsupported_cardinality(
+            "writable Cypher RETURN toInteger only supports integer-string values",
+        )
+    })
+}
+
+fn parse_float_string_value(value: &str) -> Result<Value> {
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .map(Value::Float)
+        .ok_or_else(|| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN toFloat only supports finite numeric-string values",
+            )
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8214,6 +8445,7 @@ where
             | CypherReturnTarget::PropertyAbs(_)
             | CypherReturnTarget::PropertyNumericRound { .. }
             | CypherReturnTarget::PropertyNumericSign(_)
+            | CypherReturnTarget::PropertyNumericCast { .. }
             | CypherReturnTarget::PropertyToString(_)
             | CypherReturnTarget::PropertyStringTransform { .. }
             | CypherReturnTarget::PropertyStringTrim { .. }
@@ -8560,6 +8792,21 @@ where
             .await?
         }
         CypherReturnTarget::PropertyNumericSign(_) => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyNumericCast { .. } => {
             materialize_return_projection_values(
                 store,
                 node_bindings,

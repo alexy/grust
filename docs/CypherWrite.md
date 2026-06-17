@@ -2387,6 +2387,8 @@ remaining pieces should stay explicit:
   restricted `ceil(variable.property)` / `floor(variable.property)`
   projections and aggregate bodies, and
   restricted `sign(variable.property)` projections and aggregate bodies, and
+  restricted `toInteger(variable.property)` /
+  `toFloat(variable.property)` projections and aggregate bodies, and
   restricted `isEmpty(variable.property)` projections and aggregate bodies,
   and
   restricted `toString(variable.property)` projections and aggregate bodies,
@@ -3706,3 +3708,47 @@ restricted projection target. Evaluation reuses the existing property
 materializer and applies sign conversion only to numeric values, preserving
 the same narrow, type-aware behavior as the other restricted property
 functions.
+
+### Batch CN: Restricted Numeric Conversion Projections
+
+Support bounded numeric conversion projection over property values already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN toInteger(n.score) AS score_int, toFloat(n.score) AS score_float;
+```
+
+Acceptance criteria:
+
+- Support `toInteger(variable.property)` and `toFloat(variable.property)` as
+  scalar writable `RETURN` projections when the variable is a concrete node,
+  concrete relationship, materialized row-node, or materialized
+  row-relationship variable.
+- `toInteger(...)` returns integers unchanged, truncates finite floats toward
+  zero when the value fits in `i64`, accepts JSON numeric values, and accepts
+  integer-form string or JSON string values. Return `null` when the property
+  is absent or explicitly null.
+- `toFloat(...)` returns finite floats, converts integers to floats, accepts
+  JSON numeric values, and accepts finite numeric string or JSON string
+  values. Return `null` when the property is absent or explicitly null.
+- Reject booleans, datetimes, arrays, JSON arrays, JSON objects, non-integer
+  strings for `toInteger(...)`, non-finite numeric values, out-of-range integer
+  conversions, whole-element values, paths, nested functions, cross-variable
+  expressions, and other unsupported values rather than adding broad implicit
+  casts.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `SUM`,
+  `AVG`, `MIN`, `MAX`, and `COLLECT`.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `toInteger(...)` and `toFloat(...)` property-only; arbitrary expression
+  conversion remains deferred.
+
+Implementation status: implemented in the working tree after Batch CM.
+Writable `RETURN` now parses `toInteger(variable.property)` and
+`toFloat(variable.property)` into a dedicated restricted projection target.
+Evaluation reuses the existing property materializer and performs only the
+explicit numeric conversions listed above, preserving the same narrow,
+type-aware behavior as the other restricted property functions.

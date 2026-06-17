@@ -5422,6 +5422,141 @@ fn sail_cypher_returning_projects_restricted_numeric_sign_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_restricted_numeric_casts_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let concrete =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'cast-ada', score: 7, ratio: 2.9, text_score: '42'});
+            CREATE (b:Person {id: 'cast-bob'});
+            MATCH (a:Person {id: 'cast-ada'}), (b:Person {id: 'cast-bob'})
+            CREATE (a)-[e:KNOWS {id: 'cast-knows', weight: '4.5'}]->(b)
+            RETURN toFloat(a.score) AS score_float,
+                   toInteger(a.ratio) AS ratio_int,
+                   toInteger(a.text_score) AS text_score_int,
+                   toFloat(e.weight) AS weight_float,
+                   toInteger(a.nickname) AS missing_name;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("concrete numeric cast projections");
+    assert_eq!(
+        concrete.table.rows,
+        vec![vec![
+            Value::Float(7.0),
+            Value::Int(2),
+            Value::Int(42),
+            Value::Float(4.5),
+            Value::Null,
+        ]]
+    );
+
+    let broad =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'cast-cara', status: 'cast', score: 7.2});
+            CREATE (:Person {id: 'cast-dan', status: 'cast', score: 11.8});
+            MATCH (n:Person {status: 'cast'}) SET n.seen = true
+            RETURN n.id AS id, toInteger(n.score) AS score
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("broad numeric cast projections");
+    assert_eq!(
+        broad.table.rows,
+        vec![
+            vec![Value::from("cast-cara"), Value::Int(7)],
+            vec![Value::from("cast-dan"), Value::Int(11)],
+        ]
+    );
+
+    let row_edges =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Team {id: 'cast-team'});
+            MATCH (n:Person {status: 'cast'}), (t:Team {id: 'cast-team'})
+            CREATE (n)-[r:MEMBER_OF {rank: 5}]->(t)
+            RETURN n.id AS id, toFloat(r.rank) AS rank
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("row-producing relationship numeric cast projections");
+    assert_eq!(
+        row_edges.table.rows,
+        vec![
+            vec![Value::from("cast-cara"), Value::Float(5.0)],
+            vec![Value::from("cast-dan"), Value::Float(5.0)],
+        ]
+    );
+
+    let aggregates =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (n:Person {status: 'cast'}) SET n.cast_counted = true
+            RETURN count(toInteger(n.score)) AS rows,
+                   sum(toInteger(n.score)) AS total_scores,
+                   collect(toInteger(n.score)) AS scores;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("numeric cast aggregate projections");
+    assert_eq!(
+        aggregates.table.rows,
+        vec![vec![
+            Value::Int(2),
+            Value::Int(18),
+            Value::Json(serde_json::json!([7, 11])),
+        ]]
+    );
+
+    let boolean_cast =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'cast-bool', score: true}) RETURN toInteger(n.score);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("toInteger over boolean values should stay rejected");
+    assert!(
+        matches!(boolean_cast, GrustError::CypherUnsupportedCardinality(_)),
+        "{boolean_cast:?}"
+    );
+
+    let non_integer_string =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'cast-string', score: '3.5'}) RETURN toInteger(n.score);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("toInteger over non-integer strings should stay rejected");
+    assert!(
+        matches!(
+            non_integer_string,
+            GrustError::CypherUnsupportedCardinality(_)
+        ),
+        "{non_integer_string:?}"
+    );
+
+    let nested_cast =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'cast-nested', score: 3}) RETURN toFloat(abs(n.score));",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("nested toFloat arguments should stay rejected");
+    assert!(
+        matches!(nested_cast, GrustError::CypherUnsupportedCardinality(_)),
+        "{nested_cast:?}"
+    );
+}
+
+#[test]
 fn sail_cypher_returning_projects_restricted_string_transforms_on_memory_facade() {
     let store = MemoryGraphStore::new();
 

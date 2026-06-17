@@ -172,6 +172,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   property values.
 - Added restricted writable Cypher `sign(variable.property)` projections and
   aggregate bodies over numeric property values.
+- Added restricted writable Cypher `toInteger(variable.property)` and
+  `toFloat(variable.property)` projections and aggregate bodies over numeric
+  and numeric-string property values.
 - Added restricted writable Cypher grouping for mixed scalar and aggregate
   `RETURN` projections, grouping only by scalar projections over the
   materialized write-result table and then applying the existing
