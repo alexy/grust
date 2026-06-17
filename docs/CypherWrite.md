@@ -2383,6 +2383,8 @@ remaining pieces should stay explicit:
   bodies, and
   restricted `exists(variable.property)` projections and aggregate bodies, and
   restricted `size(variable.property)` projections and aggregate bodies, and
+  restricted `head(variable.property)` / `last(variable.property)`
+  projections and aggregate bodies, and
   restricted `abs(variable.property)` projections and aggregate bodies, and
   restricted `ceil(variable.property)` / `floor(variable.property)`
   projections and aggregate bodies, and
@@ -3793,3 +3795,43 @@ restricted projection target. Evaluation reuses the existing property
 materializer and performs only explicit boolean or boolean-string conversion,
 preserving the same narrow, type-aware behavior as the other restricted
 property functions.
+
+### Batch CP: Restricted List Element Projections
+
+Support bounded list-element projection over property values already available
+in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN head(n.tags) AS first_tag, last(n.scores) AS last_score;
+```
+
+Acceptance criteria:
+
+- Support `head(variable.property)` and `last(variable.property)` as scalar
+  writable `RETURN` projections when the variable is a concrete node, concrete
+  relationship, materialized row-node, or materialized row-relationship
+  variable.
+- Return the first or last element for typed Grust arrays and JSON arrays,
+  converting JSON scalar elements through `Value::from_json`. Return `null`
+  when the property is absent, explicitly null, or an empty array.
+- Reject strings, numeric values, booleans, datetimes, JSON objects,
+  whole-element values, paths, nested functions, cross-variable expressions,
+  and other unsupported values rather than adding string indexing or general
+  list-expression semantics.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `SUM`,
+  `AVG`, `MIN`, `MAX`, and `COLLECT`.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep `head(...)` and `last(...)` property-only; list literals, list
+  comprehensions, slices, and arbitrary expression evaluation remain
+  deferred.
+
+Implementation status: implemented in the working tree after Batch CO.
+Writable `RETURN` now parses `head(variable.property)` and
+`last(variable.property)` into a dedicated restricted projection target.
+Evaluation reuses the existing property materializer and extracts only typed
+array or JSON-array elements, preserving the same narrow, type-aware behavior
+as the other restricted property functions.
