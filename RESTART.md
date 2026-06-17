@@ -1,6 +1,6 @@
 # Restart Checkpoint
 
-Generated: 2026-06-17 04:14:05 PDT
+Generated: 2026-06-17 04:22:21 PDT
 
 ## Current Goal
 
@@ -25,33 +25,37 @@ Continue implementing bounded writable Cypher features from
 - Branch: `codex/cypher-write`
 - Remote tracking branch: `origin/codex/cypher-write`
 - Expected untracked file: `OPUS1.md`
-- Latest completed slice before this checkpoint: Batch DE, restricted string
+- Latest completed slice before this checkpoint: Batch DF, restricted `IN`
   predicates in mutating `MATCH ... WHERE`.
 
 ## Latest Completed Work
 
-Batch DE added restricted string predicates to bounded mutating Cypher
+Batch DF added restricted membership predicates to bounded mutating Cypher
 `MATCH ... WHERE`:
 
 ```cypher
 MATCH (n:Person)
-WHERE n.name STARTS WITH 'Ad' AND NOT n.name ENDS WITH 'bot'
+WHERE n.team IN ['eng', 'data'] AND NOT n.status IN ['blocked']
 SET n.reviewed = true;
 ```
 
 Implemented behavior:
 
-- `grust-core` exposes explicit string predicate operators for
-  `STARTS WITH`, `ENDS WITH`, and `CONTAINS`, plus negated variants.
-- `grust-sail` parses `variable.property STARTS WITH value`,
-  `variable.property ENDS WITH value`, and `variable.property CONTAINS value`
-  for node, relationship, and endpoint variables.
-- String predicate needles must be string literals or string parameters.
-- One leading `NOT` inverts the string predicate operator.
-- Missing properties, nulls, and non-string values never match positive or
-  negated string predicates.
-- Sail SQL lowering and Memory execution both use the backend-neutral
-  `GraphPropertyPredicate` path.
+- `grust-core` exposes explicit `GraphPredicateOp::In` and
+  `GraphPredicateOp::NotIn` operators.
+- `grust-sail` parses `variable.property IN [literal_or_parameter, ...]` and
+  `variable.property IN $parameter` for node, relationship, and endpoint
+  variables.
+- List-valued parameters accept `StringArray`, `IntArray`, `FloatArray`, or
+  JSON arrays of scalar string, integer, float, or boolean values.
+- List literal items are restricted to scalar string, integer, float, or
+  boolean literals/parameters; nulls, maps, nested lists, arbitrary expressions,
+  property references, and cross-variable expressions remain deferred.
+- One leading `NOT` lowers membership to `NotIn`.
+- Missing properties never match either positive or negated membership
+  predicates.
+- Sail SQL lowering reuses existing type-aware equality conditions, and Memory
+  execution uses the backend-neutral `GraphPropertyPredicate` path.
 
 Files updated:
 
@@ -66,7 +70,7 @@ Files updated:
 
 ## Verification State
 
-The following commands passed after Batch DE:
+The following commands passed after Batch DF:
 
 ```sh
 cargo fmt --all
@@ -80,7 +84,7 @@ git diff --check
 
 Observed test summaries:
 
-- `cargo test -p grust-sail --lib`: 184 passed, 25 ignored
+- `cargo test -p grust-sail --lib`: 185 passed, 25 ignored
 - `cargo test -p grust-core --lib`: 35 passed
 - `cargo test -p grust-memory --lib`: 20 passed
 

@@ -1337,6 +1337,11 @@ fn matching_nodes_sql_filters_by_property_predicates() {
             op: GraphPredicateOp::StartsWith,
             value: Value::from("Ad"),
         },
+        GraphPropertyPredicate {
+            key: "team".to_string(),
+            op: GraphPredicateOp::In,
+            value: Value::Json(serde_json::json!(["eng", "data"])),
+        },
     ];
     let (sql, args) =
         matching_nodes_sql(Some(&Label::new("Person")), &Props::new(), &predicates).unwrap();
@@ -1347,7 +1352,10 @@ fn matching_nodes_sql_filters_by_property_predicates() {
     assert!(sql.contains("GET_JSON_OBJECT(props, '$.nickname') IS NOT NULL"));
     assert!(sql.contains("GET_JSON_OBJECT(props, '$.retired') IS NULL"));
     assert!(sql.contains("STARTSWITH(GET_JSON_OBJECT(props, '$.name'), ?)"));
-    assert_eq!(args.len(), 4);
+    assert!(sql.contains(
+        "(GET_JSON_OBJECT(props, '$.team') = ? OR GET_JSON_OBJECT(props, '$.team') = ?)"
+    ));
+    assert_eq!(args.len(), 6);
 }
 
 #[test]
@@ -1385,9 +1393,15 @@ fn matching_edges_sql_filters_by_relationship_properties() {
 #[test]
 fn cypher_match_where_lowers_node_predicates() {
     let plan = sail_cypher_mutation_plan_with_options(
-        "MATCH (n:Person) WHERE (n.status = 'inactive' AND n.score >= $min) AND NOT (n.active = true) AND (n.nickname IS NOT NULL) AND n.name STARTS WITH 'Ad' SET n.archived = true",
+        "MATCH (n:Person) WHERE (n.status = 'inactive' AND n.score >= $min) AND NOT (n.active = true) AND (n.nickname IS NOT NULL) AND n.name STARTS WITH 'Ad' AND n.team IN $teams SET n.archived = true",
         CypherMutationOptions {
-            parameters: CypherParameters::from([("min".to_string(), Value::Int(10))]),
+            parameters: CypherParameters::from([
+                ("min".to_string(), Value::Int(10)),
+                (
+                    "teams".to_string(),
+                    Value::from(vec!["eng".to_string(), "data".to_string()]),
+                ),
+            ]),
             ..CypherMutationOptions::default()
         },
     )
@@ -1425,6 +1439,11 @@ fn cypher_match_where_lowers_node_predicates() {
                     op: GraphPredicateOp::StartsWith,
                     value: Value::from("Ad"),
                 },
+                GraphPropertyPredicate {
+                    key: "team".to_string(),
+                    op: GraphPredicateOp::In,
+                    value: Value::from(vec!["eng".to_string(), "data".to_string()]),
+                },
             ],
             patch: Props::from([("archived".to_string(), Value::Bool(true))]),
             cardinality: GraphMutationCardinality::BoundedMany,
@@ -1458,7 +1477,7 @@ fn cypher_match_where_keeps_predicated_identity_matches_on_matching_path() {
 #[test]
 fn cypher_match_where_lowers_edge_and_endpoint_predicates() {
     let plan = sail_cypher_mutation_plan(
-        "MATCH (a:Person {id: 'a'})-[e:KNOWS]->(b:Person) WHERE (e.since >= 2020 AND e.source IS NOT NULL AND e.note CONTAINS 'work') AND NOT (b.status ENDS WITH 'blocked') SET e.seen = true",
+        "MATCH (a:Person {id: 'a'})-[e:KNOWS]->(b:Person) WHERE (e.since >= 2020 AND e.source IS NOT NULL AND e.note CONTAINS 'work') AND NOT (b.status ENDS WITH 'blocked') AND NOT b.team IN ['ops'] SET e.seen = true",
     )
     .unwrap();
 
@@ -1475,11 +1494,18 @@ fn cypher_match_where_lowers_edge_and_endpoint_predicates() {
                 to: GraphNodeMatch {
                     label: Some(Label::new("Person")),
                     props: Props::new(),
-                    predicates: vec![GraphPropertyPredicate {
-                        key: "status".to_string(),
-                        op: GraphPredicateOp::NotEndsWith,
-                        value: Value::from("blocked"),
-                    }],
+                    predicates: vec![
+                        GraphPropertyPredicate {
+                            key: "status".to_string(),
+                            op: GraphPredicateOp::NotEndsWith,
+                            value: Value::from("blocked"),
+                        },
+                        GraphPropertyPredicate {
+                            key: "team".to_string(),
+                            op: GraphPredicateOp::NotIn,
+                            value: Value::Json(serde_json::json!(["ops"])),
+                        },
+                    ],
                 },
                 id: None,
                 props: Props::new(),
@@ -1517,12 +1543,43 @@ fn cypher_match_where_rejects_deferred_predicate_forms() {
         "MATCH (n:Person) WHERE size(n.tags) = 2 SET n.archived = true",
         "MATCH (n:Person) WHERE n.active > true SET n.archived = true",
         "MATCH (n:Person) WHERE n.name STARTS WITH 1 SET n.archived = true",
+        "MATCH (n:Person) WHERE n.team IN null SET n.archived = true",
+        "MATCH (n:Person) WHERE n.team IN [null] SET n.archived = true",
+        "MATCH (n:Person) WHERE n.team IN [['eng']] SET n.archived = true",
         "MATCH (n:Person) WHERE m.status = 'inactive' SET n.archived = true",
     ] {
         let error =
             sail_cypher_mutation_plan(cypher).expect_err("unsupported WHERE predicate should fail");
         assert!(is_cypher_planning_error(&error) || matches!(error, GrustError::CypherSyntax(_)));
     }
+}
+
+#[test]
+fn sail_cypher_match_where_in_predicates_execute_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'where-in-ada', team: 'eng', status: 'active'});
+            CREATE (:Person {id: 'where-in-bob', team: 'ops', status: 'active'});
+            CREATE (:Person {id: 'where-in-cara', team: 'data', status: 'blocked'});
+            CREATE (:Person {id: 'where-in-missing', status: 'active'});
+            MATCH (n:Person)
+            WHERE n.team IN ['eng', 'data'] AND NOT n.status IN ['blocked']
+            SET n.selected = true
+            RETURN n.id AS id, n.selected AS selected
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("restricted IN WHERE predicates should execute on memory facade");
+
+    assert_eq!(
+        result.table.rows,
+        vec![vec![Value::from("where-in-ada"), Value::Bool(true)]]
+    );
 }
 
 #[test]

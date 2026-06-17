@@ -181,6 +181,10 @@ reconstructed from Git history, release commits, and the shipped docs.
   `endsWith(variable.property, needle)`, and
   `contains(variable.property, needle)` projections and aggregate bodies with
   literal or parameter string needles.
+- Added restricted mutating `MATCH ... WHERE variable.property IN [...]`
+  predicate support, including list-valued parameters and one leading `NOT`,
+  lowering membership checks through backend-neutral `GraphPropertyPredicate`
+  operators.
 - Added restricted writable Cypher `left(variable.property, length)` and
   `right(variable.property, length)` projections and aggregate bodies with
   literal or parameter integer lengths.

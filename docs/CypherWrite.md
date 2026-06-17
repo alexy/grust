@@ -98,8 +98,10 @@ describe unreleased working-tree additions:
   variable property to a literal or parameter with `=`, `<>`, `!=`, `>`, `>=`,
   `<`, or `<=`, check `variable.property IS NULL` or
   `variable.property IS NOT NULL`, evaluate `STARTS WITH`, `ENDS WITH`, and
-  `CONTAINS` against string literals or parameters, optionally prefix one
-  comparison, null check, or string predicate with `NOT`, wrap supported
+  `CONTAINS` against string literals or parameters, evaluate
+  `variable.property IN [...]` against scalar list literals or list-valued
+  parameters, optionally prefix one comparison, null check, string predicate,
+  or membership predicate with `NOT`, wrap supported
   predicate terms in parentheses, and combine predicates with `AND`.
 - `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
@@ -4490,3 +4492,45 @@ parameter needles, lowers leading `NOT` by inverting the string predicate
 operator, and emits Sail SQL string predicate conditions. Memory execution
 uses the same `GraphPropertyPredicate` evaluator, so only present string
 properties participate.
+
+### Batch DF: Restricted `IN` `WHERE` Predicates
+
+Extend the bounded mutating `MATCH ... WHERE` grammar to accept membership
+checks over one property and one scalar list literal or list-valued parameter:
+
+```cypher
+MATCH (n:Person)
+WHERE n.team IN ['eng', 'data'] AND NOT n.status IN ['blocked']
+SET n.reviewed = true;
+```
+
+Acceptance criteria:
+
+- Support `variable.property IN [literal_or_parameter, ...]` on matched node,
+  relationship, and endpoint variables.
+- Support `variable.property IN $parameter` when the parameter is a
+  list-valued Grust `Value` (`StringArray`, `IntArray`, `FloatArray`, or a
+  JSON array of scalar string, integer, float, or boolean values).
+- Require list items to be scalar string, integer, float, or boolean values.
+  Reject nulls, maps, nested lists, computed expressions, property references,
+  and cross-variable expressions.
+- Lower accepted predicates to explicit backend-neutral
+  `GraphPredicateOp::In` or `GraphPredicateOp::NotIn` values.
+- Preserve the existing missing-property behavior: missing properties never
+  match either positive or negated membership predicates.
+- Lower Sail SQL membership through the existing type-aware equality condition
+  builder so string, integer, float, and boolean comparisons keep the same
+  casts as ordinary property equality.
+- Keep Cypher's full null-aware `IN` semantics, arbitrary expression lists,
+  list property membership, and `OR` combinations deferred.
+- Add core predicate tests, Sail SQL-lowering assertions, planner tests for
+  list-valued parameters, rejection tests for deferred forms, and
+  Memory-facade execution coverage.
+
+Implementation status: implemented in the working tree after Batch DE.
+`grust-core` now includes explicit `In` and `NotIn` predicate operators.
+`grust-sail` parses scalar list literals and list-valued parameters in
+mutating `WHERE` membership checks, lowers one leading `NOT` to `NotIn`, and
+emits Sail SQL as an `OR` of existing equality predicates. Memory execution
+uses the same `GraphPropertyPredicate` evaluator, so only present scalar
+properties participate and missing properties remain non-matching.

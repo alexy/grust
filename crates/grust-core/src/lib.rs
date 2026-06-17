@@ -2573,6 +2573,8 @@ pub enum GraphPredicateOp {
     NotEndsWith,
     Contains,
     NotContains,
+    In,
+    NotIn,
     GreaterThan,
     GreaterThanOrEqual,
     LessThan,
@@ -2611,6 +2613,10 @@ impl GraphPropertyPredicate {
                 .is_some_and(|(actual, needle)| actual.contains(needle)),
             GraphPredicateOp::NotContains => string_predicate_values(actual, &self.value)
                 .is_some_and(|(actual, needle)| !actual.contains(needle)),
+            GraphPredicateOp::In => list_predicate_values(&self.value)
+                .is_some_and(|values| values.iter().any(|value| actual == value)),
+            GraphPredicateOp::NotIn => list_predicate_values(&self.value)
+                .is_some_and(|values| values.iter().all(|value| actual != value)),
             GraphPredicateOp::GreaterThan
             | GraphPredicateOp::GreaterThanOrEqual
             | GraphPredicateOp::LessThan
@@ -2629,7 +2635,9 @@ impl GraphPropertyPredicate {
                     | GraphPredicateOp::EndsWith
                     | GraphPredicateOp::NotEndsWith
                     | GraphPredicateOp::Contains
-                    | GraphPredicateOp::NotContains => unreachable!(),
+                    | GraphPredicateOp::NotContains
+                    | GraphPredicateOp::In
+                    | GraphPredicateOp::NotIn => unreachable!(),
                 }),
         }
     }
@@ -2638,6 +2646,29 @@ impl GraphPropertyPredicate {
 fn string_predicate_values<'a>(actual: &'a Value, value: &'a Value) -> Option<(&'a str, &'a str)> {
     match (actual, value) {
         (Value::String(actual), Value::String(needle)) => Some((actual.as_str(), needle.as_str())),
+        _ => None,
+    }
+}
+
+fn list_predicate_values(value: &Value) -> Option<Vec<Value>> {
+    match value {
+        Value::StringArray(values) => Some(values.iter().map(Value::from).collect()),
+        Value::IntArray(values) => Some(values.iter().copied().map(Value::Int).collect()),
+        Value::FloatArray(values) => Some(values.iter().copied().map(Value::Float).collect()),
+        Value::Json(serde_json::Value::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                serde_json::Value::Bool(value) => Some(Value::Bool(*value)),
+                serde_json::Value::Number(value) => value
+                    .as_i64()
+                    .map(Value::Int)
+                    .or_else(|| value.as_f64().map(Value::Float)),
+                serde_json::Value::String(value) => Some(Value::from(value)),
+                serde_json::Value::Null
+                | serde_json::Value::Array(_)
+                | serde_json::Value::Object(_) => None,
+            })
+            .collect(),
         _ => None,
     }
 }

@@ -391,6 +391,31 @@ fn property_predicates_are_type_aware_and_missing_safe() {
     assert!(name_not_contains.matches(Some(&Value::from("Ada"))));
     assert!(!name_not_contains.matches(Some(&Value::from("Max"))));
     assert!(!name_not_contains.matches(None));
+
+    let team_in = GraphPropertyPredicate {
+        key: "team".to_string(),
+        op: GraphPredicateOp::In,
+        value: Value::Json(serde_json::json!(["eng", "data"])),
+    };
+    assert!(team_in.matches(Some(&Value::from("eng"))));
+    assert!(!team_in.matches(Some(&Value::from("ops"))));
+    assert!(!team_in.matches(None));
+
+    let team_not_in = GraphPropertyPredicate {
+        key: "team".to_string(),
+        op: GraphPredicateOp::NotIn,
+        value: Value::from(vec!["eng".to_string(), "data".to_string()]),
+    };
+    assert!(team_not_in.matches(Some(&Value::from("ops"))));
+    assert!(!team_not_in.matches(Some(&Value::from("eng"))));
+    assert!(!team_not_in.matches(None));
+
+    let empty_in = GraphPropertyPredicate {
+        key: "team".to_string(),
+        op: GraphPredicateOp::In,
+        value: Value::Json(serde_json::json!([])),
+    };
+    assert!(!empty_in.matches(Some(&Value::from("eng"))));
 }
 
 #[test]

@@ -2723,6 +2723,19 @@ fn parse_where_predicate(
             });
         }
     }
+    if let Some(index) = find_top_level_keyword_sequence(predicate, "IN")? {
+        let (target, key) = parse_property_ref(&predicate[..index], "MATCH WHERE IN predicate")?;
+        let value = parse_cypher_in_values(&predicate[index + "IN".len()..], parameters)?;
+        let op = if negated {
+            GraphPredicateOp::NotIn
+        } else {
+            GraphPredicateOp::In
+        };
+        return Ok(ParsedWherePredicate {
+            target,
+            predicate: GraphPropertyPredicate { key, op, value },
+        });
+    }
     for (token, op) in [
         (">=", GraphPredicateOp::GreaterThanOrEqual),
         ("<=", GraphPredicateOp::LessThanOrEqual),
@@ -2780,6 +2793,8 @@ fn inverted_graph_predicate_op(op: GraphPredicateOp) -> GraphPredicateOp {
         GraphPredicateOp::NotEndsWith => GraphPredicateOp::EndsWith,
         GraphPredicateOp::Contains => GraphPredicateOp::NotContains,
         GraphPredicateOp::NotContains => GraphPredicateOp::Contains,
+        GraphPredicateOp::In => GraphPredicateOp::NotIn,
+        GraphPredicateOp::NotIn => GraphPredicateOp::In,
         GraphPredicateOp::GreaterThan => GraphPredicateOp::LessThanOrEqual,
         GraphPredicateOp::GreaterThanOrEqual => GraphPredicateOp::LessThan,
         GraphPredicateOp::LessThan => GraphPredicateOp::GreaterThanOrEqual,
@@ -12576,6 +12591,75 @@ fn parse_cypher_literal(value: &str, parameters: &CypherParameters) -> Result<Va
         .map_err(|_| GrustError::Unsupported(format!("unsupported Cypher literal value: {value}")))
 }
 
+fn parse_cypher_in_values(value: &str, parameters: &CypherParameters) -> Result<Value> {
+    let value = value.trim();
+    if let Some(parameter) = value.strip_prefix('$') {
+        let parsed = parse_cypher_literal(value, parameters)?;
+        validate_cypher_in_values(&parsed)?;
+        if !is_cypher_identifier(parameter) {
+            return Err(cypher_syntax(format!(
+                "unsupported Cypher parameter reference: {value}"
+            )));
+        }
+        return Ok(parsed);
+    }
+    if !(value.starts_with('[') && value.ends_with(']')) {
+        return Err(cypher_syntax(
+            "MATCH WHERE IN predicates require a list literal or list parameter",
+        ));
+    }
+    let inner = &value[1..value.len() - 1];
+    let mut values = Vec::new();
+    if !inner.trim().is_empty() {
+        for item in split_top_level_commas(inner)? {
+            let item = parse_cypher_literal(item, parameters)?;
+            validate_cypher_in_item(&item)?;
+            values.push(item.to_json());
+        }
+    }
+    Ok(Value::Json(serde_json::Value::Array(values)))
+}
+
+fn validate_cypher_in_values(value: &Value) -> Result<()> {
+    match value {
+        Value::StringArray(_) | Value::IntArray(_) | Value::FloatArray(_) => Ok(()),
+        Value::Json(serde_json::Value::Array(values)) => {
+            for value in values {
+                match value {
+                    serde_json::Value::Bool(_)
+                    | serde_json::Value::Number(_)
+                    | serde_json::Value::String(_) => {}
+                    serde_json::Value::Null
+                    | serde_json::Value::Array(_)
+                    | serde_json::Value::Object(_) => {
+                        return Err(cypher_syntax(
+                            "MATCH WHERE IN predicates only support scalar string, integer, float, or boolean list items",
+                        ));
+                    }
+                }
+            }
+            Ok(())
+        }
+        _ => Err(cypher_syntax(
+            "MATCH WHERE IN predicates require a list literal or list parameter",
+        )),
+    }
+}
+
+fn validate_cypher_in_item(value: &Value) -> Result<()> {
+    match value {
+        Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => Ok(()),
+        Value::Null
+        | Value::DateTime(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => Err(cypher_syntax(
+            "MATCH WHERE IN predicates only support scalar string, integer, float, or boolean list items",
+        )),
+    }
+}
+
 fn parse_cypher_string(value: &str) -> Result<String> {
     let value = value.trim();
     if !is_quoted(value) {
@@ -15194,6 +15278,13 @@ fn append_property_predicate_conditions(
                 conditions,
                 args,
             )?,
+            GraphPredicateOp::In | GraphPredicateOp::NotIn => append_property_in_condition(
+                &json_value,
+                predicate.op,
+                &predicate.value,
+                conditions,
+                args,
+            )?,
             GraphPredicateOp::GreaterThan
             | GraphPredicateOp::GreaterThanOrEqual
             | GraphPredicateOp::LessThan
@@ -15321,12 +15412,81 @@ fn append_property_string_predicate_condition(
         | GraphPredicateOp::NotEqual
         | GraphPredicateOp::IsNull
         | GraphPredicateOp::IsNotNull
+        | GraphPredicateOp::In
+        | GraphPredicateOp::NotIn
         | GraphPredicateOp::GreaterThan
         | GraphPredicateOp::GreaterThanOrEqual
         | GraphPredicateOp::LessThan
         | GraphPredicateOp::LessThanOrEqual => unreachable!(),
     }
     Ok(())
+}
+
+fn append_property_in_condition(
+    json_value: &str,
+    op: GraphPredicateOp,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    let values = cypher_in_predicate_values(value)?;
+    if values.is_empty() {
+        match op {
+            GraphPredicateOp::In => conditions.push("1 = 0".to_string()),
+            GraphPredicateOp::NotIn => conditions.push(format!("{json_value} IS NOT NULL")),
+            _ => unreachable!(),
+        }
+        return Ok(());
+    }
+
+    let mut equality_conditions = Vec::new();
+    let mut equality_args = Vec::new();
+    for value in values {
+        append_property_equality_condition(
+            json_value,
+            &value,
+            &mut equality_conditions,
+            &mut equality_args,
+        )?;
+    }
+    let condition = equality_conditions.join(" OR ");
+    match op {
+        GraphPredicateOp::In => conditions.push(format!("({condition})")),
+        GraphPredicateOp::NotIn => {
+            conditions.push(format!("{json_value} IS NOT NULL AND NOT ({condition})"))
+        }
+        _ => unreachable!(),
+    }
+    args.extend(equality_args);
+    Ok(())
+}
+
+fn cypher_in_predicate_values(value: &Value) -> Result<Vec<Value>> {
+    match value {
+        Value::StringArray(values) => Ok(values.iter().map(Value::from).collect()),
+        Value::IntArray(values) => Ok(values.iter().copied().map(Value::Int).collect()),
+        Value::FloatArray(values) => Ok(values.iter().copied().map(Value::Float).collect()),
+        Value::Json(serde_json::Value::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                serde_json::Value::Bool(value) => Ok(Value::Bool(*value)),
+                serde_json::Value::Number(value) => value
+                    .as_i64()
+                    .map(Value::Int)
+                    .or_else(|| value.as_f64().map(Value::Float))
+                    .ok_or_else(|| cypher_syntax("unsupported numeric value in MATCH WHERE IN")),
+                serde_json::Value::String(value) => Ok(Value::from(value)),
+                serde_json::Value::Null
+                | serde_json::Value::Array(_)
+                | serde_json::Value::Object(_) => Err(cypher_syntax(
+                    "MATCH WHERE IN predicates only support scalar string, integer, float, or boolean list items",
+                )),
+            })
+            .collect(),
+        _ => Err(cypher_syntax(
+            "MATCH WHERE IN predicates require a list literal or list parameter",
+        )),
+    }
 }
 
 fn append_property_order_condition(
@@ -15350,7 +15510,9 @@ fn append_property_order_condition(
         | GraphPredicateOp::EndsWith
         | GraphPredicateOp::NotEndsWith
         | GraphPredicateOp::Contains
-        | GraphPredicateOp::NotContains => unreachable!(),
+        | GraphPredicateOp::NotContains
+        | GraphPredicateOp::In
+        | GraphPredicateOp::NotIn => unreachable!(),
     };
     match value {
         Value::Int(n) => {
