@@ -582,6 +582,11 @@ fn mutation_sql(nodes_table: &str, edges_table: &str, mutation: &GraphMutation) 
                 "pgGraph edge property removals are not implemented yet".to_string(),
             ));
         }
+        GraphMutation::UpdateMatchingEdgeProperty { .. } => {
+            return Err(GrustError::Unsupported(
+                "pgGraph matched edge property updates are not implemented yet".to_string(),
+            ));
+        }
         GraphMutation::RemoveMatchingEdgeProps { .. } => {
             return Err(GrustError::Unsupported(
                 "pgGraph matched edge property removals are not implemented yet".to_string(),

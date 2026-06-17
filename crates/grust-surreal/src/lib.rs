@@ -934,6 +934,9 @@ fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> R
         GraphMutation::RemoveEdgeProps { .. } => Err(GrustError::Unsupported(
             "SurrealDB edge property removals are not implemented yet".to_string(),
         )),
+        GraphMutation::UpdateMatchingEdgeProperty { .. } => Err(GrustError::Unsupported(
+            "SurrealDB matched edge property updates are not implemented yet".to_string(),
+        )),
         GraphMutation::RemoveMatchingEdgeProps { .. } => Err(GrustError::Unsupported(
             "SurrealDB matched edge property removals are not implemented yet".to_string(),
         )),
