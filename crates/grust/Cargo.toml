@@ -16,6 +16,7 @@ name = "grust"
 [features]
 default = []
 cocoindex = ["dep:grust-cocoindex"]
+cypher = ["dep:grust-cypher"]
 falkor = ["dep:grust-falkor"]
 helix = ["dep:grust-helix"]
 ladybug = ["dep:grust-ladybug"]
@@ -31,6 +32,7 @@ typed-zod-rs = ["typed-garde", "grust-core/typed-zod-rs"]
 [dependencies]
 grust-core = { version = "0.9.0", path = "../grust-core" }
 grust-cocoindex = { version = "0.9.0", path = "../grust-cocoindex", optional = true }
+grust-cypher = { version = "0.9.0", path = "../grust-cypher", optional = true }
 grust-falkor = { version = "0.9.0", path = "../grust-falkor", optional = true }
 grust-helix = { version = "0.9.0", path = "../grust-helix", optional = true }
 grust-ladybug = { version = "0.9.0", path = "../grust-ladybug", optional = true }

@@ -1,26 +1,19 @@
 [package]
-name = "grust-sail"
+name = "grust-cypher"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "Sail Spark Connect GraphStore backend for Grust."
+description = "Cypher parser, planner, and generic returning executor for Grust."
 keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-async-trait = { workspace = true }
+async-trait.workspace = true
 grust-core = { version = "0.9.0", path = "../grust-core" }
-grust-cypher = { version = "0.9.0", path = "../grust-cypher" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true }
-tonic = { version = "0.14.6" }
-tonic-prost = { version = "0.14.6" }
-prost = { version = "0.14" }
-prost-types = { version = "0.14" }
-arrow = { version = "58.1.0" }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

@@ -2473,9 +2473,12 @@ remaining pieces should stay explicit:
   `CypherRelationshipIdPolicy::GenerateForRowCreate`; row-producing
   `CREATE/MERGE` can generate deterministic relationship IDs when the caller
   explicitly selects `GenerateForRowCreateAndMerge`.
-- Extracting the handwritten Sail parser into a separate `grust-cypher` crate
-  remains deferred until the grammar grows further or another backend needs a
-  parser without depending on `grust-sail`.
+- The handwritten Sail parser has been extracted into a separate `grust-cypher`
+  crate. `grust-cypher` owns all Cypher types, the parser, the planner, the
+  DDL registry, the return evaluator, and the generic returning executor.
+  `grust-sail` retains Sail SQL lowering, Arrow IPC, and SparkConnect execution
+  and depends on `grust-cypher`. The `grust-graph` facade exposes a `cypher`
+  feature flag for using the Cypher layer without requiring `grust-sail`.
 
 ## Continuation Plan After Review: 2026-06-16 16:23:54 PDT
 

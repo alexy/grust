@@ -6,6 +6,14 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Extracted the writable Cypher parser, planner, DDL types, constraint
+  registry, return evaluator, and generic returning executor into a new
+  `grust-cypher` crate, so any `GraphStore` backend can use the Cypher
+  planning and materialization layer without depending on `grust-sail`.
+  `grust-sail` retains the Sail SQL lowering, Arrow IPC staging, and
+  SparkConnect execution and depends on `grust-cypher` for all Cypher types.
+  The `grust-graph` facade exposes a new `cypher` feature that pulls in
+  `grust-cypher` without requiring the full `sail` feature.
 - Added a reusable LakeCat catalog-event graph projection helper in the
   `grust-graph` facade, covering event, warehouse, namespace, and table nodes
   with stable catalog containment edges.

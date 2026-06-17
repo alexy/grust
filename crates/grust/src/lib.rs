@@ -10,6 +10,17 @@ pub use lakecat::{
 #[cfg(feature = "cocoindex")]
 pub use grust_cocoindex::*;
 
+#[cfg(feature = "cypher")]
+pub use grust_cypher::{
+    CypherConstraintRegistry, CypherCreateMode, CypherDdlApplicationReport, CypherDdlStatement,
+    CypherGeneratedNodeId, CypherMutationOptions, CypherMutationReport, CypherMutationResult,
+    CypherMutationTableResult, CypherNodeIdPolicy, CypherNullAssignment, CypherParameters,
+    CypherRelationshipIdPolicy, CypherResultTable, CypherSchemaApplication, CypherSchemaManager,
+    CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity, NamedGraphConstraint,
+    apply_cypher_ddl_to_schema, execute_cypher_mutation_returning_with_options_on_store,
+    sail_cypher_constraints, sail_cypher_ddl, sail_cypher_mutation_plan,
+};
+
 #[cfg(feature = "falkor")]
 pub use grust_falkor::*;
 
@@ -57,6 +68,17 @@ pub mod prelude {
 
     #[cfg(feature = "cocoindex")]
     pub use grust_cocoindex::*;
+
+    #[cfg(feature = "cypher")]
+    pub use grust_cypher::{
+        CypherConstraintRegistry, CypherCreateMode, CypherDdlApplicationReport, CypherDdlStatement,
+        CypherGeneratedNodeId, CypherMutationOptions, CypherMutationReport, CypherMutationResult,
+        CypherMutationTableResult, CypherNodeIdPolicy, CypherNullAssignment, CypherParameters,
+        CypherRelationshipIdPolicy, CypherResultTable, CypherSchemaApplication, CypherSchemaManager,
+        CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity, NamedGraphConstraint,
+        apply_cypher_ddl_to_schema, execute_cypher_mutation_returning_with_options_on_store,
+        sail_cypher_constraints, sail_cypher_ddl, sail_cypher_mutation_plan,
+    };
 
     #[cfg(feature = "falkor")]
     pub use grust_falkor::*;

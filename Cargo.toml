@@ -3,6 +3,7 @@ members = [
     "crates/grust",
     "crates/grust-cocoindex",
     "crates/grust-core",
+    "crates/grust-cypher",
     "crates/grust-falkor",
     "crates/grust-helix",
     "crates/grust-ladybug",
