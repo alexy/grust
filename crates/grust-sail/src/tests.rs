@@ -5261,6 +5261,249 @@ fn sail_cypher_returning_projects_restricted_list_membership_on_memory_facade() 
 }
 
 #[test]
+fn sail_cypher_returning_projects_restricted_list_predicates_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let concrete =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {id: 'predicate-list-ada', tags: $tags, scores: $scores});
+            CREATE (b:Person {id: 'predicate-list-bob'});
+            MATCH (a:Person {id: 'predicate-list-ada'}), (b:Person {id: 'predicate-list-bob'})
+            CREATE (a)-[e:KNOWS {id: 'predicate-list-knows', weights: $weights}]->(b)
+            RETURN any(t IN a.tags WHERE t = 'speaker') AS any_speaker,
+                   all(t IN a.tags WHERE t = 'speaker') AS all_speaker,
+                   none(t IN a.tags WHERE t = 'missing') AS none_missing,
+                   single(s IN a.scores WHERE s = $needle_score) AS single_score,
+                   any(w IN e.weights WHERE w = 4.5) AS any_weight,
+                   any(t IN a.nickname WHERE t = 'speaker') AS missing_name,
+                   any(t IN a.tags WHERE t = null) AS null_needle;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    (
+                        "tags".to_string(),
+                        Value::StringArray(vec![
+                            "engineer".to_string(),
+                            "speaker".to_string(),
+                            "speaker".to_string(),
+                        ]),
+                    ),
+                    ("scores".to_string(), Value::IntArray(vec![7, 11])),
+                    ("weights".to_string(), Value::FloatArray(vec![2.5, 4.5])),
+                    ("needle_score".to_string(), Value::Int(11)),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("concrete list predicate projections");
+    assert_eq!(
+        concrete.table.rows,
+        vec![vec![
+            Value::Bool(true),
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Null,
+            Value::Null,
+        ]]
+    );
+
+    let broad =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'predicate-list-cara', status: 'list-predicate', tags: $tags_a});
+            CREATE (:Person {id: 'predicate-list-dan', status: 'list-predicate', tags: $tags_b});
+            MATCH (n:Person {status: 'list-predicate'}) SET n.predicate_checked = true
+            RETURN n.id AS id, any(t IN n.tags WHERE t = 'speaker') AS any_speaker
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    (
+                        "tags_a".to_string(),
+                        Value::StringArray(vec!["speaker".to_string(), "mentor".to_string()]),
+                    ),
+                    (
+                        "tags_b".to_string(),
+                        Value::StringArray(vec!["writer".to_string(), "mentor".to_string()]),
+                    ),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("broad list predicate projections");
+    assert_eq!(
+        broad.table.rows,
+        vec![
+            vec![Value::from("predicate-list-cara"), Value::Bool(true)],
+            vec![Value::from("predicate-list-dan"), Value::Bool(false)],
+        ]
+    );
+
+    let row_edges =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Team {id: 'predicate-list-team'});
+            MATCH (n:Person {status: 'list-predicate'}), (t:Team {id: 'predicate-list-team'})
+            CREATE (n)-[r:MEMBER_OF {rankings: $rankings}]->(t)
+            RETURN n.id AS id, single(rank IN r.rankings WHERE rank = 2) AS single_rank
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "rankings".to_string(),
+                    Value::IntArray(vec![1, 2, 3]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("row-producing relationship list predicate projections");
+    assert_eq!(
+        row_edges.table.rows,
+        vec![
+            vec![Value::from("predicate-list-cara"), Value::Bool(true)],
+            vec![Value::from("predicate-list-dan"), Value::Bool(true)],
+        ]
+    );
+
+    let aggregates =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (n:Person {status: 'list-predicate'}) SET n.predicate_counted = true
+            RETURN count(any(t IN n.tags WHERE t = 'speaker')) AS rows,
+                   count(DISTINCT any(t IN n.tags WHERE t = 'speaker')) AS states,
+                   collect(any(t IN n.tags WHERE t = 'speaker')) AS predicates;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("list predicate aggregate projections");
+    assert_eq!(
+        aggregates.table.rows,
+        vec![vec![
+            Value::Int(2),
+            Value::Int(2),
+            Value::Json(serde_json::json!([true, false])),
+        ]]
+    );
+
+    let empty =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (n:Person {id: 'predicate-list-empty', tags: $tags})
+            RETURN any(t IN n.tags WHERE t = 'speaker') AS any_speaker,
+                   all(t IN n.tags WHERE t = 'speaker') AS all_speaker,
+                   none(t IN n.tags WHERE t = 'speaker') AS none_speaker,
+                   single(t IN n.tags WHERE t = 'speaker') AS single_speaker;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "tags".to_string(),
+                    Value::StringArray(Vec::new()),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("empty list predicate projections");
+    assert_eq!(
+        empty.table.rows,
+        vec![vec![
+            Value::Bool(false),
+            Value::Bool(true),
+            Value::Bool(true),
+            Value::Bool(false),
+        ]]
+    );
+
+    let numeric_predicate_aggregate =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "MATCH (n:Person {status: 'list-predicate'}) SET n.predicate_summed = true RETURN sum(any(t IN n.tags WHERE t = 'speaker'));",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("numeric aggregates over list predicate booleans should stay rejected");
+    assert!(
+        matches!(
+            numeric_predicate_aggregate,
+            GrustError::CypherUnsupportedCardinality(_)
+        ),
+        "{numeric_predicate_aggregate:?}"
+    );
+
+    let type_mismatch =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'predicate-list-type', scores: $scores}) RETURN any(s IN n.scores WHERE s = '11');",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "scores".to_string(),
+                    Value::IntArray(vec![11]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("type mismatched list predicates should evaluate false");
+    assert_eq!(type_mismatch.table.rows, vec![vec![Value::Bool(false)]]);
+
+    let non_array =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'predicate-list-string', name: 'Ada'}) RETURN any(ch IN n.name WHERE ch = 'A');",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("list predicates over strings should stay rejected");
+    assert!(
+        matches!(non_array, GrustError::CypherUnsupportedCardinality(_)),
+        "{non_array:?}"
+    );
+
+    let wrong_item =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'predicate-list-wrong-item', tags: $tags}) RETURN any(t IN n.tags WHERE other = 'speaker');",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "tags".to_string(),
+                    Value::StringArray(vec!["speaker".to_string()]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("list predicates should require the same WHERE item variable");
+    assert!(
+        matches!(wrong_item, GrustError::CypherUnsupportedCardinality(_)),
+        "{wrong_item:?}"
+    );
+
+    let computed_predicate =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'predicate-list-computed', tags: $tags}) RETURN any(t IN n.tags WHERE toLower(t) = 'speaker');",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "tags".to_string(),
+                    Value::StringArray(vec!["speaker".to_string()]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("computed list predicate expressions should stay rejected");
+    assert!(
+        matches!(
+            computed_predicate,
+            GrustError::CypherUnsupportedCardinality(_)
+        ),
+        "{computed_predicate:?}"
+    );
+}
+
+#[test]
 fn sail_cypher_returning_projects_restricted_list_indexes_on_memory_facade() {
     let store = MemoryGraphStore::new();
 

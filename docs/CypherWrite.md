@@ -4098,3 +4098,60 @@ restricted projection target. Evaluation reuses the existing property
 materializer and performs type-aware membership checks only over typed arrays
 or JSON arrays, preserving the same narrow behavior as the other restricted
 property functions.
+
+### Batch CW: Restricted List Predicate Projections
+
+Support bounded list predicates over array-like property values already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN any(t IN n.tags WHERE t = 'speaker') AS has_speaker;
+```
+
+Acceptance criteria:
+
+- Support `any(item IN variable.property WHERE item = value)`,
+  `all(item IN variable.property WHERE item = value)`,
+  `none(item IN variable.property WHERE item = value)`, and
+  `single(item IN variable.property WHERE item = value)` as scalar writable
+  `RETURN` projections when the variable is a concrete node, concrete
+  relationship, materialized row-node, or materialized row-relationship
+  variable.
+- Accept only one local item variable, one `variable.property` haystack, and
+  one equality predicate whose left side is the same item variable.
+- Accept only literal or parameter equality values. Reject computed values,
+  property values, cross-variable expressions, nested functions, maps, lists,
+  and arbitrary predicates.
+- Compare typed Grust arrays type-aware: string equality values match only
+  string arrays, integer equality values match only integer arrays, and float
+  equality values match only float arrays. Type mismatches evaluate as no
+  matching elements.
+- For JSON arrays, convert each JSON element through `Value::from_json` and
+  compare using the existing Grust `Value` equality semantics.
+- Return `null` when the property is absent or explicitly null. Return `null`
+  for a null equality value rather than adding full Cypher null-propagation
+  semantics.
+- Use standard empty-array predicate results: `any` and `single` return
+  `false`; `all` and `none` return `true`.
+- Reject strings, numeric values, booleans, datetimes, JSON objects,
+  whole-element values, paths, nested functions, cross-variable expressions,
+  non-equality predicates, and other unsupported haystacks rather than adding
+  general list-expression semantics.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over list-predicate booleans should
+  fail through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep list predicates property-only; list literals, list comprehensions,
+  property equality values, computed equality values, nested expressions,
+  arbitrary `WHERE` predicates, and full expression evaluation remain deferred.
+
+Implementation status: implemented in the working tree after Batch CV.
+Writable `RETURN any/all/none/single(item IN variable.property WHERE item =
+value)` now parses into a dedicated restricted projection target. Evaluation
+reuses the existing property materializer and performs type-aware predicate
+checks only over typed arrays or JSON arrays, preserving the same bounded
+behavior as list membership.
