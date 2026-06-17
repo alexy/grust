@@ -2628,7 +2628,7 @@ fn split_match_where<'a>(
 fn split_top_level_and(value: &str) -> Result<Vec<&str>> {
     let mut parts = Vec::new();
     let mut rest = value.trim();
-    while let Some(index) = find_unquoted_keyword(rest, "AND") {
+    while let Some(index) = find_top_level_keyword(rest, "AND")? {
         let part = rest[..index].trim();
         if part.is_empty() {
             return Err(cypher_syntax("empty predicate before AND".to_string()));
@@ -2640,21 +2640,26 @@ fn split_top_level_and(value: &str) -> Result<Vec<&str>> {
         return Err(cypher_syntax("empty predicate after AND".to_string()));
     }
     parts.push(rest);
-    Ok(parts)
+    let mut flattened = Vec::new();
+    for part in parts {
+        let stripped = strip_enclosing_parentheses(part)?;
+        if stripped != part.trim() {
+            flattened.extend(split_top_level_and(stripped)?);
+        } else {
+            flattened.push(part);
+        }
+    }
+    Ok(flattened)
 }
 
 fn parse_where_predicate(
     predicate: &str,
     parameters: &CypherParameters,
 ) -> Result<ParsedWherePredicate> {
-    let predicate = predicate.trim();
+    let predicate = strip_enclosing_parentheses(predicate.trim())?;
     let (predicate, negated) = if let Some(after_not) = strip_leading_keyword(predicate, "NOT") {
-        let predicate = after_not.trim();
-        if predicate.is_empty()
-            || strip_leading_keyword(predicate, "NOT").is_some()
-            || find_unquoted(predicate, '(').is_some()
-            || find_unquoted(predicate, ')').is_some()
-        {
+        let predicate = strip_enclosing_parentheses(after_not.trim())?;
+        if predicate.is_empty() || strip_leading_keyword(predicate, "NOT").is_some() {
             return Err(cypher_syntax(
                 "MATCH WHERE NOT only supports a single property comparison",
             ));
@@ -12641,6 +12646,133 @@ fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
     }
     parts.push(&value[start..]);
     Ok(parts)
+}
+
+fn find_top_level_keyword(value: &str, keyword: &str) -> Result<Option<usize>> {
+    let mut quote = None;
+    let mut escaped = false;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+
+    for (index, ch) in value.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' && quote.is_some() {
+            escaped = true;
+            continue;
+        }
+        if let Some(active_quote) = quote {
+            if ch == active_quote {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' => quote = Some(ch),
+            '(' => paren_depth += 1,
+            ')' => {
+                paren_depth = paren_depth.checked_sub(1).ok_or_else(|| {
+                    cypher_syntax("unmatched ')' in Cypher expression".to_string())
+                })?;
+            }
+            '[' => bracket_depth += 1,
+            ']' => {
+                bracket_depth = bracket_depth.checked_sub(1).ok_or_else(|| {
+                    cypher_syntax("unmatched ']' in Cypher expression".to_string())
+                })?;
+            }
+            '{' => brace_depth += 1,
+            '}' => {
+                brace_depth = brace_depth.checked_sub(1).ok_or_else(|| {
+                    cypher_syntax("unmatched '}' in Cypher expression".to_string())
+                })?;
+            }
+            _ if paren_depth == 0
+                && bracket_depth == 0
+                && brace_depth == 0
+                && value[index..]
+                    .get(..keyword.len())
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(keyword))
+                && keyword_boundary(value[..index].chars().next_back())
+                && keyword_boundary(value[index + keyword.len()..].chars().next()) =>
+            {
+                return Ok(Some(index));
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return Err(GrustError::Unsupported(
+            "unterminated Cypher string literal".to_string(),
+        ));
+    }
+    if paren_depth != 0 || bracket_depth != 0 || brace_depth != 0 {
+        return Err(cypher_syntax("unclosed grouping in Cypher expression"));
+    }
+    Ok(None)
+}
+
+fn strip_enclosing_parentheses(value: &str) -> Result<&str> {
+    let mut value = value.trim();
+    loop {
+        let Some(after_open) = value.strip_prefix('(') else {
+            return Ok(value);
+        };
+        if !value.ends_with(')') {
+            return Ok(value);
+        }
+        let mut quote = None;
+        let mut escaped = false;
+        let mut paren_depth = 0usize;
+        let mut closes_at_end = false;
+        for (index, ch) in value.char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && quote.is_some() {
+                escaped = true;
+                continue;
+            }
+            if let Some(active_quote) = quote {
+                if ch == active_quote {
+                    quote = None;
+                }
+                continue;
+            }
+            match ch {
+                '\'' | '"' => quote = Some(ch),
+                '(' => paren_depth += 1,
+                ')' => {
+                    paren_depth = paren_depth.checked_sub(1).ok_or_else(|| {
+                        cypher_syntax("unmatched ')' in Cypher expression".to_string())
+                    })?;
+                    if paren_depth == 0 {
+                        closes_at_end = index + ch.len_utf8() == value.len();
+                        if !closes_at_end {
+                            return Ok(value);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if quote.is_some() {
+            return Err(GrustError::Unsupported(
+                "unterminated Cypher string literal".to_string(),
+            ));
+        }
+        if paren_depth != 0 {
+            return Err(cypher_syntax("unclosed grouping in Cypher expression"));
+        }
+        if !closes_at_end {
+            return Ok(value);
+        }
+        value = after_open[..after_open.len() - 1].trim();
+    }
 }
 
 fn split_top_level_patterns(value: &str) -> Result<Vec<&str>> {

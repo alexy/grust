@@ -1,6 +1,6 @@
 # Restart Checkpoint
 
-Generated: 2026-06-17 04:02:09 PDT
+Generated: 2026-06-17 04:07:56 PDT
 
 ## Current Goal
 
@@ -25,43 +25,38 @@ Continue implementing bounded writable Cypher features from
 - Branch: `codex/cypher-write`
 - Remote tracking branch: `origin/codex/cypher-write`
 - Expected untracked file: `OPUS1.md`
-- Latest completed slice before this checkpoint: Batch DC, restricted
-  mutating `MATCH ... WHERE variable.property IS NULL` predicates and explicit
-  null-check predicate operators.
+- Latest completed slice before this checkpoint: Batch DD, parenthesized
+  mutating `MATCH ... WHERE` predicate terms and `AND` groups.
 
 ## Latest Completed Work
 
-Batch DC completed explicit null-check predicates in the bounded mutating
-Cypher `MATCH ... WHERE` grammar:
+Batch DD added parentheses around otherwise-supported bounded mutating Cypher
+`MATCH ... WHERE` predicate terms and `AND` groups:
 
 ```cypher
 MATCH (n:Person)
-WHERE n.nickname IS NULL
-SET n.needs_nickname = true;
+WHERE (n.status = 'inactive' AND n.score >= 10) AND NOT (n.active = true)
+SET n.archived = true;
 ```
 
 Implemented behavior:
 
-- `grust-core` exposes explicit `GraphPredicateOp::IsNull` and
-  `GraphPredicateOp::IsNotNull` operators.
-- `grust-sail` parses `variable.property IS NULL`,
-  `variable.property IS NOT NULL`, `NOT variable.property IS NULL`, and
-  `NOT variable.property IS NOT NULL`.
-- Null-check syntax lowers to the explicit backend-neutral predicate operators
-  with `Value::Null`.
-- Node, relationship, and endpoint variables can use the predicate wherever
-  ordinary `AND`-joined mutating `WHERE` predicates are accepted.
-- `IS NULL` matches missing properties and explicit `Value::Null` properties.
-- `IS NOT NULL` requires a present non-null property.
-- Ordinary equality and inequality remain missing-safe exact `Value`
-  comparisons.
-- Core predicate tests plus Sail planner and Memory-facade tests cover the
-  semantics.
+- `grust-sail` splits mutating `WHERE` clauses only on top-level `AND`.
+- Enclosing parentheses around supported predicate terms are stripped before
+  lowering.
+- Enclosing parentheses around supported `AND` groups are recursively
+  flattened into the same backend-neutral predicate vectors as the
+  unparenthesized form.
+- `NOT (supported predicate)` is accepted and still lowers through the existing
+  operator-inversion path.
+- Parentheses remain semantic-free: `OR`, nested `NOT`, function calls,
+  pattern predicates, list predicates, cross-variable comparisons, and
+  arbitrary expressions are still rejected when parenthesized.
+- Planner and Memory-facade tests cover parenthesized node, edge, endpoint,
+  and negated predicates.
 
 Files updated:
 
-- `crates/grust-core/src/lib.rs`
-- `crates/grust-core/src/tests.rs`
 - `crates/grust-sail/src/lib.rs`
 - `crates/grust-sail/src/tests.rs`
 - `docs/CypherWrite.md`
@@ -71,7 +66,7 @@ Files updated:
 
 ## Verification State
 
-The following commands passed after Batch DC:
+The following commands passed after Batch DD:
 
 ```sh
 cargo fmt --all
@@ -85,7 +80,7 @@ git diff --check
 
 Observed test summaries:
 
-- `cargo test -p grust-sail --lib`: 182 passed, 25 ignored
+- `cargo test -p grust-sail --lib`: 183 passed, 25 ignored
 - `cargo test -p grust-core --lib`: 35 passed
 - `cargo test -p grust-memory --lib`: 20 passed
 

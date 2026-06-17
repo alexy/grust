@@ -98,7 +98,8 @@ describe unreleased working-tree additions:
   variable property to a literal or parameter with `=`, `<>`, `!=`, `>`, `>=`,
   `<`, or `<=`, check `variable.property IS NULL` or
   `variable.property IS NOT NULL`, optionally prefix one comparison or null
-  check with `NOT`, and combine predicates with `AND`.
+  check with `NOT`, wrap supported predicate terms in parentheses, and combine
+  predicates with `AND`.
 - `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
   operation when the source is a property on the same node variable and the
@@ -1213,8 +1214,9 @@ unsupported ordered operand types fail planning in Sail instead of relying on
 backend casts. `IS NULL` and `IS NOT NULL` lower through explicit
 backend-neutral null-check predicate operators so Memory and Sail agree that
 `IS NULL` matches missing or explicit-null properties and `IS NOT NULL`
-requires a present non-null property. `OR`, nested `NOT`, function calls, list
-predicates, pattern predicates, arbitrary expressions, and cross-variable
+requires a present non-null property. Parentheses are accepted around supported
+predicate terms and supported `AND` groups. `OR`, nested `NOT`, function calls,
+list predicates, pattern predicates, arbitrary expressions, and cross-variable
 comparisons remain deferred.
 
 ### Batch W: Read-then-write `MATCH ... CREATE`
@@ -4322,9 +4324,9 @@ Acceptance criteria:
   deferred.
 - Preserve existing missing-property semantics: a missing property never
   matches, even when the comparison is negated.
-- Reject nested `NOT`, parenthesized predicates, functions, pattern
-  predicates, list predicates, cross-variable comparisons, and arbitrary
-  expressions.
+- Reject nested `NOT`, functions, pattern predicates, list predicates,
+  cross-variable comparisons, and arbitrary expressions. Parenthesized
+  predicate terms are handled later in Batch DD.
 - Add planner and Memory-facade tests proving that Sail parsing and Memory
   execution share the same restricted semantics.
 
@@ -4410,3 +4412,38 @@ those explicit predicate operators, and emits direct Sail SQL `IS NULL` /
 `IS NOT NULL` predicates. Memory execution uses the same predicate evaluator,
 so missing and explicit-null properties match `IS NULL`, while only present
 non-null properties match `IS NOT NULL`.
+
+### Batch DD: Parenthesized `WHERE` Predicate Terms
+
+Extend the bounded mutating `MATCH ... WHERE` grammar to accept parentheses
+around otherwise-supported predicate terms and `AND` groups:
+
+```cypher
+MATCH (n:Person)
+WHERE (n.status = 'inactive' AND n.score >= 10) AND NOT (n.active = true)
+SET n.archived = true;
+```
+
+Acceptance criteria:
+
+- Support parentheses around a single supported property comparison or null
+  check.
+- Support parentheses around an `AND` group whose terms are themselves
+  supported bounded predicates.
+- Support one leading `NOT` before a parenthesized single supported predicate,
+  lowering it through the existing operator-inversion path.
+- Keep parentheses semantic-free: they only group the existing `AND`-only
+  predicate grammar and do not introduce expression evaluation.
+- Continue rejecting `OR`, nested `NOT`, function calls, pattern predicates,
+  list predicates, cross-variable comparisons, and arbitrary expressions,
+  whether or not they are parenthesized.
+- Add planner and Memory-facade tests proving parenthesized terms lower to the
+  same backend-neutral predicate vectors as unparenthesized terms.
+
+Implementation status: implemented in the working tree after Batch DC.
+`grust-sail` now splits mutating `WHERE` clauses on top-level `AND` only,
+recursively unwraps enclosing parentheses around supported conjunction groups,
+and strips enclosing parentheses around individual predicate terms before
+lowering them through the existing `GraphPropertyPredicate` path. Memory
+execution is unchanged because the resolved predicate vectors are the same as
+the unparenthesized form.

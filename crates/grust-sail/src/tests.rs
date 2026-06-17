@@ -1379,7 +1379,7 @@ fn matching_edges_sql_filters_by_relationship_properties() {
 #[test]
 fn cypher_match_where_lowers_node_predicates() {
     let plan = sail_cypher_mutation_plan_with_options(
-        "MATCH (n:Person) WHERE n.status = 'inactive' AND n.score >= $min AND NOT n.active = true AND n.nickname IS NOT NULL SET n.archived = true",
+        "MATCH (n:Person) WHERE (n.status = 'inactive' AND n.score >= $min) AND NOT (n.active = true) AND (n.nickname IS NOT NULL) SET n.archived = true",
         CypherMutationOptions {
             parameters: CypherParameters::from([("min".to_string(), Value::Int(10))]),
             ..CypherMutationOptions::default()
@@ -1447,7 +1447,7 @@ fn cypher_match_where_keeps_predicated_identity_matches_on_matching_path() {
 #[test]
 fn cypher_match_where_lowers_edge_and_endpoint_predicates() {
     let plan = sail_cypher_mutation_plan(
-        "MATCH (a:Person {id: 'a'})-[e:KNOWS]->(b:Person) WHERE e.since >= 2020 AND e.source IS NOT NULL AND NOT b.status = 'blocked' SET e.seen = true",
+        "MATCH (a:Person {id: 'a'})-[e:KNOWS]->(b:Person) WHERE (e.since >= 2020 AND e.source IS NOT NULL) AND NOT (b.status = 'blocked') SET e.seen = true",
     )
     .unwrap();
 
@@ -1495,7 +1495,9 @@ fn cypher_match_where_lowers_edge_and_endpoint_predicates() {
 fn cypher_match_where_rejects_deferred_predicate_forms() {
     for cypher in [
         "MATCH (n:Person) WHERE n.status = 'inactive' OR n.score >= 10 SET n.archived = true",
+        "MATCH (n:Person) WHERE (n.status = 'inactive' OR n.score >= 10) SET n.archived = true",
         "MATCH (n:Person) WHERE NOT NOT n.active = true SET n.archived = true",
+        "MATCH (n:Person) WHERE (n.status = 'inactive' SET n.archived = true",
         "MATCH (n:Person) WHERE size(n.tags) = 2 SET n.archived = true",
         "MATCH (n:Person) WHERE n.active > true SET n.archived = true",
         "MATCH (n:Person) WHERE m.status = 'inactive' SET n.archived = true",
@@ -1504,6 +1506,32 @@ fn cypher_match_where_rejects_deferred_predicate_forms() {
             sail_cypher_mutation_plan(cypher).expect_err("unsupported WHERE predicate should fail");
         assert!(is_cypher_planning_error(&error) || matches!(error, GrustError::CypherSyntax(_)));
     }
+}
+
+#[test]
+fn sail_cypher_match_where_parenthesized_terms_execute_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let result =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'where-paren-ada', status: 'inactive', score: 12, active: false});
+            CREATE (:Person {id: 'where-paren-bob', status: 'inactive', score: 5, active: false});
+            CREATE (:Person {id: 'where-paren-cara', status: 'inactive', score: 14, active: true});
+            MATCH (n:Person) WHERE (n.status = 'inactive' AND n.score >= 10) AND NOT (n.active = true)
+            SET n.archived = true
+            RETURN n.id AS id, n.archived AS archived
+            ORDER BY id;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("parenthesized WHERE predicates should execute on memory facade");
+
+    assert_eq!(
+        result.table.rows,
+        vec![vec![Value::from("where-paren-ada"), Value::Bool(true)]]
+    );
 }
 
 #[test]
