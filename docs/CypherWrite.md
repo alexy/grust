@@ -102,7 +102,9 @@ describe unreleased working-tree additions:
   `variable.property IN [...]` against scalar list literals or list-valued
   parameters, optionally prefix one comparison, null check, string predicate,
   or membership predicate with `NOT`, wrap supported
-  predicate terms in parentheses, and combine predicates with `AND`.
+  predicate terms in parentheses, combine predicates with `AND`, and fold
+  same-property equality `OR` groups into membership predicates. When a folded
+  `OR` group is combined with `AND`, the `OR` group must be parenthesized.
 - `MATCH ... SET n.key = n.key + value` and the corresponding `-`, `*`, and
   `/` numeric forms lower to an explicit matching-node read-modify-write plan
   operation when the source is a property on the same node variable and the
@@ -126,8 +128,9 @@ The v1 implementation should reject, with clear errors:
   aggregate slice, `CASE` in mutation assignments, arbitrary list/map
   expressions beyond the restricted projection forms, cross-variable
   expressions, or general computed expression evaluation;
-- `WHERE` forms using `OR`, nested `NOT`, pattern predicates, list predicates,
-  functions, arbitrary expressions, or cross-variable property comparisons;
+- `WHERE` forms using general `OR`, nested `NOT`, pattern predicates, list
+  predicates, functions, arbitrary expressions, or cross-variable property
+  comparisons;
 - trailing node creation in row-producing `MATCH ... CREATE`, relationship
   IDs on multi-row row-producing `CREATE` / `MERGE`, and general path-style
   binding for row-producing writes;
@@ -4534,3 +4537,44 @@ mutating `WHERE` membership checks, lowers one leading `NOT` to `NotIn`, and
 emits Sail SQL as an `OR` of existing equality predicates. Memory execution
 uses the same `GraphPropertyPredicate` evaluator, so only present scalar
 properties participate and missing properties remain non-matching.
+
+### Batch DG: Same-Property Equality `OR` Predicates
+
+Extend the bounded mutating `MATCH ... WHERE` grammar to accept the smallest
+useful `OR` form without introducing a general boolean-expression tree:
+
+```cypher
+MATCH (n:Person)
+WHERE n.status = 'active' OR n.status = 'pending'
+SET n.reviewed = true;
+```
+
+Acceptance criteria:
+
+- Support top-level `OR` groups where every term is an equality predicate over
+  the same matched variable and property.
+- Allow literal and parameter equality values when each value is a scalar
+  string, integer, float, or boolean compatible with the existing restricted
+  membership predicate values.
+- Lower the whole `OR` group to a single backend-neutral
+  `GraphPredicateOp::In` predicate rather than adding a second predicate
+  combination model.
+- Allow the folded predicate anywhere an ordinary `AND` term can appear when
+  the `OR` group is parenthesized. Reject unparenthesized `OR` mixed with
+  `AND` to avoid implying different precedence than Cypher's boolean rules.
+- Preserve existing missing-property semantics through the folded `In`
+  operator: missing properties do not match.
+- Continue rejecting mixed-property `OR`, mixed-variable `OR`, non-equality
+  `OR`, null values, nested `NOT`, pattern predicates, function calls,
+  arbitrary expressions, unparenthesized mixed `OR`/`AND`, and general
+  boolean-expression combinations.
+- Add planner tests proving the fold, rejection tests for deferred `OR` forms,
+  and Memory-facade execution coverage.
+
+Implementation status: implemented in the working tree after Batch DF.
+`grust-sail` now splits each top-level `AND` term on top-level `OR`, requires
+`OR` groups to be parenthesized when they are combined with `AND`, parses the
+terms through the existing restricted predicate parser, and accepts only
+same-target, same-key equality predicates. Accepted `OR` groups lower to the
+existing `GraphPredicateOp::In` operator, so Sail SQL lowering and Memory
+execution reuse the membership predicate path.

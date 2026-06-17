@@ -1,6 +1,6 @@
 # Restart Checkpoint
 
-Generated: 2026-06-17 04:22:21 PDT
+Generated: 2026-06-17 04:25:24 PDT
 
 ## Current Goal
 
@@ -25,37 +25,36 @@ Continue implementing bounded writable Cypher features from
 - Branch: `codex/cypher-write`
 - Remote tracking branch: `origin/codex/cypher-write`
 - Expected untracked file: `OPUS1.md`
-- Latest completed slice before this checkpoint: Batch DF, restricted `IN`
-  predicates in mutating `MATCH ... WHERE`.
+- Latest completed slice before this checkpoint: Batch DG, restricted
+  same-property equality `OR` predicates in mutating `MATCH ... WHERE`.
 
 ## Latest Completed Work
 
-Batch DF added restricted membership predicates to bounded mutating Cypher
+Batch DG added restricted same-property equality `OR` predicates to bounded
+mutating Cypher
 `MATCH ... WHERE`:
 
 ```cypher
 MATCH (n:Person)
-WHERE n.team IN ['eng', 'data'] AND NOT n.status IN ['blocked']
+WHERE n.status = 'active' OR n.status = 'pending'
 SET n.reviewed = true;
 ```
 
 Implemented behavior:
 
-- `grust-core` exposes explicit `GraphPredicateOp::In` and
-  `GraphPredicateOp::NotIn` operators.
-- `grust-sail` parses `variable.property IN [literal_or_parameter, ...]` and
-  `variable.property IN $parameter` for node, relationship, and endpoint
-  variables.
-- List-valued parameters accept `StringArray`, `IntArray`, `FloatArray`, or
-  JSON arrays of scalar string, integer, float, or boolean values.
-- List literal items are restricted to scalar string, integer, float, or
-  boolean literals/parameters; nulls, maps, nested lists, arbitrary expressions,
-  property references, and cross-variable expressions remain deferred.
-- One leading `NOT` lowers membership to `NotIn`.
-- Missing properties never match either positive or negated membership
-  predicates.
-- Sail SQL lowering reuses existing type-aware equality conditions, and Memory
-  execution uses the backend-neutral `GraphPropertyPredicate` path.
+- `grust-sail` splits each top-level `AND` term on top-level `OR`.
+- Accepted `OR` groups must consist only of equality predicates over the same
+  matched variable and property.
+- Literal and parameter equality values are accepted only when they are scalar
+  string, integer, float, or boolean values compatible with restricted
+  membership predicates.
+- Accepted groups fold to one backend-neutral `GraphPredicateOp::In`
+  predicate, reusing Sail SQL membership lowering and Memory execution.
+- Mixed-property, mixed-variable, non-equality, null-valued, nested-`NOT`,
+  function, pattern, arbitrary-expression, and general boolean-expression `OR`
+  forms remain deferred and rejected.
+- Missing properties keep the existing folded-membership behavior and do not
+  match.
 
 Files updated:
 
@@ -70,7 +69,7 @@ Files updated:
 
 ## Verification State
 
-The following commands passed after Batch DF:
+The following commands passed after Batch DG:
 
 ```sh
 cargo fmt --all
@@ -84,7 +83,7 @@ git diff --check
 
 Observed test summaries:
 
-- `cargo test -p grust-sail --lib`: 185 passed, 25 ignored
+- `cargo test -p grust-sail --lib`: 187 passed, 25 ignored
 - `cargo test -p grust-core --lib`: 35 passed
 - `cargo test -p grust-memory --lib`: 20 passed
 
@@ -109,8 +108,9 @@ Keep the next slice small and continue preserving these invariants:
 
 Potential next bounded slices:
 
-- Extend mutating `WHERE` with a tiny, explicit `OR` representation if the core
-  predicate model grows disjunction support.
+- Extend mutating `WHERE` with another restricted boolean-expression slice only
+  if it can still lower through backend-neutral predicates without adding an
+  arbitrary expression engine.
 - Add another restricted writable `RETURN` helper from the remaining batches in
   `docs/CypherWrite.md`.
 

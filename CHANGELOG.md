@@ -185,6 +185,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   predicate support, including list-valued parameters and one leading `NOT`,
   lowering membership checks through backend-neutral `GraphPropertyPredicate`
   operators.
+- Added restricted mutating `MATCH ... WHERE` support for same-property
+  equality `OR` groups by folding them into backend-neutral membership
+  predicates while keeping general boolean expression trees deferred.
 - Added restricted writable Cypher `left(variable.property, length)` and
   `right(variable.property, length)` projections and aggregate bodies with
   literal or parameter integer lengths.

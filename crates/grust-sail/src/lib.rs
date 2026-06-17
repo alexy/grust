@@ -2618,9 +2618,14 @@ fn split_match_where<'a>(
             "MATCH WHERE requires both a pattern and predicate".to_string(),
         ));
     }
-    let predicates = split_top_level_and(where_clause)?
+    let predicate_terms = split_top_level_and(where_clause)?;
+    let has_multiple_and_terms = predicate_terms.len() > 1;
+    let predicates = predicate_terms
         .into_iter()
-        .map(|predicate| parse_where_predicate(predicate, parameters))
+        .map(|predicate| validate_or_precedence(predicate, has_multiple_and_terms))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .map(|predicate| parse_where_predicate_or_fold(predicate, parameters))
         .collect::<Result<Vec<_>>>()?;
     Ok((match_pattern, predicates))
 }
@@ -2644,12 +2649,106 @@ fn split_top_level_and(value: &str) -> Result<Vec<&str>> {
     for part in parts {
         let stripped = strip_enclosing_parentheses(part)?;
         if stripped != part.trim() {
-            flattened.extend(split_top_level_and(stripped)?);
+            if find_top_level_keyword(stripped, "AND")?.is_some() {
+                flattened.extend(split_top_level_and(stripped)?);
+            } else {
+                flattened.push(part);
+            }
         } else {
             flattened.push(part);
         }
     }
     Ok(flattened)
+}
+
+fn validate_or_precedence(predicate: &str, has_multiple_and_terms: bool) -> Result<&str> {
+    if !has_multiple_and_terms {
+        return Ok(predicate);
+    }
+    if find_top_level_keyword(predicate, "OR")?.is_none() {
+        return Ok(predicate);
+    }
+    let stripped = strip_enclosing_parentheses(predicate)?;
+    if stripped == predicate.trim() {
+        return Err(cypher_syntax(
+            "MATCH WHERE OR groups combined with AND must be parenthesized",
+        ));
+    }
+    Ok(predicate)
+}
+
+fn split_top_level_or(value: &str) -> Result<Vec<&str>> {
+    let mut parts = Vec::new();
+    let mut rest = value.trim();
+    while let Some(index) = find_top_level_keyword(rest, "OR")? {
+        let part = rest[..index].trim();
+        if part.is_empty() {
+            return Err(cypher_syntax("empty predicate before OR".to_string()));
+        }
+        parts.push(part);
+        rest = rest[index + "OR".len()..].trim();
+    }
+    if rest.is_empty() {
+        return Err(cypher_syntax("empty predicate after OR".to_string()));
+    }
+    parts.push(rest);
+    let mut flattened = Vec::new();
+    for part in parts {
+        let stripped = strip_enclosing_parentheses(part)?;
+        if stripped != part.trim() {
+            flattened.extend(split_top_level_or(stripped)?);
+        } else {
+            flattened.push(part);
+        }
+    }
+    Ok(flattened)
+}
+
+fn parse_where_predicate_or_fold(
+    predicate: &str,
+    parameters: &CypherParameters,
+) -> Result<ParsedWherePredicate> {
+    let terms = split_top_level_or(predicate)?;
+    if terms.len() == 1 {
+        return parse_where_predicate(predicate, parameters);
+    }
+
+    let mut parsed = terms
+        .into_iter()
+        .map(|term| parse_where_predicate(term, parameters))
+        .collect::<Result<Vec<_>>>()?;
+    let first = parsed
+        .first()
+        .ok_or_else(|| cypher_syntax("MATCH WHERE OR requires at least one predicate"))?;
+    if first.predicate.op != GraphPredicateOp::Equal {
+        return Err(cypher_syntax(
+            "MATCH WHERE OR only supports same-property equality disjunctions",
+        ));
+    }
+    let target = first.target.clone();
+    let key = first.predicate.key.clone();
+    let mut values = Vec::with_capacity(parsed.len());
+    for predicate in parsed.drain(..) {
+        if predicate.target != target
+            || predicate.predicate.key != key
+            || predicate.predicate.op != GraphPredicateOp::Equal
+        {
+            return Err(cypher_syntax(
+                "MATCH WHERE OR only supports same-property equality disjunctions",
+            ));
+        }
+        validate_cypher_in_item(&predicate.predicate.value)?;
+        values.push(predicate.predicate.value.to_json());
+    }
+
+    Ok(ParsedWherePredicate {
+        target,
+        predicate: GraphPropertyPredicate {
+            key,
+            op: GraphPredicateOp::In,
+            value: Value::Json(serde_json::Value::Array(values)),
+        },
+    })
 }
 
 fn parse_where_predicate(
