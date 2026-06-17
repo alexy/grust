@@ -39,11 +39,11 @@ grust-memory = { version = "0.9.0", path = "../grust-memory", optional = true }
 grust-pggraph = { version = "0.9.0", path = "../grust-pggraph", optional = true }
 grust-sail = { version = "0.9.0", path = "../grust-sail", optional = true }
 grust-surreal = { version = "0.9.0", path = "../grust-surreal", optional = true }
+serde_json.workspace = true
 
 [dev-dependencies]
 garde = { workspace = true, features = ["derive"] }
 serde.workspace = true
-serde_json.workspace = true
 zod-rs.workspace = true
 
 [[example]]

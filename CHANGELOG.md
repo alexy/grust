@@ -6,6 +6,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added a LakeCat catalog graph adapter in the `grust-graph` facade that
+  converts LakeCat `nodes`/`edges` envelopes into validated Grust graphs.
 - Added `CypherConstraintRegistry`, `NamedGraphConstraint`, and
   `CypherDdlApplicationReport` for applying parsed Cypher constraint DDL to
   named schema metadata before projecting the resulting `GraphConstraint`
