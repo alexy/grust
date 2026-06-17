@@ -2956,6 +2956,10 @@ enum CypherReturnTarget {
         key: String,
         cast: CypherReturnNumericCast,
     },
+    PropertyListCast {
+        key: String,
+        cast: CypherReturnListCast,
+    },
     PropertyToBoolean(String),
     PropertyToString(String),
     PropertyStringTransform {
@@ -3020,6 +3024,14 @@ enum CypherReturnNumericRound {
 enum CypherReturnNumericCast {
     Integer,
     Float,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CypherReturnListCast {
+    String,
+    Integer,
+    Float,
+    Boolean,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3290,6 +3302,8 @@ fn parse_cypher_return_clause(
                 variable,
                 CypherReturnTarget::PropertyNumericCast { key, cast },
             )
+        } else if let Some((variable, key, cast)) = parse_return_list_cast_projection(expression)? {
+            (variable, CypherReturnTarget::PropertyListCast { key, cast })
         } else if let Some((variable, key)) = parse_return_to_boolean_projection(expression)? {
             (variable, CypherReturnTarget::PropertyToBoolean(key))
         } else if let Some((variable, key)) = parse_return_to_string_projection(expression)? {
@@ -3699,6 +3713,14 @@ fn parse_aggregate_projection(
             aggregate,
             Some(variable),
             CypherReturnTarget::PropertyNumericCast { key, cast },
+            distinct,
+        )));
+    }
+    if let Some((variable, key, cast)) = parse_return_list_cast_projection(body)? {
+        return Ok(Some((
+            aggregate,
+            Some(variable),
+            CypherReturnTarget::PropertyListCast { key, cast },
             distinct,
         )));
     }
@@ -4508,6 +4530,43 @@ fn parse_return_numeric_cast_projection(
         .map_err(|_| {
             cypher_unsupported_cardinality(
                 "writable Cypher RETURN toInteger/toFloat only supports variable.property arguments",
+            )
+        })
+}
+
+fn parse_return_list_cast_projection(
+    expression: &str,
+) -> Result<Option<(String, String, CypherReturnListCast)>> {
+    let expression = expression.trim();
+    let Some(open) = expression.find('(') else {
+        return Ok(None);
+    };
+    let cast = match expression[..open].trim().to_ascii_lowercase().as_str() {
+        "tostringlist" => CypherReturnListCast::String,
+        "tointegerlist" => CypherReturnListCast::Integer,
+        "tofloatlist" => CypherReturnListCast::Float,
+        "tobooleanlist" => CypherReturnListCast::Boolean,
+        _ => return Ok(None),
+    };
+    if !expression.ends_with(')') {
+        return Err(cypher_syntax("RETURN list cast projection is missing ')'"));
+    }
+    let body = expression[open + 1..expression.len() - 1].trim();
+    if body.is_empty() {
+        return Err(cypher_syntax(
+            "RETURN list cast projection requires a property reference",
+        ));
+    }
+    if body.contains('(') || body.contains(')') {
+        return Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN list casts only support variable.property arguments",
+        ));
+    }
+    parse_property_ref(body, "RETURN list cast projection")
+        .map(|(variable, key)| Some((variable, key, cast)))
+        .map_err(|_| {
+            cypher_unsupported_cardinality(
+                "writable Cypher RETURN list casts only support variable.property arguments",
             )
         })
 }
@@ -6376,6 +6435,23 @@ where
             )
             .await
         }
+        CypherReturnTarget::PropertyListCast { key, cast } => {
+            materialize_return_property_list_cast_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *cast,
+                row_index,
+            )
+            .await
+        }
         CypherReturnTarget::PropertyToBoolean(key) => {
             materialize_return_property_to_boolean_value_at(
                 store,
@@ -6911,6 +6987,24 @@ where
         }
         CypherReturnTarget::PropertyNumericCast { key, cast } => {
             let value = materialize_return_property_numeric_cast_value_at(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                key,
+                *cast,
+                row_index,
+            )
+            .await?;
+            Ok(non_null_return_value(value).into_iter().collect())
+        }
+        CypherReturnTarget::PropertyListCast { key, cast } => {
+            let value = materialize_return_property_list_cast_value_at(
                 store,
                 node_bindings,
                 edge_bindings,
@@ -8413,6 +8507,204 @@ fn restricted_numeric_cast_value(value: Value, cast: CypherReturnNumericCast) ->
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn materialize_return_property_list_cast_value_at<S>(
+    store: &S,
+    node_bindings: &HashMap<String, NodeId>,
+    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
+    row_node_values: &HashMap<String, Vec<Node>>,
+    row_edge_values: &HashMap<String, Vec<Edge>>,
+    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    nodes: &mut HashMap<String, Node>,
+    edges: &mut HashMap<String, Edge>,
+    projection: &CypherReturnProjection,
+    key: &str,
+    cast: CypherReturnListCast,
+    row_index: usize,
+) -> Result<Value>
+where
+    S: GraphStore + Sync,
+{
+    let value = materialize_return_property_value_at(
+        store,
+        node_bindings,
+        edge_bindings,
+        row_node_values,
+        row_edge_values,
+        row_path_bindings,
+        nodes,
+        edges,
+        projection,
+        key,
+        row_index,
+    )
+    .await?;
+    restricted_list_cast_value(value, cast)
+}
+
+fn restricted_list_cast_value(value: Value, cast: CypherReturnListCast) -> Result<Value> {
+    match value {
+        Value::Null => Ok(Value::Null),
+        Value::StringArray(values) => restricted_string_array_cast_value(values, cast),
+        Value::IntArray(values) => restricted_int_array_cast_value(values, cast),
+        Value::FloatArray(values) => restricted_float_array_cast_value(values, cast),
+        Value::Json(serde_json::Value::Array(values)) => {
+            let values = values.into_iter().map(Value::from_json).collect::<Vec<_>>();
+            restricted_json_array_cast_value(values, cast)
+        }
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::String(_)
+        | Value::DateTime(_)
+        | Value::Json(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN list casts only support array values",
+        )),
+    }
+}
+
+fn restricted_string_array_cast_value(
+    values: Vec<String>,
+    cast: CypherReturnListCast,
+) -> Result<Value> {
+    match cast {
+        CypherReturnListCast::String => Ok(Value::StringArray(values)),
+        CypherReturnListCast::Integer => values
+            .into_iter()
+            .map(|value| parse_integer_string_value(&value).and_then(expect_int_value))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::IntArray),
+        CypherReturnListCast::Float => values
+            .into_iter()
+            .map(|value| parse_float_string_value(&value).and_then(expect_float_value))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::FloatArray),
+        CypherReturnListCast::Boolean => values
+            .into_iter()
+            .map(|value| parse_boolean_string_value(&value).and_then(expect_bool_value))
+            .collect::<Result<Vec<_>>>()
+            .map(|values| Value::Json(serde_json::Value::Array(values))),
+    }
+}
+
+fn restricted_int_array_cast_value(values: Vec<i64>, cast: CypherReturnListCast) -> Result<Value> {
+    match cast {
+        CypherReturnListCast::String => Ok(Value::StringArray(
+            values.into_iter().map(|value| value.to_string()).collect(),
+        )),
+        CypherReturnListCast::Integer => Ok(Value::IntArray(values)),
+        CypherReturnListCast::Float => Ok(Value::FloatArray(
+            values.into_iter().map(|value| value as f64).collect(),
+        )),
+        CypherReturnListCast::Boolean => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toBooleanList only supports boolean or boolean-string array values",
+        )),
+    }
+}
+
+fn restricted_float_array_cast_value(
+    values: Vec<f64>,
+    cast: CypherReturnListCast,
+) -> Result<Value> {
+    match cast {
+        CypherReturnListCast::String => Ok(Value::StringArray(
+            values.into_iter().map(|value| value.to_string()).collect(),
+        )),
+        CypherReturnListCast::Integer => values
+            .into_iter()
+            .map(|value| float_to_integer_value(value).and_then(expect_int_value))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::IntArray),
+        CypherReturnListCast::Float => {
+            if values.iter().any(|value| !value.is_finite()) {
+                return Err(cypher_unsupported_cardinality(
+                    "writable Cypher RETURN toFloatList only supports finite numeric values",
+                ));
+            }
+            Ok(Value::FloatArray(values))
+        }
+        CypherReturnListCast::Boolean => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toBooleanList only supports boolean or boolean-string array values",
+        )),
+    }
+}
+
+fn restricted_json_array_cast_value(
+    values: Vec<Value>,
+    cast: CypherReturnListCast,
+) -> Result<Value> {
+    match cast {
+        CypherReturnListCast::String => values
+            .into_iter()
+            .map(|value| restricted_to_string_value(value).and_then(expect_string_value))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::StringArray),
+        CypherReturnListCast::Integer => values
+            .into_iter()
+            .map(|value| restricted_to_integer_value(value).and_then(expect_int_value))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::IntArray),
+        CypherReturnListCast::Float => values
+            .into_iter()
+            .map(|value| restricted_to_float_value(value).and_then(expect_float_value))
+            .collect::<Result<Vec<_>>>()
+            .map(Value::FloatArray),
+        CypherReturnListCast::Boolean => values
+            .into_iter()
+            .map(|value| restricted_to_boolean_value(value).and_then(expect_bool_value))
+            .collect::<Result<Vec<_>>>()
+            .map(|values| Value::Json(serde_json::Value::Array(values))),
+    }
+}
+
+fn expect_string_value(value: Value) -> Result<String> {
+    match value {
+        Value::String(value) => Ok(value),
+        Value::Null => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toStringList does not support null array elements",
+        )),
+        _ => Err(GrustError::CypherExecution(
+            "RETURN toStringList produced a non-string value".to_string(),
+        )),
+    }
+}
+
+fn expect_int_value(value: Value) -> Result<i64> {
+    match value {
+        Value::Int(value) => Ok(value),
+        Value::Null => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toIntegerList does not support null array elements",
+        )),
+        _ => Err(GrustError::CypherExecution(
+            "RETURN toIntegerList produced a non-integer value".to_string(),
+        )),
+    }
+}
+
+fn expect_float_value(value: Value) -> Result<f64> {
+    match value {
+        Value::Float(value) => Ok(value),
+        Value::Null => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toFloatList does not support null array elements",
+        )),
+        _ => Err(GrustError::CypherExecution(
+            "RETURN toFloatList produced a non-float value".to_string(),
+        )),
+    }
+}
+
+fn expect_bool_value(value: Value) -> Result<serde_json::Value> {
+    match value {
+        Value::Bool(value) => Ok(serde_json::Value::Bool(value)),
+        Value::Null => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN toBooleanList does not support null array elements",
+        )),
+        _ => Err(GrustError::CypherExecution(
+            "RETURN toBooleanList produced a non-boolean value".to_string(),
+        )),
+    }
+}
+
 fn restricted_to_integer_value(value: Value) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
@@ -9753,6 +10045,7 @@ where
             | CypherReturnTarget::PropertyNumericRound { .. }
             | CypherReturnTarget::PropertyNumericSign(_)
             | CypherReturnTarget::PropertyNumericCast { .. }
+            | CypherReturnTarget::PropertyListCast { .. }
             | CypherReturnTarget::PropertyToBoolean(_)
             | CypherReturnTarget::PropertyToString(_)
             | CypherReturnTarget::PropertyStringTransform { .. }
@@ -10205,6 +10498,21 @@ where
             .await?
         }
         CypherReturnTarget::PropertyNumericCast { .. } => {
+            materialize_return_projection_values(
+                store,
+                node_bindings,
+                edge_bindings,
+                row_node_values,
+                row_edge_values,
+                row_path_bindings,
+                nodes,
+                edges,
+                projection,
+                row_count,
+            )
+            .await?
+        }
+        CypherReturnTarget::PropertyListCast { .. } => {
             materialize_return_projection_values(
                 store,
                 node_bindings,

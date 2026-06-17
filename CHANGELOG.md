@@ -148,6 +148,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added restricted writable Cypher `any` / `all` / `none` / `single` list
   predicate projections and aggregate bodies over array-like property values
   with equality predicates against literal or parameter values.
+- Added restricted writable Cypher `toStringList`, `toIntegerList`,
+  `toFloatList`, and `toBooleanList` projections and aggregate bodies over
+  array-like property values.
 - Added restricted writable Cypher `head(variable.property)` and
   `last(variable.property)` projections and aggregate bodies over array-like
   property values.

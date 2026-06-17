@@ -4155,3 +4155,56 @@ value)` now parses into a dedicated restricted projection target. Evaluation
 reuses the existing property materializer and performs type-aware predicate
 checks only over typed arrays or JSON arrays, preserving the same bounded
 behavior as list membership.
+
+### Batch CX: Restricted List Conversion Projections
+
+Support bounded list type conversions over array-like property values already
+available in the writable result table:
+
+```cypher
+MATCH (n:Person {status: 'active'})
+SET n.seen = true
+RETURN toStringList(n.scores) AS score_strings;
+```
+
+Acceptance criteria:
+
+- Support `toStringList(variable.property)`,
+  `toIntegerList(variable.property)`, `toFloatList(variable.property)`, and
+  `toBooleanList(variable.property)` as scalar writable `RETURN` projections
+  when the variable is a concrete node, concrete relationship, materialized
+  row-node, or materialized row-relationship variable.
+- Reuse the existing scalar conversion semantics per element:
+  `toIntegerList` accepts integer values, finite floats by truncation, and
+  integer strings; `toFloatList` accepts numeric values and numeric strings;
+  `toBooleanList` accepts boolean values and `true` / `false` strings;
+  `toStringList` accepts scalar string, boolean, numeric, and datetime values.
+- Return Grust typed arrays for string, integer, and float list conversions.
+  Return a JSON boolean array for `toBooleanList` because Grust does not have a
+  dedicated boolean-array `Value` variant.
+- Convert typed Grust arrays directly when each element can be converted.
+  Convert JSON arrays by converting each element through `Value::from_json`
+  and then applying the same scalar conversion rules.
+- Return `null` when the property is absent or explicitly null.
+- Reject JSON arrays with null, object, or nested-array elements rather than
+  inventing nullable or nested typed-array semantics in this restricted batch.
+- Reject scalar values, datetimes as the outer input, JSON objects,
+  whole-element values, paths, nested functions, cross-variable expressions,
+  and other unsupported inputs rather than adding general list-expression
+  semantics.
+- Support aggregate bodies over the same restricted form through the existing
+  materialized write-result table: `COUNT`, `COUNT(DISTINCT ...)`, `MIN`,
+  `MAX`, and `COLLECT`. Numeric aggregates over converted list values should
+  fail through the existing type-aware aggregate checks.
+- Preserve grouping, `RETURN DISTINCT`, `ORDER BY`, `SKIP`/`OFFSET`, and
+  `LIMIT` behavior through the existing restricted return-table machinery.
+- Keep list conversions property-only; list literals, list comprehensions,
+  nested conversions, nullable list element preservation, and arbitrary
+  expression evaluation remain deferred.
+
+Implementation status: implemented in the working tree after Batch CW.
+Writable `RETURN toStringList/toIntegerList/toFloatList/toBooleanList(variable.property)`
+now parses into a dedicated restricted projection target. Evaluation reuses
+the existing property materializer and scalar conversion helpers over typed
+arrays or JSON arrays, preserving the same bounded behavior as the other
+restricted list projections.

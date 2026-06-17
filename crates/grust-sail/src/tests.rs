@@ -6832,6 +6832,172 @@ fn sail_cypher_returning_projects_restricted_boolean_cast_on_memory_facade() {
 }
 
 #[test]
+fn sail_cypher_returning_projects_restricted_list_casts_on_memory_facade() {
+    let store = MemoryGraphStore::new();
+
+    let concrete =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (a:Person {
+                id: 'list-cast-ada',
+                scores: $scores,
+                text_scores: $text_scores,
+                ratios: $ratios,
+                flags: $flags,
+                json_numbers: $json_numbers
+            });
+            CREATE (b:Person {id: 'list-cast-bob'});
+            MATCH (a:Person {id: 'list-cast-ada'}), (b:Person {id: 'list-cast-bob'})
+            CREATE (a)-[e:KNOWS {id: 'list-cast-knows', ranks: $ranks}]->(b)
+            RETURN toStringList(a.scores) AS score_strings,
+                   toIntegerList(a.text_scores) AS score_ints,
+                   toFloatList(a.ratios) AS ratio_floats,
+                   toBooleanList(a.flags) AS flag_bools,
+                   toIntegerList(a.json_numbers) AS json_ints,
+                   toIntegerList(e.ranks) AS edge_ranks,
+                   toStringList(a.nickname) AS missing_name;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    ("scores".to_string(), Value::IntArray(vec![7, 11])),
+                    (
+                        "text_scores".to_string(),
+                        Value::StringArray(vec!["3".to_string(), "5".to_string()]),
+                    ),
+                    ("ratios".to_string(), Value::FloatArray(vec![2.5, 4.0])),
+                    (
+                        "flags".to_string(),
+                        Value::StringArray(vec!["true".to_string(), "FALSE".to_string()]),
+                    ),
+                    (
+                        "json_numbers".to_string(),
+                        Value::Json(serde_json::json!(["8", 13])),
+                    ),
+                    (
+                        "ranks".to_string(),
+                        Value::StringArray(vec!["1".to_string(), "2".to_string()]),
+                    ),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("concrete list cast projections");
+    assert_eq!(
+        concrete.table.rows,
+        vec![vec![
+            Value::StringArray(vec!["7".to_string(), "11".to_string()]),
+            Value::IntArray(vec![3, 5]),
+            Value::FloatArray(vec![2.5, 4.0]),
+            Value::Json(serde_json::json!([true, false])),
+            Value::IntArray(vec![8, 13]),
+            Value::IntArray(vec![1, 2]),
+            Value::Null,
+        ]]
+    );
+
+    let broad =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            CREATE (:Person {id: 'list-cast-cara', status: 'list-cast', scores: $scores_a});
+            CREATE (:Person {id: 'list-cast-dan', status: 'list-cast', scores: $scores_b});
+            MATCH (n:Person {status: 'list-cast'}) SET n.cast_seen = true
+            RETURN n.id AS id, toFloatList(n.scores) AS scores
+            ORDER BY id;
+            ",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([
+                    ("scores_a".to_string(), Value::IntArray(vec![3, 5])),
+                    ("scores_b".to_string(), Value::IntArray(vec![7, 9])),
+                ]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect("broad list cast projections");
+    assert_eq!(
+        broad.table.rows,
+        vec![
+            vec![
+                Value::from("list-cast-cara"),
+                Value::FloatArray(vec![3.0, 5.0]),
+            ],
+            vec![
+                Value::from("list-cast-dan"),
+                Value::FloatArray(vec![7.0, 9.0]),
+            ],
+        ]
+    );
+
+    let aggregates =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "
+            MATCH (n:Person {status: 'list-cast'}) SET n.cast_counted = true
+            RETURN count(toStringList(n.scores)) AS rows,
+                   collect(toStringList(n.scores)) AS scores;
+            ",
+            CypherMutationOptions::default(),
+        ))
+        .expect("list cast aggregate projections");
+    assert_eq!(
+        aggregates.table.rows,
+        vec![vec![
+            Value::Int(2),
+            Value::Json(serde_json::json!([["3", "5"], ["7", "9"]])),
+        ]]
+    );
+
+    let scalar_cast =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'list-cast-scalar', score: 3}) RETURN toStringList(n.score);",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("list casts over scalar values should stay rejected");
+    assert!(
+        matches!(scalar_cast, GrustError::CypherUnsupportedCardinality(_)),
+        "{scalar_cast:?}"
+    );
+
+    let invalid_element =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'list-cast-invalid', scores: $scores}) RETURN toIntegerList(n.scores);",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "scores".to_string(),
+                    Value::StringArray(vec!["3.5".to_string()]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("invalid list cast elements should stay rejected");
+    assert!(
+        matches!(invalid_element, GrustError::CypherUnsupportedCardinality(_)),
+        "{invalid_element:?}"
+    );
+
+    let nested_cast =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "CREATE (n:Person {id: 'list-cast-nested', tags: $tags}) RETURN toStringList(tail(n.tags));",
+            CypherMutationOptions {
+                parameters: CypherParameters::from([(
+                    "tags".to_string(),
+                    Value::StringArray(vec!["a".to_string(), "b".to_string()]),
+                )]),
+                ..CypherMutationOptions::default()
+            },
+        ))
+        .expect_err("nested list cast arguments should stay rejected");
+    assert!(
+        matches!(nested_cast, GrustError::CypherUnsupportedCardinality(_)),
+        "{nested_cast:?}"
+    );
+}
+
+#[test]
 fn sail_cypher_returning_projects_restricted_string_transforms_on_memory_facade() {
     let store = MemoryGraphStore::new();
 
