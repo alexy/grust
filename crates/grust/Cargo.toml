@@ -16,6 +16,7 @@ name = "grust"
 [features]
 default = []
 cocoindex = ["dep:grust-cocoindex"]
+cypher = ["dep:grust-cypher"]
 falkor = ["dep:grust-falkor"]
 helix = ["dep:grust-helix"]
 issundb = ["dep:grust-issundb"]
@@ -47,7 +48,6 @@ serde_json.workspace = true
 [dev-dependencies]
 garde = { workspace = true, features = ["derive"] }
 serde.workspace = true
-serde_json.workspace = true
 zod-rs.workspace = true
 
 [[example]]

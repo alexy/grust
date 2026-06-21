@@ -17,6 +17,14 @@ pub enum GrustError {
     Schema(String),
     #[error("unsupported graph feature: {0}")]
     Unsupported(String),
+    #[error("Cypher syntax error: {0}")]
+    CypherSyntax(String),
+    #[error("Cypher unresolved identity: {0}")]
+    CypherUnresolvedIdentity(String),
+    #[error("Cypher unsupported cardinality: {0}")]
+    CypherUnsupportedCardinality(String),
+    #[error("Cypher execution error: {0}")]
+    CypherExecution(String),
     #[error("serialization error: {0}")]
     Serialization(String),
 }
@@ -1570,6 +1578,7 @@ impl<'a> EdgeBuilder<'a> {
 pub struct GraphSchema {
     pub nodes: Vec<NodeType>,
     pub edges: Vec<EdgeType>,
+    pub constraints: Vec<GraphConstraint>,
 }
 
 impl GraphSchema {
@@ -1589,6 +1598,13 @@ impl GraphSchema {
             .find(|edge_type| &edge_type.label == label)
     }
 
+    pub fn constraints_for_label(&self, label: &Label) -> Vec<&GraphConstraint> {
+        self.constraints
+            .iter()
+            .filter(|constraint| constraint.label() == label)
+            .collect()
+    }
+
     pub fn validate_graph(&self, graph: &Graph) -> Result<()> {
         for node in &graph.nodes {
             self.validate_node(node)?;
@@ -1601,7 +1617,8 @@ impl GraphSchema {
         for edge in &graph.edges {
             self.validate_edge_with(edge, |id| labels.get(id).copied())?;
         }
-        self.validate_edge_uniqueness(graph)
+        self.validate_edge_uniqueness(graph)?;
+        self.validate_unique_property_constraints(graph)
     }
 
     /// Enforces each edge type's [`EdgeUniqueness`]: at most one edge of the
@@ -1633,6 +1650,55 @@ impl GraphSchema {
         Ok(())
     }
 
+    fn validate_unique_property_constraints(&self, graph: &Graph) -> Result<()> {
+        for constraint in &self.constraints {
+            match constraint {
+                GraphConstraint::NodePropertyUnique { label, key } => {
+                    let mut seen: Vec<(&NodeId, &Value)> = Vec::new();
+                    for node in graph.nodes.iter().filter(|node| &node.label == label) {
+                        let Some(value) = node.props.get(key) else {
+                            continue;
+                        };
+                        if let Some((existing_id, _)) =
+                            seen.iter().find(|(_, existing)| *existing == value)
+                        {
+                            return Err(GrustError::Schema(format!(
+                                "node '{}' with label '{}' duplicates unique constrained property '{}' from node '{}'",
+                                node.id.as_str(),
+                                label.as_str(),
+                                key,
+                                existing_id.as_str()
+                            )));
+                        }
+                        seen.push((&node.id, value));
+                    }
+                }
+                GraphConstraint::EdgePropertyUnique { label, key } => {
+                    let mut seen: Vec<(String, &Value)> = Vec::new();
+                    for edge in graph.edges.iter().filter(|edge| &edge.label == label) {
+                        let Some(value) = edge.props.get(key) else {
+                            continue;
+                        };
+                        if let Some((existing_key, _)) =
+                            seen.iter().find(|(_, existing)| *existing == value)
+                        {
+                            return Err(GrustError::Schema(format!(
+                                "edge '{}' duplicates unique constrained property '{}' from edge '{}'",
+                                edge_key(edge),
+                                key,
+                                existing_key
+                            )));
+                        }
+                        seen.push((edge_key(edge), value));
+                    }
+                }
+                GraphConstraint::NodePropertyRequired { .. }
+                | GraphConstraint::EdgePropertyRequired { .. } => {}
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_node(&self, node: &Node) -> Result<()> {
         let node_type = self.node_type(&node.label).ok_or_else(|| {
             GrustError::Schema(format!("schema has no node type '{}'", node.label.as_str()))
@@ -1641,7 +1707,21 @@ impl GraphSchema {
             &node.props,
             &node_type.fields,
             &format!("node '{}'", node.id.as_str()),
-        )
+        )?;
+        for constraint in &self.constraints {
+            if let GraphConstraint::NodePropertyRequired { label, key } = constraint
+                && label == &node.label
+                && !node.props.contains_key(key)
+            {
+                return Err(GrustError::Schema(format!(
+                    "node '{}' with label '{}' is missing required constrained property '{}'",
+                    node.id.as_str(),
+                    node.label.as_str(),
+                    key
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn validate_edge(&self, edge: &Edge, graph: &Graph) -> Result<()> {
@@ -1706,7 +1786,8 @@ impl GraphSchema {
             &edge.props,
             &edge_type.fields,
             &format!("edge '{}'", edge.label.as_str()),
-        )
+        )?;
+        self.validate_edge_required_constraints(edge)
     }
 
     /// Validates an edge's label and props against the schema without
@@ -1720,7 +1801,26 @@ impl GraphSchema {
             &edge.props,
             &edge_type.fields,
             &format!("edge '{}'", edge.label.as_str()),
-        )
+        )?;
+        self.validate_edge_required_constraints(edge)
+    }
+
+    fn validate_edge_required_constraints(&self, edge: &Edge) -> Result<()> {
+        for constraint in &self.constraints {
+            if let GraphConstraint::EdgePropertyRequired { label, key } = constraint
+                && label == &edge.label
+                && !edge.props.contains_key(key)
+            {
+                return Err(GrustError::Schema(format!(
+                    "edge '{}' from '{}' to '{}' is missing required constrained property '{}'",
+                    edge.label.as_str(),
+                    edge.from.as_str(),
+                    edge.to.as_str(),
+                    key
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1738,6 +1838,75 @@ pub struct EdgeType {
     pub fields: Vec<Field>,
     pub directed: bool,
     pub uniqueness: EdgeUniqueness,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphConstraint {
+    NodePropertyUnique { label: Label, key: String },
+    NodePropertyRequired { label: Label, key: String },
+    EdgePropertyUnique { label: Label, key: String },
+    EdgePropertyRequired { label: Label, key: String },
+}
+
+impl GraphConstraint {
+    pub fn label(&self) -> &Label {
+        match self {
+            Self::NodePropertyUnique { label, .. }
+            | Self::NodePropertyRequired { label, .. }
+            | Self::EdgePropertyUnique { label, .. }
+            | Self::EdgePropertyRequired { label, .. } => label,
+        }
+    }
+
+    pub fn key(&self) -> &str {
+        match self {
+            Self::NodePropertyUnique { key, .. }
+            | Self::NodePropertyRequired { key, .. }
+            | Self::EdgePropertyUnique { key, .. }
+            | Self::EdgePropertyRequired { key, .. } => key,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphConstraintCapability {
+    #[default]
+    MetadataOnly,
+    ValidateBeforeWrite,
+    EnforcedByBackend,
+}
+
+/// Backend-native DDL support for a portable graph constraint.
+///
+/// This is intentionally separate from [`GraphConstraintCapability`].
+/// A backend may validate a constraint before writes without having native DDL,
+/// or it may create a query index that helps lookups but does not enforce the
+/// constraint. Callers that need database-enforced guarantees should require
+/// [`GraphNativeConstraintCapability::NativeConstraint`] and use
+/// [`GraphStore::apply_native_constraint`] explicitly.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphNativeConstraintCapability {
+    /// The backend has no native DDL mapping for this constraint.
+    #[default]
+    Unsupported,
+    /// The backend can create a native index that may improve related lookups
+    /// but does not enforce the constraint.
+    NativeIndex,
+    /// The backend can create a native constraint or equivalent database
+    /// object that enforces the portable constraint.
+    NativeConstraint,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GraphNativeConstraintRequest {
+    pub constraint: GraphConstraint,
+    pub if_not_exists: bool,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GraphNativeConstraintReport {
+    pub applied: usize,
+    pub skipped: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1778,6 +1947,7 @@ pub enum EdgeUniqueness {
 pub struct GraphSchemaBuilder {
     nodes: Vec<NodeType>,
     edges: Vec<EdgeType>,
+    constraints: Vec<GraphConstraint>,
 }
 
 impl GraphSchemaBuilder {
@@ -1812,10 +1982,44 @@ impl GraphSchemaBuilder {
         self
     }
 
+    pub fn constraint(mut self, constraint: GraphConstraint) -> Self {
+        self.constraints.push(constraint);
+        self
+    }
+
+    pub fn unique_node_property(self, label: impl Into<Label>, key: impl Into<String>) -> Self {
+        self.constraint(GraphConstraint::NodePropertyUnique {
+            label: label.into(),
+            key: key.into(),
+        })
+    }
+
+    pub fn required_node_property(self, label: impl Into<Label>, key: impl Into<String>) -> Self {
+        self.constraint(GraphConstraint::NodePropertyRequired {
+            label: label.into(),
+            key: key.into(),
+        })
+    }
+
+    pub fn unique_edge_property(self, label: impl Into<Label>, key: impl Into<String>) -> Self {
+        self.constraint(GraphConstraint::EdgePropertyUnique {
+            label: label.into(),
+            key: key.into(),
+        })
+    }
+
+    pub fn required_edge_property(self, label: impl Into<Label>, key: impl Into<String>) -> Self {
+        self.constraint(GraphConstraint::EdgePropertyRequired {
+            label: label.into(),
+            key: key.into(),
+        })
+    }
+
     pub fn build(self) -> GraphSchema {
         GraphSchema {
             nodes: self.nodes,
             edges: self.edges,
+            constraints: self.constraints,
         }
     }
 }
@@ -2038,6 +2242,56 @@ pub trait GraphStore: Send + Sync {
         Ok(())
     }
 
+    /// Reports how this backend treats a portable graph constraint.
+    ///
+    /// The default is metadata-only: the backend may remember or lower the
+    /// constraint as schema metadata, but callers should not assume runtime
+    /// enforcement. Backends that validate through [`GraphSchema`] before each
+    /// write can report [`GraphConstraintCapability::ValidateBeforeWrite`].
+    /// Backends with database-native guarantees can report
+    /// [`GraphConstraintCapability::EnforcedByBackend`].
+    fn constraint_capability(&self, _constraint: &GraphConstraint) -> GraphConstraintCapability {
+        GraphConstraintCapability::MetadataOnly
+    }
+
+    /// Reports whether this backend can turn a portable graph constraint into
+    /// backend-native DDL.
+    ///
+    /// This is an explicit opt-in surface. [`GraphStore::apply_schema`] remains
+    /// the portable schema/validation hook and must not be assumed to create
+    /// backend-native constraints. The default implementation reports no native
+    /// support.
+    fn native_constraint_capability(
+        &self,
+        _constraint: &GraphConstraint,
+    ) -> GraphNativeConstraintCapability {
+        GraphNativeConstraintCapability::Unsupported
+    }
+
+    /// Applies one backend-native constraint or index request.
+    ///
+    /// Backends should implement this only when they can describe the native
+    /// object they create and its enforcement behavior through
+    /// [`GraphNativeConstraintCapability`]. The default returns an explicit
+    /// unsupported error so callers cannot mistake metadata-only schema
+    /// application for native DDL.
+    async fn apply_native_constraint(
+        &self,
+        request: GraphNativeConstraintRequest,
+    ) -> Result<GraphNativeConstraintReport> {
+        match self.native_constraint_capability(&request.constraint) {
+            GraphNativeConstraintCapability::Unsupported => Err(GrustError::Unsupported(format!(
+                "backend-native DDL is not supported for graph constraint {:?}",
+                request.constraint
+            ))),
+            GraphNativeConstraintCapability::NativeIndex
+            | GraphNativeConstraintCapability::NativeConstraint => Err(GrustError::Unsupported(
+                "backend advertises native graph constraint support but does not implement apply_native_constraint"
+                    .to_string(),
+            )),
+        }
+    }
+
     /// Writes one node.
     ///
     /// The returned [`PutOutcome`] reports the most precise result the backend
@@ -2108,13 +2362,889 @@ pub trait GraphAdminStore: GraphStore {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GraphMutation {
     UpsertNode(Node),
+    PatchNode {
+        id: NodeId,
+        props: Props,
+    },
+    PatchMatchingNodes {
+        label: Option<Label>,
+        props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
+        patch: Props,
+    },
+    UpdateMatchingNodeProperty {
+        label: Option<Label>,
+        props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
+        target_key: String,
+        source_key: String,
+        op: GraphNumericOp,
+        operand: Value,
+    },
+    PatchEdge {
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+        id: Option<EdgeId>,
+        props: Props,
+    },
+    PatchMatchingEdges {
+        relationship: GraphRelationshipMatch,
+        patch: Props,
+    },
+    UpdateMatchingEdgeProperty {
+        relationship: GraphRelationshipMatch,
+        target_key: String,
+        source_key: String,
+        op: GraphNumericOp,
+        operand: Value,
+    },
+    RemoveNodeProps {
+        id: NodeId,
+        keys: Vec<String>,
+    },
+    RemoveMatchingNodeProps {
+        label: Option<Label>,
+        props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
+        keys: Vec<String>,
+    },
+    RemoveEdgeProps {
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+        id: Option<EdgeId>,
+        keys: Vec<String>,
+    },
+    RemoveMatchingEdgeProps {
+        relationship: GraphRelationshipMatch,
+        keys: Vec<String>,
+    },
+    DeleteMatchingNodes {
+        label: Option<Label>,
+        props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
+    },
     DeleteNode(NodeId),
     UpsertEdge(Edge),
+    UpsertEdgesFromNodeMatches {
+        kind: GraphMutationPlanKind,
+        from: GraphNodeMatch,
+        to: GraphNodeMatch,
+        label: Label,
+        props: Props,
+        edge_id_policy: GraphRowEdgeIdPolicy,
+    },
     DeleteEdge {
         from: NodeId,
         label: Label,
         to: NodeId,
     },
+    DeleteMatchingEdges {
+        relationship: GraphRelationshipMatch,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphMutationAtomicity {
+    OrderedNonAtomic,
+    Transactional,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphMutationPlanKind {
+    Create,
+    Merge,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphRowEdgeIdPolicy {
+    ExplicitOnly,
+    GenerateForCreate,
+    GenerateForCreateAndMerge,
+}
+
+impl Default for GraphRowEdgeIdPolicy {
+    fn default() -> Self {
+        Self::ExplicitOnly
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphMutationCardinality {
+    SingleIdentity,
+    BoundedMany,
+    UnboundedMany,
+}
+
+pub fn generated_row_edge_id(from: &NodeId, label: &Label, to: &NodeId, props: &Props) -> EdgeId {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    fn write_part(hash: &mut u64, value: &str) {
+        for byte in value.as_bytes() {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(FNV_PRIME);
+        }
+        *hash ^= 0xff;
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    let mut hash = FNV_OFFSET;
+    write_part(&mut hash, from.as_str());
+    write_part(&mut hash, label.as_str());
+    write_part(&mut hash, to.as_str());
+    for (key, value) in props {
+        write_part(&mut hash, key);
+        write_part(&mut hash, &value.to_json().to_string());
+    }
+    EdgeId::new(format!("edge-{hash:016x}"))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphNumericOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+pub fn evaluate_numeric_update(
+    current: &Value,
+    op: GraphNumericOp,
+    operand: &Value,
+) -> Result<Value> {
+    match (current, operand) {
+        (Value::Int(lhs), Value::Int(rhs)) if op != GraphNumericOp::Divide => {
+            let value = match op {
+                GraphNumericOp::Add => lhs.checked_add(*rhs),
+                GraphNumericOp::Subtract => lhs.checked_sub(*rhs),
+                GraphNumericOp::Multiply => lhs.checked_mul(*rhs),
+                GraphNumericOp::Divide => unreachable!("division handled as floating point"),
+            }
+            .ok_or_else(|| GrustError::CypherExecution("numeric expression overflow".into()))?;
+            Ok(Value::Int(value))
+        }
+        (Value::Int(lhs), Value::Int(rhs)) => numeric_float_result(*lhs as f64, op, *rhs as f64),
+        (Value::Int(lhs), Value::Float(rhs)) => numeric_float_result(*lhs as f64, op, *rhs),
+        (Value::Float(lhs), Value::Int(rhs)) => numeric_float_result(*lhs, op, *rhs as f64),
+        (Value::Float(lhs), Value::Float(rhs)) => numeric_float_result(*lhs, op, *rhs),
+        (Value::Null, _) | (_, Value::Null) => Err(GrustError::CypherExecution(
+            "numeric expression cannot read null values".into(),
+        )),
+        _ => Err(GrustError::CypherExecution(
+            "numeric expression requires integer or float values".into(),
+        )),
+    }
+}
+
+fn numeric_float_result(lhs: f64, op: GraphNumericOp, rhs: f64) -> Result<Value> {
+    let value = match op {
+        GraphNumericOp::Add => lhs + rhs,
+        GraphNumericOp::Subtract => lhs - rhs,
+        GraphNumericOp::Multiply => lhs * rhs,
+        GraphNumericOp::Divide => {
+            if rhs == 0.0 {
+                return Err(GrustError::CypherExecution(
+                    "numeric expression division by zero".into(),
+                ));
+            }
+            lhs / rhs
+        }
+    };
+    if value.is_finite() {
+        Ok(Value::Float(value))
+    } else {
+        Err(GrustError::CypherExecution(
+            "numeric expression produced a non-finite float".into(),
+        ))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphPredicateOp {
+    Equal,
+    NotEqual,
+    IsNull,
+    IsNotNull,
+    StartsWith,
+    NotStartsWith,
+    StartsWithAny,
+    NotStartsWithAny,
+    EndsWith,
+    NotEndsWith,
+    EndsWithAny,
+    NotEndsWithAny,
+    Contains,
+    NotContains,
+    ContainsAny,
+    NotContainsAny,
+    In,
+    NotIn,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphPropertyPredicate {
+    pub key: String,
+    pub op: GraphPredicateOp,
+    pub value: Value,
+}
+
+impl GraphPropertyPredicate {
+    pub fn matches(&self, actual: Option<&Value>) -> bool {
+        if matches!(self.op, GraphPredicateOp::IsNull) {
+            return actual.is_none_or(|value| matches!(value, Value::Null));
+        }
+        let Some(actual) = actual else {
+            return false;
+        };
+        match self.op {
+            GraphPredicateOp::Equal => actual == &self.value,
+            GraphPredicateOp::NotEqual => actual != &self.value,
+            GraphPredicateOp::IsNull => matches!(actual, Value::Null),
+            GraphPredicateOp::IsNotNull => !matches!(actual, Value::Null),
+            GraphPredicateOp::StartsWith => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| actual.starts_with(needle)),
+            GraphPredicateOp::NotStartsWith => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| !actual.starts_with(needle)),
+            GraphPredicateOp::StartsWithAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().any(|needle| actual.starts_with(needle))
+                }),
+            GraphPredicateOp::NotStartsWithAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().all(|needle| !actual.starts_with(needle))
+                }),
+            GraphPredicateOp::EndsWith => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| actual.ends_with(needle)),
+            GraphPredicateOp::NotEndsWith => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| !actual.ends_with(needle)),
+            GraphPredicateOp::EndsWithAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().any(|needle| actual.ends_with(needle))
+                }),
+            GraphPredicateOp::NotEndsWithAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().all(|needle| !actual.ends_with(needle))
+                }),
+            GraphPredicateOp::Contains => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| actual.contains(needle)),
+            GraphPredicateOp::NotContains => string_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needle)| !actual.contains(needle)),
+            GraphPredicateOp::ContainsAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().any(|needle| actual.contains(needle))
+                }),
+            GraphPredicateOp::NotContainsAny => string_list_predicate_values(actual, &self.value)
+                .is_some_and(|(actual, needles)| {
+                    needles.iter().all(|needle| !actual.contains(needle))
+                }),
+            GraphPredicateOp::In => list_predicate_values(&self.value)
+                .is_some_and(|values| values.iter().any(|value| actual == value)),
+            GraphPredicateOp::NotIn => list_predicate_values(&self.value)
+                .is_some_and(|values| values.iter().all(|value| actual != value)),
+            GraphPredicateOp::GreaterThan
+            | GraphPredicateOp::GreaterThanOrEqual
+            | GraphPredicateOp::LessThan
+            | GraphPredicateOp::LessThanOrEqual => compare_ordered_values(actual, &self.value)
+                .is_some_and(|ordering| match self.op {
+                    GraphPredicateOp::GreaterThan => ordering.is_gt(),
+                    GraphPredicateOp::GreaterThanOrEqual => ordering.is_gt() || ordering.is_eq(),
+                    GraphPredicateOp::LessThan => ordering.is_lt(),
+                    GraphPredicateOp::LessThanOrEqual => ordering.is_lt() || ordering.is_eq(),
+                    GraphPredicateOp::Equal
+                    | GraphPredicateOp::NotEqual
+                    | GraphPredicateOp::IsNull
+                    | GraphPredicateOp::IsNotNull
+                    | GraphPredicateOp::StartsWith
+                    | GraphPredicateOp::NotStartsWith
+                    | GraphPredicateOp::StartsWithAny
+                    | GraphPredicateOp::NotStartsWithAny
+                    | GraphPredicateOp::EndsWith
+                    | GraphPredicateOp::NotEndsWith
+                    | GraphPredicateOp::EndsWithAny
+                    | GraphPredicateOp::NotEndsWithAny
+                    | GraphPredicateOp::Contains
+                    | GraphPredicateOp::NotContains
+                    | GraphPredicateOp::ContainsAny
+                    | GraphPredicateOp::NotContainsAny
+                    | GraphPredicateOp::In
+                    | GraphPredicateOp::NotIn => unreachable!(),
+                }),
+        }
+    }
+}
+
+fn string_predicate_values<'a>(actual: &'a Value, value: &'a Value) -> Option<(&'a str, &'a str)> {
+    match (actual, value) {
+        (Value::String(actual), Value::String(needle)) => Some((actual.as_str(), needle.as_str())),
+        _ => None,
+    }
+}
+
+fn string_list_predicate_values<'a>(
+    actual: &'a Value,
+    value: &'a Value,
+) -> Option<(&'a str, Vec<&'a str>)> {
+    match (actual, value) {
+        (Value::String(actual), Value::StringArray(needles)) => Some((
+            actual.as_str(),
+            needles.iter().map(String::as_str).collect(),
+        )),
+        _ => None,
+    }
+}
+
+fn list_predicate_values(value: &Value) -> Option<Vec<Value>> {
+    match value {
+        Value::StringArray(values) => Some(values.iter().map(Value::from).collect()),
+        Value::IntArray(values) => Some(values.iter().copied().map(Value::Int).collect()),
+        Value::FloatArray(values) => Some(values.iter().copied().map(Value::Float).collect()),
+        Value::Json(serde_json::Value::Array(values)) => values
+            .iter()
+            .map(|value| match value {
+                serde_json::Value::Bool(value) => Some(Value::Bool(*value)),
+                serde_json::Value::Number(value) => value
+                    .as_i64()
+                    .map(Value::Int)
+                    .or_else(|| value.as_f64().map(Value::Float)),
+                serde_json::Value::String(value) => Some(Value::from(value)),
+                serde_json::Value::Null
+                | serde_json::Value::Array(_)
+                | serde_json::Value::Object(_) => None,
+            })
+            .collect(),
+        _ => None,
+    }
+}
+
+fn compare_ordered_values(lhs: &Value, rhs: &Value) -> Option<std::cmp::Ordering> {
+    match (lhs, rhs) {
+        (Value::Int(lhs), Value::Int(rhs)) => Some(lhs.cmp(rhs)),
+        (Value::Int(lhs), Value::Float(rhs)) => (*lhs as f64).partial_cmp(rhs),
+        (Value::Float(lhs), Value::Int(rhs)) => lhs.partial_cmp(&(*rhs as f64)),
+        (Value::Float(lhs), Value::Float(rhs)) => lhs.partial_cmp(rhs),
+        (Value::String(lhs), Value::String(rhs)) => Some(lhs.cmp(rhs)),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GraphNodeMatch {
+    pub label: Option<Label>,
+    pub props: Props,
+    pub predicates: Vec<GraphPropertyPredicate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphRelationshipMatch {
+    pub from: GraphNodeMatch,
+    pub label: Label,
+    pub to: GraphNodeMatch,
+    pub id: Option<EdgeId>,
+    pub props: Props,
+    pub predicates: Vec<GraphPropertyPredicate>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum GraphMutationPlanOp {
+    UpsertNode {
+        kind: GraphMutationPlanKind,
+        node: Node,
+    },
+    PatchNode {
+        id: NodeId,
+        props: Props,
+    },
+    PatchMatchingNodes {
+        label: Option<Label>,
+        props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
+        patch: Props,
+        cardinality: GraphMutationCardinality,
+    },
+    UpdateMatchingNodeProperty {
+        label: Option<Label>,
+        props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
+        target_key: String,
+        source_key: String,
+        op: GraphNumericOp,
+        operand: Value,
+        cardinality: GraphMutationCardinality,
+    },
+    PatchEdge {
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+        id: Option<EdgeId>,
+        props: Props,
+    },
+    PatchMatchingEdges {
+        relationship: GraphRelationshipMatch,
+        patch: Props,
+        cardinality: GraphMutationCardinality,
+    },
+    UpdateMatchingEdgeProperty {
+        relationship: GraphRelationshipMatch,
+        target_key: String,
+        source_key: String,
+        op: GraphNumericOp,
+        operand: Value,
+        cardinality: GraphMutationCardinality,
+    },
+    RemoveNodeProps {
+        id: NodeId,
+        keys: Vec<String>,
+    },
+    RemoveMatchingNodeProps {
+        label: Option<Label>,
+        props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
+        keys: Vec<String>,
+        cardinality: GraphMutationCardinality,
+    },
+    RemoveEdgeProps {
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+        id: Option<EdgeId>,
+        keys: Vec<String>,
+    },
+    RemoveMatchingEdgeProps {
+        relationship: GraphRelationshipMatch,
+        keys: Vec<String>,
+        cardinality: GraphMutationCardinality,
+    },
+    DeleteMatchingNodes {
+        label: Option<Label>,
+        props: Props,
+        predicates: Vec<GraphPropertyPredicate>,
+        cardinality: GraphMutationCardinality,
+    },
+    UpsertEdge {
+        kind: GraphMutationPlanKind,
+        edge: Edge,
+    },
+    UpsertEdgesFromNodeMatches {
+        kind: GraphMutationPlanKind,
+        from: GraphNodeMatch,
+        to: GraphNodeMatch,
+        label: Label,
+        props: Props,
+        edge_id_policy: GraphRowEdgeIdPolicy,
+        cardinality: GraphMutationCardinality,
+    },
+    DeleteNode(NodeId),
+    DeleteEdge {
+        from: NodeId,
+        label: Label,
+        to: NodeId,
+    },
+    DeleteMatchingEdges {
+        relationship: GraphRelationshipMatch,
+        cardinality: GraphMutationCardinality,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GraphMutationPlan {
+    pub operations: Vec<GraphMutationPlanOp>,
+}
+
+impl GraphMutationPlan {
+    pub fn new(operations: Vec<GraphMutationPlanOp>) -> Self {
+        Self { operations }
+    }
+
+    pub fn push(&mut self, operation: GraphMutationPlanOp) {
+        self.operations.push(operation);
+    }
+
+    pub fn report(&self) -> GraphMutationReport {
+        let mut report = GraphMutationReport::default();
+        for operation in &self.operations {
+            report.record(operation);
+        }
+        report
+    }
+
+    pub fn into_mutations(self) -> Vec<GraphMutation> {
+        self.operations
+            .into_iter()
+            .map(GraphMutation::from)
+            .collect()
+    }
+}
+
+/// Count-oriented mutation reporting.
+///
+/// Reports created from a [`GraphMutationPlan`] can know exact changed
+/// node/edge counts only for single-identity operations. Matched or
+/// row-producing operations increment their coarse operation counters at
+/// planning time, while executors fill in `matched_rows` and granular
+/// `changed_*` / `*_patches` / `*_deletes` / `*_upserts` counters after they
+/// materialize the backend row set.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GraphMutationReport {
+    pub creates: usize,
+    pub merges: usize,
+    pub deletes: usize,
+    pub patches: usize,
+    pub property_removes: usize,
+    pub matched_rows: usize,
+    pub changed_nodes: usize,
+    pub changed_edges: usize,
+    pub node_upserts: usize,
+    pub edge_upserts: usize,
+    pub node_deletes: usize,
+    pub edge_deletes: usize,
+    pub node_patches: usize,
+    pub edge_patches: usize,
+    pub node_property_removes: usize,
+    pub edge_property_removes: usize,
+    /// Upserts the executor could classify as inserting a new node, i.e. no
+    /// element with the same identity existed before the write.
+    ///
+    /// Only backends that can cheaply distinguish insert from update populate
+    /// these (for example the in-memory store). Upsert-oriented backends that
+    /// return [`PutOutcome::Upserted`] leave them at `0` and report the totals
+    /// through `node_upserts` / `edge_upserts` instead, so a zero here does not
+    /// mean "no inserts" — check the backend's classification ability first.
+    pub node_inserts: usize,
+    /// Upserts the executor could classify as updating an existing node.
+    pub node_updates: usize,
+    /// Upserts the executor could classify as inserting a new edge.
+    pub edge_inserts: usize,
+    /// Upserts the executor could classify as updating an existing edge.
+    pub edge_updates: usize,
+}
+
+impl GraphMutationReport {
+    pub fn record(&mut self, operation: &GraphMutationPlanOp) {
+        match operation {
+            GraphMutationPlanOp::UpsertNode { kind, .. }
+            | GraphMutationPlanOp::UpsertEdge { kind, .. } => {
+                match kind {
+                    GraphMutationPlanKind::Create => self.creates += 1,
+                    GraphMutationPlanKind::Merge => self.merges += 1,
+                }
+                match operation {
+                    GraphMutationPlanOp::UpsertNode { .. } => {
+                        self.node_upserts += 1;
+                        self.changed_nodes += 1;
+                    }
+                    GraphMutationPlanOp::UpsertEdge { .. } => {
+                        self.edge_upserts += 1;
+                        self.changed_edges += 1;
+                    }
+                    _ => {}
+                }
+            }
+            GraphMutationPlanOp::UpsertEdgesFromNodeMatches { kind, .. } => match kind {
+                GraphMutationPlanKind::Create => self.creates += 1,
+                GraphMutationPlanKind::Merge => self.merges += 1,
+            },
+            GraphMutationPlanOp::PatchNode { .. } => {
+                self.patches += 1;
+                self.node_patches += 1;
+                self.changed_nodes += 1;
+            }
+            GraphMutationPlanOp::PatchMatchingNodes { .. } => {
+                self.patches += 1;
+            }
+            GraphMutationPlanOp::UpdateMatchingNodeProperty { .. } => {
+                self.patches += 1;
+            }
+            GraphMutationPlanOp::PatchEdge { .. } => {
+                self.patches += 1;
+                self.edge_patches += 1;
+                self.changed_edges += 1;
+            }
+            GraphMutationPlanOp::PatchMatchingEdges { .. } => {
+                self.patches += 1;
+            }
+            GraphMutationPlanOp::UpdateMatchingEdgeProperty { .. } => {
+                self.patches += 1;
+            }
+            GraphMutationPlanOp::RemoveNodeProps { .. } => {
+                self.property_removes += 1;
+                self.node_property_removes += 1;
+                self.changed_nodes += 1;
+            }
+            GraphMutationPlanOp::RemoveMatchingNodeProps { .. } => {
+                self.property_removes += 1;
+            }
+            GraphMutationPlanOp::RemoveEdgeProps { .. } => {
+                self.property_removes += 1;
+                self.edge_property_removes += 1;
+                self.changed_edges += 1;
+            }
+            GraphMutationPlanOp::RemoveMatchingEdgeProps { .. } => {
+                self.property_removes += 1;
+            }
+            GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
+                self.deletes += 1;
+            }
+            GraphMutationPlanOp::DeleteNode(_) => {
+                self.deletes += 1;
+                self.node_deletes += 1;
+                self.changed_nodes += 1;
+            }
+            GraphMutationPlanOp::DeleteEdge { .. } => {
+                self.deletes += 1;
+                self.edge_deletes += 1;
+                self.changed_edges += 1;
+            }
+            GraphMutationPlanOp::DeleteMatchingEdges { .. } => {
+                self.deletes += 1;
+            }
+        }
+    }
+}
+
+impl From<GraphMutationPlanOp> for GraphMutation {
+    fn from(operation: GraphMutationPlanOp) -> Self {
+        match operation {
+            GraphMutationPlanOp::UpsertNode { node, .. } => Self::UpsertNode(node),
+            GraphMutationPlanOp::PatchNode { id, props } => Self::PatchNode { id, props },
+            GraphMutationPlanOp::PatchMatchingNodes {
+                label,
+                props,
+                predicates,
+                patch,
+                ..
+            } => Self::PatchMatchingNodes {
+                label,
+                props,
+                predicates,
+                patch,
+            },
+            GraphMutationPlanOp::UpdateMatchingNodeProperty {
+                label,
+                props,
+                predicates,
+                target_key,
+                source_key,
+                op,
+                operand,
+                ..
+            } => Self::UpdateMatchingNodeProperty {
+                label,
+                props,
+                predicates,
+                target_key,
+                source_key,
+                op,
+                operand,
+            },
+            GraphMutationPlanOp::PatchEdge {
+                from,
+                label,
+                to,
+                id,
+                props,
+            } => Self::PatchEdge {
+                from,
+                label,
+                to,
+                id,
+                props,
+            },
+            GraphMutationPlanOp::PatchMatchingEdges {
+                relationship,
+                patch,
+                ..
+            } => Self::PatchMatchingEdges {
+                relationship,
+                patch,
+            },
+            GraphMutationPlanOp::UpdateMatchingEdgeProperty {
+                relationship,
+                target_key,
+                source_key,
+                op,
+                operand,
+                ..
+            } => Self::UpdateMatchingEdgeProperty {
+                relationship,
+                target_key,
+                source_key,
+                op,
+                operand,
+            },
+            GraphMutationPlanOp::RemoveNodeProps { id, keys } => Self::RemoveNodeProps { id, keys },
+            GraphMutationPlanOp::RemoveEdgeProps {
+                from,
+                label,
+                to,
+                id,
+                keys,
+            } => Self::RemoveEdgeProps {
+                from,
+                label,
+                to,
+                id,
+                keys,
+            },
+            GraphMutationPlanOp::RemoveMatchingEdgeProps {
+                relationship, keys, ..
+            } => Self::RemoveMatchingEdgeProps { relationship, keys },
+            GraphMutationPlanOp::RemoveMatchingNodeProps {
+                label,
+                props,
+                predicates,
+                keys,
+                ..
+            } => Self::RemoveMatchingNodeProps {
+                label,
+                props,
+                predicates,
+                keys,
+            },
+            GraphMutationPlanOp::DeleteMatchingNodes {
+                label,
+                props,
+                predicates,
+                ..
+            } => Self::DeleteMatchingNodes {
+                label,
+                props,
+                predicates,
+            },
+            GraphMutationPlanOp::UpsertEdge { edge, .. } => Self::UpsertEdge(edge),
+            GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+                kind,
+                from,
+                to,
+                label,
+                props,
+                edge_id_policy,
+                ..
+            } => Self::UpsertEdgesFromNodeMatches {
+                kind,
+                from,
+                to,
+                label,
+                props,
+                edge_id_policy,
+            },
+            GraphMutationPlanOp::DeleteNode(id) => Self::DeleteNode(id),
+            GraphMutationPlanOp::DeleteEdge { from, label, to } => {
+                Self::DeleteEdge { from, label, to }
+            }
+            GraphMutationPlanOp::DeleteMatchingEdges { relationship, .. } => {
+                Self::DeleteMatchingEdges { relationship }
+            }
+        }
+    }
+}
+
+/// Executes already-resolved Cypher/graph mutation plans.
+///
+/// This trait intentionally accepts [`GraphMutationPlan`] rather than Cypher
+/// text. Parser ownership can stay with a backend or adapter until there are
+/// enough consumers to justify a shared parser crate, while stores that
+/// understand Grust mutation semantics can still share execution behavior.
+#[async_trait]
+pub trait CypherMutationExecutor: GraphMutationStore {
+    async fn execute_cypher_mutation_plan(
+        &self,
+        plan: &GraphMutationPlan,
+    ) -> Result<GraphMutationReport> {
+        let mut report = plan.report();
+        for operation in &plan.operations {
+            match operation {
+                GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node deletes require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::PatchMatchingNodes { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node patches require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::UpdateMatchingNodeProperty { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node expression updates require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::RemoveMatchingNodeProps { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node property removals require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::PatchMatchingEdges { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge patches require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::UpdateMatchingEdgeProperty { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge expression updates require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::RemoveMatchingEdgeProps { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge property removals require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::DeleteMatchingEdges { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge deletes require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::UpsertEdgesFromNodeMatches { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "row-producing edge upserts require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::UpsertNode { node, .. } => {
+                    classify_node_upsert(self.put_node(node).await?, &mut report);
+                }
+                GraphMutationPlanOp::UpsertEdge { edge, .. } => {
+                    classify_edge_upsert(self.put_edge(edge).await?, &mut report);
+                }
+                _ => {
+                    let mutation = GraphMutation::from(operation.clone());
+                    self.apply_mutations(std::slice::from_ref(&mutation))
+                        .await?;
+                }
+            }
+        }
+        Ok(report)
+    }
+}
+
+/// Records a single-node upsert outcome into a report's precise insert/update
+/// counters. [`PutOutcome::Upserted`] and [`PutOutcome::Deduped`] carry no
+/// insert-vs-update information and leave the counters unchanged.
+pub fn classify_node_upsert(outcome: PutOutcome, report: &mut GraphMutationReport) {
+    match outcome {
+        PutOutcome::Inserted => report.node_inserts += 1,
+        PutOutcome::Updated => report.node_updates += 1,
+        PutOutcome::Upserted | PutOutcome::Deduped => {}
+    }
+}
+
+/// Records a single-edge upsert outcome into a report's precise insert/update
+/// counters. See [`classify_node_upsert`].
+pub fn classify_edge_upsert(outcome: PutOutcome, report: &mut GraphMutationReport) {
+    match outcome {
+        PutOutcome::Inserted => report.edge_inserts += 1,
+        PutOutcome::Updated => report.edge_updates += 1,
+        PutOutcome::Upserted | PutOutcome::Deduped => {}
+    }
 }
 
 /// Incremental mutation support for stores that can delete elements.
@@ -2123,6 +3253,10 @@ pub enum GraphMutation {
 /// error.
 #[async_trait]
 pub trait GraphMutationStore: GraphStore {
+    fn mutation_atomicity(&self) -> GraphMutationAtomicity {
+        GraphMutationAtomicity::OrderedNonAtomic
+    }
+
     /// Deletes a node and all edges incident to it.
     async fn delete_node(&self, id: &NodeId) -> Result<()>;
 
@@ -2141,12 +3275,144 @@ pub trait GraphMutationStore: GraphStore {
                 GraphMutation::UpsertNode(node) => {
                     self.put_node(node).await?;
                 }
+                GraphMutation::PatchNode { id, props } => {
+                    if let Some(mut node) = self.get_node(id).await? {
+                        for (key, value) in props {
+                            node.props.insert(key.clone(), value.clone());
+                        }
+                        self.put_node(&node).await?;
+                    }
+                }
+                GraphMutation::PatchMatchingNodes { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched node patches require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutation::UpdateMatchingNodeProperty { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched node expression updates require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutation::PatchEdge {
+                    from,
+                    label,
+                    to,
+                    id,
+                    props,
+                } => {
+                    let mut edges = self
+                        .get_edges(EdgeQuery {
+                            from: Some(from.clone()),
+                            to: Some(to.clone()),
+                            label: Some(label.clone()),
+                        })
+                        .await?;
+                    if let Some(id) = id {
+                        edges.retain(|edge| edge.id.as_ref() == Some(id));
+                    }
+                    match edges.len() {
+                        0 => {}
+                        1 => {
+                            let mut edge = edges.remove(0);
+                            for (key, value) in props {
+                                edge.props.insert(key.clone(), value.clone());
+                            }
+                            self.put_edge(&edge).await?;
+                        }
+                        count => {
+                            return Err(GrustError::CypherUnsupportedCardinality(format!(
+                                "edge patch matched {count} edges; add an explicit edge id"
+                            )));
+                        }
+                    }
+                }
+                GraphMutation::PatchMatchingEdges { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched edge patches require backend-specific query support".to_string(),
+                    ));
+                }
+                GraphMutation::UpdateMatchingEdgeProperty { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched edge expression updates require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutation::RemoveNodeProps { id, keys } => {
+                    if let Some(mut node) = self.get_node(id).await? {
+                        for key in keys {
+                            node.props.remove(key);
+                        }
+                        self.put_node(&node).await?;
+                    }
+                }
+                GraphMutation::RemoveMatchingNodeProps { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched node property removal requires backend-specific query support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutation::RemoveEdgeProps {
+                    from,
+                    label,
+                    to,
+                    id,
+                    keys,
+                } => {
+                    let mut edges = self
+                        .get_edges(EdgeQuery {
+                            from: Some(from.clone()),
+                            to: Some(to.clone()),
+                            label: Some(label.clone()),
+                        })
+                        .await?;
+                    if let Some(id) = id {
+                        edges.retain(|edge| edge.id.as_ref() == Some(id));
+                    }
+                    match edges.len() {
+                        0 => {}
+                        1 => {
+                            let mut edge = edges.remove(0);
+                            for key in keys {
+                                edge.props.remove(key);
+                            }
+                            self.put_edge(&edge).await?;
+                        }
+                        count => {
+                            return Err(GrustError::CypherUnsupportedCardinality(format!(
+                                "edge property removal matched {count} edges; add an explicit edge id"
+                            )));
+                        }
+                    }
+                }
+                GraphMutation::RemoveMatchingEdgeProps { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched edge property removal requires backend-specific query support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutation::DeleteMatchingNodes { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched node deletes require backend-specific query support".to_string(),
+                    ));
+                }
                 GraphMutation::DeleteNode(id) => self.delete_node(id).await?,
                 GraphMutation::UpsertEdge(edge) => {
                     self.put_edge(edge).await?;
                 }
+                GraphMutation::UpsertEdgesFromNodeMatches { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "row-producing edge upserts require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
                 GraphMutation::DeleteEdge { from, label, to } => {
                     self.delete_edge(from, label, to).await?
+                }
+                GraphMutation::DeleteMatchingEdges { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "matched edge deletes require backend-specific query support".to_string(),
+                    ));
                 }
             }
         }
@@ -2156,11 +3422,17 @@ pub trait GraphMutationStore: GraphStore {
 
 pub mod prelude {
     pub use crate::{
-        Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType, EdgeUniqueness, Field, FieldType,
-        Graph, GraphAdminStore, GraphBuilder, GraphIndex, GraphMutation, GraphMutationStore,
+        CypherMutationExecutor, Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType,
+        EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder, GraphConstraint,
+        GraphConstraintCapability, GraphIndex, GraphMutation, GraphMutationAtomicity,
+        GraphMutationCardinality, GraphMutationPlan, GraphMutationPlanKind, GraphMutationPlanOp,
+        GraphMutationReport, GraphMutationStore, GraphNativeConstraintCapability,
+        GraphNativeConstraintReport, GraphNativeConstraintRequest, GraphNodeMatch, GraphNumericOp,
+        GraphPredicateOp, GraphPropertyPredicate, GraphRelationshipMatch, GraphRowEdgeIdPolicy,
         GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId,
-        NodeType, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value, edge_key,
-        relationship_type, schema_identifier,
+        NodeType, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value,
+        classify_edge_upsert, classify_node_upsert, edge_key, evaluate_numeric_update,
+        generated_row_edge_id, relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

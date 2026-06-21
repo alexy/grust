@@ -4,27 +4,34 @@ Rust has good graph libraries when the graph is mainly an in-memory data
 structure. It has database clients when the graph already belongs to one storage
 engine. Grust sits in the space between those two worlds.
 
-Grust is a compact property graph API for Rust: labeled nodes, labeled edges,
+The idea is simple: write graph-shaped Rust code once, keep the graph itself as
+ordinary Rust data, and let different storage and execution engines decide how
+to persist, query, index, or synchronize that graph. Grust is not trying to hide
+the differences between Spark, LadybugDB, LanceDB, PostgreSQL, SurrealDB,
+HelixDB, FalkorDB, and local memory. It is trying to give Rust applications a
+stable graph boundary before they have to choose one of those systems.
+
+That boundary is a compact property graph API: labeled nodes, labeled edges,
 typed properties, stable IDs, a graph builder, document loaders, optional typed
-ingestion, a traversal IR, and an async store contract. The goal is not to turn
-every backend into the same database. The goal is to let Rust application code
-build one graph-shaped domain model, then let backend crates decide how that
-model should be stored, queried, exported, or synchronized.
+ingestion, a traversal IR, schema metadata, mutation contracts, Arrow
+interchange paths, and feature-gated backend crates. This first post is the
+tour: what Grust is, why the shape is useful, and what it can already do.
 
 The project is here:
 
 - Repository: [github.com/querygraph/grust](https://github.com/querygraph/grust)
 - Public facade crate: [grust-graph](https://crates.io/crates/grust-graph)
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
-- Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
+- Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-ladybug](https://crates.io/crates/grust-ladybug), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
-The current `0.8.1` line is the first version where I think the whole shape is
-visible and release-tested against live backends: the core graph model,
-document loading, typed ingestion, schema-backed store writes, traversal
-lowering, shared graph-index construction, backend-specific typed storage
-hooks, and explicit Sail, SurrealDB, FalkorDB, HelixDB, LanceDB, CocoIndex, and
-pgGraph integration checks are all present in the same workspace. Some backend
-features are still young, but the contract is no longer just a sketch.
+The `0.9.0` line is the first point where I think the full idea is visible in
+code. The workspace has the core graph model, document fixtures, typed
+ingestion, schema-backed writes, traversal lowering, shared graph-index
+construction, backend-specific typed storage, LadybugDB and Sail Arrow IPC
+surfaces, GrustFrames-oriented Sail table and triplet helpers, mutation
+planning, a strict writable-Cypher subset for Sail, and live integration checks
+for the main backend family. Some pieces are intentionally small, but the
+architecture is no longer only a sketch.
 
 For the longer treatment, read the Grust book in the repository, especially
 **The Shape of Grust**, **The Core Property Graph**, **Building Graphs**,
@@ -45,12 +52,13 @@ flowchart TB
   facade --> export["grust-cocoindex\nTarget-state export adapter"]
 
   core --> model["Graph = nodes + edges\nNode = id + label + props\nEdge = from + to + label + props"]
-  core --> contract["GraphStore\nGraphAdminStore"]
+  core --> contract["GraphStore\nGraphAdminStore\nGraphMutationStore"]
   core --> ir["Traversal IR\nbackend-neutral steps"]
 
   backends --> local["grust-memory\nDeterministic local store"]
-  backends --> graphdb["Graph database writers\nFalkorDB, HelixDB, SurrealDB"]
+  backends --> graphdb["Graph database stores\nLadybugDB, FalkorDB,\nHelixDB, SurrealDB"]
   backends --> tables["Table and analytics stores\nLanceDB, pgGraph, Sail"]
+  backends --> arrow["Arrow IPC paths\nLadybugDB and Sail"]
 
   export --> target["Serializable node and relationship\nstate for incremental sync flows"]
 ```
@@ -128,7 +136,7 @@ The chapter **Building Graphs** is worth reading after the quick start. It
 explains why construction belongs at the application boundary and why
 `GraphBuilder` is more than a convenience wrapper.
 
-## Graph Documents and Typed Ingestion
+## Documents, Fixtures, and Typed Ingestion
 
 Grust now has two complementary ways to ingest graph data before it reaches a
 backend.
@@ -139,13 +147,21 @@ consistency, such as duplicate node IDs and edges pointing at missing nodes.
 The paired `to_yaml`, `to_json`, and `to_xml` methods make fixtures and
 interchange files easy to round trip.
 
+That matters for more than tests. A graph document can be a migration input, a
+small reproducible bug report, an audit artifact, or the portable fixture that
+keeps a backend lowering honest. The core benchmark example uses deterministic
+graph families similar to GrustFrames work, including ring, grid, layered,
+clustered, Graph500-style R-MAT, and GAP-style R-MAT cases, to measure graph
+cloning, shared index construction, degree scans, endpoint scans, and
+structural edge-key generation without pulling in backend dependencies.
+
 The second is typed ingestion. The optional `typed-garde` feature lets users
 define Rust structs for domain facts, validate them with `garde`, and lower
 them into ordinary Grust nodes and edges:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.1", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.9.0", features = ["typed-garde"] }
 ```
 
 ```rust
@@ -198,7 +214,7 @@ treats it as typed. In Grust, `zod-rs` plays that role for
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.1", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.9.0", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers
@@ -301,6 +317,25 @@ Administrative operations live in `GraphAdminStore`, where `bootstrap` and
 workflows without making every production caller responsible for destructive
 capabilities.
 
+Incremental changes live in `GraphMutationStore`. It keeps ordinary graph
+writes simple while giving capable backends a place to expose node and edge
+upserts, deletes, and backend-specific transaction semantics. `GraphMutationPlan`
+and `GraphMutationReport` let frontends and query lowerings resolve a mutation
+plan before applying it to a store. Sail uses that layer for its strict
+writable-Cypher subset: explicit-ID node `CREATE`/`MERGE`, resolved endpoint
+edge `CREATE`/`MERGE`, resolved node/edge `DELETE`, ordered multi-statement
+batches, local node variables bound from explicit IDs, ID-resolved
+`MATCH ... DELETE`, edge `MATCH ... CREATE` / `MATCH ... MERGE`, and broad node
+`MATCH ... DELETE` / `MATCH ... SET n += { ... }` /
+`MATCH ... SET n.key = value` / `MATCH ... REMOVE n.key` with matched-row and
+changed-element reporting, plus ID-resolved edge `MATCH ... SET e += { ... }`,
+literal property assignment, and explicit property `REMOVE` for resolved
+identities, row-producing edge `MATCH ... CREATE` / `MATCH ... MERGE` over
+matched endpoint variables, plus broad relationship delete, patch, assignment,
+and removal over endpoint predicates. `MATCH ... SET` can now contain
+comma-separated assignments, lowered as ordered plan operations across the
+supported literal, map patch, remove-on-null, and numeric node update forms.
+
 The book chapter **The Store Contract** gives this trait the attention it
 deserves. It is the piece that lets a memory store, a LanceDB table layout, a
 pgGraph projection, a Sail DataFrame backend, and graph database writers all
@@ -317,8 +352,8 @@ flowchart LR
   store --> pggraph["pgGraph\nPostgreSQL tables,\ntyped views, SQL joins"]
   store --> sail["Sail\nuniversal + typed Delta tables"]
   store --> falkor["FalkorDB\nRedis GRAPH.QUERY writes\nand property indexes"]
-  store --> helix["HelixDB\nHTTP or SDK writes\nschema-name validation"]
-  store --> surreal["SurrealDB\nHTTP or SDK writes\nschemafull tables"]
+  store --> helix["HelixDB\nHTTP or SDK\nreads + traversal"]
+  store --> surreal["SurrealDB\nHTTP or SDK\nreads + traversal"]
 
   lancedb --> universal["Universal layout\ngrust_nodes and grust_edges"]
   pggraph --> universal
@@ -333,29 +368,118 @@ flowchart LR
 
 ## Backends Without Leaking Backend Languages
 
-Grust has several backend and integration crates:
+Grust has several backend and integration crates. They are not meant to erase
+the identity of each backend. They give each backend a Grust-shaped doorway:
 
-- `grust-memory` is the deterministic local store for tests, examples, and no-service workflows.
+- `grust-memory` is the deterministic local store for tests, examples, and no-service workflows, including id-bearing parallel edges.
 - `grust-lancedb` stores universal nodes and edges in LanceDB tables, supports backend-neutral reads and bounded traversal, batches traversal target-node reads, matches property starts exactly after decoding Grust props, and mirrors schema-labeled writes into typed Arrow tables.
 - `grust-ladybug` embeds LadybugDB through the Rust `lbug` crate, supports untyped dynamic graphs and typed schema-applied graphs without a daemon, and can register Arrow IPC node, relationship, and CSR tables for direct Cypher queries.
 - `grust-pggraph` stores universal graph tables in PostgreSQL, registers them with pgGraph, lowers traversal to SQL joins, wraps mutation batches in PostgreSQL transactions, and exposes typed label views and expression indexes from `GraphSchema`.
-- `grust-sail` stages bulk writes as Arrow `LocalRelation` temp views through Sail Spark Connect, can stage arbitrary Arrow IPC streams as temp views, lowers traversal to Spark SQL joins over DataFrames, exposes degree, triplet, typed-table, and public table-contract helpers over the persisted graph tables, and mirrors schema-labeled writes into typed Delta tables.
+- `grust-sail` stages bulk writes as Arrow `LocalRelation` temp views through Sail Spark Connect, can stage arbitrary Arrow IPC streams as temp views, lowers traversal to Spark SQL joins over DataFrames, exposes degree, triplet, typed-table, public table-contract, and strict writable-Cypher mutation helpers over the persisted graph tables, and mirrors schema-labeled writes into typed Delta tables.
 - `grust-falkor` writes through Redis `GRAPH.QUERY` using FalkorDB's Cypher-like surface and creates schema-driven label/property indexes.
 - `grust-helix` supports HTTP and SDK stores for HelixDB writes, reads, and traversal; supported scalar and array properties are preserved on write, while unsupported JSON object properties fail explicitly.
 - `grust-surreal` supports HTTP and SDK stores for SurrealDB writes, reads, traversal, transactional mutation batches, and schemafull table and field definitions. Generic edge reads and node deletes now fail clearly when `SurrealConfig.relationships` is empty instead of silently scanning no relation tables.
 - `grust-cocoindex` is intentionally different: it exports a Grust graph as CocoIndex-style node and relationship target state rather than implementing `GraphStore`.
 
-The important part is not that all of these backends are equally mature. They
-are not. Some already support reads and traversal; others are focused on
-loading and administrative workflows. The important part is that the maturity
-boundary is explicit. A backend can return `GrustError::Unsupported` for
-operations it cannot yet satisfy, while application code can still depend on
-the same trait.
+The backends do not all do the same job, and that is part of the design. Some
+are durable local stores. Some are graph databases. Some are table and
+analytics engines. Some are import/export or synchronization adapters. A
+backend can expose its native strengths while returning `GrustError::Unsupported`
+for operations it cannot yet satisfy, and application code can still depend on
+the same core trait.
 
 For backend details, use the book chapter **Backend Architecture** as the main
 reading path. Then jump to the backend-specific headings in that chapter:
 **Memory**, **LanceDB**, **pgGraph**, **Sail**, **FalkorDB, HelixDB, and
 SurrealDB**, and **CocoIndex**.
+
+## Arrow, GrustFrames, and Sail Cypher
+
+The newer pieces of Grust are easiest to understand as consequences of the same
+design choice: the portable graph model stays small, while heavier backend
+capabilities live behind explicit APIs.
+
+Arrow is the columnar boundary. Grust uses Arrow IPC stream bytes at public
+backend boundaries instead of exposing one Rust `RecordBatch` type everywhere.
+That lets LadybugDB and Sail choose the Arrow crate versions required by their
+native engines while applications exchange stable IPC streams. LadybugDB can
+register Arrow node tables, relationship tables, and CSR relationship tables
+and query them with embedded Cypher. Sail can stage arbitrary Arrow IPC streams
+as Spark temp views, collect Spark SQL results as Arrow IPC chunks, or load
+Grust-shaped node and edge IPC streams through the normal graph write path.
+
+Sail also exposes the table contract that a distributed graph layer needs. The
+generic `grust_nodes` and `grust_edges` tables, typed table descriptors, field
+projection helpers, degree helpers, and directional triplet SQL helpers are the
+fixtures for GrustFrames-style lowerings: triplet filters, motif expansion, and
+aggregate-message passes can target the same physical layout that ordinary
+Grust writes produce.
+
+Writable Cypher follows the same rule. In Sail, Cypher write text is not a
+separate persistence path. `sail_cypher_mutation_plan` accepts a strict v1
+subset, ordered mutation batches, local explicit-ID node variables,
+ID-resolved `MATCH ... DELETE`, edge `MATCH ... CREATE` / `MATCH ... MERGE`,
+broad node
+`MATCH ... DELETE`, ID-resolved or broad node map patches, broad node literal
+property assignment/removal, ID-resolved edge map patches, literal property
+assignment, explicit property removal for resolved identities, row-producing
+edge `MATCH ... CREATE` / `MATCH ... MERGE`, and broad relationship delete,
+patch, assignment, and removal over endpoint predicates,
+then lowers them into `GraphMutationPlan`; `SailGraphStore`
+executes that plan through
+`GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`, typed-table
+mirror writes, and the same delete paths as ordinary Grust mutations.
+Generated node IDs are opt-in through Sail writable-Cypher options and are
+returned in a result shape separate from the count-oriented report, while
+written node and edge identities can be collected through the same result path
+when callers opt in. Node payloads cover explicit and generated node writes;
+edge payloads cover resolved and row-producing edge writes. These payloads
+describe accepted writes, not exact insert-versus-update outcomes on upsert
+backends. Strict `CREATE` mode performs read-before-write conflict checks and
+also rejects duplicate concrete create identities inside one planned batch
+before any writes run. `MERGE` and edge endpoint writes keep requiring resolved
+IDs.
+The first `RETURN` support for writes stays similarly narrow: a final element
+or property projection over node variables and concrete relationship variables
+already resolved by the write plan, including concrete edge upserts and edge
+patches, returns a `CypherMutationTableResult`. Sail and the backend-neutral
+Memory/Sail helper can also return one row per relationship variable produced
+by restricted row-producing `MATCH ... CREATE/MERGE` edge writes, plus
+portable broad node and relationship rows for restricted `MATCH ... SET/REMOVE`
+forms. Physical `id` and `label` fields are supported alongside stored
+properties, and whole elements are returned as `Value::Json` in the Grust
+`Node` / `Edge` serde shape, keeping the count-oriented mutation report separate from the table rows
+while rejecting aggregation, paths, ordering, limiting, arbitrary read-query
+features, unrestricted broad row materialization, and path-style row
+projections.
+Parameters are option-driven too: callers can bind Grust `Value`s to `$name`
+placeholders in literal positions such as IDs, property maps, and literal
+property assignments. The first expression form is deliberately narrow:
+same-variable node property arithmetic such as
+`SET n.count = n.count + $delta` lowers to an explicit read-modify-write
+mutation plan for Sail and Memory while broader computed expressions remain
+out of scope.
+Relationship matches can also filter on relationship properties beyond `id`,
+with Sail and Memory using the same matched-edge predicate semantics.
+Mutating `MATCH` filters now have a small `WHERE` grammar too: property
+comparisons against literals or parameters joined by `AND`, with missing
+properties treated as non-matches and ordered comparisons limited to numbers
+or strings.
+Null assignment is option-driven as well: the default stores `Value::Null`,
+while `CypherNullAssignment::RemoveProperty` makes explicit
+`SET x.key = null` lower to the same mutation operations as `REMOVE`.
+Plan execution is no longer Sail-only: `CypherMutationExecutor` lets the
+resolved `GraphMutationPlan` run on Sail or Memory, which keeps parser growth
+separate from backend mutation semantics.
+The parser boundary is intentionally modest for now: Sail classifies top-level
+mutation statements before lowering, and a shared parser crate waits until
+there is another Cypher text parser consumer.
+Mutation atomicity is explicit too: `GraphMutationAtomicity` distinguishes the
+default ordered/non-atomic mutation path from backends that can prove
+transactional batch execution.
+Structured Cypher errors separate syntax, unresolved identity, unsupported
+cardinality, and execution failures without making every backend expose a
+Cypher execution API.
 
 ## Traversal as IR
 
@@ -373,8 +497,9 @@ A traversal has a start expression, ordered steps, and an optional limit. Each
 step can carry a direction, an edge label, and a target node label. That is
 modest on purpose. The memory backend can scan maps. LanceDB can filter tables
 hop by hop. pgGraph can lower the traversal to SQL over universal graph tables.
-Sail can lower it to Spark SQL joins. Future graph-native backends can choose
-their own query form.
+Sail can lower it to Spark SQL joins. HelixDB, LadybugDB, and SurrealDB can
+satisfy the same portable read and traversal surface through their own graph
+store implementations.
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "18px", "primaryColor": "#f7f8fb", "primaryTextColor": "#172033", "primaryBorderColor": "#4f46e5", "lineColor": "#3b4252", "secondaryColor": "#eef6f0", "tertiaryColor": "#fff6df"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 45, "rankSpacing": 56, "padding": 18}}}%%
@@ -386,12 +511,14 @@ flowchart TB
   ir --> lancedb["LanceDB\nrepeated table filters"]
   ir --> pggraph["pgGraph\nSQL joins over nodes and edges"]
   ir --> sail["Sail\nSpark SQL joins"]
-  ir --> future["Future backend lowerings\nCypher, SurrealQL, Helix queries"]
+  ir --> graphdb["Graph stores\nLadybugDB, HelixDB,\nSurrealDB"]
+  ir --> future["Future backend lowerings\nricher graph query forms"]
 
   memory --> result["Vec<Node>"]
   lancedb --> result
   pggraph --> result
   sail --> result
+  graphdb --> result
   future --> result
 ```
 
@@ -449,6 +576,7 @@ The current backend behavior is deliberately pragmatic:
 - FalkorDB creates label/property indexes.
 - Helix validates schema names for the dynamic-query path.
 - SurrealDB defines schemafull tables and typed fields.
+- Graph mutation planning gives Sail's strict writable-Cypher subset a backend-neutral route into `GraphMutationStore`.
 
 That is the trick: Grust does not force every backend into one storage layout.
 A universal `grust_nodes` and `grust_edges` layout is flexible and portable.
@@ -469,14 +597,15 @@ Grust is still early, but its direction is already clear:
 - Keep traversal backend-neutral.
 - Let backend-specific capabilities live as extension traits when they appear.
 
-The next natural work is deeper read and traversal support across the
-write-focused backends, richer import/export helpers, more typed read helpers,
-more traversal result shapes, and broader backend coverage for incremental
-mutation. The 0.6 work matters because those next steps now have stable places
-to attach: typed ingestion for trusted Rust values and untrusted JSON,
-`GraphSchema` for backend-facing structure, `GraphMutationStore` for deletes
-where a backend supports them, and `GraphStore` for portable writes and
-traversal.
+The next natural work is broader backend coverage for mutation planning,
+richer import/export helpers, more traversal result shapes, and deeper
+backend-native query lowering. HelixDB, LadybugDB, and SurrealDB now satisfy
+the portable read and traversal surface; Sail can already lower a strict
+writable-Cypher subset into Grust mutation plans. Those steps have stable
+places to attach: typed ingestion for trusted Rust values and untrusted JSON,
+`GraphSchema` for backend-facing structure, `GraphMutationStore` for deltas and
+deletes where a backend supports them, `GraphMutationPlan` for resolved query
+lowerings, and `GraphStore` for portable writes, reads, and traversal.
 
 That last point is where the CocoIndex adapter becomes interesting. A property
 graph can be more than a one-time load. It can be target state for an indexing

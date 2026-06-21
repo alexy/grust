@@ -11,7 +11,9 @@ categories.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-grust-core = { version = "0.8.1", path = "../grust-core" }
+grust-core = { version = "0.9.0", path = "../grust-core" }
+grust-cypher = { version = "0.9.0", path = "../grust-cypher" }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tonic = { version = "0.14.6" }
@@ -20,3 +22,7 @@ prost = { version = "0.14" }
 prost-types = { version = "0.14" }
 arrow = { version = "58.1.0" }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+futures-executor.workspace = true
+grust-memory = { version = "0.9.0", path = "../grust-memory" }

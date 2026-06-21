@@ -8,6 +8,8 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use async_trait::async_trait;
 use grust_core::prelude::*;
+use grust_cypher::*;
+pub use grust_cypher::cypher_parser;
 use tonic::transport::Channel;
 
 #[allow(clippy::all, unused_imports, dead_code)]
@@ -20,6 +22,7 @@ use sc::{
     ReattachOptions, Relation, Sql, UserContext, command, execute_plan_request,
     execute_plan_response, expression, plan, relation,
 };
+
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -78,6 +81,7 @@ const DELETE_NODE_STAGE_VIEW: &str = "grust_delete_node_ids";
 const DELETE_EDGE_STAGE_VIEW: &str = "grust_delete_edges";
 pub const GRUST_NODES_TABLE: &str = "grust_nodes";
 pub const GRUST_EDGES_TABLE: &str = "grust_edges";
+pub const CYPHER_CONSTRAINT_REGISTRY_TABLE: &str = "grust_cypher_constraint_registry";
 pub const NODE_ID_COLUMN: &str = "id";
 pub const NODE_LABEL_COLUMN: &str = "label";
 pub const NODE_PROPS_COLUMN: &str = "props";
@@ -316,6 +320,895 @@ impl SailGraphStore {
         Ok(chunks)
     }
 
+    /// Persists a named Cypher constraint registry JSON blob in Sail.
+    ///
+    /// This is intentionally a Grust metadata helper, not native Sail
+    /// constraint/index DDL. Callers still apply the projected [`GraphSchema`]
+    /// through [`GraphStore::apply_schema`] when they want constraints to affect
+    /// writes.
+    pub async fn save_cypher_constraint_registry(
+        &self,
+        name: &str,
+        registry: &CypherConstraintRegistry,
+    ) -> Result<()> {
+        validate_cypher_constraint_registry_name(name)?;
+        let registry_json = registry.to_json()?;
+        self.run_command(&create_cypher_constraint_registry_table_sql(), vec![])
+            .await?;
+        self.run_command(
+            &upsert_cypher_constraint_registry_sql(name, &registry_json)?,
+            vec![],
+        )
+        .await
+    }
+
+    /// Loads a named Cypher constraint registry JSON blob from Sail.
+    ///
+    /// Missing names return `Ok(None)`. Existing rows are deserialized with
+    /// [`CypherConstraintRegistry::from_json`].
+    pub async fn load_cypher_constraint_registry(
+        &self,
+        name: &str,
+    ) -> Result<Option<CypherConstraintRegistry>> {
+        validate_cypher_constraint_registry_name(name)?;
+        self.run_command(&create_cypher_constraint_registry_table_sql(), vec![])
+            .await?;
+        let sql = select_cypher_constraint_registry_sql(name)?;
+        let chunks = self.query_arrow_ipc(&sql).await?;
+        let Some(registry_json) = parse_optional_single_string_from_arrow(
+            &chunks,
+            "registry_json",
+            "Cypher constraint registry",
+        )?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(CypherConstraintRegistry::from_json(&registry_json)?))
+    }
+
+    /// Executes the strict v1 writable-Cypher subset through Grust mutations.
+    pub async fn execute_cypher_mutation(&self, cypher: &str) -> Result<CypherMutationReport> {
+        self.execute_cypher_mutation_with_options(cypher, CypherMutationOptions::default())
+            .await
+    }
+
+    /// Executes writable Cypher with explicit execution options.
+    ///
+    /// `CypherCreateMode::ErrorIfExists` performs a read-before-write preflight
+    /// for Cypher `CREATE` operations. It is intentionally opt-in because the
+    /// default Grust mutation path treats `CREATE` and `MERGE` as upsert intent.
+    pub async fn execute_cypher_mutation_with_options(
+        &self,
+        cypher: &str,
+        options: CypherMutationOptions,
+    ) -> Result<CypherMutationReport> {
+        Ok(self
+            .execute_cypher_mutation_result_with_options(cypher, options)
+            .await?
+            .report)
+    }
+
+    /// Executes writable Cypher and returns both count-oriented mutation
+    /// reporting and any IDs accepted/generated during planning.
+    pub async fn execute_cypher_mutation_result_with_options(
+        &self,
+        cypher: &str,
+        options: CypherMutationOptions,
+    ) -> Result<CypherMutationResult> {
+        let create_mode = options.create_mode;
+        let collect_written_node_identities = options.collect_written_node_identities;
+        let collect_written_edge_identities = options.collect_written_edge_identities;
+        let (plan, generated_node_ids) = sail_cypher_mutation_plan_with_options(cypher, options)?;
+        let mut report = plan.report();
+        if create_mode == CypherCreateMode::ErrorIfExists {
+            self.check_strict_create_conflicts(&plan)
+                .await
+                .map_err(cypher_execution_error)?;
+        }
+        let mut written_node_identities = Vec::new();
+        let mut written_edge_identities = Vec::new();
+        let node_identity_collector =
+            collect_written_node_identities.then_some(&mut written_node_identities);
+        let identity_collector =
+            collect_written_edge_identities.then_some(&mut written_edge_identities);
+        self.apply_cypher_mutation_plan(
+            &plan,
+            &mut report,
+            node_identity_collector,
+            identity_collector,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .map_err(cypher_execution_error)?;
+        Ok(CypherMutationResult {
+            report,
+            generated_node_ids,
+            written_node_identities,
+            written_edge_identities,
+        })
+    }
+
+    /// Executes writable Cypher with a final, strict RETURN projection.
+    pub async fn execute_cypher_mutation_returning(
+        &self,
+        cypher: &str,
+    ) -> Result<CypherMutationTableResult> {
+        self.execute_cypher_mutation_returning_with_options(
+            cypher,
+            CypherMutationOptions::default(),
+        )
+        .await
+    }
+
+    /// Executes writable Cypher with a final, strict property-projection RETURN.
+    ///
+    /// This intentionally supports only a small write-result slice: the final
+    /// statement may project elements or properties from node or relationship
+    /// variables whose identities were resolved by the mutation plan, plus Sail
+    /// row-producing relationship variables from restricted
+    /// `MATCH ... CREATE/MERGE` edge writes. Aggregation, ordering, limiting,
+    /// paths, and arbitrary read-query features remain deferred.
+    pub async fn execute_cypher_mutation_returning_with_options(
+        &self,
+        cypher: &str,
+        options: CypherMutationOptions,
+    ) -> Result<CypherMutationTableResult> {
+        let create_mode = options.create_mode;
+        let collect_written_node_identities = options.collect_written_node_identities;
+        let collect_written_edge_identities = options.collect_written_edge_identities;
+        let planned = sail_cypher_mutation_plan_with_return_options(cypher, options)?;
+        let mut report = planned.plan.report();
+        if create_mode == CypherCreateMode::ErrorIfExists {
+            self.check_strict_create_conflicts(&planned.plan)
+                .await
+                .map_err(cypher_execution_error)?;
+        }
+        let mut written_node_identities = Vec::new();
+        let mut written_edge_identities = Vec::new();
+        let node_identity_collector =
+            collect_written_node_identities.then_some(&mut written_node_identities);
+        let identity_collector =
+            collect_written_edge_identities.then_some(&mut written_edge_identities);
+        let mut row_node_ids = HashMap::new();
+        let mut row_edge_keys = HashMap::new();
+        let mut row_node_pre_delete_values = HashMap::new();
+        let mut row_edge_pre_delete_values = HashMap::new();
+        self.apply_cypher_mutation_plan(
+            &planned.plan,
+            &mut report,
+            node_identity_collector,
+            identity_collector,
+            Some((&planned.row_node_bindings, &mut row_node_ids)),
+            Some((&planned.row_edge_match_bindings, &mut row_edge_keys)),
+            Some((&planned.row_node_bindings, &mut row_node_pre_delete_values)),
+            Some((
+                &planned.row_edge_match_bindings,
+                &mut row_edge_pre_delete_values,
+            )),
+        )
+        .await
+        .map_err(cypher_execution_error)?;
+        let mut row_node_values = row_node_return_values_on_store(self, row_node_ids)
+            .await
+            .map_err(cypher_execution_error)?;
+        row_node_values.extend(row_node_pre_delete_values);
+        let mut row_edge_values = row_edge_match_return_values_on_store(self, row_edge_keys)
+            .await
+            .map_err(cypher_execution_error)?;
+        row_edge_values.extend(row_edge_pre_delete_values);
+        row_edge_values.extend(
+            self.row_edge_return_values(&planned.row_edge_bindings)
+                .await
+                .map_err(cypher_execution_error)?,
+        );
+        row_node_values.extend(
+            row_edge_endpoint_node_values_on_store(
+                self,
+                &planned.node_bindings,
+                &planned.row_edge_bindings,
+                &row_edge_values,
+            )
+            .await
+            .map_err(cypher_execution_error)?,
+        );
+        let table = evaluate_cypher_return_table(
+            self,
+            &planned.node_bindings,
+            &planned.edge_bindings,
+            &row_node_values,
+            &row_edge_values,
+            &planned.row_path_bindings,
+            &planned.return_clause,
+        )
+        .await
+        .map_err(cypher_execution_error)?;
+        Ok(CypherMutationTableResult {
+            mutation: CypherMutationResult {
+                report,
+                generated_node_ids: planned.generated_node_ids,
+                written_node_identities,
+                written_edge_identities,
+            },
+            table,
+        })
+    }
+
+    async fn apply_cypher_mutation_plan(
+        &self,
+        plan: &GraphMutationPlan,
+        report: &mut CypherMutationReport,
+        mut written_node_identities: Option<&mut Vec<CypherWrittenNodeIdentity>>,
+        mut written_edge_identities: Option<&mut Vec<CypherWrittenEdgeIdentity>>,
+        mut row_node_capture: Option<(
+            &HashMap<String, GraphNodeMatch>,
+            &mut HashMap<String, Vec<NodeId>>,
+        )>,
+        mut row_edge_capture: Option<(
+            &HashMap<String, GraphRelationshipMatch>,
+            &mut HashMap<String, Vec<String>>,
+        )>,
+        mut row_node_pre_delete_capture: Option<(
+            &HashMap<String, GraphNodeMatch>,
+            &mut HashMap<String, Vec<Node>>,
+        )>,
+        mut row_edge_pre_delete_capture: Option<(
+            &HashMap<String, GraphRelationshipMatch>,
+            &mut HashMap<String, Vec<Edge>>,
+        )>,
+    ) -> Result<()> {
+        for operation in &plan.operations {
+            if let Some((bindings, values)) = row_node_pre_delete_capture.as_mut() {
+                collect_deleted_row_node_values_for_operation(self, operation, bindings, values)
+                    .await?;
+            }
+            if let Some((bindings, values)) = row_edge_pre_delete_capture.as_mut() {
+                collect_deleted_row_edge_values_for_operation(self, operation, bindings, values)
+                    .await?;
+            }
+            if let Some((bindings, values)) = row_node_capture.as_mut() {
+                collect_row_node_ids_for_operation(self, operation, bindings, values).await?;
+            }
+            if let Some((bindings, values)) = row_edge_capture.as_mut() {
+                collect_row_edge_keys_for_operation(self, operation, bindings, values).await?;
+            }
+            match operation {
+                GraphMutationPlanOp::PatchMatchingNodes {
+                    label,
+                    props,
+                    predicates,
+                    patch,
+                    ..
+                } => {
+                    self.apply_patch_matching_nodes(
+                        label.as_ref(),
+                        props,
+                        predicates,
+                        patch,
+                        report,
+                    )
+                    .await?;
+                }
+                GraphMutationPlanOp::UpdateMatchingNodeProperty {
+                    label,
+                    props,
+                    predicates,
+                    target_key,
+                    source_key,
+                    op,
+                    operand,
+                    ..
+                } => {
+                    self.apply_update_matching_node_property(
+                        label.as_ref(),
+                        props,
+                        predicates,
+                        target_key,
+                        source_key,
+                        *op,
+                        operand,
+                        report,
+                    )
+                    .await?;
+                }
+                GraphMutationPlanOp::RemoveMatchingNodeProps {
+                    label,
+                    props,
+                    predicates,
+                    keys,
+                    ..
+                } => {
+                    self.apply_remove_matching_node_props(
+                        label.as_ref(),
+                        props,
+                        predicates,
+                        keys,
+                        report,
+                    )
+                    .await?;
+                }
+                GraphMutationPlanOp::DeleteMatchingNodes {
+                    label,
+                    props,
+                    predicates,
+                    ..
+                } => {
+                    self.apply_delete_matching_nodes(label.as_ref(), props, predicates, report)
+                        .await?;
+                }
+                GraphMutationPlanOp::PatchMatchingEdges {
+                    relationship,
+                    patch,
+                    ..
+                } => {
+                    self.apply_patch_matching_edges(relationship, patch, report)
+                        .await?;
+                }
+                GraphMutationPlanOp::UpdateMatchingEdgeProperty {
+                    relationship,
+                    target_key,
+                    source_key,
+                    op,
+                    operand,
+                    ..
+                } => {
+                    self.apply_update_matching_edge_property(
+                        relationship,
+                        target_key,
+                        source_key,
+                        *op,
+                        operand,
+                        report,
+                    )
+                    .await?;
+                }
+                GraphMutationPlanOp::RemoveMatchingEdgeProps {
+                    relationship, keys, ..
+                } => {
+                    self.apply_remove_matching_edge_props(relationship, keys, report)
+                        .await?;
+                }
+                GraphMutationPlanOp::DeleteMatchingEdges { relationship, .. } => {
+                    self.apply_delete_matching_edges(relationship, report)
+                        .await?;
+                }
+                GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+                    kind,
+                    from,
+                    to,
+                    label,
+                    props,
+                    edge_id_policy,
+                    ..
+                } => {
+                    self.apply_upsert_edges_from_node_matches(
+                        *kind,
+                        from,
+                        to,
+                        label,
+                        props,
+                        *edge_id_policy,
+                        report,
+                        written_edge_identities.as_deref_mut(),
+                    )
+                    .await?;
+                }
+                _ => {
+                    let precise_upsert = match operation {
+                        GraphMutationPlanOp::UpsertNode { node, .. } => {
+                            Some(CypherResolvedUpsertClassification::Node {
+                                existed: self.get_node(&node.id).await?.is_some(),
+                            })
+                        }
+                        GraphMutationPlanOp::UpsertEdge { edge, .. } => {
+                            Some(CypherResolvedUpsertClassification::Edge {
+                                existed: self.strict_create_edge_exists(edge).await?,
+                            })
+                        }
+                        _ => None,
+                    };
+                    let mutation = GraphMutation::from(operation.clone());
+                    self.apply_mutations(std::slice::from_ref(&mutation))
+                        .await?;
+                    if let Some(classification) = precise_upsert {
+                        classification.record(report);
+                    }
+                    if let (Some(collector), GraphMutationPlanOp::UpsertNode { kind, node }) =
+                        (written_node_identities.as_deref_mut(), operation)
+                    {
+                        collector.push(cypher_written_node_identity(*kind, node));
+                    }
+                    if let (Some(collector), GraphMutationPlanOp::UpsertEdge { kind, edge }) =
+                        (written_edge_identities.as_deref_mut(), operation)
+                    {
+                        collector.push(cypher_written_edge_identity(*kind, edge));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn strict_create_edge_exists(&self, edge: &Edge) -> Result<bool> {
+        let mut existing = self
+            .get_edges(EdgeQuery {
+                from: Some(edge.from.clone()),
+                to: Some(edge.to.clone()),
+                label: Some(edge.label.clone()),
+            })
+            .await?;
+
+        if let Some(id) = &edge.id {
+            let sql = "SELECT id, src_id, src_label, dst_id, dst_label, edge_type, props \
+                       FROM grust_edges WHERE id = ? LIMIT 1";
+            existing.extend(self.run_edge_query(sql, vec![lit_str(id.as_str())]).await?);
+        }
+
+        Ok(strict_create_edge_conflicts(edge, &existing))
+    }
+
+    async fn apply_patch_matching_nodes(
+        &self,
+        label: Option<&Label>,
+        props: &Props,
+        predicates: &[GraphPropertyPredicate],
+        patch: &Props,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let (sql, args) = matching_nodes_sql(label, props, predicates)?;
+        let mut nodes = self.run_query(&sql, args).await?;
+        report.matched_rows += nodes.len();
+        report.node_patches += nodes.len();
+        report.changed_nodes += nodes.len();
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        for node in &mut nodes {
+            for (key, value) in patch {
+                node.props.insert(key.clone(), value.clone());
+            }
+        }
+        let schema = self.current_schema();
+        if let Some(schema) = schema.as_ref() {
+            for node in &nodes {
+                schema.validate_node(node)?;
+            }
+        }
+        self.load_nodes(schema.as_ref(), &nodes).await
+    }
+
+    async fn apply_update_matching_node_property(
+        &self,
+        label: Option<&Label>,
+        props: &Props,
+        predicates: &[GraphPropertyPredicate],
+        target_key: &str,
+        source_key: &str,
+        op: GraphNumericOp,
+        operand: &Value,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let (sql, args) = matching_nodes_sql(label, props, predicates)?;
+        let mut nodes = self.run_query(&sql, args).await?;
+        report.matched_rows += nodes.len();
+        report.node_patches += nodes.len();
+        report.changed_nodes += nodes.len();
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        for node in &mut nodes {
+            let current = node.props.get(source_key).ok_or_else(|| {
+                GrustError::CypherExecution(format!(
+                    "numeric expression source property '{source_key}' is missing"
+                ))
+            })?;
+            let value = evaluate_numeric_update(current, op, operand)?;
+            node.props.insert(target_key.to_string(), value);
+        }
+        let schema = self.current_schema();
+        if let Some(schema) = schema.as_ref() {
+            for node in &nodes {
+                schema.validate_node(node)?;
+            }
+        }
+        self.load_nodes(schema.as_ref(), &nodes).await
+    }
+
+    async fn apply_remove_matching_node_props(
+        &self,
+        label: Option<&Label>,
+        props: &Props,
+        predicates: &[GraphPropertyPredicate],
+        keys: &[String],
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let (sql, args) = matching_nodes_sql(label, props, predicates)?;
+        let mut nodes = self.run_query(&sql, args).await?;
+        report.matched_rows += nodes.len();
+        report.node_property_removes += nodes.len();
+        report.changed_nodes += nodes.len();
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        for node in &mut nodes {
+            for key in keys {
+                node.props.remove(key);
+            }
+        }
+        let schema = self.current_schema();
+        if let Some(schema) = schema.as_ref() {
+            for node in &nodes {
+                schema.validate_node(node)?;
+            }
+        }
+        self.load_nodes(schema.as_ref(), &nodes).await
+    }
+
+    async fn apply_patch_matching_edges(
+        &self,
+        relationship: &GraphRelationshipMatch,
+        patch: &Props,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let mut edges = self.matching_edges(relationship).await?;
+        report.matched_rows += edges.len();
+        report.edge_patches += edges.len();
+        report.changed_edges += edges.len();
+        if edges.is_empty() {
+            return Ok(());
+        }
+
+        for edge in &mut edges {
+            for (key, value) in patch {
+                edge.props.insert(key.clone(), value.clone());
+            }
+        }
+        self.validate_and_load_edges(&edges).await
+    }
+
+    async fn apply_update_matching_edge_property(
+        &self,
+        relationship: &GraphRelationshipMatch,
+        target_key: &str,
+        source_key: &str,
+        op: GraphNumericOp,
+        operand: &Value,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let mut edges = self.matching_edges(relationship).await?;
+        report.matched_rows += edges.len();
+        report.edge_patches += edges.len();
+        report.changed_edges += edges.len();
+        if edges.is_empty() {
+            return Ok(());
+        }
+
+        for edge in &mut edges {
+            let current = edge.props.get(source_key).ok_or_else(|| {
+                GrustError::CypherExecution(format!(
+                    "numeric expression source property '{source_key}' is missing"
+                ))
+            })?;
+            let value = evaluate_numeric_update(current, op, operand)?;
+            edge.props.insert(target_key.to_string(), value);
+        }
+        self.validate_and_load_edges(&edges).await
+    }
+
+    async fn apply_remove_matching_edge_props(
+        &self,
+        relationship: &GraphRelationshipMatch,
+        keys: &[String],
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let mut edges = self.matching_edges(relationship).await?;
+        report.matched_rows += edges.len();
+        report.edge_property_removes += edges.len();
+        report.changed_edges += edges.len();
+        if edges.is_empty() {
+            return Ok(());
+        }
+
+        for edge in &mut edges {
+            for key in keys {
+                edge.props.remove(key);
+            }
+        }
+        self.validate_and_load_edges(&edges).await
+    }
+
+    async fn apply_delete_matching_edges(
+        &self,
+        relationship: &GraphRelationshipMatch,
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let edges = self.matching_edges(relationship).await?;
+        report.matched_rows += edges.len();
+        report.edge_deletes += edges.len();
+        report.changed_edges += edges.len();
+        let mut keys = edges.iter().map(edge_key).collect::<Vec<_>>();
+        keys.sort();
+        keys.dedup();
+        self.delete_edges_by_keys(&relationship.label, &keys).await
+    }
+
+    async fn delete_edges_by_keys(&self, edge_type: &Label, keys: &[String]) -> Result<()> {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        self.stage_record_batch(DELETE_EDGE_STAGE_VIEW, edge_keys_record_batch(keys)?)
+            .await?;
+        self.run_command(&delete_edge_keys_from_view_sql("grust_edges")?, vec![])
+            .await?;
+        let typed_table = self
+            .current_schema()
+            .and_then(|schema| schema.edge_type(edge_type).cloned());
+        if let Some(edge_type) = typed_table {
+            self.run_command(
+                &delete_edge_keys_from_view_sql(&sail_edge_table(edge_type.label.as_str())?)?,
+                vec![],
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn matching_edges(&self, relationship: &GraphRelationshipMatch) -> Result<Vec<Edge>> {
+        let (sql, args) = matching_edges_sql(relationship)?;
+        self.run_edge_query(&sql, args).await
+    }
+
+    async fn row_edge_return_values(
+        &self,
+        bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
+    ) -> Result<HashMap<String, Vec<Edge>>> {
+        let mut values = HashMap::new();
+        for (variable, binding) in bindings {
+            let edges = self
+                .edges_from_node_matches(
+                    binding.kind,
+                    &binding.from,
+                    &binding.to,
+                    &binding.label,
+                    &binding.props,
+                    binding.edge_id_policy,
+                )
+                .await?;
+            match binding.kind {
+                GraphMutationPlanKind::Create | GraphMutationPlanKind::Merge => {}
+            }
+            values.insert(variable.clone(), edges);
+        }
+        Ok(values)
+    }
+
+    async fn apply_upsert_edges_from_node_matches(
+        &self,
+        kind: GraphMutationPlanKind,
+        from: &GraphNodeMatch,
+        to: &GraphNodeMatch,
+        label: &Label,
+        props: &Props,
+        edge_id_policy: GraphRowEdgeIdPolicy,
+        report: &mut CypherMutationReport,
+        written_edge_identities: Option<&mut Vec<CypherWrittenEdgeIdentity>>,
+    ) -> Result<()> {
+        let edges = self
+            .edges_from_node_matches(kind, from, to, label, props, edge_id_policy)
+            .await?;
+        report.matched_rows += edges.len();
+        report.edge_upserts += edges.len();
+        report.changed_edges += edges.len();
+        match kind {
+            GraphMutationPlanKind::Create => {}
+            GraphMutationPlanKind::Merge => {}
+        }
+        let mut existing = Vec::with_capacity(edges.len());
+        for edge in &edges {
+            existing.push(self.strict_create_edge_exists(edge).await?);
+        }
+        self.validate_and_load_edges(&edges).await?;
+        for existed in existing {
+            if existed {
+                report.edge_updates += 1;
+            } else {
+                report.edge_inserts += 1;
+            }
+        }
+        if let Some(collector) = written_edge_identities {
+            collector.extend(
+                edges
+                    .iter()
+                    .map(|edge| cypher_written_edge_identity(kind, edge)),
+            );
+        }
+        Ok(())
+    }
+
+    async fn edges_from_node_matches(
+        &self,
+        kind: GraphMutationPlanKind,
+        from: &GraphNodeMatch,
+        to: &GraphNodeMatch,
+        label: &Label,
+        props: &Props,
+        edge_id_policy: GraphRowEdgeIdPolicy,
+    ) -> Result<Vec<Edge>> {
+        let (from_sql, from_args) =
+            matching_nodes_sql(from.label.as_ref(), &from.props, &from.predicates)?;
+        let (to_sql, to_args) = matching_nodes_sql(to.label.as_ref(), &to.props, &to.predicates)?;
+        let from_nodes = self.run_query(&from_sql, from_args).await?;
+        let to_nodes = self.run_query(&to_sql, to_args).await?;
+        let mut edges = Vec::with_capacity(from_nodes.len().saturating_mul(to_nodes.len()));
+        let edge_id = edge_id_from_props(props)?;
+        if edge_id.is_some() && edges.capacity() > 1 {
+            return Err(cypher_unsupported_cardinality(
+                "row-producing MATCH ... CREATE/MERGE with an explicit relationship id must produce exactly one edge",
+            ));
+        }
+        for from_node in &from_nodes {
+            for to_node in &to_nodes {
+                let mut edge = Edge::new(
+                    label.clone(),
+                    from_node.id.clone(),
+                    to_node.id.clone(),
+                    props.clone(),
+                );
+                if let Some(id) = edge_id.clone() {
+                    edge = edge.with_id(id);
+                } else if row_edge_id_policy_generates(kind, edge_id_policy) {
+                    let generated_id =
+                        generated_row_edge_id(&edge.from, &edge.label, &edge.to, &edge.props);
+                    edge = edge.with_id(generated_id);
+                }
+                edges.push(edge);
+            }
+        }
+        Ok(edges)
+    }
+
+    async fn validate_and_load_edges(&self, edges: &[Edge]) -> Result<()> {
+        let schema = self.current_schema();
+        let endpoint_ids = edges
+            .iter()
+            .flat_map(|edge| [&edge.from, &edge.to])
+            .cloned()
+            .collect::<Vec<_>>();
+        let endpoint_nodes = self.get_nodes(&endpoint_ids).await?;
+        let node_labels = endpoint_nodes
+            .iter()
+            .map(|node| (&node.id, &node.label))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(schema) = schema.as_ref() {
+            for edge in edges {
+                schema.validate_edge_with(edge, |id| node_labels.get(id).copied())?;
+            }
+        }
+        self.load_edges(schema.as_ref(), edges, &node_labels).await
+    }
+
+    async fn apply_delete_matching_nodes(
+        &self,
+        label: Option<&Label>,
+        props: &Props,
+        predicates: &[GraphPropertyPredicate],
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let (sql, args) = matching_nodes_sql(label, props, predicates)?;
+        let nodes = self.run_query(&sql, args).await?;
+        report.matched_rows += nodes.len();
+        report.node_deletes += nodes.len();
+        report.changed_nodes += nodes.len();
+        if nodes.is_empty() {
+            return Ok(());
+        }
+
+        let ids = nodes.iter().map(|node| node.id.clone()).collect::<Vec<_>>();
+        let all_edges = self.get_edges(EdgeQuery::default()).await?;
+        let incident_edges = all_edges
+            .iter()
+            .filter(|edge| ids.iter().any(|id| id == &edge.from || id == &edge.to))
+            .count();
+        report.changed_edges += incident_edges;
+        report.edge_deletes += incident_edges;
+        self.delete_nodes_by_ids(&ids).await
+    }
+
+    async fn check_strict_create_conflicts(&self, plan: &GraphMutationPlan) -> Result<()> {
+        check_strict_create_plan_conflicts(plan)?;
+        for operation in &plan.operations {
+            match operation {
+                GraphMutationPlanOp::UpsertNode {
+                    kind: GraphMutationPlanKind::Create,
+                    node,
+                } => {
+                    if self.get_node(&node.id).await?.is_some() {
+                        return Err(GrustError::Unsupported(format!(
+                            "Cypher CREATE would overwrite existing node '{}'",
+                            node.id.as_str()
+                        )));
+                    }
+                }
+                GraphMutationPlanOp::UpsertEdge {
+                    kind: GraphMutationPlanKind::Create,
+                    edge,
+                } => {
+                    if self.strict_create_edge_exists(edge).await? {
+                        return Err(GrustError::Unsupported(format!(
+                            "Cypher CREATE would overwrite existing edge '{}'",
+                            edge_key(edge)
+                        )));
+                    }
+                }
+                GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+                    kind: GraphMutationPlanKind::Create,
+                    from,
+                    to,
+                    label,
+                    props,
+                    edge_id_policy,
+                    ..
+                } => {
+                    let edges = self
+                        .edges_from_node_matches(
+                            GraphMutationPlanKind::Create,
+                            from,
+                            to,
+                            label,
+                            props,
+                            *edge_id_policy,
+                        )
+                        .await?;
+                    for edge in &edges {
+                        if self.strict_create_edge_exists(edge).await? {
+                            return Err(GrustError::Unsupported(format!(
+                                "Cypher CREATE would overwrite existing edge '{}'",
+                                edge_key(edge)
+                            )));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_nodes_by_ids(&self, ids: &[NodeId]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let id_refs = ids.iter().collect::<Vec<_>>();
+        self.stage_record_batch(DELETE_NODE_STAGE_VIEW, node_ids_record_batch(&id_refs)?)
+            .await?;
+        self.run_command(&delete_nodes_from_view_sql("grust_nodes")?, vec![])
+            .await?;
+        self.run_command(&delete_node_edges_from_view_sql("grust_edges")?, vec![])
+            .await?;
+        if let Some(schema) = self.current_schema() {
+            for node_type in &schema.nodes {
+                self.run_command(
+                    &delete_nodes_from_view_sql(&sail_node_table(node_type.label.as_str())?)?,
+                    vec![],
+                )
+                .await?;
+            }
+            for edge_type in &schema.edges {
+                self.run_command(
+                    &delete_node_edges_from_view_sql(&sail_edge_table(edge_type.label.as_str())?)?,
+                    vec![],
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Loads Grust-shaped Arrow IPC node and edge streams into Sail tables.
     ///
     /// Node streams must provide `id`, `label`, and `props` string columns.
@@ -351,18 +1244,18 @@ impl SailGraphStore {
 
     /// Computes out-degrees over the generic persisted Sail edge table.
     pub async fn out_degrees(&self) -> Result<Vec<SailDegreeRow>> {
-        self.run_degree_query(&sail_out_degrees_sql()).await
+        self.run_degree_query(sail_out_degrees_sql()).await
     }
 
     /// Computes in-degrees over the generic persisted Sail edge table.
     pub async fn in_degrees(&self) -> Result<Vec<SailDegreeRow>> {
-        self.run_degree_query(&sail_in_degrees_sql()).await
+        self.run_degree_query(sail_in_degrees_sql()).await
     }
 
     /// Computes total degree for each non-isolated vertex over the generic
     /// persisted Sail edge table.
     pub async fn degrees(&self) -> Result<Vec<SailDegreeRow>> {
-        self.run_degree_query(&sail_degrees_sql()).await
+        self.run_degree_query(sail_degrees_sql()).await
     }
 
     /// Computes both directed degree components for every persisted vertex.
@@ -600,6 +1493,89 @@ impl SailGraphStore {
         }
         Ok(())
     }
+
+    /// Read-before-write enforcement of node uniqueness constraints.
+    ///
+    /// For every `NodePropertyUnique` constraint touched by `nodes`, this reads
+    /// the persisted nodes of that label and rejects a write whose constrained
+    /// property value already belongs to a different node id. This is a
+    /// best-effort `ValidateBeforeWrite` check with an inherent race window:
+    /// concurrent writers are not serialized, and the label scan cost grows
+    /// with the number of persisted nodes of the label.
+    async fn enforce_unique_node_constraints(
+        &self,
+        constraints: &[GraphConstraint],
+        nodes: &[Node],
+    ) -> Result<()> {
+        for constraint in constraints {
+            let GraphConstraint::NodePropertyUnique { label, key } = constraint else {
+                continue;
+            };
+            if !nodes
+                .iter()
+                .any(|node| &node.label == label && node.props.contains_key(key))
+            {
+                continue;
+            }
+            let existing = self
+                .run_query(
+                    "SELECT id, label, props FROM grust_nodes WHERE label = ?",
+                    vec![lit_str(label.as_str())],
+                )
+                .await?;
+            for node in nodes {
+                if let Some(conflict) = unique_node_conflict(&existing, node, label, key) {
+                    return Err(GrustError::Schema(format!(
+                        "node '{}' violates unique constraint on property '{}' of label '{}' (conflicts with persisted node '{}')",
+                        node.id.as_str(),
+                        key,
+                        label.as_str(),
+                        conflict.as_str()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Read-before-write enforcement of edge uniqueness constraints. Shares the
+    /// best-effort `ValidateBeforeWrite` semantics of
+    /// [`Self::enforce_unique_node_constraints`].
+    async fn enforce_unique_edge_constraints(
+        &self,
+        constraints: &[GraphConstraint],
+        edges: &[Edge],
+    ) -> Result<()> {
+        for constraint in constraints {
+            let GraphConstraint::EdgePropertyUnique { label, key } = constraint else {
+                continue;
+            };
+            if !edges
+                .iter()
+                .any(|edge| &edge.label == label && edge.props.contains_key(key))
+            {
+                continue;
+            }
+            let existing = self
+                .get_edges(EdgeQuery {
+                    label: Some(label.clone()),
+                    ..EdgeQuery::default()
+                })
+                .await?;
+            for edge in edges {
+                if let Some(conflict) = unique_edge_conflict(&existing, edge, label, key) {
+                    return Err(GrustError::Schema(format!(
+                        "edge '{}' violates unique constraint on property '{}' of label '{}' (conflicts with persisted edge '{}')",
+                        edge_key(edge),
+                        key,
+                        label.as_str(),
+                        conflict
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 // ── GraphStore ────────────────────────────────────────────────────────────────
@@ -615,10 +1591,27 @@ impl GraphStore for SailGraphStore {
         Ok(())
     }
 
+    fn constraint_capability(&self, constraint: &GraphConstraint) -> GraphConstraintCapability {
+        // Required and unique constraints are both validated read-before-write:
+        // required by `validate_node`/`validate_graph`, unique by an existence
+        // query against persisted rows. Neither is enforced atomically by the
+        // backend, so concurrent writers can still race.
+        match constraint {
+            GraphConstraint::NodePropertyRequired { .. }
+            | GraphConstraint::EdgePropertyRequired { .. }
+            | GraphConstraint::NodePropertyUnique { .. }
+            | GraphConstraint::EdgePropertyUnique { .. } => {
+                GraphConstraintCapability::ValidateBeforeWrite
+            }
+        }
+    }
+
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {
             schema.validate_node(node)?;
+            self.enforce_unique_node_constraints(&schema.constraints, std::slice::from_ref(node))
+                .await?;
         }
         self.load_nodes(schema.as_ref(), std::slice::from_ref(node))
             .await?;
@@ -629,6 +1622,8 @@ impl GraphStore for SailGraphStore {
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {
             schema.validate_edge_props(edge)?;
+            self.enforce_unique_edge_constraints(&schema.constraints, std::slice::from_ref(edge))
+                .await?;
         }
         self.load_edges(
             schema.as_ref(),
@@ -643,6 +1638,10 @@ impl GraphStore for SailGraphStore {
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {
             schema.validate_graph(graph)?;
+            self.enforce_unique_node_constraints(&schema.constraints, &graph.nodes)
+                .await?;
+            self.enforce_unique_edge_constraints(&schema.constraints, &graph.edges)
+                .await?;
         }
         let node_labels: BTreeMap<&NodeId, &Label> = graph
             .nodes
@@ -670,6 +1669,27 @@ impl GraphStore for SailGraphStore {
             .await?
             .into_iter()
             .next())
+    }
+
+    /// Batched node read using a single `IN (...)` query rather than one round
+    /// trip per id. Preserves input order and duplicates and skips missing ids,
+    /// matching the [`GraphStore::get_nodes`] default contract.
+    async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql = format!("SELECT id, label, props FROM grust_nodes WHERE id IN ({placeholders})");
+        let args = ids.iter().map(|id| lit_str(id.as_str())).collect();
+        let fetched = self.run_query(&sql, args).await?;
+        let by_id: HashMap<&str, &Node> = fetched
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect();
+        Ok(ids
+            .iter()
+            .filter_map(|id| by_id.get(id.as_str()).map(|node| (*node).clone()))
+            .collect())
     }
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
@@ -770,29 +1790,7 @@ impl GraphAdminStore for SailGraphStore {
 #[async_trait]
 impl GraphMutationStore for SailGraphStore {
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
-        self.stage_record_batch(DELETE_NODE_STAGE_VIEW, node_ids_record_batch(&[id])?)
-            .await?;
-        self.run_command(&delete_nodes_from_view_sql("grust_nodes")?, vec![])
-            .await?;
-        self.run_command(&delete_node_edges_from_view_sql("grust_edges")?, vec![])
-            .await?;
-        if let Some(schema) = self.current_schema() {
-            for node_type in &schema.nodes {
-                self.run_command(
-                    &delete_nodes_from_view_sql(&sail_node_table(node_type.label.as_str())?)?,
-                    vec![],
-                )
-                .await?;
-            }
-            for edge_type in &schema.edges {
-                self.run_command(
-                    &delete_node_edges_from_view_sql(&sail_edge_table(edge_type.label.as_str())?)?,
-                    vec![],
-                )
-                .await?;
-            }
-        }
-        Ok(())
+        self.delete_nodes_by_ids(std::slice::from_ref(id)).await
     }
 
     async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
@@ -814,6 +1812,20 @@ impl GraphMutationStore for SailGraphStore {
             .await?;
         }
         Ok(())
+    }
+}
+
+#[async_trait]
+impl CypherMutationExecutor for SailGraphStore {
+    async fn execute_cypher_mutation_plan(
+        &self,
+        plan: &GraphMutationPlan,
+    ) -> Result<GraphMutationReport> {
+        let mut report = plan.report();
+        self.apply_cypher_mutation_plan(plan, &mut report, None, None, None, None, None, None)
+            .await
+            .map_err(cypher_execution_error)?;
+        Ok(report)
     }
 }
 
@@ -941,6 +1953,21 @@ fn delete_edges_record_batch(edges: &[(&NodeId, &Label, &NodeId)]) -> Result<Rec
     .map_err(|e| GrustError::Backend(format!("Arrow edge delete batch build failed: {e}")))
 }
 
+fn edge_keys_record_batch(keys: &[String]) -> Result<RecordBatch> {
+    let schema = Arc::new(ArrowSchema::new(vec![ArrowField::new(
+        "edge_key",
+        DataType::Utf8,
+        false,
+    )]));
+    RecordBatch::try_new(
+        schema,
+        vec![Arc::new(StringArray::from_iter_values(
+            keys.iter().map(String::as_str),
+        ))],
+    )
+    .map_err(|e| GrustError::Backend(format!("Arrow edge-key delete batch build failed: {e}")))
+}
+
 fn ipc_bytes(batch: &RecordBatch) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     {
@@ -979,6 +2006,7 @@ fn merge_edges_from_view_sql() -> String {
     )
 }
 
+
 fn delete_nodes_from_view_sql(table: &str) -> Result<String> {
     Ok(format!(
         "MERGE INTO {} AS t USING {DELETE_NODE_STAGE_VIEW} AS s \
@@ -1009,24 +2037,31 @@ fn delete_edges_from_view_sql(table: &str, include_label: bool) -> Result<String
     ))
 }
 
-pub fn sail_out_degrees_sql() -> String {
-    "SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id".to_string()
+fn delete_edge_keys_from_view_sql(table: &str) -> Result<String> {
+    Ok(format!(
+        "MERGE INTO {} AS t USING {DELETE_EDGE_STAGE_VIEW} AS s \
+         ON t.edge_key = s.edge_key WHEN MATCHED THEN DELETE",
+        sql_table_ref(table)?
+    ))
 }
 
-pub fn sail_in_degrees_sql() -> String {
-    "SELECT dst_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY dst_id".to_string()
+pub fn sail_out_degrees_sql() -> &'static str {
+    "SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id"
 }
 
-pub fn sail_degrees_sql() -> String {
+pub fn sail_in_degrees_sql() -> &'static str {
+    "SELECT dst_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY dst_id"
+}
+
+pub fn sail_degrees_sql() -> &'static str {
     "SELECT id, SUM(degree) AS degree FROM (\
        SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id \
        UNION ALL \
        SELECT dst_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY dst_id\
      ) degree_events GROUP BY id"
-        .to_string()
 }
 
-pub fn sail_degree_pairs_sql() -> String {
+pub fn sail_degree_pairs_sql() -> &'static str {
     "SELECT n.id AS id, \
             COALESCE(in_degrees.degree, 0) AS in_degree, \
             COALESCE(out_degrees.degree, 0) AS out_degree \
@@ -1035,7 +2070,6 @@ pub fn sail_degree_pairs_sql() -> String {
          ON n.id = in_degrees.id \
        LEFT JOIN (SELECT src_id AS id, COUNT(*) AS degree FROM grust_edges GROUP BY src_id) out_degrees \
          ON n.id = out_degrees.id"
-        .to_string()
 }
 
 pub fn sail_triplets_sql() -> String {
@@ -1237,6 +2271,543 @@ fn typed_edge_merge_from_view_sql(edge_type: &EdgeType) -> Result<String> {
             .collect::<Vec<_>>()
             .join(", ")
     ))
+}
+
+fn matching_nodes_sql(
+    label: Option<&Label>,
+    props: &Props,
+    predicates: &[GraphPropertyPredicate],
+) -> Result<(String, Vec<expression::Literal>)> {
+    let mut conditions = Vec::new();
+    let mut args = Vec::new();
+    if let Some(label) = label {
+        conditions.push("label = ?".to_string());
+        args.push(lit_str(label.as_str()));
+    }
+    for (key, value) in props {
+        validate_json_key(key)?;
+        let json_value = sail_json_property_expr("props", key)?;
+        match value {
+            Value::String(s) => {
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(s));
+            }
+            Value::Int(n) => {
+                conditions.push(format!("CAST({json_value} AS BIGINT) = ?"));
+                args.push(lit_long(*n));
+            }
+            Value::Float(f) => {
+                conditions.push(format!("CAST({json_value} AS DOUBLE) = ?"));
+                args.push(lit_double(*f));
+            }
+            Value::Bool(b) => {
+                conditions.push(format!("CAST({json_value} AS BOOLEAN) = ?"));
+                args.push(lit_bool(*b));
+            }
+            Value::Null => conditions.push(format!("{json_value} IS NULL")),
+            Value::DateTime(_)
+            | Value::StringArray(_)
+            | Value::IntArray(_)
+            | Value::FloatArray(_)
+            | Value::Json(_) => {
+                let json = serde_json::to_string(&value.to_json())
+                    .map_err(|err| GrustError::Serialization(err.to_string()))?;
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(&json));
+            }
+        }
+    }
+    append_property_predicate_conditions("props", predicates, &mut conditions, &mut args)?;
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+    Ok((
+        format!("SELECT id, label, props FROM grust_nodes{where_clause}"),
+        args,
+    ))
+}
+
+fn matching_edges_sql(
+    relationship: &GraphRelationshipMatch,
+) -> Result<(String, Vec<expression::Literal>)> {
+    let mut conditions = vec!["e.edge_type = ?".to_string()];
+    let mut args = vec![lit_str(relationship.label.as_str())];
+    if let Some(id) = &relationship.id {
+        conditions.push("e.id = ?".to_string());
+        args.push(lit_str(id.as_str()));
+    }
+    append_relationship_prop_conditions(relationship, &mut conditions, &mut args)?;
+    append_node_match_conditions("src", &relationship.from, &mut conditions, &mut args)?;
+    append_node_match_conditions("dst", &relationship.to, &mut conditions, &mut args)?;
+    Ok((
+        format!(
+            "SELECT e.id, e.src_id, src.label AS src_label, e.dst_id, dst.label AS dst_label, e.edge_type, e.props \
+             FROM grust_edges e \
+             JOIN grust_nodes src ON src.id = e.src_id \
+             JOIN grust_nodes dst ON dst.id = e.dst_id \
+             WHERE {}",
+            conditions.join(" AND ")
+        ),
+        args,
+    ))
+}
+
+fn append_relationship_prop_conditions(
+    relationship: &GraphRelationshipMatch,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    for (key, value) in &relationship.props {
+        validate_json_key(key)?;
+        let json_value = format!("GET_JSON_OBJECT(e.props, '$.{key}')");
+        match value {
+            Value::String(s) => {
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(s));
+            }
+            Value::Int(n) => {
+                conditions.push(format!("CAST({json_value} AS BIGINT) = ?"));
+                args.push(lit_long(*n));
+            }
+            Value::Float(f) => {
+                conditions.push(format!("CAST({json_value} AS DOUBLE) = ?"));
+                args.push(lit_double(*f));
+            }
+            Value::Bool(b) => {
+                conditions.push(format!("CAST({json_value} AS BOOLEAN) = ?"));
+                args.push(lit_bool(*b));
+            }
+            Value::Null => conditions.push(format!("{json_value} IS NULL")),
+            Value::DateTime(_)
+            | Value::StringArray(_)
+            | Value::IntArray(_)
+            | Value::FloatArray(_)
+            | Value::Json(_) => {
+                let json = serde_json::to_string(&value.to_json())
+                    .map_err(|err| GrustError::Serialization(err.to_string()))?;
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(&json));
+            }
+        }
+    }
+    append_property_predicate_conditions("e.props", &relationship.predicates, conditions, args)?;
+    Ok(())
+}
+
+fn append_node_match_conditions(
+    alias: &str,
+    node: &GraphNodeMatch,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    if let Some(label) = &node.label {
+        conditions.push(format!("{alias}.label = ?"));
+        args.push(lit_str(label.as_str()));
+    }
+    for (key, value) in &node.props {
+        if key == "id" {
+            let Some(id) = value.as_str() else {
+                return Err(cypher_unresolved_identity(
+                    "relationship endpoint id predicate must be a string",
+                ));
+            };
+            conditions.push(format!("{alias}.id = ?"));
+            args.push(lit_str(id));
+            continue;
+        }
+        validate_json_key(key)?;
+        let json_value = format!("GET_JSON_OBJECT({alias}.props, '$.{key}')");
+        match value {
+            Value::String(s) => {
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(s));
+            }
+            Value::Int(n) => {
+                conditions.push(format!("CAST({json_value} AS BIGINT) = ?"));
+                args.push(lit_long(*n));
+            }
+            Value::Float(f) => {
+                conditions.push(format!("CAST({json_value} AS DOUBLE) = ?"));
+                args.push(lit_double(*f));
+            }
+            Value::Bool(b) => {
+                conditions.push(format!("CAST({json_value} AS BOOLEAN) = ?"));
+                args.push(lit_bool(*b));
+            }
+            Value::Null => conditions.push(format!("{json_value} IS NULL")),
+            Value::DateTime(_)
+            | Value::StringArray(_)
+            | Value::IntArray(_)
+            | Value::FloatArray(_)
+            | Value::Json(_) => {
+                let json = serde_json::to_string(&value.to_json())
+                    .map_err(|err| GrustError::Serialization(err.to_string()))?;
+                conditions.push(format!("{json_value} = ?"));
+                args.push(lit_str(&json));
+            }
+        }
+    }
+    append_property_predicate_conditions(
+        &format!("{alias}.props"),
+        &node.predicates,
+        conditions,
+        args,
+    )?;
+    Ok(())
+}
+
+fn append_property_predicate_conditions(
+    props_expr: &str,
+    predicates: &[GraphPropertyPredicate],
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    for predicate in predicates {
+        validate_json_key(&predicate.key)?;
+        let json_value = sail_json_property_expr(props_expr, &predicate.key)?;
+        match predicate.op {
+            GraphPredicateOp::Equal => {
+                append_property_equality_condition(&json_value, &predicate.value, conditions, args)?
+            }
+            GraphPredicateOp::NotEqual => append_property_inequality_condition(
+                &json_value,
+                &predicate.value,
+                conditions,
+                args,
+            )?,
+            GraphPredicateOp::IsNull => conditions.push(format!("{json_value} IS NULL")),
+            GraphPredicateOp::IsNotNull => conditions.push(format!("{json_value} IS NOT NULL")),
+            GraphPredicateOp::StartsWith
+            | GraphPredicateOp::NotStartsWith
+            | GraphPredicateOp::StartsWithAny
+            | GraphPredicateOp::NotStartsWithAny
+            | GraphPredicateOp::EndsWith
+            | GraphPredicateOp::NotEndsWith
+            | GraphPredicateOp::EndsWithAny
+            | GraphPredicateOp::NotEndsWithAny
+            | GraphPredicateOp::Contains
+            | GraphPredicateOp::NotContains
+            | GraphPredicateOp::ContainsAny
+            | GraphPredicateOp::NotContainsAny => append_property_string_predicate_condition(
+                &json_value,
+                predicate.op,
+                &predicate.value,
+                conditions,
+                args,
+            )?,
+            GraphPredicateOp::In | GraphPredicateOp::NotIn => append_property_in_condition(
+                &json_value,
+                predicate.op,
+                &predicate.value,
+                conditions,
+                args,
+            )?,
+            GraphPredicateOp::GreaterThan
+            | GraphPredicateOp::GreaterThanOrEqual
+            | GraphPredicateOp::LessThan
+            | GraphPredicateOp::LessThanOrEqual => append_property_order_condition(
+                &json_value,
+                predicate.op,
+                &predicate.value,
+                conditions,
+                args,
+            )?,
+        }
+    }
+    Ok(())
+}
+
+fn append_property_equality_condition(
+    json_value: &str,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    match value {
+        Value::String(s) => {
+            conditions.push(format!("{json_value} = ?"));
+            args.push(lit_str(s));
+        }
+        Value::Int(n) => {
+            conditions.push(format!("CAST({json_value} AS BIGINT) = ?"));
+            args.push(lit_long(*n));
+        }
+        Value::Float(f) => {
+            conditions.push(format!("CAST({json_value} AS DOUBLE) = ?"));
+            args.push(lit_double(*f));
+        }
+        Value::Bool(b) => {
+            conditions.push(format!("CAST({json_value} AS BOOLEAN) = ?"));
+            args.push(lit_bool(*b));
+        }
+        Value::Null => conditions.push(format!("{json_value} IS NULL")),
+        Value::DateTime(_)
+        | Value::StringArray(_)
+        | Value::IntArray(_)
+        | Value::FloatArray(_)
+        | Value::Json(_) => {
+            let json = serde_json::to_string(&value.to_json())
+                .map_err(|err| GrustError::Serialization(err.to_string()))?;
+            conditions.push(format!("{json_value} = ?"));
+            args.push(lit_str(&json));
+        }
+    }
+    Ok(())
+}
+
+fn append_property_inequality_condition(
+    json_value: &str,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    match value {
+        Value::Null => conditions.push(format!("{json_value} IS NOT NULL")),
+        _ => {
+            let mut inner_conditions = Vec::new();
+            let mut inner_args = Vec::new();
+            append_property_equality_condition(
+                json_value,
+                value,
+                &mut inner_conditions,
+                &mut inner_args,
+            )?;
+            let Some(condition) = inner_conditions.into_iter().next() else {
+                return Ok(());
+            };
+            conditions.push(format!("{json_value} IS NOT NULL AND NOT ({condition})"));
+            args.extend(inner_args);
+        }
+    }
+    Ok(())
+}
+
+fn append_property_string_predicate_condition(
+    json_value: &str,
+    op: GraphPredicateOp,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    match op {
+        GraphPredicateOp::StartsWith => {
+            let needle = cypher_string_predicate_needle(value)?;
+            conditions.push(format!("STARTSWITH({json_value}, ?)"));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::NotStartsWith => {
+            let needle = cypher_string_predicate_needle(value)?;
+            conditions.push(format!(
+                "{json_value} IS NOT NULL AND NOT STARTSWITH({json_value}, ?)"
+            ));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::StartsWithAny => append_property_string_any_condition(
+            json_value,
+            "STARTSWITH",
+            false,
+            value,
+            conditions,
+            args,
+        )?,
+        GraphPredicateOp::NotStartsWithAny => append_property_string_any_condition(
+            json_value,
+            "STARTSWITH",
+            true,
+            value,
+            conditions,
+            args,
+        )?,
+        GraphPredicateOp::EndsWith => {
+            let needle = cypher_string_predicate_needle(value)?;
+            conditions.push(format!("ENDSWITH({json_value}, ?)"));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::NotEndsWith => {
+            let needle = cypher_string_predicate_needle(value)?;
+            conditions.push(format!(
+                "{json_value} IS NOT NULL AND NOT ENDSWITH({json_value}, ?)"
+            ));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::EndsWithAny => append_property_string_any_condition(
+            json_value, "ENDSWITH", false, value, conditions, args,
+        )?,
+        GraphPredicateOp::NotEndsWithAny => append_property_string_any_condition(
+            json_value, "ENDSWITH", true, value, conditions, args,
+        )?,
+        GraphPredicateOp::Contains => {
+            let needle = cypher_string_predicate_needle(value)?;
+            conditions.push(format!("CONTAINS({json_value}, ?)"));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::NotContains => {
+            let needle = cypher_string_predicate_needle(value)?;
+            conditions.push(format!(
+                "{json_value} IS NOT NULL AND NOT CONTAINS({json_value}, ?)"
+            ));
+            args.push(lit_str(needle));
+        }
+        GraphPredicateOp::ContainsAny => append_property_string_any_condition(
+            json_value, "CONTAINS", false, value, conditions, args,
+        )?,
+        GraphPredicateOp::NotContainsAny => append_property_string_any_condition(
+            json_value, "CONTAINS", true, value, conditions, args,
+        )?,
+        GraphPredicateOp::Equal
+        | GraphPredicateOp::NotEqual
+        | GraphPredicateOp::IsNull
+        | GraphPredicateOp::IsNotNull
+        | GraphPredicateOp::In
+        | GraphPredicateOp::NotIn
+        | GraphPredicateOp::GreaterThan
+        | GraphPredicateOp::GreaterThanOrEqual
+        | GraphPredicateOp::LessThan
+        | GraphPredicateOp::LessThanOrEqual => unreachable!(),
+    }
+    Ok(())
+}
+
+fn cypher_string_predicate_needle(value: &Value) -> Result<&str> {
+    value.as_str().ok_or_else(|| {
+        cypher_syntax("MATCH WHERE string predicates require string literals or parameters")
+    })
+}
+
+fn cypher_string_predicate_needles(value: &Value) -> Result<&[String]> {
+    value.as_string_array().ok_or_else(|| {
+        cypher_syntax(
+            "MATCH WHERE string predicate OR groups require string literals or parameters",
+        )
+    })
+}
+
+fn append_property_string_any_condition(
+    json_value: &str,
+    sql_function: &str,
+    negated: bool,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    let needles = cypher_string_predicate_needles(value)?;
+    if needles.is_empty() {
+        conditions.push(if negated {
+            format!("{json_value} IS NOT NULL")
+        } else {
+            "1 = 0".to_string()
+        });
+        return Ok(());
+    }
+    let inner = needles
+        .iter()
+        .map(|_| format!("{sql_function}({json_value}, ?)"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    if negated {
+        conditions.push(format!("{json_value} IS NOT NULL AND NOT ({inner})"));
+    } else {
+        conditions.push(format!("({inner})"));
+    }
+    for needle in needles {
+        args.push(lit_str(needle));
+    }
+    Ok(())
+}
+
+fn append_property_in_condition(
+    json_value: &str,
+    op: GraphPredicateOp,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    let values = cypher_in_predicate_values(value)?;
+    if values.is_empty() {
+        match op {
+            GraphPredicateOp::In => conditions.push("1 = 0".to_string()),
+            GraphPredicateOp::NotIn => conditions.push(format!("{json_value} IS NOT NULL")),
+            _ => unreachable!(),
+        }
+        return Ok(());
+    }
+
+    let mut equality_conditions = Vec::new();
+    let mut equality_args = Vec::new();
+    for value in values {
+        append_property_equality_condition(
+            json_value,
+            &value,
+            &mut equality_conditions,
+            &mut equality_args,
+        )?;
+    }
+    let condition = equality_conditions.join(" OR ");
+    match op {
+        GraphPredicateOp::In => conditions.push(format!("({condition})")),
+        GraphPredicateOp::NotIn => {
+            conditions.push(format!("{json_value} IS NOT NULL AND NOT ({condition})"))
+        }
+        _ => unreachable!(),
+    }
+    args.extend(equality_args);
+    Ok(())
+}
+
+
+fn append_property_order_condition(
+    json_value: &str,
+    op: GraphPredicateOp,
+    value: &Value,
+    conditions: &mut Vec<String>,
+    args: &mut Vec<expression::Literal>,
+) -> Result<()> {
+    let sql_op = match op {
+        GraphPredicateOp::GreaterThan => ">",
+        GraphPredicateOp::GreaterThanOrEqual => ">=",
+        GraphPredicateOp::LessThan => "<",
+        GraphPredicateOp::LessThanOrEqual => "<=",
+        GraphPredicateOp::Equal
+        | GraphPredicateOp::NotEqual
+        | GraphPredicateOp::IsNull
+        | GraphPredicateOp::IsNotNull
+        | GraphPredicateOp::StartsWith
+        | GraphPredicateOp::NotStartsWith
+        | GraphPredicateOp::StartsWithAny
+        | GraphPredicateOp::NotStartsWithAny
+        | GraphPredicateOp::EndsWith
+        | GraphPredicateOp::NotEndsWith
+        | GraphPredicateOp::EndsWithAny
+        | GraphPredicateOp::NotEndsWithAny
+        | GraphPredicateOp::Contains
+        | GraphPredicateOp::NotContains
+        | GraphPredicateOp::ContainsAny
+        | GraphPredicateOp::NotContainsAny
+        | GraphPredicateOp::In
+        | GraphPredicateOp::NotIn => unreachable!(),
+    };
+    match value {
+        Value::Int(n) => {
+            conditions.push(format!("CAST({json_value} AS BIGINT) {sql_op} ?"));
+            args.push(lit_long(*n));
+        }
+        Value::Float(f) => {
+            conditions.push(format!("CAST({json_value} AS DOUBLE) {sql_op} ?"));
+            args.push(lit_double(*f));
+        }
+        Value::String(s) => {
+            conditions.push(format!("{json_value} {sql_op} ?"));
+            args.push(lit_str(s));
+        }
+        _ => {
+            return Err(cypher_syntax(
+                "MATCH WHERE ordered comparisons require integer, float, or string literals",
+            ));
+        }
+    }
+    Ok(())
 }
 
 // Joins match nodes to edges by id only: node ids are globally unique (the
@@ -1469,19 +3040,46 @@ fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
 }
 
-fn validate_json_key(value: &str) -> Result<()> {
-    let valid = !value.is_empty()
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || ch == '_');
-    if valid {
-        Ok(())
-    } else {
-        Err(GrustError::Schema(format!(
-            "invalid JSON property key '{value}'"
-        )))
+fn validate_cypher_constraint_registry_name(name: &str) -> Result<()> {
+    if name.trim().is_empty() {
+        return Err(GrustError::Schema(
+            "Cypher constraint registry name must not be empty".to_string(),
+        ));
     }
+    Ok(())
 }
+
+fn create_cypher_constraint_registry_table_sql() -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {} \
+         (name STRING NOT NULL, registry_json STRING NOT NULL) USING delta",
+        CYPHER_CONSTRAINT_REGISTRY_TABLE
+    )
+}
+
+fn upsert_cypher_constraint_registry_sql(name: &str, registry_json: &str) -> Result<String> {
+    validate_cypher_constraint_registry_name(name)?;
+    Ok(format!(
+        "MERGE INTO {table} AS t \
+         USING (SELECT {name} AS name, {registry_json} AS registry_json) AS s \
+         ON t.name = s.name \
+         WHEN MATCHED THEN UPDATE SET t.registry_json = s.registry_json \
+         WHEN NOT MATCHED THEN INSERT (name, registry_json) VALUES (s.name, s.registry_json)",
+        table = CYPHER_CONSTRAINT_REGISTRY_TABLE,
+        name = sql_str(name),
+        registry_json = sql_str(registry_json),
+    ))
+}
+
+fn select_cypher_constraint_registry_sql(name: &str) -> Result<String> {
+    validate_cypher_constraint_registry_name(name)?;
+    Ok(format!(
+        "SELECT registry_json FROM {} WHERE name = {} LIMIT 1",
+        CYPHER_CONSTRAINT_REGISTRY_TABLE,
+        sql_str(name)
+    ))
+}
+
 
 // ── Props JSON ────────────────────────────────────────────────────────────────
 
@@ -1522,6 +3120,41 @@ fn props_from_json(data: &str) -> Result<Props> {
 }
 
 // ── Arrow parsing ─────────────────────────────────────────────────────────────
+
+fn parse_optional_single_string_from_arrow(
+    chunks: &[Vec<u8>],
+    column_name: &str,
+    context: &str,
+) -> Result<Option<String>> {
+    let mut value = None;
+    for data in chunks {
+        let reader = StreamReader::try_new(Cursor::new(data), None)
+            .map_err(|e| GrustError::Backend(format!("Arrow IPC read failed: {e}")))?;
+        let schema = reader.schema();
+        let column_idx = schema
+            .index_of(column_name)
+            .map_err(|_| GrustError::Schema(format!("{context} missing '{column_name}' column")))?;
+        for batch in reader {
+            let batch =
+                batch.map_err(|e| GrustError::Backend(format!("Arrow batch error: {e}")))?;
+            let values = string_column(&batch, column_idx, column_name)?;
+            for row in 0..batch.num_rows() {
+                if values.is_null(row) {
+                    return Err(GrustError::Schema(format!(
+                        "{context} column '{column_name}' must not be null"
+                    )));
+                }
+                if value.is_some() {
+                    return Err(GrustError::Schema(format!(
+                        "{context} returned more than one row"
+                    )));
+                }
+                value = Some(values.value(row).to_string());
+            }
+        }
+    }
+    Ok(value)
+}
 
 fn parse_nodes_from_arrow(data: &[u8]) -> Result<Vec<Node>> {
     let reader = StreamReader::try_new(Cursor::new(data), None)

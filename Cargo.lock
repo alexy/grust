@@ -3293,7 +3293,7 @@ dependencies = [
 
 [[package]]
 name = "grust-cocoindex"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "grust-core",
  "serde",
@@ -3302,9 +3302,10 @@ dependencies = [
 
 [[package]]
 name = "grust-core"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "async-trait",
+ "futures-executor",
  "garde",
  "quick-xml",
  "serde",
@@ -3315,8 +3316,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "grust-cypher"
+version = "0.9.0"
+dependencies = [
+ "async-trait",
+ "futures-executor",
+ "grust-core",
+ "grust-memory",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "grust-falkor"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "futures-executor",
@@ -3327,11 +3341,12 @@ dependencies = [
 
 [[package]]
 name = "grust-graph"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "garde",
  "grust-cocoindex",
  "grust-core",
+ "grust-cypher",
  "grust-falkor",
  "grust-helix",
  "grust-issundb",
@@ -3348,7 +3363,7 @@ dependencies = [
 
 [[package]]
 name = "grust-helix"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -3373,7 +3388,7 @@ dependencies = [
 
 [[package]]
 name = "grust-ladybug"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "arrow 55.2.0",
  "async-trait",
@@ -3386,7 +3401,7 @@ dependencies = [
 
 [[package]]
 name = "grust-lancedb"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -3400,7 +3415,7 @@ dependencies = [
 
 [[package]]
 name = "grust-memory"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "futures-executor",
@@ -3411,7 +3426,7 @@ dependencies = [
 
 [[package]]
 name = "grust-pggraph"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -3422,13 +3437,17 @@ dependencies = [
 
 [[package]]
 name = "grust-sail"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
+ "futures-executor",
  "grust-core",
+ "grust-cypher",
+ "grust-memory",
  "prost",
  "prost-types",
+ "serde",
  "serde_json",
  "tokio",
  "tonic",
@@ -3438,7 +3457,7 @@ dependencies = [
 
 [[package]]
 name = "grust-surreal"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "async-trait",
  "futures-executor",
