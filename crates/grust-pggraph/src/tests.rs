@@ -20,7 +20,7 @@ fn sample_graph() -> Graph {
 #[test]
 fn bootstrap_registers_pggraph_projection() {
     let config = PgGraphConfig::default();
-    let sql = bootstrap_sql(
+    let sql = pggraph_bootstrap_sql(
         &config,
         "\"public\".\"grust_nodes\"",
         "\"public\".\"grust_edges\"",
@@ -38,181 +38,15 @@ fn bootstrap_registers_pggraph_projection() {
 }
 
 #[test]
-fn graph_schema_creates_typed_views_and_indexes() {
-    let config = PgGraphConfig::default();
-    let schema = GraphSchema::builder()
-        .node(
-            "Person",
-            vec![
-                Field::required("name", FieldType::String),
-                Field::optional("age", FieldType::Int),
-            ],
-        )
-        .edge(
-            "WORKS_ON",
-            vec![Label::new("Person")],
-            vec![Label::new("Project")],
-            vec![Field::required("since", FieldType::Int)],
-        )
-        .build();
-
-    let sql = pggraph_schema_sql(
-        &config,
-        "\"public\".\"grust_nodes\"",
-        "\"public\".\"grust_edges\"",
-        &schema,
-    )
-    .unwrap();
-
-    assert!(sql.contains("CREATE OR REPLACE VIEW \"public\".\"grust_node_person\""));
-    assert!(sql.contains("props #>> ARRAY['name', 'value'] AS \"name\""));
-    assert!(sql.contains("(props #>> ARRAY['age', 'value'])::bigint AS \"age\""));
-    assert!(sql.contains("CREATE OR REPLACE VIEW \"public\".\"grust_edge_works_on\""));
-    assert!(sql.contains("\"grust_node_person_age_idx\""));
-    assert!(sql.contains("\"grust_edge_works_on_since_idx\""));
-}
-
-#[test]
-fn node_upsert_uses_jsonb_and_conflict_update() {
-    let graph = sample_graph();
-    let sql = upsert_nodes_sql("\"public\".\"grust_nodes\"", &graph.nodes).unwrap();
-
-    assert!(sql.contains("INSERT INTO \"public\".\"grust_nodes\""));
-    assert!(sql.contains("::jsonb"));
-    assert!(sql.contains("ON CONFLICT (id) DO UPDATE"));
-    assert!(sql.contains("'person-1'"));
-    assert!(sql.contains("'Talk'"));
-}
-
-#[test]
-fn edge_upsert_uses_grust_edge_identity() {
-    let graph = sample_graph();
-    let sql = upsert_edges_sql("\"public\".\"grust_edges\"", &graph.edges).unwrap();
-
-    assert!(sql.contains("INSERT INTO \"public\".\"grust_edges\""));
-    assert!(sql.contains("(id, from_id, to_id, label, props)"));
-    assert!(sql.contains("ON CONFLICT (from_id, label, to_id) DO UPDATE"));
-    assert!(sql.contains("'person-1'"));
-    assert!(sql.contains("'talk-1'"));
-    assert!(sql.contains("'PRESENTS'"));
-}
-
-#[test]
-fn mutation_batch_sql_wraps_ordered_mutations_in_transaction() {
-    let mutations = vec![
-        GraphMutation::UpsertNode(Node::new("Person", "person-1", Props::new())),
-        GraphMutation::UpsertNode(Node::new("Talk", "talk-1", Props::new())),
-        GraphMutation::UpsertEdge(Edge::new("PRESENTS", "person-1", "talk-1", Props::new())),
-        GraphMutation::PatchNode {
-            id: NodeId::new("person-1"),
-            props: Props::from([("name".to_string(), Value::from("Ada"))]),
-        },
-        GraphMutation::DeleteEdge {
-            from: NodeId::new("person-1"),
-            label: Label::new("PRESENTS"),
-            to: NodeId::new("talk-1"),
-        },
-        GraphMutation::DeleteNode(NodeId::new("person-1")),
-    ];
-    let sql = apply_mutations_sql(
-        &PgGraphConfig::default(),
-        "\"public\".\"grust_nodes\"",
-        "\"public\".\"grust_edges\"",
-        &mutations,
-    )
-    .unwrap();
-
-    assert!(sql.starts_with("BEGIN;\n"));
-    assert!(sql.ends_with(";\nCOMMIT"));
-    assert!(sql.contains("INSERT INTO \"public\".\"grust_nodes\""));
-    assert!(sql.contains("INSERT INTO \"public\".\"grust_edges\""));
-    assert!(sql.contains("UPDATE \"public\".\"grust_nodes\" SET props = props ||"));
-    assert!(sql.contains("'person-1'"));
-    assert!(sql.contains("DELETE FROM \"public\".\"grust_edges\" WHERE from_id = 'person-1' AND label = 'PRESENTS' AND to_id = 'talk-1'"));
-    assert!(sql.contains("DELETE FROM \"public\".\"grust_nodes\" WHERE id = 'person-1'"));
-}
-
-#[test]
-fn mutation_batch_sql_auto_builds_before_commit() {
-    let config = PgGraphConfig {
-        auto_build: true,
-        ..PgGraphConfig::default()
-    };
-    let sql = apply_mutations_sql(
-        &config,
-        "\"public\".\"grust_nodes\"",
-        "\"public\".\"grust_edges\"",
-        &[GraphMutation::UpsertNode(Node::new(
-            "Person",
-            "person-1",
-            Props::new(),
-        ))],
-    )
-    .unwrap();
-
-    let build = sql.find("SELECT * FROM graph.build").unwrap();
-    let commit = sql.find("COMMIT").unwrap();
-    assert!(build < commit);
-}
-
-#[test]
-fn traversal_sql_builds_exact_out_step() {
-    let traversal = Traversal::from_node("person-1")
-        .out("PRESENTS")
-        .to("Talk")
-        .limit(10);
-
-    let sql = traversal_sql(
-        "\"public\".\"grust_nodes\"",
-        "\"public\".\"grust_edges\"",
-        &traversal,
-    )
-    .unwrap();
-
-    assert!(sql.contains("JOIN \"public\".\"grust_edges\" e0 ON e0.from_id = n0.id"));
-    assert!(sql.contains("AND e0.label = 'PRESENTS'"));
-    assert!(sql.contains("JOIN \"public\".\"grust_nodes\" n1 ON n1.id = e0.to_id"));
-    assert!(sql.contains("AND n1.label = 'Talk'"));
-    assert!(sql.contains("WHERE n0.id = 'person-1'"));
-    assert!(sql.contains("LIMIT 10"));
-}
-
-#[test]
-fn traversal_sql_builds_property_start() {
-    let traversal = Traversal {
-        start: Start::NodesByProperty {
-            label: Label::new("Person"),
-            key: "name".to_string(),
-            value: Value::from("Ada"),
-        },
-        steps: Vec::new(),
-        limit: None,
-    };
-
-    let sql = traversal_sql(
-        "\"public\".\"grust_nodes\"",
-        "\"public\".\"grust_edges\"",
-        &traversal,
-    )
-    .unwrap();
-
-    assert!(sql.contains("WHERE n0.label = 'Person'"));
-    assert!(sql.contains("n0.props #>> ARRAY['name', 'value'] = 'Ada'"));
-}
-
-#[test]
-fn rejects_invalid_config_identifiers() {
-    assert!(validate_identifier("grust_1").is_ok());
-    assert!(validate_identifier("1grust").is_err());
-    assert!(validate_identifier("grust-nodes").is_err());
-}
-
-#[test]
-fn rejects_unsafe_json_property_keys() {
-    assert!(validate_json_key("safe_key_1").is_ok());
-    assert!(validate_json_key("display-name").is_err());
-    assert!(validate_json_key("'} OR 1=1--").is_err());
-    assert!(validate_json_key("").is_err());
+fn build_mode_maps_to_pggraph_projection_modes() {
+    assert_eq!(
+        PgGraphBuildMode::CsrReadonly.as_pggraph_mode(),
+        "csr_readonly"
+    );
+    assert_eq!(
+        PgGraphBuildMode::MutableOverlay.as_pggraph_mode(),
+        "mutable_overlay"
+    );
 }
 
 #[tokio::test]

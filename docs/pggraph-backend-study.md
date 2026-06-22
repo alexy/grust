@@ -1,5 +1,9 @@
 # pgGraph Backend Study
 
+Status: research/design note. `grust-pggraph` exists in the workspace; this
+document remains useful for architecture background and should not be treated
+as the current implementation checklist.
+
 This note studies Evokoa/pgGraph as a possible next Grust backend.
 
 ## What pgGraph Is

@@ -1,0 +1,13 @@
+[package]
+name = "grust-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Generic PostgreSQL GraphStore backend for Grust."
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+grust-postgres-core = { version = "0.9.2", path = "../grust-postgres-core" }
