@@ -238,11 +238,12 @@ client uses `tonic_prost::ProstCodec`.
 See [Writable Cypher Implementation Plan](CypherWrite.md) for the concrete
 implementation plan derived from this proposal.
 
-Sail's first Cypher integration is read-only by design: `MATCH ... RETURN`
-lowers cleanly to relational scans, joins, filters, projections, ordering, and
-limits over `grust_nodes`, `grust_edges`, and typed schema tables. Cypher writes
-should not be added by teaching Sail to mutate graph tables directly from a
-second, Sail-owned graph model.
+Sail's first Cypher integration was scoped around relational graph access:
+`MATCH ... RETURN` lowers cleanly to relational scans, joins, filters,
+projections, ordering, and limits over `grust_nodes`, `grust_edges`, and typed
+schema tables. Cypher writes were added by keeping Sail at the persistence
+boundary rather than teaching it to mutate graph tables directly from a second,
+Sail-owned graph model.
 
 The mutation boundary should remain Grust:
 
@@ -250,7 +251,7 @@ The mutation boundary should remain Grust:
 Cypher mutation text
         |
         v
-Sail parser/analyzer graph mutation IR
+grust-cypher parser/planner graph mutation IR
         |
         v
 Grust-style mutation semantics
@@ -274,8 +275,10 @@ contract already exposed by Grust:
 - `SET` maps to replacement or patch semantics only after Grust defines that
   distinction explicitly; today `put_node` and `put_edge` are replacement
   upserts for the affected element.
-- `DELETE` maps to `GraphMutationStore::delete_node` or `delete_edge`. Node
-  deletes remove incident edges, matching the existing mutation trait.
+- `DELETE` maps to explicit `GraphMutationStore` delete operations. Node
+  deletes remove incident edges, and relationship-row deletes capture the
+  matched relationship rows once before deleting requested relationship rows
+  and endpoint nodes.
 
 This keeps mutation behavior portable across backends. Backends that support
 transactions can override `apply_mutations` atomically. Backends that use the
@@ -284,15 +287,14 @@ planning must not promise stronger behavior than the target store can provide.
 The shared `GraphMutationAtomicity` marker makes that contract inspectable:
 Sail keeps the default ordered/non-atomic capability until the active table mode
 can prove stronger guarantees.
-Writable Cypher text execution remains a Sail entrypoint at this stage; the
-shared cross-backend contract is the Grust mutation plan, report, structured
-Cypher error categories, and `CypherMutationExecutor` for resolved plans.
-Memory implements that plan executor for deterministic non-Sail tests.
-Within Sail, a small internal parser front-door classifies top-level mutation
-statements before lowering; a shared parser crate remains deferred until there
-is a second Cypher text parser consumer.
+Writable Cypher text execution is now shared through `grust-cypher`. The
+cross-backend contract is the Grust mutation plan, report, structured Cypher
+error categories, DDL helpers, restricted returning evaluator, and generic
+returning executor. Memory implements that plan executor for deterministic
+non-Sail tests, while Sail owns the Spark SQL lowering and Arrow-backed
+persistence helpers.
 
-Open semantic decisions before accepting general Cypher writes:
+Remaining semantic boundaries for writable Cypher:
 
 - ID policy: node IDs are explicit by default, and Sail writable Cypher now has
   an opt-in generated-ID policy for node `CREATE`; deriving IDs from
@@ -304,9 +306,10 @@ Open semantic decisions before accepting general Cypher writes:
   `REMOVE`, optional remove-on-null compatibility, and restricted numeric node
   property updates now lower through Grust mutation semantics. Relationship
   matches support endpoint predicates, relationship property predicates,
-  delete, map patching, literal property assignment, and explicit property
-  removal. Relationship arithmetic, `CASE`, path expressions, functions, and
-  arbitrary computed expressions remain open.
+  delete, map patching, literal property assignment, explicit property
+  removal, and same-relationship numeric arithmetic. Restricted writable
+  `RETURN` supports bounded `CASE`, path, path-helper, scalar helper, map, and
+  list projections, but arbitrary computed expressions remain open.
 - Parameters: Sail writable Cypher accepts `$name` placeholders only where
   literal values are already accepted, using `CypherMutationOptions` rather
   than expression evaluation.
@@ -318,15 +321,18 @@ Open semantic decisions before accepting general Cypher writes:
   variables already bound by the write plan, including scalar property
   projections, whole-element projections, restricted aggregates, grouping,
   row-level `DISTINCT`, result controls, `RETURN *`, and restricted map/list
-  projections. Path returns and arbitrary read-query projection semantics
-  remain deferred.
+  projections, plus restricted path returns and path helper projections over
+  write-bound path variables. Arbitrary read-query projection semantics remain
+  deferred.
 - Match cardinality: mutating `MATCH ... SET/DELETE` may affect zero, one, or
   many rows; broad node `MATCH ... DELETE` now reports matched rows and changed
   graph elements, and broad node `MATCH ... SET +=`, `SET n.key = value`, and
   `REMOVE n.key` use the same matched-row reporting model for node changes.
   ID-resolved edge patches use structural edge identity plus optional explicit
   edge `id`; broad relationship mutations use a `GraphRelationshipMatch`
-  descriptor and report matched rows plus changed edge counts.
+  descriptor and report matched rows plus changed edge counts. Mixed
+  relationship-row deletes such as `DELETE e, a` use a captured row set so
+  relationship rows and selected endpoint nodes stay aligned.
 - Atomicity: Sail/Delta operations may need staged Arrow temp views and grouped
   `MERGE`/`DELETE` commands, but multi-statement Spark SQL should not be
   described as transactional unless Sail can prove it for the active table
@@ -334,17 +340,16 @@ Open semantic decisions before accepting general Cypher writes:
 
 Recommended implementation phases:
 
-1. Define a backend-neutral `GraphMutationPlan` in Grust or `grust-core` that
-   is close to `GraphMutation` but can represent unresolved IDs and matched
-   bindings during planning.
-2. Add `grust-sail` lowering from resolved mutation batches to the existing
+1. Keep `GraphMutationPlan` and `GraphMutation` as the backend-neutral write
+   contract that can represent resolved IDs and matched-row bindings during
+   planning.
+2. Keep `grust-cypher` responsible for text parsing, planning, DDL helpers, and
+   portable returning execution.
+3. Keep `grust-sail` lowering resolved mutation batches to the existing
    `MERGE INTO`, typed-table mirror writes, and staged Arrow delete helpers.
-3. In Sail, parse Cypher mutation syntax into `spec` nodes, but lower execution
-   through the Grust-compatible mutation plan rather than direct ad hoc table
-   edits.
-4. Add ignored live `grust-sail` Spark Connect tests for each mutation form,
-   then add Sail parser/analyzer/planner tests that prove the same semantics
-   through `SqlCommand`.
+4. Add ignored live `grust-sail` Spark Connect tests for backend behavior, and
+   parser/planner/generic executor tests in `grust-cypher` for portable
+   semantics.
 
 ### 2.5 Arrow Decoding
 
@@ -488,4 +493,4 @@ scripts/integration-test.sh --backend sail
 | Streaming ingestion | Spark structured streaming as write path |
 | De-duplication in `Both` traversal | Intermediate node dedup across UNION branches |
 | Property predicate pushdown | Requires typed columns (label-partitioned layout) |
-| Cypher mutations | Route through Grust mutation semantics and `grust-sail` helpers, not direct Sail-owned table edits |
+| Broader Cypher read/write coverage | Continue routing through `grust-cypher`, Grust mutation semantics, and `grust-sail` helpers rather than direct Sail-owned table edits |

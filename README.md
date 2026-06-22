@@ -51,9 +51,13 @@ crates/
   grust-ladybug/  Embedded LadybugDB store using the Rust lbug crate
   grust-lancedb/  LanceDB store using the Rust SDK
   grust-memory/   Deterministic in-memory store for tests and local use
-  grust-pggraph/  PostgreSQL/pgGraph store over universal graph tables
+  grust-postgres/ Generic PostgreSQL store over universal graph tables
+  grust-postgres-core/ Shared PostgreSQL table and SQL lowering implementation
+  grust-pggraph/  pgGraph extension wrapper over the PostgreSQL store
   grust-sail/     Sail SparkConnect backend using Spark DataFrames
+  grust-sql-core/ Shared SQL generation helpers for SQL table backends
   grust-surreal/  SurrealDB writer using HTTP or the Rust SDK
+  grust-turso/    Turso store using the Rust SDK over SQLite-compatible tables
 ```
 
 The backend crates expose reads and traversal as they mature behind the same
@@ -227,7 +231,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.9.0", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.10.0", features = ["memory"] }
 ```
 
 The facade re-exports the full `grust-memory` crate surface when the feature is
@@ -317,7 +321,7 @@ Backend crates are optional facade features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.9.0", features = ["falkor", "helix", "ladybug", "lancedb", "pggraph", "sail", "surreal"] }
+grust = { package = "grust-graph", version = "0.10.0", features = ["falkor", "helix", "ladybug", "lancedb", "postgres", "pggraph", "sail", "surreal", "turso"] }
 ```
 
 For Arrow-native data sources, enable `ladybug-arrow` to use embedded
@@ -358,11 +362,35 @@ during traversal, performs exact property-start matching over decoded Grust
 properties, and can mirror schema-labeled nodes and edges into typed Arrow
 tables.
 
-`grust-pggraph` stores Grust graphs in universal PostgreSQL tables, registers
-those tables with the pgGraph extension, supports SQL-backed reads/traversal,
-can build a pgGraph projection for graph-index experiments, and lowers
-`GraphSchema` into typed label views and expression indexes. Its mutation
-batches are wrapped in PostgreSQL transactions.
+`grust-postgres` stores Grust graphs in universal PostgreSQL tables using
+ordinary JSONB and SQL, so it can run on managed PostgreSQL services such as
+Neon without requiring extensions. It supports SQL-backed reads/traversal,
+schema-derived typed label views and expression indexes, and transactional
+mutation batches through the shared `grust-postgres-core` implementation.
+
+`grust-pggraph` wraps the same shared PostgreSQL implementation, registers the
+universal tables with the pgGraph extension, and can build a pgGraph projection
+for graph-index experiments.
+
+`grust-turso` uses the Turso Rust SDK directly and stores Grust graphs in
+SQLite-compatible universal node and edge tables with JSON text properties. It
+supports local in-process Turso databases by default and exposes an optional
+`turso-sync` facade feature for Turso Cloud sync construction. Reads,
+schema-derived views, bounded traversal, and mutation batches run through
+ordinary SQL over the local Turso connection; synced callers can explicitly
+push or pull through the store's Turso sync helpers.
+
+The PostgreSQL, pgGraph, and Turso backends share backend-neutral SQL graph
+generation through `grust-sql-core`: universal table DDL, reads, traversal
+joins, mutation framing, schema views, indexes, identifier quoting, and literal
+escaping. The dialect layer stays narrow and performance-sensitive: PostgreSQL
+keeps JSONB operators, `ON CONFLICT`, `CREATE OR REPLACE VIEW`, and lateral
+joins, while Turso keeps JSON text, `json_extract`, `json_patch`, and
+SQLite-compatible view and join forms. `grust-postgres-core` remains the
+PostgreSQL-specific execution and connection layer reused by both
+`grust-postgres` and `grust-pggraph`. Sail is intentionally outside this shared
+SQL core because its lowering targets Spark Connect, Arrow IPC staging, and
+distributed Spark SQL rather than direct row-store SQL.
 
 `grust-sail` stores graphs as Spark DataFrames through Sail's SparkConnect
 server, lowers traversal IR to Spark SQL joins, and can mirror schema-labeled
@@ -382,11 +410,13 @@ backend writes.
 Typed-table descriptor helpers and directional triplet SQL helpers cover the
 common GrustFrames-style needs of selecting schema-backed Sail tables and
 lowering triplet filters, motifs, and aggregate-message passes.
-Writable Cypher starts as a strict Sail-specific v1 surface:
-`sail_cypher_mutation_plan` parses explicit-ID node `CREATE`/`MERGE`, resolved
-endpoint edge `CREATE`/`MERGE`, and resolved node/edge `DELETE` into Grust
-mutation plans. It also accepts ordered multi-statement batches and local node
-variables bound from explicit-ID node patterns, plus ID-resolved
+Writable Cypher is implemented in `grust-cypher` as a strict, backend-neutral
+planning surface with Sail compatibility wrappers:
+`sail_cypher_mutation_plan` and the generic `cypher_mutation_plan` parse
+explicit-ID node `CREATE`/`MERGE`, resolved endpoint edge `CREATE`/`MERGE`, and
+resolved node/edge `DELETE` into Grust mutation plans. They also accept ordered
+multi-statement batches and local node variables bound from explicit-ID node
+patterns, plus ID-resolved
 `MATCH ... DELETE`, edge `MATCH ... CREATE` / `MATCH ... MERGE`, and
 cardinality-aware broad node
 `MATCH ... DELETE` / `MATCH ... SET n += { ... }` / `MATCH ... SET n.key = value`
@@ -396,7 +426,8 @@ property `REMOVE` for resolved node or edge identities, row-producing edge
 `MATCH ... CREATE` and `MATCH ... MERGE` when both endpoints come from matched
 node variables, plus broad relationship `MATCH ... DELETE` / `MATCH ... SET e += { ... }` /
 `MATCH ... SET e.key = value` / `MATCH ... REMOVE e.key` over endpoint
-predicates, while
+predicates plus relationship-row deletes such as `DELETE e, a` that can delete
+matched relationship rows and endpoint nodes from one captured row set, while
 `SailGraphStore::execute_cypher_mutation` executes those plans through
 `GraphMutationStore` and the existing Sail staging and `MERGE INTO` paths.
 For stricter Cypher compatibility, callers can use
@@ -438,7 +469,81 @@ row-producing edge write. It returns a
 `CypherMutationTableResult` with the usual mutation result plus a
 `CypherResultTable`; aggregation, paths, ordering, limiting, arbitrary
 read-query features, unrestricted broad row materialization, and path-style
-row projections remain rejected.
+row projections remain rejected. Scalar projections and aggregate bodies share
+one restricted return-target parser for the supported literal, map/list,
+path-helper, introspection, string, numeric, conversion, `coalesce`, and `CASE`
+forms. Restricted aggregate bodies also share the scalar projection
+materializer for literal, map/list, introspection, string, numeric, conversion,
+`coalesce`, `CASE`, and list-helper targets, while `*`, whole elements,
+properties, and path functions keep their aggregate-specific paths. Restricted
+`COUNT(...)` scalar targets use the same projection-materializer
+classification before applying non-null and `DISTINCT` count semantics.
+Grouped aggregate row materialization reuses that same scalar evaluator for
+classifier-covered targets while keeping aggregate-specific shapes explicit.
+Internally, writable `RETURN` target materialization is classified into star,
+whole-element, direct-property, scalar-projection, element-function, and
+path-function paths before aggregate and count routing. Scalar projection
+evaluation also classifies restricted target shapes into literal, map, list,
+conditional, coalesce, introspection, list-access, list-predicate, numeric,
+conversion, string, element-function, and path-function kinds before routing
+special cases. The scalar evaluator now routes through a small internal scalar
+AST over those restricted shapes rather than matching the public return-target
+enum directly, and list-helper expressions have a dedicated
+internal evaluator boundary. String-helper expressions now use the same kind
+of dedicated internal evaluator boundary, as do numeric and conversion helper
+expressions. Literal/composite, `CASE`/`coalesce`, and introspection scalar
+expressions use dedicated evaluator boundaries too, and binding plus
+element/path wrapper scalar routes now sit behind the same expression-family
+dispatcher style. The top-level scalar dispatcher also uses an internal
+scalar AST-family classifier before routing to binding, wrapper, value,
+control, introspection, list, numeric, conversion, or string evaluators.
+Nested `coalesce(...)` arguments can reuse those already-supported restricted
+scalar targets while keeping coalesce arguments on one variable and rejecting
+nested list/map composites. Restricted `CASE` branch values use the same
+scalar AST path for same-variable properties, literals, and already-supported
+scalar helper targets while keeping CASE predicates equality-only. Restricted
+list predicate equality values use that scalar AST path while keeping haystacks
+property-only and item predicates equality-only. Restricted list projection
+items use the same scalar AST path for direct properties, literals, and
+already-supported scalar helper targets while still rejecting nested list/map
+composites and cross-variable lists. Restricted map projection values use that
+scalar AST path for same-variable properties, literals, and already-supported
+scalar helper targets while still rejecting nested list/map composites and
+cross-variable values. `toLower(...)` and `toUpper(...)` now use the same
+bounded scalar argument path, so they can wrap direct properties, literals, or
+already-supported restricted scalar targets without enabling general expression
+evaluation. `trim(...)`, `lTrim(...)`, and `rTrim(...)` use that same bounded
+scalar argument path while preserving existing string-only trim semantics.
+`reverse(...)` uses the same bounded scalar argument path while preserving
+existing string-or-array reverse semantics. `isEmpty(...)` also uses the
+bounded scalar argument path while preserving existing string, array, and JSON
+collection emptiness semantics. `split(...)` uses the same bounded first
+argument path while keeping delimiters literal-or-parameter only and preserving
+string-only split semantics. `substring(...)` uses the same bounded first
+argument path while keeping offsets literal-or-parameter only and preserving
+string-only substring semantics. `left(...)` and `right(...)` use the same
+bounded first argument path while keeping lengths literal-or-parameter only and
+preserving string-only slice semantics. `startsWith(...)`, `endsWith(...)`,
+and `contains(...)` use that same bounded first argument path while keeping
+needles literal-or-parameter only and preserving string-only predicate
+semantics. `replace(...)` uses the same bounded first argument path while
+keeping search and replacement strings literal-or-parameter only and preserving
+string-only replacement semantics. `toString(...)` also uses the bounded
+argument path while preserving scalar-only string conversion semantics.
+`abs(...)` uses that same bounded argument path while preserving numeric-only
+absolute-value semantics. `ceil(...)` and `floor(...)` use that same bounded
+argument path while preserving numeric-only rounding semantics. `sign(...)`
+uses that same bounded argument path while preserving finite numeric sign
+semantics. `toInteger(...)` and `toFloat(...)` use that same bounded argument
+path while preserving numeric and numeric-string conversion semantics.
+`toBoolean(...)` uses that same bounded argument path while preserving boolean
+and boolean-string conversion semantics. `head(...)`, `last(...)`, and
+`tail(...)` use that same bounded argument path while preserving array-only
+list access semantics. List index expressions and slice bounds use that same
+bounded argument path while preserving non-negative-integer subscript
+semantics. `toStringList(...)`, `toIntegerList(...)`, `toFloatList(...)`, and
+`toBooleanList(...)` use that same bounded argument path while preserving
+array-only list conversion semantics.
 `CypherMutationOptions::parameters` lets callers bind Grust `Value`s to
 `$name` placeholders in literal positions such as IDs, property maps, and
 literal property assignments; quoted `'$name'` remains ordinary string text.
@@ -448,7 +553,75 @@ property comparisons against literals or parameters joined with `AND`, such as
 backend-neutral `GraphPropertyPredicate` values, so Memory evaluates the same
 plan that Sail lowers to SQL. Missing properties never match; `null` only
 matches equality or inequality against `Value::Null`, and ordered comparisons
-are limited to numbers or strings.
+are limited to numbers or strings. The bounded grammar also supports null
+checks, string predicates, scalar membership, same-property `OR` folds, and
+restricted `AND` / `OR` groups parsed through an internal boolean AST. The AST
+lowerer accepts factored `OR` branches whose `AND` groups share common
+predicates and differ by one foldable same-property predicate, including
+unparenthesized factored groups that lower to the same backend-neutral shape.
+Common terms inside those factored branches may themselves be foldable `OR`
+groups, and nested parenthesized foldable `OR` terms flatten into the same
+grouped predicates when every leaf stays bounded. Exact duplicate bounded
+predicates are de-duplicated after parsing and folding, including inside each
+factored `OR` branch before branch comparison. Factored branch `AND` groups
+also run the same bounded-predicate canonicalization pipeline as top-level
+`AND`, so branch-local equality, membership, inequality, and range
+combinations can expose a flat foldable shape. Impossible factored `OR`
+branches are pruned after canonicalization, and all-impossible factored groups
+collapse to the existing empty `IN` no-match predicate. Branches subsumed by a
+broader sibling branch are pruned too, so `(A AND B) OR A` lowers to `A`.
+Conservative same-property predicate implication also prunes narrower branches
+covered by broader sibling membership, exclusion, inequality, or ordered-bound
+predicates, including stricter same-direction range bounds and ordered bounds
+that exclude a sibling inequality value or every value in a sibling grouped
+exclusion. Simple bounded `OR` terms that cannot use the direct same-property
+fold can also collapse through that same conservative branch-subsumption path,
+for example when a broader `IS NOT NULL` sibling covers a narrower string
+predicate. Negated simple `OR` terms can use that path too, but only when the
+positive disjunction first collapses to one backend-neutral predicate that can
+then be inverted. Negated factored `OR` groups can do the same only when the
+positive factored group collapses all the way to one non-empty bounded
+predicate. Negated `AND` groups can also reuse conservative branch subsumption
+when the disjunction of negated terms collapses to one non-empty bounded
+predicate. Negated same-property `OR` groups with a null branch can lower to a
+bounded conjunction of `IS NOT NULL` plus negated equality or membership
+terms. Folded `OR` value lists also drop exact duplicate alternatives while
+preserving first-seen order, and repeated same-property membership predicates
+are canonicalized when they can still be represented as one backend-neutral
+membership predicate.
+Empty positive membership intersections lower to an empty `IN` predicate,
+which matches no rows. Same-property equality and membership combinations
+collapse to equality, narrowed `IN`, or empty `IN` no-match predicates when
+that preserves the `AND` semantics. Double negation over an otherwise bounded
+predicate collapses back to the positive bounded predicate. Negated foldable
+`AND` groups such as `NOT (n.status <> 'active' AND n.status <> 'pending')`
+lower to the same grouped membership path when each negated term stays on one
+property, and matching string exclusions such as
+`NOT (NOT n.name STARTS WITH 'Ad' AND NOT n.name STARTS WITH 'Gr')` lower to
+the grouped string path. Duplicate negated `AND` terms such as
+`NOT (n.status = 'blocked' AND n.status = 'blocked')` collapse to the single
+negated bounded predicate they represent. Nested negated string `AND` groups
+can merge an already-grouped string predicate with another matching
+same-property string predicate without adding a general boolean evaluator.
+Factored `OR` branch pruning also recognizes exact string predicates covered
+by sibling grouped string predicates over the same property, and negated
+string branches covered by sibling grouped negated string predicates over the
+same property. It also recognizes bounded predicates that imply broader
+`IS NOT NULL` branches, plus exact-null predicates that imply `IS NULL`
+without reversing missing-property semantics. Exact inequality branches can
+also be pruned when a sibling branch already accepts the equivalent singleton
+leading-`NOT` membership exclusion, and singleton membership branches can be
+pruned when a sibling branch already accepts the equivalent exact equality;
+equivalent singleton membership/equality branches keep the equality form.
+Ordered-bound branches can also be pruned when the bound excludes the sibling
+inequality value.
+Scalar inequality combinations can similarly narrow `IN`, widen `NOT IN`, or
+collapse contradictions to empty `IN`. Same-property ordered bounds keep the
+stricter lower or upper bound and
+collapse impossible ranges to empty `IN`. Equality combined with ordered
+bounds collapses to equality when the value is inside the range, or empty
+`IN` when it is outside. Positive `IN` lists combined with ordered bounds are
+filtered to the surviving values, or to empty `IN` when no value remains.
 `CypherMutationOptions::null_assignment` defaults to storing
 `SET x.key = null` as `Value::Null`, but callers can select
 `CypherNullAssignment::RemoveProperty` to lower explicit null assignment to
@@ -462,14 +635,15 @@ The first expression form is intentionally small: node property assignments can
 read the current value of another property on the same node variable and apply
 `+`, `-`, `*`, or `/` with an integer or float literal or parameter, lowering
 to an explicit read-modify-write mutation plan shared by Sail and Memory.
-Execution of resolved mutation plans is backend-neutral through
-`CypherMutationExecutor`: Sail still owns the text parser for now, but the
-resulting `GraphMutationPlan` can execute on Sail or on `MemoryGraphStore` for
-deterministic tests. Backends without support for a plan operation return
-structured execution errors instead of ignoring it.
-The Sail parser now has a small internal front-door boundary that classifies
-top-level mutation statements before lowering, while a shared parser crate
-remains deferred until there is a second Cypher text parser consumer.
+Parsing, planning, DDL helpers, and the restricted returning evaluator now live
+in `grust-cypher`. Execution of resolved mutation plans is backend-neutral
+through `CypherMutationExecutor`, so the same `GraphMutationPlan` can execute on
+Sail or on `MemoryGraphStore` for deterministic tests. Backends without support
+for a plan operation return structured execution errors instead of ignoring it.
+`grust-sail` owns only Sail-specific execution concerns such as SparkConnect,
+SQL lowering, Arrow IPC staging, Delta `MERGE INTO`, and registry-table
+persistence, while preserving the `sail_cypher_*` names as compatibility
+wrappers.
 Mutation batch atomicity is explicit through `GraphMutationAtomicity`: the
 default mutation path is ordered but not atomic, while backends with proven
 transaction wrappers, currently pgGraph and SurrealDB, can report
@@ -483,9 +657,11 @@ patch mutations and reuses the same typed-edge mirror writes as ordinary edge
 upserts.
 Row-producing edge `MATCH ... CREATE` and `MATCH ... MERGE` materialize the
 matched endpoint node pairs before writing, report the matched row count
-separately from attempted edge upserts, and reject trailing node creation or
-explicit relationship IDs in the row-producing form. The current report does
-not distinguish newly inserted merge rows from rows that already existed.
+separately from attempted edge upserts, and reject trailing node creation.
+Explicit relationship IDs are accepted only for single-row row-producing
+writes, while generated relationship IDs require an explicit caller-selected
+policy. Precise insert/update counters are populated where the executor can
+distinguish newly inserted rows from rows that already existed.
 Literal `SET n.key = value` / `SET e.key = value` lowers to one-key patches,
 and explicit `REMOVE n.key` / `REMOVE e.key` lowers to backend-neutral property
 remove mutations. Node forms can target either a resolved identity or a broad
@@ -493,8 +669,16 @@ node match; edge forms can target either a resolved identity or a broad
 relationship match. Broad relationship matches can filter on relationship
 property predicates beyond `id`; explicit edge `id` remains a separate
 identity filter and can be combined with ordinary relationship predicates.
-Relationship expression updates and general computed expressions remain
-deferred.
+Same-relationship numeric property updates such as `SET e.weight = e.weight +
+1` lower to explicit read-modify-write mutations; cross-variable relationship
+expressions and general computed expressions remain deferred.
+Existing matched relationship `SET`, `REMOVE`, relationship-only `DELETE`, and
+mixed endpoint-deleting `DELETE` rows can bind restricted path variables, so
+`MATCH p = (a)-[e:TYPE]->(b) SET e.seen = true RETURN p` and
+`MATCH p = (a)-[e:TYPE]->(b) DELETE e RETURN p` return the same JSON path
+shape used by row-producing and resolved single-edge write paths. For mixed
+forms such as `DELETE e, a`, including explicit-ID endpoints, the returned
+path is snapshotted before the relationship and endpoint node are removed.
 The mutation report includes matched-row and changed node/edge counts for
 broad Sail node and relationship deletes, patches, and property removals, and
 the parser accepts top-level mutation keywords case-insensitively while
@@ -537,6 +721,7 @@ Grust:    talk -[PRESENTED_BY]-> Person
 Surreal:  talk:id->presented_by->person
 Helix:    N<Talk>(id)::Out<PresentedBy>
 pgGraph:  SQL over grust_nodes/grust_edges, optionally graph.build()
+Turso:    SQL over grust_nodes/grust_edges with SQLite JSON functions
 Sail:     Spark SQL joins over grust_nodes/grust_edges
 LanceDB:  SDK table filters over grust_nodes/grust_edges
 Memory:   adjacency-map lookup
@@ -600,8 +785,14 @@ Constraint metadata is portable but enforcement is explicit. Required-property
 constraints validate through `GraphSchema` before writes on backends that keep
 an applied schema. Unique-property constraints validate inside
 `GraphSchema::validate_graph`; the memory backend reports validate-before-write
-behavior for them, while other backends may still report metadata-only behavior
-until they add comparable preflight or native enforcement.
+behavior for them. Memory also supports explicit native constraint application
+through `GraphStore::apply_native_constraint`, storing backend-owned required
+or unique property constraints and enforcing them on later writes without
+requiring typed `GraphSchema` metadata. `grust-cypher` exposes
+`apply_cypher_native_constraints` for applying parsed `CREATE CONSTRAINT` DDL
+through that native-constraint path. Other backends may still report
+metadata-only behavior until they add comparable preflight or native
+enforcement.
 
 The current backends use schema differently:
 

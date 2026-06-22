@@ -1,22 +1,14 @@
 [package]
-name = "grust-lancedb"
+name = "grust-sql-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-description = "LanceDB GraphStore backend for Grust."
+description = "Shared SQL generation helpers for Grust SQL backends."
 keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-arrow = "58.3.0"
-async-trait = { workspace = true }
-futures = "0.3.32"
 grust-core = { version = "0.10.0", path = "../grust-core" }
-lancedb = { workspace = true }
 serde_json = { workspace = true }
-
-[dev-dependencies]
-tempfile = { workspace = true }
-tokio = { workspace = true }

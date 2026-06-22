@@ -1,5 +1,10 @@
 # grust Architectural Review — Fable/Codex Task List
 
+Status: active review backlog with stale baseline metadata. This review was
+written against `v0.6.2`; some findings have since been fixed elsewhere, but
+unmarked items should be revalidated against the current workspace before being
+implemented.
+
 **Codebase**: `~/src/grust` — v0.6.2, 10-crate workspace, Cargo edition 2024 / resolver 3  
 **Review date**: 2026-06-12  
 **Reviewer**: Fable (claude-sonnet-4-6)

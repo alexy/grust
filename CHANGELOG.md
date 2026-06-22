@@ -4,8 +4,32 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
-## Unreleased
+## 0.10.0 - 2026-06-22
 
+- Added `grust-sql-core`, a shared SQL generation crate for universal-table
+  SQL backends, and refactored PostgreSQL/pgGraph and Turso lowering through
+  it while keeping JSON operators, upsert syntax, view creation, transaction
+  semantics, and bidirectional traversal join shapes dialect-specific.
+- Added `grust-turso`, a Turso Rust SDK backend with local in-process Turso
+  storage, optional Turso Cloud sync construction, universal node/edge tables,
+  SQL-backed reads/traversal, schema views/indexes, and transactional mutation
+  batches.
+
+- Added a generic `grust-postgres` backend for extension-free PostgreSQL
+  deployments such as Neon, with reusable `grust-postgres-core` storage,
+  schema-view, traversal, and mutation SQL shared by `grust-pggraph`.
+- Refactored `grust-pggraph` into a pgGraph extension/projection wrapper over
+  the shared PostgreSQL backend implementation.
+- Refreshed documentation status after the writable Cypher completion pass:
+  updated book and Arrow examples for the `0.10.0` line, replaced the stale
+  restart checkpoint, marked older backend proposal documents as historical
+  design notes where implementation now exists, and added the next major
+  Cypher work areas to `docs/CypherWrite.md`.
+- Added `docs/GrustCypherFull.md` and `docs/GrustCypherBackends.md` to plan the
+  path from the current strict Grust Cypher subset toward full GQL coverage and
+  backend-specific portable conformance profiles.
+- Split the full GQL plan into execution-sized logical work units with
+  dependencies, full-access Codex estimates, and done criteria.
 - Extracted the writable Cypher parser, planner, DDL types, constraint
   registry, return evaluator, and generic returning executor into a new
   `grust-cypher` crate, so any `GraphStore` backend can use the Cypher
@@ -14,6 +38,218 @@ reconstructed from Git history, release commits, and the shipped docs.
   SparkConnect execution and depends on `grust-cypher` for all Cypher types.
   The `grust-graph` facade exposes a new `cypher` feature that pulls in
   `grust-cypher` without requiring the full `sail` feature.
+- Moved backend-neutral writable Cypher parser, planner, DDL, restricted
+  returning, and Memory-backed generic execution tests from `grust-sail` into
+  `grust-cypher`; `grust-sail` now keeps Sail SQL, Arrow, SparkConnect, and
+  live Sail persistence coverage.
+- Added a restricted boolean AST for mutating Cypher `MATCH ... WHERE`
+  lowering, so bounded `AND` / `OR` / one-term `NOT` groups lower through one
+  conservative backend-neutral predicate path and factored unparenthesized
+  `AND` / `OR` groups can be accepted when they canonicalize to the existing
+  foldable predicate-vector shape.
+- Consolidated restricted writable Cypher aggregate projection materialization
+  so literal, map/list, introspection, string, numeric, conversion,
+  `coalesce`, `CASE`, and list-helper aggregate bodies reuse the scalar
+  projection materializer while aggregate-specific `*`, whole-element,
+  property, and path-function paths remain explicit.
+- Consolidated restricted writable Cypher `COUNT(...)` projection
+  materialization onto the same scalar projection classifier while preserving
+  explicit `count(*)`, whole-element, direct-property, path-function, non-null,
+  and `DISTINCT` semantics.
+- Consolidated grouped writable Cypher aggregate row materialization so
+  classifier-covered restricted scalar targets reuse the scalar projection
+  evaluator while aggregate-specific `*`, whole-element, direct-property, and
+  path-function paths remain explicit.
+- Added an internal writable Cypher `RETURN` target materialization classifier
+  that separates star, whole-element, direct-property, scalar-projection,
+  element-function, and path-function targets before aggregate, grouped
+  aggregate, and `COUNT` routing.
+- Added an internal writable Cypher scalar projection kind classifier so
+  restricted scalar evaluation now explicitly routes star, whole-element,
+  direct-property, literal, map/list, conditional, coalesce, introspection,
+  list-helper, numeric, conversion, string, element-function, and path-function
+  target shapes.
+- Added an internal writable Cypher scalar expression view so restricted scalar
+  classification and evaluation route through expression-shaped variants rather
+  than matching the public return-target enum directly.
+- Added a dedicated internal evaluator boundary for writable Cypher restricted
+  list-helper scalar expressions while preserving the existing list projection
+  materializers and supported syntax.
+- Added a dedicated internal evaluator boundary for writable Cypher restricted
+  string-helper scalar expressions while preserving the existing string
+  projection materializers and supported syntax.
+- Added dedicated internal evaluator boundaries for writable Cypher restricted
+  numeric and conversion scalar expressions while preserving the existing
+  numeric, scalar cast, and list cast materializers and supported syntax.
+- Added dedicated internal evaluator boundaries for writable Cypher restricted
+  literal/composite, `CASE`/`coalesce`, and introspection scalar expressions
+  while preserving existing materializers and supported syntax.
+- Added dedicated internal evaluator boundaries for writable Cypher scalar
+  binding routes and element/path wrapper routes, completing expression-family
+  dispatch for the currently supported restricted scalar target shapes.
+- Added an internal writable Cypher scalar AST-family classifier so the
+  top-level scalar dispatcher routes through binding, wrapper, value, control,
+  introspection, list, numeric, conversion, and string evaluator families.
+- Promoted the internal writable Cypher restricted scalar expression view to a
+  `CypherReturnScalarAst` boundary used by scalar kind classification, family
+  classification, and scalar projection evaluation.
+- Extended restricted writable Cypher `coalesce(...)` so arguments can be
+  direct properties, literals, or already-supported restricted scalar targets
+  evaluated through the scalar AST while still requiring one variable.
+- Extended restricted writable Cypher list projections so list items can be
+  direct properties, literals, or already-supported restricted scalar targets
+  evaluated through the scalar AST while still rejecting nested list/map
+  composites and cross-variable lists.
+- Extended restricted writable Cypher map projections so entry values can be
+  same-variable properties, literals, or already-supported restricted scalar
+  targets evaluated through the scalar AST while still rejecting nested
+  list/map composites and cross-variable values.
+- Consolidated nested restricted scalar parsing across `coalesce(...)`, list
+  projection items, and map projection values, including shared rejection for
+  nested list/map composites before a broader expression AST exists.
+- Extended restricted writable Cypher `CASE` branch values so `THEN` and
+  `ELSE` can wrap same-variable direct properties, literals, or
+  already-supported restricted scalar targets while preserving equality-only
+  CASE predicates.
+- Extended restricted writable Cypher list predicate equality values so
+  `any` / `all` / `none` / `single` comparisons can use same-variable direct
+  properties, literals, or already-supported restricted scalar targets while
+  preserving property-only haystacks and item-variable equality predicates.
+- Extended restricted writable Cypher `toLower(...)` and `toUpper(...)`
+  projections so they can wrap direct properties, literals, or
+  already-supported restricted scalar targets while preserving the existing
+  string-only value semantics.
+- Extended restricted writable Cypher `trim(...)`, `lTrim(...)`, and
+  `rTrim(...)` projections so they can wrap direct properties, literals, or
+  already-supported restricted scalar targets while preserving the existing
+  string-only trim semantics.
+- Extended restricted writable Cypher `reverse(...)` projections so they can
+  wrap direct properties, literals, or already-supported restricted scalar
+  targets while preserving the existing string-or-array reverse semantics.
+- Extended restricted writable Cypher `isEmpty(...)` projections so they can
+  wrap direct properties, literals, or already-supported restricted scalar
+  targets while preserving the existing string, array, and JSON collection
+  emptiness semantics.
+- Extended restricted writable Cypher `split(...)` projections so their first
+  argument can wrap direct properties, literals, or already-supported
+  restricted scalar targets while delimiters remain non-empty string literals
+  or parameters.
+- Extended restricted writable Cypher `substring(...)` projections so their
+  first argument can wrap direct properties, literals, or already-supported
+  restricted scalar targets while offsets remain non-negative integer literals
+  or parameters.
+- Extended restricted writable Cypher `left(...)` and `right(...)` projections
+  so their first argument can wrap direct properties, literals, or
+  already-supported restricted scalar targets while lengths remain
+  non-negative integer literals or parameters.
+- Extended restricted writable Cypher `startsWith(...)`, `endsWith(...)`, and
+  `contains(...)` projections so their first argument can wrap direct
+  properties, literals, or already-supported restricted scalar targets while
+  needles remain string literals or parameters.
+- Extended restricted writable Cypher `replace(...)` projections so their
+  first argument can wrap direct properties, literals, or already-supported
+  restricted scalar targets while search and replacement strings remain
+  literals or parameters.
+- Extended restricted writable Cypher `toString(...)` projections so their
+  argument can wrap direct properties, literals, or already-supported
+  restricted scalar targets while preserving scalar-only string conversion.
+- Extended restricted writable Cypher `abs(...)` projections so their argument
+  can wrap direct properties, literals, or already-supported restricted scalar
+  targets while preserving numeric-only absolute-value semantics.
+- Extended restricted writable Cypher `ceil(...)` and `floor(...)` projections
+  so their argument can wrap direct properties, literals, or already-supported
+  restricted scalar targets while preserving numeric-only rounding semantics.
+- Extended restricted writable Cypher `sign(...)` projections so their
+  argument can wrap direct properties, literals, or already-supported
+  restricted scalar targets while preserving finite numeric sign semantics.
+- Extended restricted writable Cypher `toInteger(...)` and `toFloat(...)`
+  projections so their argument can wrap direct properties, literals, or
+  already-supported restricted scalar targets while preserving numeric and
+  numeric-string conversion semantics.
+- Extended restricted writable Cypher `toBoolean(...)` projections so their
+  argument can wrap direct properties, literals, or already-supported
+  restricted scalar targets while preserving boolean and boolean-string
+  conversion semantics.
+- Extended restricted writable Cypher `head(...)`, `last(...)`, and
+  `tail(...)` projections so their argument can wrap direct properties,
+  literals, or already-supported restricted scalar targets while preserving
+  array-only list access semantics.
+- Extended restricted writable Cypher list indexes and slice bounds so their
+  subscript expressions can wrap direct properties, literals, or
+  already-supported restricted scalar targets while preserving
+  non-negative-integer subscript semantics.
+- Extended restricted writable Cypher `toStringList(...)`,
+  `toIntegerList(...)`, `toFloatList(...)`, and `toBooleanList(...)`
+  projections so their argument can wrap direct properties, literals, or
+  already-supported restricted scalar targets while preserving array-only list
+  conversion semantics.
+- Extended restricted mutating Cypher `MATCH ... WHERE` boolean lowering to
+  collapse double negation over an otherwise bounded predicate back to the
+  positive backend-neutral predicate.
+- Extended restricted mutating Cypher `MATCH ... WHERE` `OR` folding to
+  flatten nested parenthesized foldable `OR` terms before applying the
+  existing same-property grouped predicate or grouped exclusion lowering.
+- Extended restricted mutating Cypher `MATCH ... WHERE` boolean lowering so
+  negated foldable `AND` groups, such as
+  `NOT (n.status <> 'active' AND n.status <> 'pending')`, can lower through
+  the existing same-property grouped predicate path, including matching string
+  predicate groups such as
+  `NOT (NOT n.name STARTS WITH 'Ad' AND NOT n.name STARTS WITH 'Gr')`, while
+  mixed-property and general De Morgan cases remain rejected.
+- Extended restricted mutating Cypher `MATCH ... WHERE` boolean lowering so
+  duplicate negated `AND` terms such as
+  `NOT (n.status = 'blocked' AND n.status = 'blocked')` collapse to the same
+  bounded predicate as `NOT n.status = 'blocked'`.
+- Extended restricted mutating Cypher `MATCH ... WHERE` string folding so
+  nested negated `AND` groups can merge an already-grouped string predicate
+  with another matching same-property string predicate while general boolean
+  evaluation remains rejected.
+- Extended restricted mutating Cypher `MATCH ... WHERE` factored-branch
+  pruning so exact string predicates can be recognized as covered by sibling
+  grouped string predicates over the same variable, property, and string
+  operation family.
+- Extended restricted mutating Cypher `MATCH ... WHERE` factored-branch
+  pruning so negated string predicates can be recognized as covered by sibling
+  grouped negated string predicates over the same variable, property, and
+  string operation family.
+- Extended restricted mutating Cypher `MATCH ... WHERE` factored-branch
+  pruning so bounded predicates that imply `IS NOT NULL`, plus exact-null
+  predicates that imply `IS NULL`, can be recognized as covered by sibling
+  null-check predicates without reversing missing-property semantics.
+- Extended restricted mutating Cypher `MATCH ... WHERE` factored-branch
+  pruning so exact inequality predicates can be recognized as covered by
+  equivalent singleton leading-`NOT` membership exclusions.
+- Extended restricted mutating Cypher `MATCH ... WHERE` factored-branch
+  pruning so singleton membership predicates can be recognized as covered by
+  equivalent exact equality predicates.
+- Canonicalized restricted mutating Cypher `MATCH ... WHERE` factored-branch
+  pruning so equivalent singleton membership and exact equality branches keep
+  the equality predicate form.
+- Extended restricted mutating Cypher `MATCH ... WHERE` factored-branch
+  pruning so ordered-bound predicates can be recognized as covered by sibling
+  scalar inequality predicates when the excluded value cannot satisfy the
+  bound.
+- Extended restricted mutating Cypher `MATCH ... WHERE` factored-branch
+  pruning so ordered-bound predicates can be recognized as covered by sibling
+  grouped exclusion predicates when every excluded value cannot satisfy the
+  bound.
+- Extended restricted mutating Cypher `MATCH ... WHERE` simple `OR` lowering
+  so non-folded bounded terms can reuse conservative branch subsumption, such
+  as pruning a narrower string predicate when a sibling `IS NOT NULL` predicate
+  already covers it.
+- Extended restricted mutating Cypher `MATCH ... WHERE` negated simple `OR`
+  lowering so a disjunction that first collapses to one bounded predicate can
+  be inverted, preserving rejection for general De Morgan expansion.
+- Extended restricted mutating Cypher `MATCH ... WHERE` negated factored `OR`
+  lowering so a factored disjunction that first collapses to one non-empty
+  bounded predicate can be inverted while broader De Morgan cases stay
+  rejected.
+- Extended restricted mutating Cypher `MATCH ... WHERE` negated `AND` lowering
+  so the disjunction of negated bounded terms can reuse conservative branch
+  subsumption when it collapses to one non-empty predicate.
+- Extended restricted mutating Cypher `MATCH ... WHERE` negated simple `OR`
+  lowering for same-property null disjunctions, producing bounded `IS NOT
+  NULL` plus negated equality or membership predicates.
 - Added `GraphNativeConstraintCapability` and
   `GraphStore::apply_native_constraint` to `grust-core` so backends can
   declare whether they support native index or native-enforcing constraint DDL
@@ -21,6 +257,15 @@ reconstructed from Git history, release commits, and the shipped docs.
   independently of `apply_schema`. The default implementation returns
   `Unsupported`, keeping Sail's read-before-write uniqueness honest until a
   backend-native unique constraint implementation exists.
+- Implemented native graph constraint application for `MemoryGraphStore`:
+  required and unique node or edge property constraints can now be explicitly
+  applied, validated against the current graph, skipped with `if_not_exists`,
+  and enforced on later writes without requiring typed `GraphSchema` metadata.
+- Added `apply_cypher_native_constraints` in `grust-cypher` so parsed
+  `CREATE CONSTRAINT` DDL can be applied directly through
+  `GraphStore::apply_native_constraint`; the helper preserves
+  `IF NOT EXISTS` semantics and rejects `DROP CONSTRAINT` until native drop
+  semantics exist.
 - Added a reusable LakeCat catalog-event graph projection helper in the
   `grust-graph` facade, covering event, warehouse, namespace, and table nodes
   with stable catalog containment edges.
@@ -111,11 +356,34 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added strict multi-target `MATCH ... DELETE` support for relationship
   patterns such as `DELETE e, a`, lowering relationship deletes and
   ID-resolved endpoint node deletes into ordered Grust mutation operations.
+- Added backend-neutral relationship-row deletes for writable Cypher, lowering
+  broad endpoint targets and mixed forms such as `DELETE e, a` into captured
+  `DeleteRelationshipRows` operations implemented by Memory and Sail.
+- Aligned the Sail backend proposal and Cypher implementation plan with the
+  current writable Cypher public contract, including the `grust-cypher`
+  parser/planner split, restricted returning surface, native constraint helper,
+  and relationship-row delete semantics.
 - Added restricted writable Cypher path-shaped `RETURN` support for
   row-producing `MATCH ... CREATE/MERGE` relationship writes that bind a path
   variable such as `CREATE p = (n)-[r:TYPE]->(t)`, returning aligned source
   node, relationship, and target node JSON while keeping path properties and
   resolved-edge paths deferred.
+- Added restricted writable Cypher path-shaped `RETURN` support for existing
+  matched relationship rows updated by `MATCH p = (a)-[e:TYPE]->(b) SET ...`
+  or `REMOVE ...`, reusing the same path JSON shape and row alignment as other
+  write-result path returns.
+- Added restricted writable Cypher path-shaped `RETURN` support for
+  relationship-only matched deletes such as
+  `MATCH p = (a)-[e:TYPE]->(b) DELETE e RETURN p`, returning the pre-delete
+  path rows.
+- Extended deleted relationship path returns to mixed relationship-row endpoint
+  deletes such as `MATCH p = (a)-[e:TYPE]->(b) DELETE e, a RETURN p`,
+  snapshotting endpoint nodes before the delete so returned paths can describe
+  graph elements removed by the same operation.
+- Extended path-bound mixed relationship deletes to explicit-ID endpoint
+  targets by routing them through row snapshots, so
+  `MATCH p = (a {id: ...})-[e:TYPE]->(b) DELETE e, a RETURN p` returns the
+  pre-delete path while still deleting the resolved endpoint node.
 - Extended restricted writable Cypher path-shaped `RETURN` support to
   `count(p)`, `count(DISTINCT p)`, and `collect(p)` over row-producing path
   variables, reusing the same aligned path materialization used by `RETURN p`.
@@ -212,6 +480,63 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added restricted mutating `MATCH ... WHERE` support for same-property string
   predicate `OR` groups such as repeated `STARTS WITH`, `ENDS WITH`, or
   `CONTAINS`, lowering them to backend-neutral grouped string predicates.
+- Extended the restricted mutating `MATCH ... WHERE` boolean grammar to factor
+  positive `OR` branches whose `AND` groups share identical bounded predicates
+  and differ by one foldable same-property predicate, while still rejecting
+  unfactorable general boolean expressions.
+- Extended that factored `OR`-of-`AND` lowering to allow common branch terms
+  that are themselves foldable parenthesized `OR` groups, preserving the flat
+  backend-neutral predicate vector.
+- Canonicalized restricted mutating `MATCH ... WHERE` lowering by removing
+  exact duplicate bounded predicates after parsing and `OR` folding while
+  preserving deterministic predicate order.
+- Canonicalized each candidate factored `OR` branch before branch comparison so
+  duplicate bounded predicates inside a branch do not block otherwise valid
+  `OR`-of-`AND` lowering.
+- Canonicalized folded mutating `MATCH ... WHERE` `OR` groups by removing exact
+  duplicate membership values or grouped string needles while preserving
+  first-seen order.
+- Canonicalized repeat same-property membership filters in mutating
+  `MATCH ... WHERE` by intersecting representable positive `IN` predicates and
+  unioning repeat `NOT IN` exclusions.
+- Represented empty same-property positive membership intersections as one
+  empty `IN` predicate, giving mutating `MATCH ... WHERE` a backend-neutral
+  no-match filter without adding a new predicate operator.
+- Canonicalized same-property equality and membership combinations in mutating
+  `MATCH ... WHERE`, including equality selected by `IN`, equality excluded by
+  `NOT IN`, conflicting equality, and `IN` minus `NOT IN`.
+- Canonicalized same-property scalar inequality combinations in mutating
+  `MATCH ... WHERE`, including equality conflicts, repeated `<>` exclusions,
+  `IN` minus `<>`, and `NOT IN` plus `<>`.
+- Canonicalized same-property ordered comparison ranges in mutating
+  `MATCH ... WHERE`, keeping stricter lower or upper bounds and collapsing
+  impossible ranges to empty `IN`.
+- Canonicalized same-property equality plus ordered range predicates in
+  mutating `MATCH ... WHERE`, keeping equality when it satisfies the range and
+  lowering out-of-range equality to empty `IN`.
+- Canonicalized same-property positive membership plus ordered range
+  predicates in mutating `MATCH ... WHERE`, filtering `IN` lists to values that
+  satisfy the range and lowering fully excluded lists to empty `IN`.
+- Canonicalized each factored mutating `MATCH ... WHERE` `OR` branch with the
+  same bounded-predicate pipeline used by top-level `AND`, allowing
+  branch-local equality, membership, inequality, and range simplifications to
+  expose a backend-neutral common-predicate plus same-property fold shape.
+- Pruned impossible factored mutating `MATCH ... WHERE` `OR` branches after
+  branch-local canonicalization, lowering single-survivor groups directly and
+  all-impossible groups to the existing empty `IN` no-match predicate.
+- Pruned subsumed factored mutating `MATCH ... WHERE` `OR` branches after
+  canonicalization, so narrower conjunctions such as `(A AND B) OR A` lower to
+  the broader backend-neutral predicate set.
+- Extended factored mutating `MATCH ... WHERE` `OR` branch subsumption with
+  conservative same-property predicate implication for equality, membership,
+  negated membership, scalar inequality, and ordered-bound predicates.
+- Extended factored mutating `MATCH ... WHERE` branch subsumption to prune
+  stricter same-direction ordered bounds when a sibling branch already accepts
+  the broader range predicate.
+- Consolidated restricted writable Cypher `RETURN` parsing so scalar
+  projections and aggregate bodies share one return-target recognizer for the
+  existing literal, map/list, path-helper, introspection, string, numeric,
+  conversion, `coalesce`, and `CASE` forms.
 - Added restricted writable Cypher `left(variable.property, length)` and
   `right(variable.property, length)` projections and aggregate bodies with
   literal or parameter integer lengths.

@@ -1,5 +1,9 @@
 # CocoIndex Integration Proposal
 
+Status: historical design note. The `grust-cocoindex` crate now exists as the
+sync/export integration described here; keep this document as rationale for the
+shape, not as the current implementation checklist.
+
 This note studies CocoIndex as a possible Grust integration. The short version:
 CocoIndex can fit Grust, but it should not start as another ordinary
 `GraphStore` database backend. It should start as an incremental graph sync

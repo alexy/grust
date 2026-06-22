@@ -15,8 +15,8 @@ sync = ["turso/sync"]
 
 [dependencies]
 async-trait = { workspace = true }
-grust-core = { version = "0.9.1", path = "../grust-core" }
-grust-sql-core = { version = "0.9.2", path = "../grust-sql-core" }
+grust-core = { version = "0.10.0", path = "../grust-core" }
+grust-sql-core = { version = "0.10.0", path = "../grust-sql-core" }
 serde_json = { workspace = true }
 turso = { workspace = true, default-features = false }
 

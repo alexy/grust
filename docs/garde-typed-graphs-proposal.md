@@ -1,5 +1,9 @@
 # Garde Typed Graph Proposal
 
+Status: historical design note. The `typed-garde` and `typed-zod-rs` ingestion
+features are implemented; this document explains the original shape and should
+not be read as an open proposal.
+
 This branch proposes an optional `typed-garde` feature for Grust. The feature lets users define typed Rust structs for graph nodes and edges, validate them with `garde`, then lower the validated values into the existing dynamic `Graph` model.
 
 The important boundary is that typed graph definitions are an ingestion layer. Backends continue to receive ordinary `Node`, `Edge`, and `Graph` values, so this does not require a backend schema migration or a new storage abstraction.

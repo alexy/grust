@@ -24,7 +24,7 @@ The project is here:
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
 - Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-ladybug](https://crates.io/crates/grust-ladybug), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
-The `0.9.0` line is the first point where I think the full idea is visible in
+The `0.10.0` line is the first point where I think the full idea is visible in
 code. The workspace has the core graph model, document fixtures, typed
 ingestion, schema-backed writes, traversal lowering, shared graph-index
 construction, backend-specific typed storage, LadybugDB and Sail Arrow IPC
@@ -161,7 +161,7 @@ them into ordinary Grust nodes and edges:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.9.0", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.10.0", features = ["typed-garde"] }
 ```
 
 ```rust
@@ -214,7 +214,7 @@ treats it as typed. In Grust, `zod-rs` plays that role for
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.9.0", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.10.0", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers
@@ -415,9 +415,11 @@ fixtures for GrustFrames-style lowerings: triplet filters, motif expansion, and
 aggregate-message passes can target the same physical layout that ordinary
 Grust writes produce.
 
-Writable Cypher follows the same rule. In Sail, Cypher write text is not a
-separate persistence path. `sail_cypher_mutation_plan` accepts a strict v1
-subset, ordered mutation batches, local explicit-ID node variables,
+Writable Cypher follows the same rule. Cypher write text is not a separate
+persistence path: `grust-cypher` parses and plans it, while
+`sail_cypher_mutation_plan` remains a compatibility wrapper over the shared
+planner. The strict v1 subset accepts ordered mutation batches, local
+explicit-ID node variables,
 ID-resolved `MATCH ... DELETE`, edge `MATCH ... CREATE` / `MATCH ... MERGE`,
 broad node
 `MATCH ... DELETE`, ID-resolved or broad node map patches, broad node literal
@@ -425,8 +427,7 @@ property assignment/removal, ID-resolved edge map patches, literal property
 assignment, explicit property removal for resolved identities, row-producing
 edge `MATCH ... CREATE` / `MATCH ... MERGE`, and broad relationship delete,
 patch, assignment, and removal over endpoint predicates,
-then lowers them into `GraphMutationPlan`; `SailGraphStore`
-executes that plan through
+then lowers them into `GraphMutationPlan`; `SailGraphStore` executes that plan through
 `GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`, typed-table
 mirror writes, and the same delete paths as ordinary Grust mutations.
 Generated node IDs are opt-in through Sail writable-Cypher options and are

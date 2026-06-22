@@ -1,5 +1,9 @@
 # Ladybug Backend Proposal
 
+Status: historical design note. `grust-ladybug` exists in the workspace; this
+document records the backend rationale and design tradeoffs rather than the
+current implementation checklist.
+
 This note proposes `grust-ladybug`, an embedded LadybugDB backend for Grust.
 
 ## Sources Studied

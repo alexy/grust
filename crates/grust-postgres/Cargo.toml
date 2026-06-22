@@ -10,4 +10,4 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-grust-postgres-core = { version = "0.9.2", path = "../grust-postgres-core" }
+grust-postgres-core = { version = "0.10.0", path = "../grust-postgres-core" }

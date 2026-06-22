@@ -31,14 +31,14 @@ Enable the Arrow API through the facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.2", features = ["ladybug-arrow"] }
+grust = { package = "grust-graph", version = "0.10.0", features = ["ladybug-arrow"] }
 ```
 
 Or depend on the backend crate directly:
 
 ```toml
 [dependencies]
-grust-ladybug = { version = "0.8.2", features = ["arrow"] }
+grust-ladybug = { version = "0.10.0", features = ["arrow"] }
 ```
 
 The Ladybug support is built on the embedded Rust `lbug` crate directly. No
@@ -112,7 +112,7 @@ Spark Connect. Grust exposes that path directly:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.8.2", features = ["sail"] }
+grust = { package = "grust-graph", version = "0.10.0", features = ["sail"] }
 ```
 
 ### Arbitrary Arrow Sources

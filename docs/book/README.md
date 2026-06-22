@@ -48,7 +48,6 @@ Outputs:
 
 - `build/dist/grust.pdf`
 - `build/dist/grust.epub`
-- `build/dist/grust.epub`
 - `build/dist/grust (<version>).epub` ignored symlink to `grust.epub`
 - `build/dist/grust.mobi`
 - `build/dist/VERSION.md`

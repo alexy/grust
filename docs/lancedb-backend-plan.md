@@ -1,5 +1,9 @@
 # LanceDB Backend Plan
 
+Status: historical design note. `grust-lancedb` exists in the workspace; this
+document records the original backend plan and should be checked against code
+before using it as current API documentation.
+
 This plan proposes `grust-lancedb`, a backend that stores Grust property graphs
 in LanceDB using the Rust SDK.
 
