@@ -1,0 +1,25 @@
+[package]
+name = "grust-turso"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Turso GraphStore backend for Grust."
+keywords.workspace = true
+categories.workspace = true
+
+[features]
+default = []
+sync = ["turso/sync"]
+
+[dependencies]
+async-trait = { workspace = true }
+grust-core = { version = "0.9.1", path = "../grust-core" }
+grust-sql-core = { version = "0.9.2", path = "../grust-sql-core" }
+serde_json = { workspace = true }
+turso = { workspace = true, default-features = false }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
