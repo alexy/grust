@@ -8,8 +8,7 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use async_trait::async_trait;
 use grust_core::prelude::*;
-use grust_cypher::*;
-pub use grust_cypher::cypher_parser;
+pub use grust_cypher::*;
 use tonic::transport::Channel;
 
 #[allow(clippy::all, unused_imports, dead_code)]
@@ -22,7 +21,6 @@ use sc::{
     ReattachOptions, Relation, Sql, UserContext, command, execute_plan_request,
     execute_plan_response, expression, plan, relation,
 };
-
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -674,6 +672,20 @@ impl SailGraphStore {
                     self.apply_delete_matching_edges(relationship, report)
                         .await?;
                 }
+                GraphMutationPlanOp::DeleteRelationshipRows {
+                    relationship,
+                    delete_edges,
+                    endpoint_nodes,
+                    ..
+                } => {
+                    self.apply_delete_relationship_rows(
+                        relationship,
+                        *delete_edges,
+                        endpoint_nodes,
+                        report,
+                    )
+                    .await?;
+                }
                 GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
                     kind,
                     from,
@@ -1117,6 +1129,59 @@ impl SailGraphStore {
         report.changed_edges += incident_edges;
         report.edge_deletes += incident_edges;
         self.delete_nodes_by_ids(&ids).await
+    }
+
+    async fn apply_delete_relationship_rows(
+        &self,
+        relationship: &GraphRelationshipMatch,
+        delete_edges: bool,
+        endpoint_nodes: &[GraphRelationshipEndpoint],
+        report: &mut CypherMutationReport,
+    ) -> Result<()> {
+        let edges = self.matching_edges(relationship).await?;
+        let mut ids = edges
+            .iter()
+            .flat_map(|edge| {
+                endpoint_nodes.iter().map(|endpoint| match endpoint {
+                    GraphRelationshipEndpoint::From => edge.from.clone(),
+                    GraphRelationshipEndpoint::To => edge.to.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        ids.sort();
+        ids.dedup();
+
+        let mut edge_keys = if delete_edges {
+            edges.iter().map(edge_key).collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if !ids.is_empty() {
+            let all_edges = self.get_edges(EdgeQuery::default()).await?;
+            edge_keys.extend(
+                all_edges
+                    .iter()
+                    .filter(|edge| ids.iter().any(|id| id == &edge.from || id == &edge.to))
+                    .map(edge_key),
+            );
+        }
+        edge_keys.sort();
+        edge_keys.dedup();
+
+        report.matched_rows += edges.len();
+        report.node_deletes += ids.len();
+        report.changed_nodes += ids.len();
+        report.edge_deletes += edge_keys.len();
+        report.changed_edges += edge_keys.len();
+
+        if !ids.is_empty() {
+            self.delete_nodes_by_ids(&ids).await?;
+        }
+        if delete_edges && ids.is_empty() {
+            self.delete_edges_by_keys(&relationship.label, &edge_keys)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn check_strict_create_conflicts(&self, plan: &GraphMutationPlan) -> Result<()> {
@@ -2006,7 +2071,6 @@ fn merge_edges_from_view_sql() -> String {
     )
 }
 
-
 fn delete_nodes_from_view_sql(table: &str) -> Result<String> {
     Ok(format!(
         "MERGE INTO {} AS t USING {DELETE_NODE_STAGE_VIEW} AS s \
@@ -2756,7 +2820,6 @@ fn append_property_in_condition(
     Ok(())
 }
 
-
 fn append_property_order_condition(
     json_value: &str,
     op: GraphPredicateOp,
@@ -3079,7 +3142,6 @@ fn select_cypher_constraint_registry_sql(name: &str) -> Result<String> {
         sql_str(name)
     ))
 }
-
 
 // ── Props JSON ────────────────────────────────────────────────────────────────
 

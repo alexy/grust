@@ -956,6 +956,9 @@ fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> R
         GraphMutation::DeleteMatchingEdges { .. } => Err(GrustError::Unsupported(
             "SurrealDB matched edge deletes are not implemented yet".to_string(),
         )),
+        GraphMutation::DeleteRelationshipRows { .. } => Err(GrustError::Unsupported(
+            "SurrealDB row-producing relationship deletes are not implemented yet".to_string(),
+        )),
     }
 }
 

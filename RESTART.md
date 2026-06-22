@@ -1,116 +1,75 @@
 # Restart Checkpoint
 
-Generated: 2026-06-17 04:40:37 PDT
+Generated: 2026-06-18 PDT
 
-## Current Goal
+## Current State
 
-Continue implementing bounded writable Cypher features from
-`docs/CypherWrite.md` on branch `codex/cypher-write`.
+The long-running writable Cypher implementation goal from `docs/CypherWrite.md`
+is complete in the working tree. The repository is currently on branch `main`
+with broad, intentionally dirty Cypher, docs, and book-artifact changes.
 
-## Current Instructions
+Do not treat this file as a release marker. No staging, commit, package,
+publish, or registry verification has been done for this checkpoint.
 
-- Keep committing locally.
-- Push is allowed now that GitHub SSH access is available.
-- Do not publish crates until the next major checkpoint and explicit release
-  direction.
-- When publishing the new crates, bump the version, publish in dependency
-  order, verify the published crates with `cargo info <crate>@<version>` from
-  outside the workspace, and notify the active TypeSec and Lakecat goal threads
-  to rebuild against the published versions. Lakecat especially should rebuild
-  in GitHub CI after pushing.
-- Do not stage or modify untracked `OPUS1.md` unless explicitly asked.
+## Completed Cypher Slice
 
-## Branch And Worktree
+The parser, planner, DDL helpers, constraint registry, restricted returning
+evaluator, and generic returning executor now live in `grust-cypher`.
+`grust-sail` keeps Sail SQL lowering, Arrow IPC staging, SparkConnect execution,
+and compatibility wrappers. The `grust-graph` facade exposes a `cypher` feature
+for using the shared Cypher layer without enabling full Sail support.
 
-- Branch: `codex/cypher-write`
-- Remote tracking branch: `origin/codex/cypher-write`
-- Expected untracked file: `OPUS1.md`
-- Latest completed slice before this checkpoint: Batch DJ, restricted
-  same-property string predicate `OR` groups in mutating `MATCH ... WHERE`.
-
-## Latest Completed Work
-
-Batch DJ added restricted same-property string predicate `OR` groups in
-bounded mutating Cypher `MATCH ... WHERE`:
-
-```cypher
-MATCH (n:Person)
-WHERE n.name STARTS WITH 'Ad' OR n.name STARTS WITH 'Gr'
-SET n.reviewed = true;
-```
-
-Implemented behavior:
-
-- `grust-core` exposes grouped string predicate operators:
-  `StartsWithAny`, `EndsWithAny`, `ContainsAny`, and negated variants.
-- `grust-sail` accepts same-property `OR` groups whose terms repeat the same
-  string predicate operator (`STARTS WITH`, `ENDS WITH`, or `CONTAINS`).
-- Positive groups fold to the matching grouped string predicate; `NOT (...)`
-  groups fold to the negated grouped string predicate.
-- Needles must be string literals or string parameters.
-- Mixed operators, mixed properties, mixed variables, non-string needles,
-  equality/membership mixed with string predicates, functions, patterns,
-  arbitrary expressions, and general boolean-expression forms remain rejected.
-- Missing properties, nulls, and non-string values do not match positive or
-  negated grouped string predicates.
-
-Files updated:
-
-- `crates/grust-sail/src/lib.rs`
-- `crates/grust-sail/src/tests.rs`
-- `crates/grust-core/src/lib.rs`
-- `crates/grust-core/src/tests.rs`
-- `docs/CypherWrite.md`
-- `CHANGELOG.md`
-- `docs/book/manuscript.md`
-- rebuilt book artifacts under `docs/book/build/dist/`
+`docs/CypherWrite.md` has implementation status for every batch. The latest
+completed families include nested negated same-property `OR` groups that lower
+to bounded `AND` predicate vectors across supported ordered, null, string,
+equality, and membership combinations, plus the matched/deleted relationship
+path return batches through DP.
 
 ## Verification State
 
-The following commands passed after Batch DJ:
+The following checks passed after the goal completion audit:
 
 ```sh
-cargo fmt --all
-cargo test -p grust-sail --lib
-cargo test -p grust-core --lib
-cargo test -p grust-memory --lib
-cargo check -p grust-graph --features sail,memory
+cargo test -p grust-cypher --lib --quiet
+cargo check -p grust-graph --features cypher,memory --quiet
 docs/book/build.sh
 git diff --check
 ```
 
-Observed test summaries:
+Observed Cypher test summary:
 
-- `cargo test -p grust-sail --lib`: 196 passed, 25 ignored
-- `cargo test -p grust-core --lib`: 35 passed
-- `cargo test -p grust-memory --lib`: 20 passed
+- `cargo test -p grust-cypher --lib --quiet`: 327 passed
 
-Book rebuild output confirmed:
+Book rebuild output confirmed current distribution artifacts under
+`docs/book/build/dist/`, with `VERSION.md` recording `grust (0.9.0)` and
+`built_at: 2026-06-18`.
 
-- `docs/book/build/dist/grust.pdf`
-- `docs/book/build/dist/grust.epub`
-- `docs/book/build/dist/grust (0.9.0).epub -> grust.epub`
-- `docs/book/build/dist/grust.mobi`
-- `docs/book/build/dist/VERSION.md`
+## Known Open Areas
+
+- Release prep remains undone: convert `CHANGELOG.md` `Unreleased` into a dated
+  release entry, run the package workflow, publish in dependency order only
+  when explicitly requested, and verify registry state from outside the
+  workspace.
+- Proposal and review documents have been marked as historical/backlog where
+  appropriate, but some design notes still need a deeper code-against-doc
+  reconciliation before being used as implementation guidance.
+- Cypher’s portable execution path is strongest for `MemoryGraphStore` and Sail.
+  Other backends can consume planned `GraphMutationPlan` values through their
+  `GraphMutationStore` implementations, but they do not all expose direct text
+  Cypher execution helpers or identical backend-native constraint enforcement.
 
 ## Next Safe Continuation
 
-Keep the next slice small and continue preserving these invariants:
+For release cleanup, start by reviewing `git status --short`, then run:
 
-- Cypher remains a syntax layer over Grust-owned mutation semantics.
-- Writable `RETURN` helpers operate only over already-bound/materialized write
-  result rows.
-- Mutating `WHERE` stays backend-neutral through `GraphPropertyPredicate`.
-- No arbitrary expression engine, cross-variable expressions, path-pattern
-  predicates, or list/map expression evaluation should be introduced.
+```sh
+cargo test -p grust-cypher --lib --quiet
+cargo check -p grust-graph --features cypher,memory --quiet
+docs/book/build.sh
+git diff --check
+```
 
-Potential next bounded slices:
-
-- Extend mutating `WHERE` with another restricted boolean-expression slice only
-  if it can still lower through backend-neutral predicates without adding an
-  arbitrary expression engine.
-- Add another restricted writable `RETURN` helper from the remaining batches in
-  `docs/CypherWrite.md`.
-
-For each slice, update code, tests, `CHANGELOG.md`, `docs/CypherWrite.md`, book
-manuscript, rebuilt book artifacts, then commit and push.
+For more Cypher feature work, extend `docs/CypherWrite.md` with a new explicit
+batch before editing code, keep tests in `crates/grust-cypher` when the behavior
+is parser/planner/generic-executor logic, and leave Sail-specific SQL or live
+SparkConnect tests in `crates/grust-sail`.

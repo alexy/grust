@@ -16,6 +16,7 @@ struct MemoryGraph {
     nodes: BTreeMap<NodeId, Node>,
     edges: BTreeMap<MemoryEdgeKey, Edge>,
     schema: Option<GraphSchema>,
+    native_constraints: Vec<GraphConstraint>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -199,6 +200,85 @@ impl MemoryGraphStore {
             edges: edges.into_values().collect(),
         }
     }
+
+    fn validate_native_constraints(inner: &MemoryGraph, graph: &Graph) -> Result<()> {
+        for constraint in &inner.native_constraints {
+            match constraint {
+                GraphConstraint::NodePropertyRequired { label, key } => {
+                    for node in graph.nodes.iter().filter(|node| &node.label == label) {
+                        if !node.props.contains_key(key) {
+                            return Err(GrustError::Schema(format!(
+                                "node '{}' with label '{}' is missing native required constrained property '{}'",
+                                node.id.as_str(),
+                                label.as_str(),
+                                key
+                            )));
+                        }
+                    }
+                }
+                GraphConstraint::EdgePropertyRequired { label, key } => {
+                    for edge in graph.edges.iter().filter(|edge| &edge.label == label) {
+                        if !edge.props.contains_key(key) {
+                            return Err(GrustError::Schema(format!(
+                                "edge '{}' from '{}' to '{}' is missing native required constrained property '{}'",
+                                edge.label.as_str(),
+                                edge.from.as_str(),
+                                edge.to.as_str(),
+                                key
+                            )));
+                        }
+                    }
+                }
+                GraphConstraint::NodePropertyUnique { label, key } => {
+                    let mut seen: Vec<(&NodeId, &Value)> = Vec::new();
+                    for node in graph.nodes.iter().filter(|node| &node.label == label) {
+                        let Some(value) = node.props.get(key) else {
+                            continue;
+                        };
+                        if let Some((existing_id, _)) =
+                            seen.iter().find(|(_, existing)| *existing == value)
+                        {
+                            return Err(GrustError::Schema(format!(
+                                "node '{}' with label '{}' duplicates native unique constrained property '{}' from node '{}'",
+                                node.id.as_str(),
+                                label.as_str(),
+                                key,
+                                existing_id.as_str()
+                            )));
+                        }
+                        seen.push((&node.id, value));
+                    }
+                }
+                GraphConstraint::EdgePropertyUnique { label, key } => {
+                    let mut seen: Vec<(String, &Value)> = Vec::new();
+                    for edge in graph.edges.iter().filter(|edge| &edge.label == label) {
+                        let Some(value) = edge.props.get(key) else {
+                            continue;
+                        };
+                        if let Some((existing_key, _)) =
+                            seen.iter().find(|(_, existing)| *existing == value)
+                        {
+                            return Err(GrustError::Schema(format!(
+                                "edge '{}' duplicates native unique constrained property '{}' from edge '{}'",
+                                edge_key(edge),
+                                key,
+                                existing_key
+                            )));
+                        }
+                        seen.push((edge_key(edge), value));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_write_snapshot(inner: &MemoryGraph, graph: &Graph) -> Result<()> {
+        if let Some(schema) = &inner.schema {
+            schema.validate_graph(graph)?;
+        }
+        Self::validate_native_constraints(inner, graph)
+    }
 }
 
 #[async_trait]
@@ -221,11 +301,58 @@ impl GraphStore for MemoryGraphStore {
         }
     }
 
+    fn native_constraint_capability(
+        &self,
+        constraint: &GraphConstraint,
+    ) -> GraphNativeConstraintCapability {
+        match constraint {
+            GraphConstraint::NodePropertyRequired { .. }
+            | GraphConstraint::EdgePropertyRequired { .. }
+            | GraphConstraint::NodePropertyUnique { .. }
+            | GraphConstraint::EdgePropertyUnique { .. } => {
+                GraphNativeConstraintCapability::NativeConstraint
+            }
+        }
+    }
+
+    async fn apply_native_constraint(
+        &self,
+        request: GraphNativeConstraintRequest,
+    ) -> Result<GraphNativeConstraintReport> {
+        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        if inner.native_constraints.contains(&request.constraint) {
+            if request.if_not_exists {
+                return Ok(GraphNativeConstraintReport {
+                    applied: 0,
+                    skipped: 1,
+                });
+            }
+            return Err(GrustError::Schema(format!(
+                "native graph constraint already exists: {:?}",
+                request.constraint
+            )));
+        }
+
+        let mut next = inner.native_constraints.clone();
+        next.push(request.constraint);
+        let graph = Self::graph_snapshot(&inner);
+        let staged = MemoryGraph {
+            nodes: inner.nodes.clone(),
+            edges: inner.edges.clone(),
+            schema: inner.schema.clone(),
+            native_constraints: next,
+        };
+        Self::validate_native_constraints(&staged, &graph)?;
+        inner.native_constraints = staged.native_constraints;
+        Ok(GraphNativeConstraintReport {
+            applied: 1,
+            skipped: 0,
+        })
+    }
+
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
-        if let Some(schema) = &inner.schema {
-            schema.validate_graph(&Self::graph_snapshot_with_node(&inner, node))?;
-        }
+        Self::validate_write_snapshot(&inner, &Self::graph_snapshot_with_node(&inner, node))?;
         let previous = inner.nodes.insert(node.id.clone(), node.clone());
         Ok(match previous {
             Some(_) => PutOutcome::Updated,
@@ -235,9 +362,7 @@ impl GraphStore for MemoryGraphStore {
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
-        if let Some(schema) = &inner.schema {
-            schema.validate_graph(&Self::graph_snapshot_with_edge(&inner, edge))?;
-        }
+        Self::validate_write_snapshot(&inner, &Self::graph_snapshot_with_edge(&inner, edge))?;
         let previous = inner
             .edges
             .insert(MemoryEdgeKey::from_edge(edge), edge.clone());
@@ -249,9 +374,7 @@ impl GraphStore for MemoryGraphStore {
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
-        if let Some(schema) = &inner.schema {
-            schema.validate_graph(&Self::graph_snapshot_with_graph(&inner, graph))?;
-        }
+        Self::validate_write_snapshot(&inner, &Self::graph_snapshot_with_graph(&inner, graph))?;
         let mut report = LoadReport::default();
         for node in &graph.nodes {
             inner.nodes.insert(node.id.clone(), node.clone());
@@ -601,6 +724,57 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     report.changed_edges += edges.len();
                     for edge in edges {
                         inner.edges.remove(&MemoryEdgeKey::from_edge(&edge));
+                    }
+                }
+                GraphMutationPlanOp::DeleteRelationshipRows {
+                    relationship,
+                    delete_edges,
+                    endpoint_nodes,
+                    ..
+                } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let edges = Self::matching_edges(&inner, relationship);
+                    let mut ids = edges
+                        .iter()
+                        .flat_map(|edge| {
+                            endpoint_nodes.iter().map(|endpoint| match endpoint {
+                                GraphRelationshipEndpoint::From => edge.from.clone(),
+                                GraphRelationshipEndpoint::To => edge.to.clone(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    ids.sort();
+                    ids.dedup();
+
+                    let mut edge_keys = if *delete_edges {
+                        edges
+                            .iter()
+                            .map(MemoryEdgeKey::from_edge)
+                            .collect::<Vec<_>>()
+                    } else {
+                        Vec::new()
+                    };
+                    edge_keys.extend(
+                        inner
+                            .edges
+                            .keys()
+                            .filter(|key| ids.iter().any(|id| id == &key.from || id == &key.to))
+                            .cloned(),
+                    );
+                    edge_keys.sort();
+                    edge_keys.dedup();
+
+                    report.matched_rows += edges.len();
+                    report.node_deletes += ids.len();
+                    report.changed_nodes += ids.len();
+                    report.edge_deletes += edge_keys.len();
+                    report.changed_edges += edge_keys.len();
+
+                    for id in &ids {
+                        inner.nodes.remove(id);
+                    }
+                    for key in edge_keys {
+                        inner.edges.remove(&key);
                     }
                 }
                 GraphMutationPlanOp::UpsertEdgesFromNodeMatches {

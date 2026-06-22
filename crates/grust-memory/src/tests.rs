@@ -118,21 +118,47 @@ fn memory_reports_constraint_capabilities_and_validates_constraints() {
     );
     assert_eq!(
         store.native_constraint_capability(&required),
-        GraphNativeConstraintCapability::Unsupported
+        GraphNativeConstraintCapability::NativeConstraint
     );
     assert_eq!(
         store.native_constraint_capability(&unique),
-        GraphNativeConstraintCapability::Unsupported
+        GraphNativeConstraintCapability::NativeConstraint
     );
 
-    let native_error =
+    let native_report =
+        futures_executor::block_on(store.apply_native_constraint(GraphNativeConstraintRequest {
+            constraint: unique.clone(),
+            if_not_exists: false,
+        }))
+        .expect("memory applies native constraints");
+    assert_eq!(
+        native_report,
+        GraphNativeConstraintReport {
+            applied: 1,
+            skipped: 0
+        }
+    );
+    let duplicate_native =
         futures_executor::block_on(store.apply_native_constraint(GraphNativeConstraintRequest {
             constraint: unique.clone(),
             if_not_exists: true,
         }))
-        .expect_err("memory validates constraints but does not emit native DDL");
+        .expect("if-not-exists skips duplicate native constraints");
+    assert_eq!(
+        duplicate_native,
+        GraphNativeConstraintReport {
+            applied: 0,
+            skipped: 1
+        }
+    );
+    let duplicate_error =
+        futures_executor::block_on(store.apply_native_constraint(GraphNativeConstraintRequest {
+            constraint: unique.clone(),
+            if_not_exists: false,
+        }))
+        .expect_err("duplicate native constraint without if-not-exists should fail");
     assert!(
-        matches!(native_error, GrustError::Unsupported(message) if message.contains("backend-native DDL"))
+        matches!(duplicate_error, GrustError::Schema(message) if message.contains("already exists"))
     );
 
     futures_executor::block_on(store.apply_schema(&schema)).unwrap();
@@ -163,6 +189,56 @@ fn memory_reports_constraint_capabilities_and_validates_constraints() {
         error
             .to_string()
             .contains("duplicates unique constrained property 'email'")
+    );
+}
+
+#[test]
+fn memory_native_constraints_validate_existing_and_future_writes() {
+    let store = MemoryGraphStore::new();
+    futures_executor::block_on(store.put_node(&Node::new(
+        "Person",
+        "person-1",
+        Props::from([("email".to_string(), Value::from("ada@example.com"))]),
+    )))
+    .unwrap();
+    futures_executor::block_on(store.put_node(&Node::new(
+        "Person",
+        "person-2",
+        Props::from([("email".to_string(), Value::from("ada@example.com"))]),
+    )))
+    .unwrap();
+
+    let duplicate_unique =
+        futures_executor::block_on(store.apply_native_constraint(GraphNativeConstraintRequest {
+            constraint: GraphConstraint::NodePropertyUnique {
+                label: Label::new("Person"),
+                key: "email".to_string(),
+            },
+            if_not_exists: false,
+        }))
+        .expect_err("native unique constraint should validate existing graph");
+    assert!(
+        duplicate_unique
+            .to_string()
+            .contains("duplicates native unique constrained property 'email'")
+    );
+
+    let store = MemoryGraphStore::new();
+    futures_executor::block_on(store.apply_native_constraint(GraphNativeConstraintRequest {
+        constraint: GraphConstraint::NodePropertyRequired {
+            label: Label::new("Person"),
+            key: "email".to_string(),
+        },
+        if_not_exists: false,
+    }))
+    .unwrap();
+    let missing_required =
+        futures_executor::block_on(store.put_node(&Node::new("Person", "person-1", Props::new())))
+            .expect_err("native required constraint should validate future writes");
+    assert!(
+        missing_required
+            .to_string()
+            .contains("missing native required constrained property 'email'")
     );
 }
 

@@ -3,6 +3,9 @@
 Review of `~/src/grust` at branch `codex/cypher-write`. Findings are ordered by
 severity. Each item lists the location, the problem, and a concrete fix.
 
+Status update: items 1, 2, 4, 6, and 9 have been addressed in the current
+tree. Items 3, 5, 7, and 8 remain follow-ups.
+
 ## Verification notes
 
 - `cargo build --workspace --all-features` currently fails in this environment
@@ -20,6 +23,11 @@ severity. Each item lists the location, the problem, and a concrete fix.
 ---
 
 ## 1. Bug — `contains("->")` is quote-blind (HIGH)
+
+**Status:** fixed. Edge-vs-node pattern classification now uses the
+quote-aware scanner, and `grust-cypher` owns tests for node `CREATE`/`MERGE`/
+`DELETE` with `->` inside string literals plus edge properties containing
+`->`.
 
 **File:** `crates/grust-sail/src/lib.rs` — lines 404, 453, 503, 636, 738, 947
 
@@ -52,6 +60,9 @@ property value still parses as an edge.
 
 ## 2. Design — `MemoryGraphStore` silently drops parallel edges (MEDIUM)
 
+**Status:** fixed. `MemoryGraphStore` now keys stored edges by endpoint,
+label, and optional explicit edge ID, preserving id-bearing parallel edges.
+
 **File:** `crates/grust-memory/src/lib.rs` — line 17
 
 ```rust
@@ -77,6 +88,8 @@ backend and should be the most faithful to the model.
 
 ## 3. Cleanup — static SQL builders allocate a fresh `String` per call (LOW)
 
+**Status:** still open. Some static SQL helpers still allocate owned strings.
+
 **File:** `crates/grust-sail/src/lib.rs` — lines 3494, 3498, 3502, 3511, 3523
 
 `sail_out_degrees_sql`, `sail_in_degrees_sql`, `sail_degrees_sql`,
@@ -91,6 +104,10 @@ it or return the `Outgoing` constant directly.
 ---
 
 ## 4. Clarify — `GraphMutationReport::record` undercounts for matched ops (LOW/DOCS)
+
+**Status:** fixed. `GraphMutationReport` documentation now describes the
+difference between resolved single-identity counters and matched/bulk operation
+counters.
 
 **File:** `crates/grust-core/src/lib.rs` — lines 2484–2560
 
@@ -128,6 +145,11 @@ order and skip missing ids (matching the documented contract).
 
 ## 6. Refactor — extract a `grust-cypher` crate (MEDIUM, architectural)
 
+**Status:** fixed. The parser, planner, DDL helpers, constraint registry,
+restricted returning evaluator, and generic returning executor now live in
+`grust-cypher`; `grust-sail` keeps Sail-specific SQL/Spark execution and
+compatibility wrappers.
+
 **Files:** parser in `crates/grust-sail/src/lib.rs` (~350–2218); trait
 `CypherMutationExecutor` in `crates/grust-core/src/lib.rs:2690`.
 
@@ -162,6 +184,9 @@ edits becomes a recurring maintenance cost.
 
 ## 8. Cleanup — redundant `version` on path deps (LOW)
 
+**Status:** still open. `grust-sail` still carries versioned path dependency
+entries for local Grust crates.
+
 **File:** `crates/grust-sail/Cargo.toml` — lines 14, 26
 
 ```toml
@@ -180,6 +205,9 @@ resolution at publish time), or add workspace dep aliases and use
 ---
 
 ## 9. Cleanup — triplicated quote-scanner loops (LOW)
+
+**Status:** fixed. Writable Cypher scanners share the quote-aware scanning
+path.
 
 **File:** `crates/grust-sail/src/lib.rs` — lines 2127, 2154, 2189
 

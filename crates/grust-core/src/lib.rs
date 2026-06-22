@@ -2443,6 +2443,11 @@ pub enum GraphMutation {
     DeleteMatchingEdges {
         relationship: GraphRelationshipMatch,
     },
+    DeleteRelationshipRows {
+        relationship: GraphRelationshipMatch,
+        delete_edges: bool,
+        endpoint_nodes: Vec<GraphRelationshipEndpoint>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2462,6 +2467,12 @@ pub enum GraphRowEdgeIdPolicy {
     ExplicitOnly,
     GenerateForCreate,
     GenerateForCreateAndMerge,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphRelationshipEndpoint {
+    From,
+    To,
 }
 
 impl Default for GraphRowEdgeIdPolicy {
@@ -2849,6 +2860,13 @@ pub enum GraphMutationPlanOp {
         relationship: GraphRelationshipMatch,
         cardinality: GraphMutationCardinality,
     },
+    DeleteRelationshipRows {
+        relationship: GraphRelationshipMatch,
+        delete_edges: bool,
+        endpoint_nodes: Vec<GraphRelationshipEndpoint>,
+        target_count: usize,
+        cardinality: GraphMutationCardinality,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -3003,6 +3021,9 @@ impl GraphMutationReport {
             GraphMutationPlanOp::DeleteMatchingEdges { .. } => {
                 self.deletes += 1;
             }
+            GraphMutationPlanOp::DeleteRelationshipRows { target_count, .. } => {
+                self.deletes += *target_count;
+            }
         }
     }
 }
@@ -3140,6 +3161,16 @@ impl From<GraphMutationPlanOp> for GraphMutation {
             GraphMutationPlanOp::DeleteMatchingEdges { relationship, .. } => {
                 Self::DeleteMatchingEdges { relationship }
             }
+            GraphMutationPlanOp::DeleteRelationshipRows {
+                relationship,
+                delete_edges,
+                endpoint_nodes,
+                ..
+            } => Self::DeleteRelationshipRows {
+                relationship,
+                delete_edges,
+                endpoint_nodes,
+            },
         }
     }
 }
@@ -3414,6 +3445,12 @@ pub trait GraphMutationStore: GraphStore {
                         "matched edge deletes require backend-specific query support".to_string(),
                     ));
                 }
+                GraphMutation::DeleteRelationshipRows { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "relationship-row deletes require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
             }
         }
         Ok(())
@@ -3428,11 +3465,11 @@ pub mod prelude {
         GraphMutationCardinality, GraphMutationPlan, GraphMutationPlanKind, GraphMutationPlanOp,
         GraphMutationReport, GraphMutationStore, GraphNativeConstraintCapability,
         GraphNativeConstraintReport, GraphNativeConstraintRequest, GraphNodeMatch, GraphNumericOp,
-        GraphPredicateOp, GraphPropertyPredicate, GraphRelationshipMatch, GraphRowEdgeIdPolicy,
-        GraphSchema, GraphSchemaBuilder, GraphStore, GrustError, Label, LoadReport, Node, NodeId,
-        NodeType, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal, Value,
-        classify_edge_upsert, classify_node_upsert, edge_key, evaluate_numeric_update,
-        generated_row_edge_id, relationship_type, schema_identifier,
+        GraphPredicateOp, GraphPropertyPredicate, GraphRelationshipEndpoint,
+        GraphRelationshipMatch, GraphRowEdgeIdPolicy, GraphSchema, GraphSchemaBuilder, GraphStore,
+        GrustError, Label, LoadReport, Node, NodeId, NodeType, Props, PutOutcome, Result, RfcDate,
+        Start, Step, Traversal, Value, classify_edge_upsert, classify_node_upsert, edge_key,
+        evaluate_numeric_update, generated_row_edge_id, relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]
