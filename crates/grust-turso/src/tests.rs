@@ -198,3 +198,38 @@ async fn in_memory_put_read_traverse_schema_and_mutations() {
         .expect("read deleted edges");
     assert!(edges.is_empty());
 }
+
+#[tokio::test]
+async fn cypher_mutation_executor_patches_matching_nodes() {
+    let store = TursoGraphStore::in_memory()
+        .await
+        .expect("open Turso store");
+    store.bootstrap().await.expect("bootstrap Turso tables");
+    store.put_graph(&sample_graph()).await.expect("write graph");
+
+    let report = store
+        .execute_cypher_mutation_plan(&GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::PatchMatchingNodes {
+                label: Some(Label::new("Person")),
+                props: Props::from([("id".to_string(), Value::from("person-1"))]),
+                predicates: Vec::new(),
+                patch: Props::from([("querygraph_ready".to_string(), Value::from(true))]),
+                cardinality: GraphMutationCardinality::SingleIdentity,
+            },
+        ]))
+        .await
+        .expect("execute matched-node patch");
+
+    assert_eq!(report.matched_rows, 1);
+    assert_eq!(report.node_patches, 1);
+    assert_eq!(report.changed_nodes, 1);
+    let person = store
+        .get_node(&NodeId::new("person-1"))
+        .await
+        .expect("read patched node")
+        .expect("person node missing");
+    assert_eq!(
+        person.props.get("querygraph_ready"),
+        Some(&Value::from(true))
+    );
+}

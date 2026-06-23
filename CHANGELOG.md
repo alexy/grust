@@ -4,6 +4,13 @@ All notable Grust changes are recorded here by date and release. This project
 started before the changelog existed, so entries before 2026-06-12 were
 reconstructed from Git history, release commits, and the shipped docs.
 
+## Unreleased
+
+- Added Turso-backed matched-node patch execution for the Grust Cypher mutation
+  executor. `TursoGraphStore` can now run the reusable Cypher
+  `MATCH ... SET ... RETURN ...` path for bounded node patches while keeping
+  unsupported matched edge/delete/update forms explicit.
+
 ## 0.10.0 - 2026-06-22
 
 - Added `grust-sql-core`, a shared SQL generation crate for universal-table

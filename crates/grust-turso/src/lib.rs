@@ -292,6 +292,98 @@ impl GraphMutationStore for TursoGraphStore {
     }
 }
 
+#[async_trait]
+impl CypherMutationExecutor for TursoGraphStore {
+    async fn execute_cypher_mutation_plan(
+        &self,
+        plan: &GraphMutationPlan,
+    ) -> Result<GraphMutationReport> {
+        let mut report = plan.report();
+        for operation in &plan.operations {
+            match operation {
+                GraphMutationPlanOp::PatchMatchingNodes {
+                    label,
+                    props,
+                    predicates,
+                    patch,
+                    ..
+                } => {
+                    let nodes = self
+                        .matching_nodes(label.as_ref(), props, predicates)
+                        .await?;
+                    report.matched_rows += nodes.len();
+                    report.node_patches += nodes.len();
+                    report.changed_nodes += nodes.len();
+
+                    for mut node in nodes {
+                        for (key, value) in patch {
+                            node.props.insert(key.clone(), value.clone());
+                        }
+                        self.put_node(&node).await?;
+                    }
+                }
+                GraphMutationPlanOp::UpsertNode { node, .. } => {
+                    classify_node_upsert(self.put_node(node).await?, &mut report);
+                }
+                GraphMutationPlanOp::UpsertEdge { edge, .. } => {
+                    classify_edge_upsert(self.put_edge(edge).await?, &mut report);
+                }
+                GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node deletes require Turso delete query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::UpdateMatchingNodeProperty { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node expression updates require Turso expression update support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::RemoveMatchingNodeProps { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched node property removals require Turso property removal support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::PatchMatchingEdges { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge patches require Turso edge query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::UpdateMatchingEdgeProperty { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge expression updates require Turso expression update support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::RemoveMatchingEdgeProps { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge property removals require Turso property removal support"
+                            .to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::DeleteMatchingEdges { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "matched edge deletes require Turso edge query support".to_string(),
+                    ));
+                }
+                GraphMutationPlanOp::UpsertEdgesFromNodeMatches { .. } => {
+                    return Err(GrustError::CypherExecution(
+                        "row-producing edge upserts require Turso node-pair query support"
+                            .to_string(),
+                    ));
+                }
+                _ => {
+                    let mutation = GraphMutation::from(operation.clone());
+                    self.apply_mutations(std::slice::from_ref(&mutation))
+                        .await?;
+                }
+            }
+        }
+        Ok(report)
+    }
+}
+
 pub fn bootstrap_sql(config: &TursoConfig, nodes_table: &str, edges_table: &str) -> Result<String> {
     Ok(grust_sql_core::universal_bootstrap_sql(
         &TursoDialect,
@@ -402,6 +494,49 @@ fn json_predicate(alias: &str, key: &str, value: &Value) -> Result<String> {
             format!("{prop} = {}", sql_str(&json))
         }
     })
+}
+
+impl TursoGraphStore {
+    async fn matching_nodes(
+        &self,
+        label: Option<&Label>,
+        props: &Props,
+        predicates: &[GraphPropertyPredicate],
+    ) -> Result<Vec<Node>> {
+        let mut clauses = Vec::new();
+        if let Some(label) = label {
+            clauses.push(format!("n.label = {}", sql_str(label.as_str())));
+        }
+        for (key, value) in props {
+            if key == "id" {
+                let Some(id) = value.as_str() else {
+                    return Ok(Vec::new());
+                };
+                clauses.push(format!("n.id = {}", sql_str(id)));
+            } else {
+                clauses.push(json_predicate("n", key, value)?);
+            }
+        }
+        let where_clause = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", clauses.join(" AND "))
+        };
+        let sql = format!(
+            "SELECT n.id, n.label, {} AS props FROM {} n{where_clause}",
+            TursoDialect.node_props_select("n"),
+            self.nodes_table()
+        );
+        let mut nodes = self.query_nodes(&sql).await?;
+        if !predicates.is_empty() {
+            nodes.retain(|node| {
+                predicates
+                    .iter()
+                    .all(|predicate| predicate.matches(node.props.get(&predicate.key)))
+            });
+        }
+        Ok(nodes)
+    }
 }
 
 fn row_to_node(row: &turso::Row) -> Result<Node> {
