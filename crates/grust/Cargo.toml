@@ -18,9 +18,6 @@ default = []
 cocoindex = ["dep:grust-cocoindex"]
 cypher = ["dep:grust-cypher"]
 falkor = ["dep:grust-falkor"]
-helix = ["dep:grust-helix"]
-ladybug = ["dep:grust-ladybug"]
-ladybug-arrow = ["ladybug", "grust-ladybug/arrow"]
 lancedb = ["dep:grust-lancedb"]
 memory = ["dep:grust-memory"]
 postgres = ["dep:grust-postgres"]
@@ -37,8 +34,6 @@ grust-core = { version = "0.10.0", path = "../grust-core" }
 grust-cocoindex = { version = "0.10.0", path = "../grust-cocoindex", optional = true }
 grust-cypher = { version = "0.10.0", path = "../grust-cypher", optional = true }
 grust-falkor = { version = "0.10.0", path = "../grust-falkor", optional = true }
-grust-helix = { version = "0.10.0", path = "../grust-helix", optional = true }
-grust-ladybug = { version = "0.10.0", path = "../grust-ladybug", optional = true }
 grust-lancedb = { version = "0.10.0", path = "../grust-lancedb", optional = true }
 grust-memory = { version = "0.10.0", path = "../grust-memory", optional = true }
 grust-postgres = { version = "0.10.0", path = "../grust-postgres", optional = true }
