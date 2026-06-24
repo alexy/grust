@@ -6,6 +6,7 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "HelixDB GraphStore backend for Grust."
+publish = false  # helix-db not on crates.io
 keywords.workspace = true
 categories.workspace = true
 
