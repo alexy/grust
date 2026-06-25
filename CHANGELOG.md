@@ -20,6 +20,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   endpoint/edge properties, and `WHERE` over `a`/`r`/`b`), lowered to a
   `grust_edges`/`grust_nodes` join; the backend returns the matched columns as
   text and `grust_cypher` reconstructs the `(a, r, b)` bindings before projecting.
+  `WHERE … IN [literals]` (and `NOT … IN`) is also pushed, on both the node and
+  segment paths, for non-empty homogeneous int/float/string lists.
 - Refactored `grust-cypher` from a single ~16k-line `lib.rs` and ~17k-line
   `tests.rs` into cohesive modules (`ddl`, `parse`, `primitives`, `planner`,
   `eval_rows`, `restricted_values`, `projection`, `where_clause`, `returning`,

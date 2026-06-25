@@ -81,6 +81,8 @@ const PUSHABLE_QUERIES: &[&str] = &[
     "MATCH (n:Person) RETURN n.name ORDER BY n.name SKIP 1 LIMIT 2",
     "MATCH (n:Person) WHERE n.age >= 40 RETURN avg(n.age) AS mean",
     "MATCH (n:City) RETURN n.name",
+    "MATCH (n:Person) WHERE n.age IN [36, 85] RETURN n.name ORDER BY n.name",
+    "MATCH (n:Person) WHERE NOT n.name IN ['Ada'] RETURN n.name ORDER BY n.name",
 ];
 
 /// Relationship-segment queries within the pushable subset.
@@ -95,6 +97,7 @@ const PUSHABLE_SEGMENTS: &[&str] = &[
     "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.name <> 'Ada' RETURN a.name, b.name",
     "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN count(*) AS c",
     "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE NOT b.age >= 80 RETURN b.name",
+    "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.name IN ['Alan', 'Grace'] RETURN a.name, b.name",
 ];
 
 #[tokio::test]

@@ -80,6 +80,11 @@ enum Predicate {
         prop: PropRef,
         negated: bool,
     },
+    /// `prop IN [literal, …]` (non-empty, homogeneous literals).
+    In {
+        prop: PropRef,
+        values: Vec<Scalar>,
+    },
 }
 
 /// A reference to a property of the scanned node. `label` maps to the backend's
@@ -134,6 +139,86 @@ enum Scalar {
     Int(i64),
     Float(f64),
     Str(String),
+}
+
+/// Coarse kind of a [`Scalar`], for casting and homogeneity checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScalarKind {
+    Int,
+    Float,
+    Str,
+}
+
+impl Scalar {
+    fn kind(&self) -> ScalarKind {
+        match self {
+            Scalar::Int(_) => ScalarKind::Int,
+            Scalar::Float(_) => ScalarKind::Float,
+            Scalar::Str(_) => ScalarKind::Str,
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Scalar::Int(n) => n.to_string(),
+            Scalar::Float(f) => render_float(*f),
+            // String literals are rendered by the dialect (escaping); see callers.
+            Scalar::Str(_) => unreachable!("string scalars render via the dialect"),
+        }
+    }
+}
+
+/// Lower an `Expr::List` of constant literals into a non-empty, homogeneous
+/// scalar list (the only `IN` right-hand side that is cleanly pushable). Returns
+/// `None` for empty, mixed-kind, or non-literal lists → reference fallback.
+fn lower_scalar_list(expr: &Expr, params: &CypherParameters) -> Option<Vec<Scalar>> {
+    let Expr::List(items) = expr else {
+        return None;
+    };
+    if items.is_empty() {
+        return None;
+    }
+    let values: Vec<Scalar> = items
+        .iter()
+        .map(|e| lower_scalar(e, params))
+        .collect::<Option<_>>()?;
+    let kind = values[0].kind();
+    if values.iter().all(|v| v.kind() == kind) {
+        Some(values)
+    } else {
+        None
+    }
+}
+
+/// Apply the numeric cast a comparison/`IN` needs, given the operand's SQL form,
+/// whether it is a (text) label column, and the literal kind.
+fn cast_for_kind(raw: String, is_label: bool, kind: ScalarKind, dialect: &dyn SqlDialect) -> String {
+    match kind {
+        ScalarKind::Str => raw,
+        _ if is_label => raw,
+        ScalarKind::Int => dialect.cast_int(&raw),
+        ScalarKind::Float => dialect.cast_float(&raw),
+    }
+}
+
+/// Render an `IN (…)` list: cast the operand by the (homogeneous) element kind
+/// and render each element with the dialect.
+fn render_in_list(
+    raw: String,
+    is_label: bool,
+    values: &[Scalar],
+    dialect: &dyn SqlDialect,
+) -> String {
+    let lhs = cast_for_kind(raw, is_label, values[0].kind(), dialect);
+    let list = values
+        .iter()
+        .map(|v| match v {
+            Scalar::Str(s) => dialect.string_literal(s),
+            other => other.render(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{lhs} IN ({list})")
 }
 
 // ---------------------------------------------------------------------------
@@ -331,6 +416,15 @@ fn lower_predicate(expr: &Expr, var: &str, params: &CypherParameters) -> Option<
                 negated: *negated,
             })
         }
+        Expr::Binary {
+            op: BinaryOp::In,
+            lhs,
+            rhs,
+        } => {
+            let prop = lower_prop_ref(lhs, var)?;
+            let values = lower_scalar_list(rhs, params)?;
+            Some(Predicate::In { prop, values })
+        }
         Expr::Binary { op, lhs, rhs } => {
             let cmp = lower_cmp_op(*op)?;
             // Accept `prop <op> literal` or `literal <op> prop`.
@@ -496,6 +590,10 @@ fn render_predicate(pred: &Predicate, dialect: &dyn SqlDialect) -> String {
                 format!("{p} IS NULL")
             }
         }
+        Predicate::In { prop, values } => {
+            let raw = render_prop(prop, dialect);
+            render_in_list(raw, matches!(prop, PropRef::Label), values, dialect)
+        }
     }
 }
 
@@ -588,6 +686,10 @@ enum SegPredicate {
     IsNull {
         operand: SegOperand,
         negated: bool,
+    },
+    In {
+        operand: SegOperand,
+        values: Vec<Scalar>,
     },
 }
 
@@ -815,6 +917,14 @@ fn lower_seg_predicate(
         Expr::IsNull { operand, negated } => Some(SegPredicate::IsNull {
             operand: lower_seg_operand(operand, roles)?,
             negated: *negated,
+        }),
+        Expr::Binary {
+            op: BinaryOp::In,
+            lhs,
+            rhs,
+        } => Some(SegPredicate::In {
+            operand: lower_seg_operand(lhs, roles)?,
+            values: lower_scalar_list(rhs, params)?,
         }),
         Expr::Binary { op, lhs, rhs } => {
             let cmp = lower_cmp_op(*op)?;
@@ -1046,6 +1156,11 @@ fn render_seg_predicate(pred: &SegPredicate, dialect: &dyn SqlDialect) -> String
                 format!("{p} IS NULL")
             }
         }
+        SegPredicate::In { operand, values } => {
+            let raw = render_seg_operand(operand, dialect);
+            let is_label = matches!(operand, SegOperand::NodeLabel(_));
+            render_in_list(raw, is_label, values, dialect)
+        }
     }
 }
 
@@ -1178,6 +1293,21 @@ mod tests {
     }
 
     #[test]
+    fn in_list_predicate() {
+        assert_eq!(
+            spark_sql("MATCH (n:Person) WHERE n.age IN [30, 40, 50] RETURN n.name"),
+            "SELECT id, label, props FROM `grust_nodes` \
+             WHERE label = 'Person' AND CAST(GET_JSON_OBJECT(props, '$.age') AS BIGINT) IN (30, 40, 50)"
+        );
+        // NOT IN via the Not wrapper; string list rendered/escaped by the dialect.
+        assert_eq!(
+            sqlite_sql("MATCH (n:Person) WHERE NOT n.name IN ['Ada', 'Alan'] RETURN n"),
+            "SELECT id, label, props FROM \"grust_nodes\" \
+             WHERE label = 'Person' AND (NOT json_extract(props, '$.name') IN ('Ada', 'Alan'))"
+        );
+    }
+
+    #[test]
     fn literal_on_left_flips_operator() {
         assert_eq!(
             spark_sql("MATCH (n:Person) WHERE 40 <= n.age RETURN n"),
@@ -1233,8 +1363,9 @@ mod tests {
         // UNION.
         assert!(plan("MATCH (n:A) RETURN n.label AS l UNION MATCH (m:B) RETURN m.label AS l")
             .is_none());
-        // Predicate outside the subset: IN.
-        assert!(plan("MATCH (n:Person) WHERE n.age IN [1,2] RETURN n").is_none());
+        // Empty / mixed-kind IN lists are not pushable (reference fallback).
+        assert!(plan("MATCH (n:Person) WHERE n.age IN [] RETURN n").is_none());
+        assert!(plan("MATCH (n:Person) WHERE n.age IN [1, 'x'] RETURN n").is_none());
         // String predicate.
         assert!(plan("MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n").is_none());
         // Function in WHERE.
@@ -1365,6 +1496,19 @@ mod tests {
              JOIN `grust_nodes` nb ON nb.id = re.dst_id \
              WHERE re.edge_type = 'RATED' \
              AND CAST(GET_JSON_OBJECT(re.props, '$.stars') AS BIGINT) >= 4"
+        );
+    }
+
+    #[test]
+    fn segment_in_predicate() {
+        assert_eq!(
+            seg_spark("MATCH (:Person)-[:KNOWS]->(b) WHERE b.name IN ['Alan', 'Grace'] RETURN b.name"),
+            "SELECT nb.id, nb.label, nb.props \
+             FROM `grust_edges` re \
+             JOIN `grust_nodes` na ON na.id = re.src_id \
+             JOIN `grust_nodes` nb ON nb.id = re.dst_id \
+             WHERE re.edge_type = 'KNOWS' AND na.label = 'Person' \
+             AND GET_JSON_OBJECT(nb.props, '$.name') IN ('Alan', 'Grace')"
         );
     }
 

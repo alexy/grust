@@ -1034,6 +1034,7 @@ async fn test_read_pushdown_matches_reference() {
         "MATCH (n:Person) WHERE n.city IS NULL RETURN n.name ORDER BY n.name",
         "MATCH (n:Person) WHERE n.age > 30 AND n.city = 'London' RETURN n.name ORDER BY n.name",
         "MATCH (n) RETURN n.label AS label, count(*) AS c ORDER BY label",
+        "MATCH (n:Person) WHERE n.age IN [36, 85] RETURN n.name ORDER BY n.name",
         // Relationship-segment join pushdown.
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b ORDER BY a, b",
         "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age >= 40 RETURN b.name ORDER BY b.name",
