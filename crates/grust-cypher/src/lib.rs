@@ -3,6 +3,15 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use grust_core::prelude::*;
 use serde::{Deserialize, Serialize};
 
+pub mod gql;
+pub use gql::{
+    feature_manifest, gql_cardinality, gql_execution, gql_name, gql_syntax, gql_type, load_manifest,
+    load_manifest_cases, support_counts, support_summary, unsupported_gql_feature,
+    GqlConformanceProfile, GqlError, GqlErrorKind, GqlExpectation, GqlFeature, GqlFeatureDescriptor,
+    GqlFeatureFamily, GqlFeatureStatus, GqlManifest, GqlManifestCase, GqlRequirement,
+    GqlSupportCounts,
+};
+
 pub type CypherMutationReport = GraphMutationReport;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

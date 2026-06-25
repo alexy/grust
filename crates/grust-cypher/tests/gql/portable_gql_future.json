@@ -1,0 +1,50 @@
+{
+  "profile": "portable-gql",
+  "cases": [
+    {
+      "id": "read-only-match-return",
+      "feature": "read-only-match-return",
+      "requirement": "future",
+      "statement": "MATCH (n:Person) RETURN n.name",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature",
+      "notes": "Read-only MATCH ... RETURN without a write arrives in Unit 6."
+    },
+    {
+      "id": "with-clause",
+      "feature": "with-clause",
+      "requirement": "future",
+      "statement": "MATCH (n:Person) WITH n.city AS city, count(*) AS c RETURN city, c",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature",
+      "notes": "Query composition arrives in Unit 8."
+    },
+    {
+      "id": "optional-match",
+      "feature": "optional-match",
+      "requirement": "future",
+      "statement": "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a, b",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature",
+      "notes": "OPTIONAL MATCH null-padding arrives in Unit 9."
+    },
+    {
+      "id": "general-expression-tree",
+      "feature": "general-expression-tree",
+      "requirement": "future",
+      "statement": "MATCH (n:Person) RETURN n.first + ' ' + n.last AS full",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature",
+      "notes": "General expression evaluation arrives in Unit 7."
+    },
+    {
+      "id": "quantified-path-pattern",
+      "feature": "quantified-path-pattern",
+      "requirement": "future",
+      "statement": "MATCH (a:Person)-[:KNOWS]->{1,3}(b:Person) RETURN b",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature",
+      "notes": "Quantified path patterns arrive in Unit 9."
+    }
+  ]
+}
