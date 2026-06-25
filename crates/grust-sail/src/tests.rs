@@ -1003,6 +1003,7 @@ async fn test_read_pushdown_matches_reference() {
         let mut p = Props::new();
         p.insert("name".into(), Value::from(name));
         p.insert("age".into(), Value::Int(age));
+        p.insert("active".into(), Value::Bool(age < 50));
         if let Some(city) = city {
             p.insert("city".into(), Value::from(city));
         }
@@ -1036,6 +1037,7 @@ async fn test_read_pushdown_matches_reference() {
         "MATCH (n) RETURN n.label AS label, count(*) AS c ORDER BY label",
         "MATCH (n:Person) WHERE n.age IN [36, 85] RETURN n.name ORDER BY n.name",
         "MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) WHERE n.active = true RETURN n.name ORDER BY n.name",
         // Relationship-segment join pushdown.
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b ORDER BY a, b",
         "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age >= 40 RETURN b.name ORDER BY b.name",

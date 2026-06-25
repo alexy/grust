@@ -129,9 +129,20 @@ string-typed properties; a non-string property value *errors* in the reference
 but *filters* under pushdown (documented caveat — pushed SQL can't abort the
 query). Empty needles fall back.
 
-Deferred (next pushdown increments, each gated by the oracle): variable-length
-with an edge-list (named relationship) binding; path variables; arithmetic
-predicates; boolean literals.
+**Boolean comparisons.** `prop = true|false` / `prop <> true|false` are pushed on
+both paths via `SqlDialect::bool_literal_sql` (SQLite compares the `json_extract`
+integer `1`/`0`; Spark the `GET_JSON_OBJECT` text `'true'`/`'false'`). Ordered
+comparisons against booleans and bool inline-map props fall back.
+
+**Arithmetic predicates: deferred by design.** Arithmetic in WHERE operands
+(`n.age + 1 > 40`) is *not* pushed: it is dialect-divergent for exact reference
+equality — integer-vs-float division differs (SQLite `5/2 = 2`, Spark `5/2 = 2.5`,
+the reference is float), and schemaless operand-type promotion can't be resolved
+without per-operand type info. It correctly falls back to the reference.
+
+Deferred (each gated by the oracle): arithmetic predicates (above);
+variable-length with an edge-list (named relationship) binding; path variables;
+`OPTIONAL MATCH` / `WITH` / `UNION` / multi-pattern `MATCH` (multi-clause shapes).
 
 ---
 

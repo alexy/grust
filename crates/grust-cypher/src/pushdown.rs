@@ -114,6 +114,12 @@ enum Predicate {
         op: StrOp,
         needle: String,
     },
+    /// `prop = true|false` / `prop <> true|false` (op is `Eq` or `Ne`).
+    BoolCompare {
+        prop: PropRef,
+        op: CmpOp,
+        value: bool,
+    },
 }
 
 /// A reference to a property of the scanned node. `label` maps to the backend's
@@ -318,6 +324,9 @@ pub trait SqlDialect {
     /// escapes it. NULL `expr` must yield NULL (so the row is dropped), matching
     /// the reference's null handling.
     fn string_predicate(&self, expr: &str, op: StrOp, needle: &str) -> String;
+    /// Render the SQL literal a JSON-extracted boolean compares equal to: SQLite
+    /// `json_extract` yields `1`/`0`; Spark `GET_JSON_OBJECT` yields `'true'`/`'false'`.
+    fn bool_literal_sql(&self, value: bool) -> String;
     /// Whether `json_property` yields a **natively typed** scalar that sorts
     /// numerically/lexically like the reference (e.g. SQLite/libSQL `json_extract`
     /// returns INTEGER/REAL/TEXT). When false (e.g. Spark `GET_JSON_OBJECT`
@@ -363,6 +372,10 @@ impl SqlDialect for SparkDialect {
             StrOp::Contains => format!("CONTAINS({expr}, {n})"),
         }
     }
+    fn bool_literal_sql(&self, value: bool) -> String {
+        // GET_JSON_OBJECT returns the JSON boolean as text.
+        if value { "'true'".to_string() } else { "'false'".to_string() }
+    }
 }
 
 /// SQLite / libSQL dialect (the Turso backend, also the embedded differential
@@ -400,6 +413,10 @@ impl SqlDialect for SqliteDialect {
             // Compare the last `needle.len()` characters (SQLite counts chars).
             StrOp::EndsWith => format!("substr({expr}, -{}) = {n}", needle.chars().count()),
         }
+    }
+    fn bool_literal_sql(&self, value: bool) -> String {
+        // json_extract returns the JSON boolean as integer 1/0.
+        if value { "1".to_string() } else { "0".to_string() }
     }
     fn orders_json_typed(&self) -> bool {
         // SQLite / libSQL `json_extract` returns INTEGER/REAL/TEXT, so ORDER BY
@@ -638,6 +655,17 @@ fn lower_predicate(expr: &Expr, var: &str, params: &CypherParameters) -> Option<
         }
         Expr::Binary { op, lhs, rhs } => {
             let cmp = lower_cmp_op(*op)?;
+            // `prop = true|false` (Eq/Ne only) — booleans render dialect-specific.
+            if matches!(cmp, CmpOp::Eq | CmpOp::Ne) {
+                if let (Some(prop), Some(value)) = (lower_prop_ref(lhs, var), lower_bool(rhs, params))
+                {
+                    return Some(Predicate::BoolCompare { prop, op: cmp, value });
+                }
+                if let (Some(prop), Some(value)) = (lower_prop_ref(rhs, var), lower_bool(lhs, params))
+                {
+                    return Some(Predicate::BoolCompare { prop, op: cmp, value });
+                }
+            }
             // Accept `prop <op> literal` or `literal <op> prop`.
             if let Some(prop) = lower_prop_ref(lhs, var) {
                 let value = lower_scalar(rhs, params)?;
@@ -657,6 +685,19 @@ fn lower_predicate(expr: &Expr, var: &str, params: &CypherParameters) -> Option<
                 None
             }
         }
+        _ => None,
+    }
+}
+
+/// Lower an expression to a boolean literal (literal or a parameter bound to a
+/// `Value::Bool`), else `None`.
+fn lower_bool(expr: &Expr, params: &CypherParameters) -> Option<bool> {
+    match expr {
+        Expr::Boolean(b) => Some(*b),
+        Expr::Parameter(name) => match params.get(name)? {
+            Value::Bool(b) => Some(*b),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -911,6 +952,14 @@ fn render_predicate(pred: &Predicate, dialect: &dyn SqlDialect) -> String {
         Predicate::StringPred { prop, op, needle } => {
             dialect.string_predicate(&render_prop(prop, dialect), *op, needle)
         }
+        Predicate::BoolCompare { prop, op, value } => {
+            format!(
+                "{} {} {}",
+                render_prop(prop, dialect),
+                op.sql(),
+                dialect.bool_literal_sql(*value)
+            )
+        }
     }
 }
 
@@ -1013,6 +1062,11 @@ enum SegPredicate {
         operand: SegOperand,
         op: StrOp,
         needle: String,
+    },
+    BoolCompare {
+        operand: SegOperand,
+        op: CmpOp,
+        value: bool,
     },
 }
 
@@ -1384,6 +1438,18 @@ fn lower_seg_predicate(
         }),
         Expr::Binary { op, lhs, rhs } => {
             let cmp = lower_cmp_op(*op)?;
+            if matches!(cmp, CmpOp::Eq | CmpOp::Ne) {
+                if let (Some(operand), Some(value)) =
+                    (lower_seg_operand(lhs, roles), lower_bool(rhs, params))
+                {
+                    return Some(SegPredicate::BoolCompare { operand, op: cmp, value });
+                }
+                if let (Some(operand), Some(value)) =
+                    (lower_seg_operand(rhs, roles), lower_bool(lhs, params))
+                {
+                    return Some(SegPredicate::BoolCompare { operand, op: cmp, value });
+                }
+            }
             if let Some(operand) = lower_seg_operand(lhs, roles) {
                 Some(SegPredicate::Compare {
                     operand,
@@ -1603,6 +1669,14 @@ fn render_seg_predicate(pred: &SegPredicate, dialect: &dyn SqlDialect) -> String
         }
         SegPredicate::StringPred { operand, op, needle } => {
             dialect.string_predicate(&render_seg_operand(operand, dialect), *op, needle)
+        }
+        SegPredicate::BoolCompare { operand, op, value } => {
+            format!(
+                "{} {} {}",
+                render_seg_operand(operand, dialect),
+                op.sql(),
+                dialect.bool_literal_sql(*value)
+            )
         }
     }
 }
@@ -2136,6 +2210,22 @@ mod tests {
             sqlite_sql("MATCH (n:Person) WHERE n.name STARTS WITH 'Ad' RETURN n"),
             "SELECT id, label, props FROM \"grust_nodes\" \
              WHERE label = 'Person' AND instr(json_extract(props, '$.name'), 'Ad') = 1"
+        );
+    }
+
+    #[test]
+    fn boolean_comparison() {
+        // SQLite json_extract yields integer 1/0.
+        assert_eq!(
+            sqlite_sql("MATCH (n:Person) WHERE n.active = true RETURN n.name"),
+            "SELECT id, label, props FROM \"grust_nodes\" \
+             WHERE label = 'Person' AND json_extract(props, '$.active') = 1"
+        );
+        // Spark GET_JSON_OBJECT yields the boolean as text.
+        assert_eq!(
+            spark_sql("MATCH (n:Person) WHERE n.active <> false RETURN n.name"),
+            "SELECT id, label, props FROM `grust_nodes` \
+             WHERE label = 'Person' AND GET_JSON_OBJECT(props, '$.active') <> 'false'"
         );
     }
 

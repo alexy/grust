@@ -27,10 +27,10 @@ use grust_cypher::{CypherParameters, CypherResultTable};
 /// (NULLs), and a name with an apostrophe (to exercise string escaping).
 fn fixture() -> Graph {
     let nodes = vec![
-        person("p1", "Ada", 36, None, Some(9.5)),
-        person("p2", "Alan", 41, Some("London"), Some(7.0)),
-        person("p3", "Grace", 85, Some("London"), None),
-        person("p4", "O'Hara", 50, None, Some(7.0)),
+        person("p1", "Ada", 36, None, Some(9.5), true),
+        person("p2", "Alan", 41, Some("London"), Some(7.0), false),
+        person("p3", "Grace", 85, Some("London"), None, true),
+        person("p4", "O'Hara", 50, None, Some(7.0), false),
         node("City", "c1", &[("name", Value::from("London"))]),
     ];
     let rated = |stars: i64| -> Props {
@@ -50,8 +50,19 @@ fn fixture() -> Graph {
     Graph::new(nodes, edges)
 }
 
-fn person(id: &str, name: &str, age: i64, city: Option<&str>, score: Option<f64>) -> Node {
-    let mut props: Vec<(&str, Value)> = vec![("name", Value::from(name)), ("age", Value::Int(age))];
+fn person(
+    id: &str,
+    name: &str,
+    age: i64,
+    city: Option<&str>,
+    score: Option<f64>,
+    active: bool,
+) -> Node {
+    let mut props: Vec<(&str, Value)> = vec![
+        ("name", Value::from(name)),
+        ("age", Value::Int(age)),
+        ("active", Value::Bool(active)),
+    ];
     if let Some(city) = city {
         props.push(("city", Value::from(city)));
     }
@@ -95,6 +106,9 @@ const PUSHABLE_QUERIES: &[&str] = &[
     "MATCH (n:Person) WHERE n.name ENDS WITH 'e' RETURN n.name ORDER BY n.name",
     "MATCH (n:Person) WHERE n.name CONTAINS 'l' RETURN n.name ORDER BY n.name",
     "MATCH (n:Person) WHERE NOT n.name CONTAINS 'a' RETURN n.name ORDER BY n.name",
+    "MATCH (n:Person) WHERE n.active = true RETURN n.name ORDER BY n.name",
+    "MATCH (n:Person) WHERE n.active <> true RETURN n.name ORDER BY n.name",
+    "MATCH (n:Person) WHERE n.active = false RETURN n.name ORDER BY n.name",
 ];
 
 /// Relationship-segment queries within the pushable subset.
@@ -193,6 +207,9 @@ impl SqlDialect for UntypedSqlite {
             StrOp::Contains => format!("instr({expr}, {n}) > 0"),
             StrOp::EndsWith => format!("substr({expr}, -{}) = {n}", needle.chars().count()),
         }
+    }
+    fn bool_literal_sql(&self, value: bool) -> String {
+        if value { "1".to_string() } else { "0".to_string() }
     }
     // orders_json_typed defaults to false → ordering casts via TypeHints.
 }
