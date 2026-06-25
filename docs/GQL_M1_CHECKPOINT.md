@@ -42,37 +42,52 @@ provably unchanged (same 327 tests, byte-identical). The new lexer → AST →
 parser → semantics pipeline is fully tested in isolation but is **not yet wired
 into the production path**.
 
-## Deferred to this review — DO NOT do these unsupervised
+## Reviewability refactor (done after the checkpoint, on request)
+
+The monoliths were subsequently decomposed (the user explicitly greenlit it):
+
+- **`tests.rs` (17k) → `tests/` dir**: `mod.rs` (shared imports + helper) + seven
+  themed submodules (≤4k each). Submodules reach crate internals via `use super::*`
+  chained through `tests/mod.rs`. Verbatim split + rustfmt; 327 tests unchanged.
+- **`lib.rs` (16k) → 176-line root + 9 modules** (ddl, parse, primitives, planner,
+  eval_rows, restricted_values, projection, where_clause, returning; each ≤3186
+  lines). Items moved at top-level boundaries; cross-module items raised to
+  `pub(crate)` (functions, async fns, struct fields inside `struct {}` only, and
+  the impl methods the compiler flagged). Public API unchanged.
+
+Gate after refactor: 412 lib + 3 integration tests pass, 0 warnings,
+facade(cypher,memory)/sail/turso compile.
+
+## Deferred to review — DO NOT do these unsupervised
 
 These are the monolith-integrating / public-API-affecting / highest-blast-radius
 steps the review (and `GQL_GOAL.md`) reserved for a human checkpoint. They are
 listed in the order I recommend greenlighting them:
 
-1. **Unit 2b — coarse module grouping.** Group the ~16k flat top-level lines of
-   `lib.rs` into modules (ast-ish/parse/ddl/plan/return/execute/compat). Risky
-   visibility re-plumbing; re-estimated 4–7 days. Do a minimal grouping; defer
-   fine `ast/plan/execute` seams until after Unit 5.
-2. **Unit 2 — grust-sail glob narrowing.** Replace `grust-sail`'s
+1. **grust-sail glob narrowing.** Replace `grust-sail`'s
    `pub use grust_cypher::*;` (lib.rs:11) with an explicit named re-export. This
-   is a **public-API change** to `grust-sail` — needs CHANGELOG note + review of
-   what downstream (the `grust-graph` facade) relies on.
-3. **Units 3/4 — wire the new pipeline into the production path.** Make the
+   is a **public-API change** to `grust-sail`, and it is entangled with the
+   `grust-graph` facade: the facade re-exports the `Cypher*` names under both the
+   `cypher` and `sail` cfgs, so narrowing the glob (removing its shadowability)
+   makes `--features cypher,memory,sail` fail to compile. (That feature combo is
+   already broken on this branch for the same reason — pre-existing.) Needs a
+   coordinated facade change to gate the duplicate re-exports + a CHANGELOG note.
+2. **Units 3/4 — wire the new pipeline into the production path.** Make the
    legacy `cypher_*` entrypoints compatibility wrappers over
    lexer→parser→semantics→(existing logical plans). This is where the new code
    becomes load-bearing and where behavior could drift — needs the AST→plan
-   lowering (the remaining part of Unit 4) and careful diffing against the 327
-   tests.
-4. **Unit 5 — shared row model (highest blast radius).** Mandated two-phase:
+   lowering (the remaining part of Unit 4) and careful diffing against the tests.
+3. **Unit 5 — shared row model (highest blast radius).** Mandated two-phase:
    (5a) introduce `GqlRecord/GqlBinding/GqlTable/GqlScope`, make the existing
    `CypherResultTable`/`CypherReturn*` structs thin adapters, gated on **RETURN\***
-   **ordering/JSON golden snapshots written BEFORE the swap** (I did not generate
-   these — the returning-execution API is woven through internal Memory-facade
-   test helpers and faithful snapshots should be produced under review, as part
-   of 5a); (5b) migrate callers, delete adapters.
+   **ordering/JSON golden snapshots written BEFORE the swap** (not yet generated —
+   the returning-execution API is woven through internal Memory-facade test
+   helpers and faithful snapshots should be produced under review, as part of 5a);
+   (5b) migrate callers, delete adapters.
 
 ## Suggested next session
 
-Greenlight item 1 (Unit 2b minimal grouping) or item 4·5a (row-model adapters +
-golden snapshots) first — both unblock the most downstream work. Re-run the gate
+Greenlight item 2 (wire the pipeline) or item 3·5a (row-model adapters + golden
+snapshots) first — both unblock the most downstream work. Re-run the gate
 between every sub-step. Keep the 327-count floor and the facade/Sail checks as
 hard gates. Publishing remains suspended until explicitly requested.
