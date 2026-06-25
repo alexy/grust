@@ -34,7 +34,77 @@ projections.
 Not yet done for the read core (deferred): wiring the legacy write entrypoints
 onto the new pipeline (below).
 
-## Unit 15 progress — read pushdown, milestone 1 (additive)
+## Unit 15 — read pushdown (PAUSED at a comprehensive point)
+
+Status: the cleanly-additive predicate/path pushdown work is **complete and
+verified**; paused here on request. 16 sub-commits (`c238e25` … `cfa6e3e`) on
+`cypher-gql-full`, each green and oracle-checked.
+
+### What pushes down today
+
+`crates/grust-cypher/src/pushdown.rs` lowers a bounded read query's
+`MATCH`/`WHERE` filter into SQL via a `SqlDialect` (`SparkDialect`,
+`SqliteDialect`); the `RETURN` projection runs through the shared Memory
+reference (`read::project_*`), so a pushdown result is **byte-identical to
+`read::run_read_query` by construction**. Anything outside the pushable subset
+returns `Ok(None)` → the backend falls back to the reference (never a wrong
+answer).
+
+- **Patterns:** single node; 1..N relationship segments (out/in/undirected,
+  multiple rel types, inline endpoint/edge props); variable-length `*m..n` with
+  an anonymous relationship (recursive CTE enumerating simple paths, no repeated
+  nodes). Entry points: `plan_node_read`, `plan_segment_read`,
+  `plan_var_length_read` (+ `_with_hints` variants).
+- **`WHERE`** (node and segment paths): comparisons (`=,<>,<,<=,>,>=`),
+  `IS [NOT] NULL`, `IN`/`NOT IN`, `STARTS/ENDS/CONTAINS`, boolean `= true/false`,
+  `+`/`-`/`*` arithmetic over typed numeric properties, and `AND`/`OR`/`NOT`.
+- **Shaping:** `ORDER BY` / `SKIP` / `LIMIT` pushed into SQL — always for
+  typed-JSON dialects (SQLite/libSQL `json_extract`), and for Spark when a
+  `TypeHints` (from the graph schema) types the sort keys so numeric casts are
+  emitted (incl. edge-property keys). Otherwise ordering stays in the reference.
+- **Backends:** `SailGraphStore::run_read_query` tries node → segment →
+  var-length → reference fallback. `SailTypeHints` derives type hints from the
+  applied `GraphSchema`.
+
+### Verification
+
+- **Differential oracle** (`crates/grust-turso/tests/read_pushdown_oracle.rs`):
+  executes the generated SQL against embedded SQLite and asserts row-equality vs
+  the Memory reference — 10 tests covering every feature above, including a
+  prefix-collision graph for var-length and an `UntypedSqlite` dialect that
+  simulates the Spark cast path. Recursive-CTE (var-length) runs against real
+  SQLite via `rusqlite` (bundled, a grust-turso dev-dep) since `turso` lacks
+  `WITH RECURSIVE`.
+- **Sail:** a `#[ignore]` live-server differential test (`grust-sail/src/tests.rs`).
+- Gate: cypher 507 lib / 3 / 11 (0 failed, 0 warnings); turso 7 + 10; sail 35 /
+  26 ignored; facade(`cypher,memory`) + grust-turso compile; `git diff --check`
+  clean.
+
+### Future work (none are clean additive predicate work)
+
+1. **`/`, `%`, `^` arithmetic** — *not safely pushable*: integer-vs-float
+   division and modulo diverge across engines (SQLite `5/2 = 2`, Spark `5/2 =
+   2.5`, reference is float). Correct reference fallback exists. Would need a
+   per-dialect division-semantics shim to be provably equal.
+2. **Variable-length with a named-relationship edge-list binding**
+   (`(a)-[r:T*1..n]->(b) … r`) — needs the recursive CTE to accumulate an edge
+   array and reconstruct `r` as a `Value::Json` list matching the reference.
+   Niche; anonymous-relationship var-length already pushes.
+3. **Path variables** (`MATCH p = …`) — needs path-value reconstruction; niche.
+4. **Multi-clause shapes** (`OPTIONAL MATCH`, `WITH`, `UNION`, multi-pattern
+   `MATCH`) — **high value, substantial multi-commit effort** with its own design
+   surface (e.g. `OPTIONAL MATCH` = `LEFT JOIN` with null-padding to match the
+   reference; `WITH`/`UNION` need sub-plan composition). Recommended as a fresh
+   focused track with a direction call, not squeezed into the predicate work.
+
+Other backends: only Sail wires pushdown into its read entrypoint today. Turso
+is used as the oracle but its own `run_read_query` is not wired (and its tagged
+JSON storage would need a tagged dialect variant). Postgres/pgGraph/pgq backends
+could reuse the same `SqlDialect` IR.
+
+---
+
+### Implementation history (chronological)
 
 `src/pushdown.rs` is the backend-neutral lowering. `plan_node_read(cypher,
 params)` lowers the **pushable subset** — a single node pattern

@@ -18,9 +18,11 @@ We are executing the GQL completion goal. **Everything below is on branch
   guardrails, the corrected dependency DAG, decomposed units, milestone
   checkpoints. Derived from `docs/GrustCypherFull.md` after a multi-agent review.
 - **Progress checkpoint:** `docs/GQL_M1_CHECKPOINT.md` — what landed in M1
-  (Foundation) and M2 (read query core), and what's deferred.
+  (Foundation), M2 (read query core), and Unit 15 (read pushdown), and what's
+  deferred. **Read its "Unit 15 — read pushdown (PAUSED)" section first** for the
+  current consolidated status + future-work list.
 
-### Status: M1 done, M2 (Portable Query Core, read side) complete
+### Status: M1 done, M2 (read side) done, Unit 15 (read pushdown) done & paused
 - **M1 Foundation** (additive, alongside the untouched legacy planner):
   `gql` (conformance spine: `GqlFeature` taxonomy + structured `GqlError`),
   `lexer` (span-bearing), `ast`, `parser` (recursive descent), `semantics`
@@ -41,10 +43,25 @@ We are executing the GQL completion goal. **Everything below is on branch
   implicit GROUP BY; WITH horizon; UNWIND; UNION/UNION ALL. The `GqlFeature`
   manifest marks these `Supported`; corpus in `tests/gql/portable_read.json`.
 
+- **Unit 15 read pushdown (`src/pushdown.rs`)** — DONE & paused. Backend-neutral
+  lowering of the bounded read filter into SQL (`SqlDialect`: Spark + SQLite);
+  `RETURN` runs through the shared reference so results are byte-identical by
+  construction. Covers single node, 1..N relationship segments (out/in/undirected,
+  multi-type, inline props), variable-length `*m..n` (anonymous rel, recursive
+  CTE); `WHERE` with comparisons / `IS NULL` / `IN` / string preds / boolean /
+  `+`·`-`·`*` arithmetic / `AND·OR·NOT`; `ORDER BY`/`SKIP`/`LIMIT` into SQL
+  (typed-JSON always, Spark via schema `TypeHints`). Wired into
+  `SailGraphStore::run_read_query`. Differential oracle in
+  `grust-turso/tests/read_pushdown_oracle.rs` (embedded SQLite incl. `rusqlite`
+  for recursive CTEs). **See the checkpoint's Unit 15 section for the full
+  future-work list.**
+
 ### NEXT — decision point (pick a track when resuming)
-The safe additive read work is done. Remaining work needs a direction call:
-1. **Sail/backend read pushdown (Unit 15)** — *recommended, additive*: lower the
-   read subset into Sail SQL / other backends. Doesn't touch the stable surface.
+The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
+1. **Finish Unit 15 pushdown tails** — `OPTIONAL MATCH`/`WITH`/`UNION`/multi-pattern
+   `MATCH` (high value, substantial; `OPTIONAL` = LEFT JOIN + null-padding);
+   `/`·`%`·`^` arithmetic (dialect-divergent — needs a division shim);
+   named-rel-edge-list var-length; path variables. See checkpoint Unit 15.
 2. **Write-path rewiring (Unit 10)** — make the legacy `cypher_*` write
    entrypoints run through the new pipeline. **Review-flagged as highest-risk**
    (behavior could drift across the 327 strict-write tests); GQL_GOAL.md mandates
@@ -60,7 +77,7 @@ The safe additive read work is done. Remaining work needs a direction call:
    "Unreleased" into a dated entry. `AGENTS.md`'s auto-publish rule is
    **suspended** for this goal. CHANGELOG "Unreleased" notes are fine.
 2. **Test floor:** `cargo test -p grust-cypher --lib` must stay green and the
-   count must only grow (469 right now; 327 of those are the original strict-write
+   count must only grow (507 right now; 327 of those are the original strict-write
    suite — never delete/`#[ignore]` to pass). 
 3. **Additive discipline:** the legacy strict-write planner and the stable
    Memory/Sail behavior are not to be changed destructively. New work lands as
@@ -72,11 +89,11 @@ The safe additive read work is done. Remaining work needs a direction call:
 ## VERIFY (the gate — run between steps)
 ```sh
 cd ~/src/grust
-cargo test  -p grust-cypher                         # 469 lib + 3 + 11 integration, 0 failed
+cargo test  -p grust-cypher                         # 507 lib + 3 + 11 integration, 0 failed
 cargo build -p grust-cypher --lib 2>&1 | grep -c warning:   # expect 0
 cargo check -p grust-graph --features cypher,memory         # facade
 cargo check -p grust-sail                                   # surface-touching units
-cargo check -p grust-turso                                  # (Unit 10 only)
+cargo test  -p grust-turso                                  # 7 lib + 10 pushdown oracle (Unit 15)
 git  diff --check                                           # whitespace clean
 ```
 No external services needed for the cypher work (Memory reference + unit tests).
@@ -86,7 +103,8 @@ Two pre-existing crawler/Sail live-server tests are `#[ignore]` by design.
 - `lib.rs` (~190 lines) — crate root: module wiring, re-exports, option/result
   types, the two top-level plan entrypoints.
 - New pipeline: `gql.rs`, `lexer.rs`, `ast.rs`, `parser.rs`, `semantics.rs`,
-  `read.rs` (the read executor).
+  `read.rs` (the Memory read executor), `pushdown.rs` (backend-neutral read
+  pushdown → SQL; Unit 15).
 - Legacy (strict-write) split: `ddl.rs`, `parse.rs`, `primitives.rs`,
   `planner.rs`, `eval_rows.rs`, `restricted_values.rs`, `projection.rs`,
   `where_clause.rs`, `returning.rs`.
