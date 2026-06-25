@@ -17,8 +17,8 @@
 
 use grust_core::{Edge, Graph, Label, Node, NodeId, Props, Value};
 use grust_cypher::pushdown::{
-    plan_node_read, plan_node_read_with_hints, plan_segment_read, ScalarKind, SqlDialect,
-    SqliteDialect, TypeHints,
+    plan_node_read, plan_node_read_with_hints, plan_segment_read, plan_segment_read_with_hints,
+    ScalarKind, SqlDialect, SqliteDialect, TypeHints,
 };
 use grust_cypher::read::run_read_query;
 use grust_cypher::{CypherParameters, CypherResultTable};
@@ -33,14 +33,19 @@ fn fixture() -> Graph {
         person("p4", "O'Hara", 50, None, Some(7.0)),
         node("City", "c1", &[("name", Value::from("London"))]),
     ];
-    let mut rated = Props::new();
-    rated.insert("stars".into(), Value::Int(5));
+    let rated = |stars: i64| -> Props {
+        let mut p = Props::new();
+        p.insert("stars".into(), Value::Int(stars));
+        p
+    };
     let edges = vec![
         Edge::new("KNOWS", "p1", "p2", Props::new()),
         Edge::new("KNOWS", "p2", "p3", Props::new()),
         Edge::new("KNOWS", "p1", "p4", Props::new()),
         Edge::new("FOLLOWS", "p3", "p1", Props::new()),
-        Edge::new("RATED", "p1", "c1", rated),
+        Edge::new("RATED", "p1", "c1", rated(5)),
+        Edge::new("RATED", "p2", "c1", rated(3)),
+        Edge::new("RATED", "p3", "c1", rated(4)),
     ];
     Graph::new(nodes, edges)
 }
@@ -179,6 +184,12 @@ impl TypeHints for OracleHints {
             _ => None,
         }
     }
+    fn edge_property_kind(&self, edge_type: Option<&str>, key: &str) -> Option<ScalarKind> {
+        match (edge_type, key) {
+            (Some("RATED"), "stars") => Some(ScalarKind::Int),
+            _ => None,
+        }
+    }
 }
 
 #[tokio::test]
@@ -218,6 +229,33 @@ async fn schema_aware_ordering_casts_match_reference() {
 }
 
 #[tokio::test]
+async fn untyped_segment_edge_ordering_matches_reference() {
+    // Spark-path simulation: untyped dialect + edge hints cast the edge-property
+    // sort key; SQLite executes it and must match the reference sequence.
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    let cypher = "MATCH (a:Person)-[r:RATED]->(b) RETURN a.name ORDER BY r.stars DESC";
+    let plan = plan_segment_read_with_hints(cypher, &params, &OracleHints)
+        .unwrap()
+        .unwrap();
+    assert!(plan.pushes_ordering(&UntypedSqlite));
+    let sql = plan.to_sql(&UntypedSqlite);
+    assert!(sql.contains("CAST(json_extract(re.props"), "expected an edge cast in `{sql}`");
+    let n = plan.column_count();
+    let mut rows = conn.query(&sql, ()).await.unwrap();
+    let mut text_rows = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        text_rows.push((0..n).map(|i| opt_text(&row, i)).collect());
+    }
+    let actual = plan
+        .project_text_rows(&UntypedSqlite, text_rows, &params)
+        .unwrap();
+    let expected = run_read_query(&graph, cypher, &params).unwrap();
+    assert_eq!(actual, expected, "untyped segment edge ordering mismatch");
+}
+
+#[tokio::test]
 async fn segment_pushdown_matches_reference() {
     let graph = fixture();
     let conn = embed(&graph).await;
@@ -240,6 +278,8 @@ async fn segment_pushed_ordering_preserves_sequence() {
     for cypher in [
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY b.age DESC",
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name ORDER BY b.age SKIP 1",
+        // Edge-property ordering on a typed-JSON dialect (no hints needed).
+        "MATCH (a:Person)-[r:RATED]->(b) RETURN a.name ORDER BY r.stars",
     ] {
         let plan = plan_segment_read(cypher, &params).unwrap().unwrap();
         assert!(

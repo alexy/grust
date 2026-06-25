@@ -183,6 +183,14 @@ pub trait TypeHints {
     /// The scalar kind of property `key` on a node of `label` (if known). `label`
     /// is `None` for an unlabeled pattern.
     fn node_property_kind(&self, label: Option<&str>, key: &str) -> Option<ScalarKind>;
+
+    /// The scalar kind of property `key` on a relationship of `edge_type` (if
+    /// known). `edge_type` is `None` when the pattern's relationship type is
+    /// absent or ambiguous (multiple types), in which case ordering by an edge
+    /// property stays in the reference projection on untyped-JSON dialects.
+    fn edge_property_kind(&self, _edge_type: Option<&str>, _key: &str) -> Option<ScalarKind> {
+        None
+    }
 }
 
 /// A [`TypeHints`] that knows nothing — every lookup returns `None`. Backends
@@ -1105,12 +1113,19 @@ fn lower_segment(
         b: b_var.as_deref(),
         rel: rel_var.as_deref(),
     };
+    // A single relationship type lets edge-property ordering be typed on untyped
+    // dialects; multiple/absent types leave the edge kind unknown.
+    let edge_type = match rel.types.as_slice() {
+        [one] => Some(one.as_str()),
+        _ => None,
+    };
     let projection = return_clause.projection.clone();
     let ordering = compute_seg_ordering(
         &projection,
         &roles,
         a_label.as_deref(),
         b_label.as_deref(),
+        edge_type,
         params,
         hints,
     );
@@ -1136,6 +1151,7 @@ fn compute_seg_ordering(
     roles: &VarRoles,
     a_label: Option<&str>,
     b_label: Option<&str>,
+    edge_type: Option<&str>,
     params: &CypherParameters,
     hints: &dyn TypeHints,
 ) -> Option<SegPushedOrdering> {
@@ -1165,7 +1181,7 @@ fn compute_seg_ordering(
             SegOperand::NodeLabel(_) => Some(ScalarKind::Str),
             SegOperand::NodeProp(Endpoint::A, key) => hints.node_property_kind(a_label, key),
             SegOperand::NodeProp(Endpoint::B, key) => hints.node_property_kind(b_label, key),
-            SegOperand::EdgeProp(_) => None,
+            SegOperand::EdgeProp(key) => hints.edge_property_kind(edge_type, key),
         };
         keys.push(SegOrderKey {
             operand,
@@ -1845,6 +1861,12 @@ mod tests {
                 _ => None,
             }
         }
+        fn edge_property_kind(&self, edge_type: Option<&str>, key: &str) -> Option<ScalarKind> {
+            match (edge_type, key) {
+                (Some("RATED"), "stars") => Some(ScalarKind::Int),
+                _ => None,
+            }
+        }
     }
 
     #[test]
@@ -2020,6 +2042,26 @@ mod tests {
         assert!(plan.to_sql(&SparkDialect).ends_with(
             "ORDER BY CAST(GET_JSON_OBJECT(nb.props, '$.age') AS BIGINT) DESC NULLS FIRST LIMIT 3"
         ));
+    }
+
+    #[test]
+    fn segment_edge_property_ordering_with_hints() {
+        // A single rel type lets an edge-property sort key be typed on Spark.
+        let plan = plan_segment_read_with_hints(
+            "MATCH (a)-[r:RATED]->(b) RETURN b.name ORDER BY r.stars DESC",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .expect("pushable");
+        assert!(plan.pushes_ordering(&SparkDialect));
+        assert!(plan.to_sql(&SparkDialect).ends_with(
+            "ORDER BY CAST(GET_JSON_OBJECT(re.props, '$.stars') AS BIGINT) DESC NULLS FIRST"
+        ));
+        // Typed-JSON dialects order the edge property directly (no hints needed).
+        assert!(plan
+            .to_sql(&SqliteDialect)
+            .ends_with("ORDER BY json_extract(re.props, '$.stars') DESC NULLS FIRST"));
     }
 
     #[test]

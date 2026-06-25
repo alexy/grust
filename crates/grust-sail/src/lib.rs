@@ -3300,7 +3300,6 @@ impl grust_cypher::pushdown::TypeHints for SailTypeHints {
         label: Option<&str>,
         key: &str,
     ) -> Option<grust_cypher::pushdown::ScalarKind> {
-        use grust_cypher::pushdown::ScalarKind;
         let label = label?;
         let node_type = self
             .schema
@@ -3309,12 +3308,35 @@ impl grust_cypher::pushdown::TypeHints for SailTypeHints {
             .iter()
             .find(|n| n.label.as_str() == label)?;
         let field = node_type.fields.iter().find(|f| f.name == key)?;
-        match field.ty {
-            FieldType::Int => Some(ScalarKind::Int),
-            FieldType::Float => Some(ScalarKind::Float),
-            FieldType::String => Some(ScalarKind::Str),
-            _ => None,
-        }
+        scalar_kind_of(&field.ty)
+    }
+
+    fn edge_property_kind(
+        &self,
+        edge_type: Option<&str>,
+        key: &str,
+    ) -> Option<grust_cypher::pushdown::ScalarKind> {
+        let edge_type = edge_type?;
+        let edge = self
+            .schema
+            .as_ref()?
+            .edges
+            .iter()
+            .find(|e| e.label.as_str() == edge_type)?;
+        let field = edge.fields.iter().find(|f| f.name == key)?;
+        scalar_kind_of(&field.ty)
+    }
+}
+
+/// Map a schema [`FieldType`] to the pushdown [`ScalarKind`] used for ORDER BY
+/// casts (only the cleanly-orderable scalar types map).
+fn scalar_kind_of(ty: &FieldType) -> Option<grust_cypher::pushdown::ScalarKind> {
+    use grust_cypher::pushdown::ScalarKind;
+    match ty {
+        FieldType::Int => Some(ScalarKind::Int),
+        FieldType::Float => Some(ScalarKind::Float),
+        FieldType::String => Some(ScalarKind::Str),
+        _ => None,
     }
 }
 
