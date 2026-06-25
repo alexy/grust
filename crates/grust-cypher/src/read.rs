@@ -774,13 +774,99 @@ fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
             let is_null = matches!(eval(operand, row, params)?, Value::Null);
             Ok(Value::Bool(is_null != *negated))
         }
-        Expr::Map(_) | Expr::Function { .. } | Expr::Case { .. } | Expr::Index { .. } => {
-            Err(unsupported_gql_feature(
-                GqlFeature::GeneralExpressionTree,
-                GqlConformanceProfile::PortableGql,
-                "maps, functions, CASE, and indexing are not supported by the read reference executor yet (Unit 7)",
-            ))
+        Expr::Function {
+            name,
+            distinct,
+            star,
+            args,
+        } => {
+            if is_aggregate_name(name) {
+                return Err(gql_execution(format!(
+                    "aggregate {name}() is only allowed as a top-level RETURN item"
+                )));
+            }
+            if *star || *distinct {
+                return Err(unsupported_gql_feature(
+                    GqlFeature::ScalarFunctionRegistry,
+                    GqlConformanceProfile::PortableGql,
+                    format!("`{name}(DISTINCT ...)`/`{name}(*)` is not a scalar function form"),
+                ));
+            }
+            eval_scalar_function(name, args, row, params)
         }
+        Expr::Map(_) | Expr::Case { .. } | Expr::Index { .. } => Err(unsupported_gql_feature(
+            GqlFeature::GeneralExpressionTree,
+            GqlConformanceProfile::PortableGql,
+            "maps, CASE, and indexing are not supported by the read reference executor yet (Unit 7)",
+        )),
+    }
+}
+
+/// Scalar function registry for the read reference executor. Reuses the crate's
+/// existing `restricted_*_value` evaluators rather than reimplementing them.
+fn eval_scalar_function(
+    name: &str,
+    args: &[Expr],
+    row: &Row,
+    params: &CypherParameters,
+) -> Result<Value> {
+    let lower = name.to_ascii_lowercase();
+
+    // `coalesce` is variadic and null-aware; handle it before the unary helpers.
+    if lower == "coalesce" {
+        if args.is_empty() {
+            return Err(gql_type("coalesce() expects at least one argument".to_string()));
+        }
+        for arg in args {
+            let value = eval(arg, row, params)?;
+            if !matches!(value, Value::Null) {
+                return Ok(value);
+            }
+        }
+        return Ok(Value::Null);
+    }
+
+    // All remaining functions are unary.
+    let [arg] = args else {
+        return Err(unsupported_gql_feature(
+            GqlFeature::ScalarFunctionRegistry,
+            GqlConformanceProfile::PortableGql,
+            format!("scalar function `{name}` with {} arguments is not supported yet", args.len()),
+        ));
+    };
+    let value = eval(arg, row, params)?;
+    // Cypher scalar functions are null-propagating.
+    if matches!(value, Value::Null) {
+        return Ok(Value::Null);
+    }
+
+    match lower.as_str() {
+        "toupper" => restricted_string_transform_value(value, CypherReturnStringTransform::Upper),
+        "tolower" => restricted_string_transform_value(value, CypherReturnStringTransform::Lower),
+        "trim" => restricted_string_trim_value(value, CypherReturnStringTrim::Both),
+        "ltrim" => restricted_string_trim_value(value, CypherReturnStringTrim::Left),
+        "rtrim" => restricted_string_trim_value(value, CypherReturnStringTrim::Right),
+        "reverse" => restricted_string_reverse_value(value),
+        "tostring" => restricted_to_string_value(value),
+        "tointeger" => restricted_to_integer_value(value),
+        "tofloat" => restricted_to_float_value(value),
+        "toboolean" => restricted_to_boolean_value(value),
+        "abs" => restricted_abs_value(value),
+        "sign" => restricted_numeric_sign_value(value),
+        "ceil" => restricted_numeric_round_value(value, CypherReturnNumericRound::Ceil),
+        "floor" => restricted_numeric_round_value(value, CypherReturnNumericRound::Floor),
+        "round" => match value {
+            Value::Int(n) => Ok(Value::Int(n)),
+            Value::Float(f) => Ok(Value::Float(f.round())),
+            other => Err(gql_type(format!("round() expects a number, got {other:?}"))),
+        },
+        "size" | "length" => restricted_size_value(value),
+        "isempty" => restricted_is_empty_value(value),
+        _ => Err(unsupported_gql_feature(
+            GqlFeature::ScalarFunctionRegistry,
+            GqlConformanceProfile::PortableGql,
+            format!("scalar function `{name}` is not supported by the read reference executor yet"),
+        )),
     }
 }
 
@@ -1198,9 +1284,13 @@ mod tests {
         let err = run_read_query(&graph(), "MATCH (a) RETURN a UNION MATCH (b) RETURN b", &CypherParameters::new())
             .unwrap_err();
         assert!(matches!(err, GrustError::Unsupported(_)));
-        // Scalar (non-aggregate) functions are still unsupported (Unit 7).
-        let err = run_read_query(&graph(), "MATCH (n:Person) RETURN toString(n.age)", &CypherParameters::new())
-            .unwrap_err();
+        // CASE expressions are still unsupported (general expression engine, Unit 7+).
+        let err = run_read_query(
+            &graph(),
+            "MATCH (n:Person) RETURN CASE WHEN n.age > 0 THEN 1 ELSE 0 END",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
         assert!(matches!(err, GrustError::Unsupported(_)));
     }
 
@@ -1296,5 +1386,46 @@ mod tests {
     fn count_distinct() {
         let t = run("MATCH (n) RETURN count(DISTINCT n.label) AS kinds");
         assert_eq!(t.rows, vec![vec![Value::Int(2)]]);
+    }
+
+    #[test]
+    fn scalar_string_functions() {
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN toUpper(n.name) AS u, size(n.name) AS s");
+        assert_eq!(t.rows, vec![vec![Value::from("ADA"), Value::Int(3)]]);
+    }
+
+    #[test]
+    fn scalar_numeric_functions() {
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN abs(0 - n.age) AS a, toString(n.age) AS s");
+        assert_eq!(t.rows, vec![vec![Value::Int(36), Value::from("36")]]);
+    }
+
+    #[test]
+    fn coalesce_picks_first_non_null() {
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN coalesce(n.population, n.age, 0) AS c");
+        assert_eq!(t.rows, vec![vec![Value::Int(36)]]);
+    }
+
+    #[test]
+    fn scalar_function_null_propagates() {
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN toUpper(n.population) AS u");
+        assert_eq!(t.rows, vec![vec![Value::Null]]);
+    }
+
+    #[test]
+    fn scalar_in_where_filters() {
+        let t = run("MATCH (n:Person) WHERE toUpper(n.name) = 'ADA' RETURN n.name");
+        assert_eq!(t.rows, vec![vec![Value::from("Ada")]]);
+    }
+
+    #[test]
+    fn unknown_scalar_function_is_feature_tagged() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH (n:Person) RETURN sqrt(n.age)",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GrustError::Unsupported(_)));
     }
 }
