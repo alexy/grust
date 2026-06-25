@@ -807,8 +807,8 @@ configuration, batching, serialization, and query strategy.
 
 Feature flags keep the facade crate light. The public `grust` crate re-exports
 backend crates only when features such as `memory`, `lancedb`, `postgres`,
-`pggraph`, `turso`, `sail`, `falkor`, `helix`, `surreal`, or `cocoindex` are
-enabled.
+`postgres-pgq`, `pggraph`, `turso`, `sail`, `falkor`, `helix`, `surreal`, or
+`cocoindex` are enabled.
 
 Serde makes the graph model portable. Core types derive `Serialize` and
 `Deserialize`, and backends can turn properties into JSON strings, JSONB,
@@ -967,6 +967,13 @@ schema get typed SQL surfaces.
 PostgreSQL implementation. It bootstraps the `graph` extension, registers the
 universal tables, and can optionally build the pgGraph projection for
 graph-index experiments without forking the storage and traversal code.
+
+`grust-postgres-pgq` targets PostgreSQL 19's native SQL/PGQ support. It uses
+the same universal tables as the durable storage layout, creates a native
+`PROPERTY GRAPH` over them, and executes bounded traversal through
+`GRAPH_TABLE`. That keeps writes, reads, schema views, and mutation batches on
+the proven PostgreSQL backend while letting traversal exercise PostgreSQL's
+standard property-graph query engine.
 
 The reusable SQL boundary lives in `grust-sql-core`. It owns the parts that are
 really common across row-store SQL graph backends: universal table DDL, reads,
@@ -1608,8 +1615,8 @@ different ways:
   typed mode validates writes against the applied schema.
 - LanceDB creates typed Arrow tables per node and edge label and mirrors writes
   into them.
-- pgGraph/PostgreSQL exposes typed label views and expression indexes over the
-  universal tables.
+- pgGraph/PostgreSQL/PostgreSQL PGQ exposes typed label views and expression
+  indexes over the universal tables.
 - Sail creates typed Delta tables per node and edge label and mirrors writes
   into them.
 - SurrealDB lowers schema into `DEFINE TABLE` and `DEFINE FIELD` statements.

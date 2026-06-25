@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added `grust-postgres-pgq`, a PostgreSQL 19 SQL/PGQ backend that reuses the
+  shared PostgreSQL universal-table store, creates a native `PROPERTY GRAPH`,
+  executes bounded traversal through `GRAPH_TABLE`, and is exposed through the
+  `grust-graph` facade feature `postgres-pgq`.
 - Added Turso-backed matched-node patch execution for the Grust Cypher mutation
   executor. `TursoGraphStore` can now run the reusable Cypher
   `MATCH ... SET ... RETURN ...` path for bounded node patches while keeping

@@ -43,6 +43,9 @@ pub use grust_memory::*;
 #[cfg(feature = "postgres")]
 pub use grust_postgres::*;
 
+#[cfg(feature = "postgres-pgq")]
+pub use grust_postgres_pgq::*;
+
 #[cfg(feature = "pggraph")]
 pub use grust_pggraph::*;
 
@@ -114,6 +117,9 @@ pub mod prelude {
 
     #[cfg(feature = "postgres")]
     pub use grust_postgres::*;
+
+    #[cfg(feature = "postgres-pgq")]
+    pub use grust_postgres_pgq::*;
 
     #[cfg(feature = "pggraph")]
     pub use grust_pggraph::*;

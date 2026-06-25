@@ -69,12 +69,14 @@ scripts/integration-test.sh --profile all
 - LanceDB
 - CocoIndex
 - pgGraph
+- PostgreSQL PGQ
 
 You can also target one backend directly:
 
 ```sh
 scripts/integration-test.sh --backend pggraph --mode docker
 scripts/integration-test.sh --backend helix --mode source
+scripts/integration-test.sh --backend postgres-pgq
 ```
 
 ## Modes
@@ -205,6 +207,14 @@ PGGRAPH_PORT=5432 scripts/integration-test.sh --backend pggraph --mode docker
 That command will use the local service on `5432` only if it exposes the
 `graph` extension. Otherwise it will start Grust's own pgGraph container on a
 free high port such as `55432`.
+
+PostgreSQL PGQ uses PostgreSQL 19 beta or newer with native SQL/PGQ support.
+The default maintainer path expects a separate prefix at
+`/opt/homebrew/opt/postgresql@19beta`, a data directory at
+`/opt/homebrew/var/postgresql@19beta`, and port `5419`. Override
+`POSTGRES_PGQ_PREFIX`, `POSTGRES_PGQ_DATA`, `POSTGRES_PGQ_HOST`,
+`POSTGRES_PGQ_PORT`, or `POSTGRES_PGQ_CONNECTION_STRING` to use another
+isolated install.
 
 LadybugDB, LanceDB, and CocoIndex do not need daemon startup. LadybugDB runs
 through the embedded Rust `lbug` crate, LanceDB exercises real local storage,

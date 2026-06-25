@@ -20,7 +20,7 @@ KEEP_RUNNING=0
 MODE="${GRUST_INTEGRATION_MODE:-auto}"
 PROFILE="${GRUST_INTEGRATION_PROFILE:-}"
 
-ALL_BACKENDS=(sail surreal falkor helix ladybug lancedb cocoindex pggraph)
+ALL_BACKENDS=(sail surreal falkor helix ladybug lancedb cocoindex pggraph postgres-pgq)
 DOCKER_BACKENDS=(surreal falkor ladybug lancedb cocoindex pggraph)
 QUICK_BACKENDS=(ladybug lancedb cocoindex)
 
@@ -34,7 +34,7 @@ Starts configured local backend services when needed, then runs live backend
 tests. A live test fails if its backend is absent; no successful run is produced
 by silently skipping an unavailable service.
 
-Backends: sail, surreal, falkor, helix, ladybug, lancedb, cocoindex, pggraph
+Backends: sail, surreal, falkor, helix, ladybug, lancedb, cocoindex, pggraph, postgres-pgq
 
 Profiles:
   quick   Local integration checks that do not need daemons: ladybug, lancedb, cocoindex
@@ -338,6 +338,62 @@ start_pggraph() {
   fi
 }
 
+postgres_pgq_bin() {
+  local name="$1"
+  if [[ -x "${POSTGRES_PGQ_PREFIX:-}/bin/$name" ]]; then
+    echo "${POSTGRES_PGQ_PREFIX}/bin/$name"
+  elif command -v "$name" >/dev/null 2>&1; then
+    command -v "$name"
+  else
+    return 1
+  fi
+}
+
+wait_postgres_pgq() {
+  local pg_isready_bin
+  pg_isready_bin="$(postgres_pgq_bin pg_isready)" || {
+    echo "pg_isready not found; install PostgreSQL 19 beta or set POSTGRES_PGQ_PREFIX" >&2
+    return 1
+  }
+  local deadline=$((SECONDS + 120))
+  until "$pg_isready_bin" -h "$POSTGRES_PGQ_HOST" -p "$POSTGRES_PGQ_PORT" -d postgres >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      echo "timed out waiting for PostgreSQL PGQ on $POSTGRES_PGQ_HOST:$POSTGRES_PGQ_PORT" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+start_postgres_pgq() {
+  if port_open "$POSTGRES_PGQ_HOST" "$POSTGRES_PGQ_PORT"; then
+    echo "postgres-pgq already listening on $POSTGRES_PGQ_HOST:$POSTGRES_PGQ_PORT"
+    return
+  fi
+  [[ "$NO_START" -eq 0 ]] || return
+
+  local initdb_bin pg_ctl_bin
+  initdb_bin="$(postgres_pgq_bin initdb)" || {
+    echo "initdb not found; install PostgreSQL 19 beta or set POSTGRES_PGQ_PREFIX" >&2
+    return 1
+  }
+  pg_ctl_bin="$(postgres_pgq_bin pg_ctl)" || {
+    echo "pg_ctl not found; install PostgreSQL 19 beta or set POSTGRES_PGQ_PREFIX" >&2
+    return 1
+  }
+
+  if [[ ! -f "$POSTGRES_PGQ_DATA/PG_VERSION" ]]; then
+    mkdir -p "$POSTGRES_PGQ_DATA"
+    "$initdb_bin" -D "$POSTGRES_PGQ_DATA" --auth=trust --no-instructions
+  fi
+
+  "$pg_ctl_bin" \
+    -D "$POSTGRES_PGQ_DATA" \
+    -l "$STATE_DIR/postgres-pgq.log" \
+    -o "-p $POSTGRES_PGQ_PORT -k /tmp" \
+    start
+}
+
 backend_kind() {
   case "$1" in
     ladybug|lancedb|cocoindex)
@@ -346,7 +402,7 @@ backend_kind() {
     surreal|falkor|pggraph)
       echo "docker"
       ;;
-    sail|helix)
+    sail|helix|postgres-pgq)
       echo "source"
       ;;
   esac
@@ -359,6 +415,7 @@ source_path_for() {
     falkor) echo "${FALKOR_SOURCE:-}" ;;
     helix) echo "${HELIX_SOURCE:-}" ;;
     pggraph) echo "${PGGRAPH_SOURCE:-}" ;;
+    postgres-pgq) echo "${POSTGRES_PGQ_PREFIX:-}" ;;
     *) echo "" ;;
   esac
 }
@@ -379,6 +436,7 @@ host_for() {
     falkor) echo "$FALKOR_HOST:$FALKOR_PORT" ;;
     helix) echo "$HELIX_HOST:$HELIX_PORT" ;;
     pggraph) echo "$PGGRAPH_HOST:$PGGRAPH_PORT" ;;
+    postgres-pgq) echo "$POSTGRES_PGQ_HOST:$POSTGRES_PGQ_PORT" ;;
     *) echo "local" ;;
   esac
 }
@@ -439,6 +497,7 @@ doctor() {
           case "$backend" in
             sail) state="source checkout missing; start service manually or configure SAIL_SOURCE" ;;
             helix) state="source checkout missing; start service manually or configure HELIX_SOURCE" ;;
+            postgres-pgq) state="PostgreSQL 19 beta prefix missing; build it or configure POSTGRES_PGQ_PREFIX" ;;
             *) state="source checkout missing; start service manually or configure the backend source path" ;;
           esac
         fi
@@ -502,6 +561,12 @@ run_backend() {
       wait_pggraph
       export PGGRAPH_TEST_CONNECTION_STRING="$PGGRAPH_CONNECTION_STRING"
       cargo test -p grust-pggraph -- --ignored --test-threads=1
+      ;;
+    postgres-pgq)
+      start_postgres_pgq
+      wait_postgres_pgq
+      export POSTGRES_PGQ_TEST_CONNECTION_STRING="$POSTGRES_PGQ_CONNECTION_STRING"
+      cargo test -p grust-postgres-pgq -- --ignored --test-threads=1
       ;;
     *)
       echo "unknown backend: $backend" >&2

@@ -11,6 +11,7 @@ members = [
     "crates/grust-memory",
     "crates/grust-postgres",
     "crates/grust-postgres-core",
+    "crates/grust-postgres-pgq",
     "crates/grust-pggraph",
     "crates/grust-sail",
     "crates/grust-sql-core",
