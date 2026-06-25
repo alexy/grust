@@ -60,24 +60,25 @@ facade(cypher,memory)/sail/turso compile.
 
 ## Deferred to review — DO NOT do these unsupervised
 
-These are the monolith-integrating / public-API-affecting / highest-blast-radius
-steps the review (and `GQL_GOAL.md`) reserved for a human checkpoint. They are
-listed in the order I recommend greenlighting them:
+Done since the checkpoint:
 
-1. **grust-sail glob narrowing.** Replace `grust-sail`'s
-   `pub use grust_cypher::*;` (lib.rs:11) with an explicit named re-export. This
-   is a **public-API change** to `grust-sail`, and it is entangled with the
-   `grust-graph` facade: the facade re-exports the `Cypher*` names under both the
-   `cypher` and `sail` cfgs, so narrowing the glob (removing its shadowability)
-   makes `--features cypher,memory,sail` fail to compile. (That feature combo is
-   already broken on this branch for the same reason — pre-existing.) Needs a
-   coordinated facade change to gate the duplicate re-exports + a CHANGELOG note.
-2. **Units 3/4 — wire the new pipeline into the production path.** Make the
+- **grust-sail / grust-graph re-export narrowing** (commit on this branch).
+  `grust-sail` now uses an internal `use grust_cypher::*` + explicit
+  `pub use grust_cypher::{portable surface}`; the facade's `sail` feature enables
+  `cypher`, the Cypher language surface is re-exported once (from the `cypher`
+  block), and the `sail` blocks list only Sail-native items. This also fixed
+  building the facade with `cypher`+`sail` together and removed dead
+  `helix`/`ladybug` facade blocks. CHANGELOG Unreleased updated.
+
+Still reserved for a human checkpoint (the monolith-integrating / highest-blast-
+radius steps), in recommended order:
+
+1. **Units 3/4 — wire the new pipeline into the production path.** Make the
    legacy `cypher_*` entrypoints compatibility wrappers over
    lexer→parser→semantics→(existing logical plans). This is where the new code
    becomes load-bearing and where behavior could drift — needs the AST→plan
    lowering (the remaining part of Unit 4) and careful diffing against the tests.
-3. **Unit 5 — shared row model (highest blast radius).** Mandated two-phase:
+2. **Unit 5 — shared row model (highest blast radius).** Mandated two-phase:
    (5a) introduce `GqlRecord/GqlBinding/GqlTable/GqlScope`, make the existing
    `CypherResultTable`/`CypherReturn*` structs thin adapters, gated on **RETURN\***
    **ordering/JSON golden snapshots written BEFORE the swap** (not yet generated —
@@ -87,7 +88,7 @@ listed in the order I recommend greenlighting them:
 
 ## Suggested next session
 
-Greenlight item 2 (wire the pipeline) or item 3·5a (row-model adapters + golden
+Greenlight item 1 (wire the pipeline) or item 2·5a (row-model adapters + golden
 snapshots) first — both unblock the most downstream work. Re-run the gate
 between every sub-step. Keep the 327-count floor and the facade/Sail checks as
 hard gates. Publishing remains suspended until explicitly requested.
