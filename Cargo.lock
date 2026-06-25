@@ -3551,6 +3551,7 @@ version = "0.10.0"
 dependencies = [
  "async-trait",
  "grust-core",
+ "grust-cypher",
  "grust-sql-core",
  "serde_json",
  "tempfile",

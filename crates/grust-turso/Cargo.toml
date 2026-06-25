@@ -21,5 +21,6 @@ serde_json = { workspace = true }
 turso = { workspace = true, default-features = false }
 
 [dev-dependencies]
+grust-cypher = { version = "0.10.0", path = "../grust-cypher" }
 tempfile = { workspace = true }
 tokio = { workspace = true }
