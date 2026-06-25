@@ -21,7 +21,12 @@ reconstructed from Git history, release commits, and the shipped docs.
   `grust_edges`/`grust_nodes` join; the backend returns the matched columns as
   text and `grust_cypher` reconstructs the `(a, r, b)` bindings before projecting.
   `WHERE … IN [literals]` (and `NOT … IN`) is also pushed, on both the node and
-  segment paths, for non-empty homogeneous int/float/string lists.
+  segment paths, for non-empty homogeneous int/float/string lists. `ORDER BY` /
+  `SKIP` / `LIMIT` are pushed into SQL on the single-node path for dialects whose
+  JSON extraction is natively typed (SQLite/libSQL `json_extract`, not Spark
+  `GET_JSON_OBJECT`), gated on no aggregate/`DISTINCT` and scan-var sort keys,
+  with `NULLS LAST`/`FIRST` matching the reference; otherwise ordering stays in
+  the reference projection.
 - Refactored `grust-cypher` from a single ~16k-line `lib.rs` and ~17k-line
   `tests.rs` into cohesive modules (`ddl`, `parse`, `primitives`, `planner`,
   `eval_rows`, `restricted_values`, `projection`, `where_clause`, `returning`,

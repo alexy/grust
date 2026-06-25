@@ -114,6 +114,31 @@ async fn pushdown_matches_reference() {
 }
 
 #[tokio::test]
+async fn pushed_ordering_preserves_sequence() {
+    // ORDER BY / SKIP / LIMIT pushed into SQLite must reproduce the reference's
+    // exact row *sequence* (not just multiset). Fixture columns are tie-free.
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in [
+        "MATCH (n:Person) RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) RETURN n.name ORDER BY n.age DESC",
+        "MATCH (n:Person) RETURN n.name ORDER BY n.age DESC SKIP 1 LIMIT 2",
+        "MATCH (n:Person) WHERE n.city IS NOT NULL RETURN n.name, n.age ORDER BY n.age",
+        "MATCH (n:Person) RETURN n.name AS who ORDER BY who SKIP 1",
+    ] {
+        let plan = plan_node_read(cypher, &params).unwrap().unwrap();
+        assert!(
+            plan.pushes_ordering(&SqliteDialect),
+            "expected pushed ordering for `{cypher}`"
+        );
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        let actual = pushdown(&conn, cypher, &params).await;
+        assert_eq!(actual, expected, "sequence mismatch for `{cypher}`");
+    }
+}
+
+#[tokio::test]
 async fn segment_pushdown_matches_reference() {
     let graph = fixture();
     let conn = embed(&graph).await;
@@ -174,7 +199,7 @@ async fn pushdown(
             props: parse_props(&text(&row, 2)),
         });
     }
-    plan.project(nodes, params).unwrap()
+    plan.project(&SqliteDialect, nodes, params).unwrap()
 }
 
 /// Run a relationship-segment query via the pushdown path: lower to SQLite SQL,

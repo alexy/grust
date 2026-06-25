@@ -943,7 +943,7 @@ fn is_aggregate_name(name: &str) -> bool {
 }
 
 /// True if `expr` contains an aggregate function call anywhere.
-fn expr_has_aggregate(expr: &Expr) -> bool {
+pub(crate) fn expr_has_aggregate(expr: &Expr) -> bool {
     match expr {
         Expr::Function { name, args, .. } => {
             is_aggregate_name(name) || args.iter().any(expr_has_aggregate)

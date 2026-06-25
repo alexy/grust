@@ -68,12 +68,27 @@ oracle gained an edge table + 10 segment queries (compared as a row **multiset**
 since join order is backend-defined); Sail's live test gained segment + a
 multi-hop fallback case.
 
-Deferred (next pushdown increments, each gated by the oracle): undirected and
-multi-segment / variable-length paths, path variables, `IN` /
-`STARTS·ENDS·CONTAINS` / arithmetic predicates, boolean literals, and pushing
-`ORDER BY`/`SKIP`/`LIMIT`/projection into SQL (requires establishing
-cross-dialect ordering/typing equivalence — NULLS ordering, bool encoding,
-cross-type compares).
+**`IN` predicates** (`prop IN [literals]`, and `NOT … IN`) are pushed on both the
+node and segment paths for non-empty homogeneous int/float/string lists (SQL
+3-valued `IN` matches the reference's membership semantics).
+
+**`ORDER BY` / `SKIP` / `LIMIT` pushdown** (single-node path): pushed into SQL
+**only for dialects whose JSON extraction is natively typed** — `SqlDialect::orders_json_typed()`
+is `true` for SQLite/libSQL (`json_extract` → INTEGER/REAL/TEXT) and `false` for
+Spark (`GET_JSON_OBJECT` → text, where numeric `ORDER BY` would sort
+lexicographically). Gated on no aggregate/`DISTINCT`, every sort key resolving
+(through `RETURN` aliases) to a scan-var property/label, and `SKIP`/`LIMIT`
+resolving to non-negative integers; emitted with `NULLS LAST` (asc) /
+`NULLS FIRST` (desc) to match the reference (NULL = max). When pushed, the Rust
+projection drops order/skip/limit; otherwise it keeps them. The Turso oracle now
+verifies pushed ordering by **exact row sequence** (tie-free fixture columns);
+Spark keeps ordering in the reference projection pending schema-aware typed-table
+pushdown.
+
+Deferred (next pushdown increments, each gated by the oracle): typed-table /
+schema-aware ordering for Spark; `ORDER BY`/`SKIP`/`LIMIT` on the segment path;
+undirected and multi-segment / variable-length paths; path variables;
+`STARTS·ENDS·CONTAINS` / arithmetic predicates; boolean literals.
 
 ---
 

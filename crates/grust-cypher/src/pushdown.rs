@@ -59,8 +59,27 @@ pub struct NodeReadPushdown {
     /// The conjunction of inline-property equalities and the `WHERE` predicate,
     /// already lowered to a backend-neutral form. `None` means "no filter".
     filter: Option<Predicate>,
+    /// `ORDER BY`/`SKIP`/`LIMIT` lowered for SQL pushdown, when structurally
+    /// pushable (no aggregate/`DISTINCT`, keys are scan-var props/label,
+    /// skip/limit are non-negative integers). Only emitted by `to_sql` for
+    /// dialects whose JSON extraction is typed (see [`SqlDialect::orders_json_typed`]).
+    ordering: Option<PushedOrdering>,
     /// The `RETURN` projection, run through the shared reference projection.
     projection: Projection,
+}
+
+/// `ORDER BY`/`SKIP`/`LIMIT` resolved for SQL pushdown.
+#[derive(Clone, Debug, PartialEq)]
+struct PushedOrdering {
+    keys: Vec<OrderKey>,
+    skip: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct OrderKey {
+    prop: PropRef,
+    descending: bool,
 }
 
 /// A backend-neutral, pushable filter predicate over the scanned node.
@@ -244,6 +263,15 @@ pub trait SqlDialect {
     fn cast_float(&self, expr: &str) -> String;
     /// Render a string literal, safely escaped for this dialect.
     fn string_literal(&self, value: &str) -> String;
+    /// Whether `json_property` yields a **natively typed** scalar that sorts
+    /// numerically/lexically like the reference (e.g. SQLite/libSQL `json_extract`
+    /// returns INTEGER/REAL/TEXT). When false (e.g. Spark `GET_JSON_OBJECT`
+    /// returns text, so numeric `ORDER BY` would sort lexicographically),
+    /// `ORDER BY`/`SKIP`/`LIMIT` are kept in the reference projection rather than
+    /// pushed, to preserve row-equality.
+    fn orders_json_typed(&self) -> bool {
+        false
+    }
 }
 
 /// Spark SQL dialect (the Sail backend): `GET_JSON_OBJECT`, backtick idents,
@@ -298,6 +326,11 @@ impl SqlDialect for SqliteDialect {
     }
     fn string_literal(&self, value: &str) -> String {
         format!("'{}'", value.replace('\'', "''"))
+    }
+    fn orders_json_typed(&self) -> bool {
+        // SQLite / libSQL `json_extract` returns INTEGER/REAL/TEXT, so ORDER BY
+        // sorts by type+value the way the reference does.
+        true
     }
 }
 
@@ -368,12 +401,80 @@ fn lower_query(query: &Query, params: &CypherParameters) -> Option<NodeReadPushd
         filter = Some(conjoin(filter, predicate));
     }
 
+    let projection = return_clause.projection.clone();
+    let ordering = compute_pushed_ordering(&projection, &var, params);
     Some(NodeReadPushdown {
         var,
         label,
         filter,
-        projection: return_clause.projection.clone(),
+        ordering,
+        projection,
     })
+}
+
+/// Resolve `ORDER BY`/`SKIP`/`LIMIT` for SQL pushdown over a single scan var, or
+/// `None` if the projection is not structurally pushable (so ordering stays in
+/// the reference projection). Requires: no aggregates, no `DISTINCT`, a non-empty
+/// `ORDER BY` whose keys all resolve (through `RETURN` aliases) to a property or
+/// label of `var`, and `SKIP`/`LIMIT` that resolve to non-negative integers.
+fn compute_pushed_ordering(
+    projection: &Projection,
+    var: &str,
+    params: &CypherParameters,
+) -> Option<PushedOrdering> {
+    if projection.distinct {
+        return None;
+    }
+    if projection.items.iter().any(|i| crate::read::expr_has_aggregate(&i.expr)) {
+        return None;
+    }
+    // A bare SKIP/LIMIT with no ORDER BY would select an arbitrary subset (not the
+    // reference's), so only push when there is a total-ish sort to anchor it.
+    if projection.order_by.is_empty() {
+        return None;
+    }
+    // alias -> underlying RETURN expression (ORDER BY may reference an alias).
+    let aliases: std::collections::HashMap<&str, &Expr> = projection
+        .items
+        .iter()
+        .filter_map(|i| i.alias.as_deref().map(|a| (a, &i.expr)))
+        .collect();
+
+    let mut keys = Vec::with_capacity(projection.order_by.len());
+    for item in &projection.order_by {
+        let resolved = match &item.expr {
+            Expr::Variable(name) => aliases.get(name.as_str()).copied().unwrap_or(&item.expr),
+            other => other,
+        };
+        let prop = lower_prop_ref(resolved, var)?;
+        keys.push(OrderKey {
+            prop,
+            descending: item.descending,
+        });
+    }
+    let skip = match &projection.skip {
+        None => None,
+        Some(e) => Some(lower_usize(e, params)?),
+    };
+    let limit = match &projection.limit {
+        None => None,
+        Some(e) => Some(lower_usize(e, params)?),
+    };
+    Some(PushedOrdering { keys, skip, limit })
+}
+
+/// Resolve a `SKIP`/`LIMIT` expression to a non-negative integer (literal or a
+/// parameter bound to a non-negative `Value::Int`), or `None` if not.
+fn lower_usize(expr: &Expr, params: &CypherParameters) -> Option<usize> {
+    let value = match expr {
+        Expr::Integer(n) => *n,
+        Expr::Parameter(name) => match params.get(name)? {
+            Value::Int(n) => *n,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    usize::try_from(value).ok()
 }
 
 fn conjoin(existing: Option<Predicate>, next: Predicate) -> Predicate {
@@ -554,18 +655,75 @@ impl NodeReadPushdown {
             sql.push_str(" WHERE ");
             sql.push_str(&conditions.join(" AND "));
         }
+        if self.pushes_ordering(dialect) {
+            sql.push_str(&render_order_limit(self.ordering.as_ref().unwrap(), dialect));
+        }
         sql
     }
 
+    /// Whether `to_sql` pushes `ORDER BY`/`SKIP`/`LIMIT` for this dialect (so the
+    /// backend must NOT re-apply them in the projection).
+    pub fn pushes_ordering(&self, dialect: &dyn SqlDialect) -> bool {
+        dialect.orders_json_typed() && self.ordering.is_some()
+    }
+
     /// Run the `RETURN` projection over the nodes the backend fetched, producing
-    /// the same [`CypherResultTable`] the in-memory reference would.
+    /// the same [`CypherResultTable`] the in-memory reference would. When the
+    /// dialect pushed `ORDER BY`/`SKIP`/`LIMIT`, those are dropped from the
+    /// in-Rust projection (the SQL already applied them).
     pub fn project(
         &self,
+        dialect: &dyn SqlDialect,
         nodes: Vec<Node>,
         params: &CypherParameters,
     ) -> Result<CypherResultTable> {
-        crate::read::project_nodes(&self.var, nodes, &self.projection, params)
+        if self.pushes_ordering(dialect) {
+            let projection = strip_order_limit(&self.projection);
+            crate::read::project_nodes(&self.var, nodes, &projection, params)
+        } else {
+            crate::read::project_nodes(&self.var, nodes, &self.projection, params)
+        }
     }
+}
+
+/// Render the trailing ` ORDER BY … [LIMIT …] [OFFSET …]` for a pushed ordering.
+/// `NULLS LAST` (asc) / `NULLS FIRST` (desc) match the reference, where NULL
+/// sorts as the maximum value.
+fn render_order_limit(ordering: &PushedOrdering, dialect: &dyn SqlDialect) -> String {
+    let mut sql = String::new();
+    let keys = ordering
+        .keys
+        .iter()
+        .map(|k| {
+            let col = render_prop(&k.prop, dialect);
+            if k.descending {
+                format!("{col} DESC NULLS FIRST")
+            } else {
+                format!("{col} ASC NULLS LAST")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    sql.push_str(" ORDER BY ");
+    sql.push_str(&keys);
+    match (ordering.limit, ordering.skip) {
+        (Some(n), Some(s)) => sql.push_str(&format!(" LIMIT {n} OFFSET {s}")),
+        (Some(n), None) => sql.push_str(&format!(" LIMIT {n}")),
+        // SKIP without LIMIT: `LIMIT -1 OFFSET s` returns all rows after the skip.
+        (None, Some(s)) => sql.push_str(&format!(" LIMIT -1 OFFSET {s}")),
+        (None, None) => {}
+    }
+    sql
+}
+
+/// A copy of `projection` with `ORDER BY`/`SKIP`/`LIMIT` cleared (used when the
+/// backend pushed them into SQL).
+fn strip_order_limit(projection: &Projection) -> Projection {
+    let mut projection = projection.clone();
+    projection.order_by.clear();
+    projection.skip = None;
+    projection.limit = None;
+    projection
 }
 
 fn render_predicate(pred: &Predicate, dialect: &dyn SqlDialect) -> String {
@@ -1402,7 +1560,8 @@ mod tests {
         ];
         let plan = plan("MATCH (n:Person) WHERE n.age >= 40 RETURN n.name ORDER BY n.name")
             .expect("pushable");
-        let table = plan.project(nodes, &params()).unwrap();
+        // SparkDialect does not push ordering, so the Rust projection sorts.
+        let table = plan.project(&SparkDialect, nodes, &params()).unwrap();
         assert_eq!(table.columns, vec!["n.name".to_string()]);
         assert_eq!(
             table.rows,
@@ -1417,9 +1576,54 @@ mod tests {
             node("Person", "p2", &[("age", Value::Int(50))]),
         ];
         let plan = plan("MATCH (n:Person) RETURN count(*) AS c").expect("pushable");
-        let table = plan.project(nodes, &params()).unwrap();
+        let table = plan.project(&SparkDialect, nodes, &params()).unwrap();
         assert_eq!(table.columns, vec!["c".to_string()]);
         assert_eq!(table.rows, vec![vec![Value::Int(2)]]);
+    }
+
+    #[test]
+    fn order_limit_pushed_only_for_typed_dialects() {
+        let cypher = "MATCH (n:Person) WHERE n.age >= 40 RETURN n.name ORDER BY n.age DESC SKIP 1 LIMIT 2";
+        let plan = plan(cypher).expect("pushable");
+        // SQLite extracts typed JSON → ORDER BY/SKIP/LIMIT pushed with NULLS rules.
+        assert_eq!(
+            plan.to_sql(&SqliteDialect),
+            "SELECT id, label, props FROM \"grust_nodes\" \
+             WHERE label = 'Person' AND CAST(json_extract(props, '$.age') AS INTEGER) >= 40 \
+             ORDER BY json_extract(props, '$.age') DESC NULLS FIRST LIMIT 2 OFFSET 1"
+        );
+        assert!(plan.pushes_ordering(&SqliteDialect));
+        // Spark's GET_JSON_OBJECT returns text → ordering stays in the reference.
+        assert!(!plan.to_sql(&SparkDialect).contains("ORDER BY"));
+        assert!(!plan.pushes_ordering(&SparkDialect));
+    }
+
+    #[test]
+    fn order_by_alias_and_label_are_pushable() {
+        // ORDER BY an output alias that resolves to a scan-var property.
+        let sql = plan("MATCH (n:Person) RETURN n.age AS a ORDER BY a")
+            .expect("pushable")
+            .to_sql(&SqliteDialect);
+        assert!(sql.ends_with("ORDER BY json_extract(props, '$.age') ASC NULLS LAST"), "{sql}");
+        // ORDER BY label uses the column directly.
+        let sql = plan("MATCH (n) RETURN n.label ORDER BY n.label")
+            .expect("pushable")
+            .to_sql(&SqliteDialect);
+        assert!(sql.ends_with("ORDER BY label ASC NULLS LAST"), "{sql}");
+    }
+
+    #[test]
+    fn non_pushable_ordering_stays_in_rust() {
+        // Aggregate, DISTINCT, computed ORDER key, and bare LIMIT are not pushed.
+        for cypher in [
+            "MATCH (n:Person) RETURN count(*) AS c ORDER BY c",
+            "MATCH (n:Person) RETURN DISTINCT n.age AS a ORDER BY a",
+            "MATCH (n:Person) RETURN n.age AS a ORDER BY n.age + 1",
+            "MATCH (n:Person) RETURN n.name LIMIT 3",
+        ] {
+            let p = plan(cypher).expect("node-pushable");
+            assert!(!p.pushes_ordering(&SqliteDialect), "should not push: {cypher}");
+        }
     }
 
     // ---- relationship segment pushdown ------------------------------------

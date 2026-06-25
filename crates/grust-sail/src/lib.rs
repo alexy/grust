@@ -1341,9 +1341,9 @@ impl SailGraphStore {
         params: &CypherParameters,
     ) -> Result<CypherResultTable> {
         if let Some(plan) = grust_cypher::pushdown::plan_node_read(cypher, params)? {
-            let sql = plan.to_sql(&grust_cypher::pushdown::SparkDialect);
-            let nodes = self.run_query(&sql, vec![]).await?;
-            return plan.project(nodes, params);
+            let dialect = grust_cypher::pushdown::SparkDialect;
+            let nodes = self.run_query(&plan.to_sql(&dialect), vec![]).await?;
+            return plan.project(&dialect, nodes, params);
         }
         if let Some(plan) = grust_cypher::pushdown::plan_segment_read(cypher, params)? {
             let sql = plan.to_sql(&grust_cypher::pushdown::SparkDialect);
