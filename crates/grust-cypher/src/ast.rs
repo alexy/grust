@@ -434,11 +434,9 @@ impl Expr {
     /// True if this expression is a literal constant (no variables/params/calls).
     pub fn is_constant(&self) -> bool {
         match self {
-            Expr::Null
-            | Expr::Boolean(_)
-            | Expr::Integer(_)
-            | Expr::Float(_)
-            | Expr::String(_) => true,
+            Expr::Null | Expr::Boolean(_) | Expr::Integer(_) | Expr::Float(_) | Expr::String(_) => {
+                true
+            }
             Expr::List(items) => items.iter().all(Expr::is_constant),
             Expr::Map(entries) => entries.iter().all(|(_, v)| v.is_constant()),
             _ => false,

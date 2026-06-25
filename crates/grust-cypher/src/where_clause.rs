@@ -22,7 +22,9 @@ pub(crate) fn split_match_where<'a>(
     Ok((match_pattern, predicates))
 }
 
-pub(crate) fn canonicalize_where_predicates(predicates: &mut Vec<ParsedWherePredicate>) -> Result<()> {
+pub(crate) fn canonicalize_where_predicates(
+    predicates: &mut Vec<ParsedWherePredicate>,
+) -> Result<()> {
     dedupe_where_predicates(predicates);
     merge_where_membership_predicates(predicates)?;
     merge_where_equality_membership_predicates(predicates)?;
@@ -42,7 +44,9 @@ pub(crate) fn dedupe_where_predicates(predicates: &mut Vec<ParsedWherePredicate>
     *predicates = deduped;
 }
 
-pub(crate) fn merge_where_membership_predicates(predicates: &mut Vec<ParsedWherePredicate>) -> Result<()> {
+pub(crate) fn merge_where_membership_predicates(
+    predicates: &mut Vec<ParsedWherePredicate>,
+) -> Result<()> {
     let mut merged = Vec::with_capacity(predicates.len());
     for predicate in predicates.drain(..) {
         if !matches!(
@@ -85,7 +89,10 @@ pub(crate) fn merge_where_membership_predicates(predicates: &mut Vec<ParsedWhere
     Ok(())
 }
 
-pub(crate) fn intersect_membership_values(left: &Value, right: &Value) -> Result<Vec<serde_json::Value>> {
+pub(crate) fn intersect_membership_values(
+    left: &Value,
+    right: &Value,
+) -> Result<Vec<serde_json::Value>> {
     let right_values = cypher_in_predicate_values(right)?
         .into_iter()
         .map(|value| value.to_json())
@@ -100,7 +107,10 @@ pub(crate) fn intersect_membership_values(left: &Value, right: &Value) -> Result
     Ok(intersection)
 }
 
-pub(crate) fn union_membership_values(left: &Value, right: &Value) -> Result<Vec<serde_json::Value>> {
+pub(crate) fn union_membership_values(
+    left: &Value,
+    right: &Value,
+) -> Result<Vec<serde_json::Value>> {
     let mut union = Vec::new();
     for value in cypher_in_predicate_values(left)?
         .into_iter()
@@ -552,7 +562,9 @@ pub(crate) fn is_positive_string_predicate_op(op: GraphPredicateOp) -> bool {
     )
 }
 
-pub(crate) fn where_predicate_uses_only_string_values(predicate: &ParsedWherePredicate) -> Result<bool> {
+pub(crate) fn where_predicate_uses_only_string_values(
+    predicate: &ParsedWherePredicate,
+) -> Result<bool> {
     match predicate.predicate.op {
         GraphPredicateOp::Equal => Ok(matches!(predicate.predicate.value, Value::String(_))),
         GraphPredicateOp::In => {
@@ -691,7 +703,10 @@ pub(crate) fn order_bounds_are_contradictory(
     }
 }
 
-pub(crate) fn compare_where_order_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+pub(crate) fn compare_where_order_values(
+    left: &Value,
+    right: &Value,
+) -> Option<std::cmp::Ordering> {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => Some(left.cmp(right)),
         (Value::Float(left), Value::Float(right)) => left.partial_cmp(right),
@@ -2077,7 +2092,9 @@ pub(crate) fn lower_where_or_branches(
     ))
 }
 
-pub(crate) fn prune_subsumed_where_or_branches(branches: &mut Vec<Vec<ParsedWherePredicate>>) -> Result<()> {
+pub(crate) fn prune_subsumed_where_or_branches(
+    branches: &mut Vec<Vec<ParsedWherePredicate>>,
+) -> Result<()> {
     let mut keep = Vec::with_capacity(branches.len());
     for index in 0..branches.len() {
         let mut redundant = false;
@@ -2306,7 +2323,9 @@ pub(crate) fn where_predicate_implies_is_null(predicate: &ParsedWherePredicate) 
     }
 }
 
-pub(crate) fn where_predicate_implies_is_not_null(predicate: &ParsedWherePredicate) -> Result<bool> {
+pub(crate) fn where_predicate_implies_is_not_null(
+    predicate: &ParsedWherePredicate,
+) -> Result<bool> {
     match predicate.predicate.op {
         GraphPredicateOp::Equal => Ok(predicate.predicate.value != Value::Null),
         GraphPredicateOp::NotEqual => Ok(predicate.predicate.value == Value::Null),
@@ -2790,4 +2809,3 @@ pub(crate) fn apply_edge_where_predicates(
     }
     Ok(())
 }
-

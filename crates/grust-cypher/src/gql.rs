@@ -1355,7 +1355,9 @@ mod tests {
             );
         }
         // A future feature is not supported yet, even at the widest profile.
-        assert!(!GqlFeature::GeneralExpressionTree.is_supported_in(GqlConformanceProfile::Full39075));
+        assert!(
+            !GqlFeature::GeneralExpressionTree.is_supported_in(GqlConformanceProfile::Full39075)
+        );
     }
 
     #[test]
@@ -1409,7 +1411,10 @@ mod tests {
         assert!(rendered.contains("profile=portable-gql"));
 
         assert!(matches!(gql_syntax("x"), GrustError::CypherSyntax(_)));
-        assert!(matches!(gql_name("x"), GrustError::CypherUnresolvedIdentity(_)));
+        assert!(matches!(
+            gql_name("x"),
+            GrustError::CypherUnresolvedIdentity(_)
+        ));
         assert!(matches!(
             gql_cardinality("x"),
             GrustError::CypherUnsupportedCardinality(_)

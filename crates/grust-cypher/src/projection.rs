@@ -465,7 +465,10 @@ where
     )))
 }
 
-pub(crate) fn count_materialized_return_values(values: Vec<Value>, distinct: bool) -> Result<usize> {
+pub(crate) fn count_materialized_return_values(
+    values: Vec<Value>,
+    distinct: bool,
+) -> Result<usize> {
     if distinct {
         Ok(distinct_return_values(values)?.len())
     } else {
@@ -1807,7 +1810,9 @@ pub(crate) fn operation_node_match(operation: &GraphMutationPlanOp) -> Option<Gr
     }
 }
 
-pub(crate) fn operation_relationship_match(operation: &GraphMutationPlanOp) -> Option<GraphRelationshipMatch> {
+pub(crate) fn operation_relationship_match(
+    operation: &GraphMutationPlanOp,
+) -> Option<GraphRelationshipMatch> {
     match operation {
         GraphMutationPlanOp::PatchMatchingEdges { relationship, .. }
         | GraphMutationPlanOp::UpdateMatchingEdgeProperty { relationship, .. }
@@ -2356,4 +2361,3 @@ pub fn check_strict_create_plan_conflicts(plan: &GraphMutationPlan) -> Result<()
     }
     Ok(())
 }
-

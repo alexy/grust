@@ -1586,4 +1586,3 @@ impl CypherMutationPlanner {
         self.bind_row_node_variable(node)
     }
 }
-

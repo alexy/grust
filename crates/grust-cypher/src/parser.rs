@@ -14,8 +14,8 @@
 use grust_core::GrustError;
 
 use crate::ast::*;
-use crate::gql::{gql_syntax, unsupported_gql_feature, GqlConformanceProfile, GqlFeature};
-use crate::lexer::{line_col, tokenize, Keyword, Span, SpannedToken, Token};
+use crate::gql::{GqlConformanceProfile, GqlFeature, gql_syntax, unsupported_gql_feature};
+use crate::lexer::{Keyword, Span, SpannedToken, Token, line_col, tokenize};
 
 /// What kind of failure a [`ParseError`] represents.
 #[derive(Clone, Debug, PartialEq)]
@@ -246,7 +246,9 @@ impl Parser {
         let mut clauses = Vec::new();
         loop {
             match self.peek() {
-                Token::Keyword(Keyword::Match) => clauses.push(Clause::Match(self.parse_match(false)?)),
+                Token::Keyword(Keyword::Match) => {
+                    clauses.push(Clause::Match(self.parse_match(false)?))
+                }
                 Token::Keyword(Keyword::Optional) => {
                     // OPTIONAL MATCH
                     self.advance();
@@ -258,15 +260,21 @@ impl Parser {
                     }
                     clauses.push(Clause::Match(self.parse_match(true)?));
                 }
-                Token::Keyword(Keyword::Create) => clauses.push(Clause::Create(self.parse_create()?)),
+                Token::Keyword(Keyword::Create) => {
+                    clauses.push(Clause::Create(self.parse_create()?))
+                }
                 Token::Keyword(Keyword::Merge) => clauses.push(Clause::Merge(self.parse_merge()?)),
                 Token::Keyword(Keyword::Delete) | Token::Keyword(Keyword::Detach) => {
                     clauses.push(Clause::Delete(self.parse_delete()?))
                 }
                 Token::Keyword(Keyword::Set) => clauses.push(Clause::Set(self.parse_set()?)),
-                Token::Keyword(Keyword::Remove) => clauses.push(Clause::Remove(self.parse_remove()?)),
+                Token::Keyword(Keyword::Remove) => {
+                    clauses.push(Clause::Remove(self.parse_remove()?))
+                }
                 Token::Keyword(Keyword::With) => clauses.push(Clause::With(self.parse_with()?)),
-                Token::Keyword(Keyword::Unwind) => clauses.push(Clause::Unwind(self.parse_unwind()?)),
+                Token::Keyword(Keyword::Unwind) => {
+                    clauses.push(Clause::Unwind(self.parse_unwind()?))
+                }
                 Token::Keyword(Keyword::Return) => {
                     clauses.push(Clause::Return(self.parse_return()?));
                     break; // RETURN ends a single query
@@ -278,13 +286,15 @@ impl Parser {
                         self.span_here(),
                         GqlFeature::ProcedureCall,
                         "CALL procedures are not supported yet (Unit 14)",
-                    ))
+                    ));
                 }
                 _ => break,
             }
             // a UNION or EOF/semicolon ends the single query
-            if matches!(self.peek(), Token::Keyword(Keyword::Union) | Token::Eof | Token::Semicolon)
-            {
+            if matches!(
+                self.peek(),
+                Token::Keyword(Keyword::Union) | Token::Eof | Token::Semicolon
+            ) {
                 break;
             }
         }
@@ -591,8 +601,10 @@ impl Parser {
     fn parse_path_pattern(&mut self) -> PResult<PathPattern> {
         let start = self.span_here();
         // optional path variable: `p = (...)`
-        let variable = if matches!(self.peek(), Token::Identifier(_) | Token::QuotedIdentifier(_))
-            && self.peek_at(1) == &Token::Eq
+        let variable = if matches!(
+            self.peek(),
+            Token::Identifier(_) | Token::QuotedIdentifier(_)
+        ) && self.peek_at(1) == &Token::Eq
         {
             let name = self.parse_name("a path variable")?;
             self.expect(&Token::Eq, "= in path assignment")?;
@@ -620,7 +632,10 @@ impl Parser {
     fn parse_node_pattern(&mut self) -> PResult<NodePattern> {
         let start = self.span_here();
         self.expect(&Token::LParen, "'(' to start a node pattern")?;
-        let variable = if matches!(self.peek(), Token::Identifier(_) | Token::QuotedIdentifier(_)) {
+        let variable = if matches!(
+            self.peek(),
+            Token::Identifier(_) | Token::QuotedIdentifier(_)
+        ) {
             Some(self.parse_name("a node variable")?)
         } else {
             None
@@ -659,7 +674,7 @@ impl Parser {
                 return Err(ParseError::syntax(
                     self.span_here(),
                     "expected a relationship pattern",
-                ))
+                ));
             }
         };
 
@@ -668,7 +683,10 @@ impl Parser {
         let mut properties = None;
         let mut length = None;
         if self.eat(&Token::LBracket) {
-            if matches!(self.peek(), Token::Identifier(_) | Token::QuotedIdentifier(_)) {
+            if matches!(
+                self.peek(),
+                Token::Identifier(_) | Token::QuotedIdentifier(_)
+            ) {
                 variable = Some(self.parse_name("a relationship variable")?);
             }
             if self.peek() == &Token::Colon {
@@ -700,7 +718,7 @@ impl Parser {
                 return Err(ParseError::syntax(
                     self.span_here(),
                     "expected '-' or '->' to close a relationship pattern",
-                ))
+                ));
             }
         };
 
@@ -712,7 +730,7 @@ impl Parser {
                 return Err(ParseError::syntax(
                     start.to(self.prev_span()),
                     "a relationship cannot point in both directions (<-...->)",
-                ))
+                ));
             }
         };
 
@@ -859,13 +877,13 @@ impl Parser {
                 if word.eq_ignore_ascii_case("starts")
                     && self.peek_at(1).is_keyword(Keyword::With) =>
             {
-                return Some((BinaryOp::StartsWith, 2))
+                return Some((BinaryOp::StartsWith, 2));
             }
             Token::Identifier(word)
                 if word.eq_ignore_ascii_case("ends")
                     && self.peek_at(1).is_keyword(Keyword::With) =>
             {
-                return Some((BinaryOp::EndsWith, 2))
+                return Some((BinaryOp::EndsWith, 2));
             }
             _ => return None,
         };
@@ -1101,24 +1119,39 @@ mod tests {
         assert_eq!(path.start.variable.as_deref(), Some("a"));
         assert_eq!(path.segments.len(), 1);
         assert_eq!(path.segments[0].relationship.direction, Direction::Outgoing);
-        assert_eq!(path.segments[0].relationship.types, vec!["KNOWS".to_string()]);
+        assert_eq!(
+            path.segments[0].relationship.types,
+            vec!["KNOWS".to_string()]
+        );
     }
 
     #[test]
     fn parses_incoming_and_undirected() {
         let q1 = q("MATCH (a)<-[:R]-(b) RETURN a");
-        let Clause::Match(m1) = &q1.parts[0].query.clauses[0] else { panic!() };
-        assert_eq!(m1.patterns[0].segments[0].relationship.direction, Direction::Incoming);
+        let Clause::Match(m1) = &q1.parts[0].query.clauses[0] else {
+            panic!()
+        };
+        assert_eq!(
+            m1.patterns[0].segments[0].relationship.direction,
+            Direction::Incoming
+        );
 
         let q2 = q("MATCH (a)-[:R]-(b) RETURN a");
-        let Clause::Match(m2) = &q2.parts[0].query.clauses[0] else { panic!() };
-        assert_eq!(m2.patterns[0].segments[0].relationship.direction, Direction::Undirected);
+        let Clause::Match(m2) = &q2.parts[0].query.clauses[0] else {
+            panic!()
+        };
+        assert_eq!(
+            m2.patterns[0].segments[0].relationship.direction,
+            Direction::Undirected
+        );
     }
 
     #[test]
     fn parses_variable_length_range() {
         let query = q("MATCH (a)-[:R*1..3]->(b) RETURN b");
-        let Clause::Match(m) = &query.parts[0].query.clauses[0] else { panic!() };
+        let Clause::Match(m) = &query.parts[0].query.clauses[0] else {
+            panic!()
+        };
         let len = m.patterns[0].segments[0].relationship.length.unwrap();
         assert_eq!(len.min, Some(1));
         assert_eq!(len.max, Some(3));
@@ -1127,7 +1160,9 @@ mod tests {
     #[test]
     fn parses_node_properties_map() {
         let query = q("CREATE (:Person {id: 'p1', age: 30, active: true})");
-        let Clause::Create(c) = &query.parts[0].query.clauses[0] else { panic!() };
+        let Clause::Create(c) = &query.parts[0].query.clauses[0] else {
+            panic!()
+        };
         let props = c.patterns[0].start.properties.as_ref().unwrap();
         assert_eq!(props.entries.len(), 3);
         assert_eq!(props.entries[0].0, "id");
@@ -1138,8 +1173,18 @@ mod tests {
         // 1 + 2 * 3 => 1 + (2 * 3)
         let expr = e("1 + 2 * 3");
         match expr {
-            Expr::Binary { op: BinaryOp::Add, rhs, .. } => {
-                assert!(matches!(*rhs, Expr::Binary { op: BinaryOp::Multiply, .. }));
+            Expr::Binary {
+                op: BinaryOp::Add,
+                rhs,
+                ..
+            } => {
+                assert!(matches!(
+                    *rhs,
+                    Expr::Binary {
+                        op: BinaryOp::Multiply,
+                        ..
+                    }
+                ));
             }
             _ => panic!("expected add at top"),
         }
@@ -1150,8 +1195,18 @@ mod tests {
         // a OR b AND c => a OR (b AND c)
         let expr = e("a OR b AND c");
         match expr {
-            Expr::Binary { op: BinaryOp::Or, rhs, .. } => {
-                assert!(matches!(*rhs, Expr::Binary { op: BinaryOp::And, .. }));
+            Expr::Binary {
+                op: BinaryOp::Or,
+                rhs,
+                ..
+            } => {
+                assert!(matches!(
+                    *rhs,
+                    Expr::Binary {
+                        op: BinaryOp::And,
+                        ..
+                    }
+                ));
             }
             _ => panic!("expected OR at top"),
         }
@@ -1159,17 +1214,53 @@ mod tests {
 
     #[test]
     fn comparison_and_membership_and_string_ops() {
-        assert!(matches!(e("n.age >= 18"), Expr::Binary { op: BinaryOp::Ge, .. }));
-        assert!(matches!(e("x IN [1, 2, 3]"), Expr::Binary { op: BinaryOp::In, .. }));
-        assert!(matches!(e("n.name STARTS WITH 'A'"), Expr::Binary { op: BinaryOp::StartsWith, .. }));
-        assert!(matches!(e("n.name ENDS WITH 'z'"), Expr::Binary { op: BinaryOp::EndsWith, .. }));
-        assert!(matches!(e("n.name CONTAINS 'oo'"), Expr::Binary { op: BinaryOp::Contains, .. }));
+        assert!(matches!(
+            e("n.age >= 18"),
+            Expr::Binary {
+                op: BinaryOp::Ge,
+                ..
+            }
+        ));
+        assert!(matches!(
+            e("x IN [1, 2, 3]"),
+            Expr::Binary {
+                op: BinaryOp::In,
+                ..
+            }
+        ));
+        assert!(matches!(
+            e("n.name STARTS WITH 'A'"),
+            Expr::Binary {
+                op: BinaryOp::StartsWith,
+                ..
+            }
+        ));
+        assert!(matches!(
+            e("n.name ENDS WITH 'z'"),
+            Expr::Binary {
+                op: BinaryOp::EndsWith,
+                ..
+            }
+        ));
+        assert!(matches!(
+            e("n.name CONTAINS 'oo'"),
+            Expr::Binary {
+                op: BinaryOp::Contains,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn is_null_postfix() {
-        assert!(matches!(e("n.x IS NULL"), Expr::IsNull { negated: false, .. }));
-        assert!(matches!(e("n.x IS NOT NULL"), Expr::IsNull { negated: true, .. }));
+        assert!(matches!(
+            e("n.x IS NULL"),
+            Expr::IsNull { negated: false, .. }
+        ));
+        assert!(matches!(
+            e("n.x IS NOT NULL"),
+            Expr::IsNull { negated: true, .. }
+        ));
     }
 
     #[test]
@@ -1206,7 +1297,11 @@ mod tests {
     fn case_expression() {
         let expr = e("CASE WHEN n.age >= 18 THEN 'adult' ELSE 'minor' END");
         match expr {
-            Expr::Case { branches, default, operand } => {
+            Expr::Case {
+                branches,
+                default,
+                operand,
+            } => {
                 assert!(operand.is_none());
                 assert_eq!(branches.len(), 1);
                 assert!(default.is_some());
@@ -1221,16 +1316,22 @@ mod tests {
         let clauses = &query.parts[0].query.clauses;
         assert!(matches!(clauses[0], Clause::Match(_)));
         assert!(matches!(clauses[1], Clause::With(_)));
-        let Clause::With(w) = &clauses[1] else { panic!() };
+        let Clause::With(w) = &clauses[1] else {
+            panic!()
+        };
         assert!(w.where_clause.is_some());
-        let Clause::Return(r) = &clauses[2] else { panic!() };
+        let Clause::Return(r) = &clauses[2] else {
+            panic!()
+        };
         assert_eq!(r.projection.items[0].alias.as_deref(), Some("name"));
     }
 
     #[test]
     fn parses_return_distinct_star_order_skip_limit() {
         let query = q("MATCH (n) RETURN DISTINCT * ORDER BY n.name DESC SKIP 5 LIMIT 10");
-        let Clause::Return(r) = query.parts[0].query.clauses.last().unwrap() else { panic!() };
+        let Clause::Return(r) = query.parts[0].query.clauses.last().unwrap() else {
+            panic!()
+        };
         assert!(r.projection.distinct);
         assert!(r.projection.star);
         assert_eq!(r.projection.order_by.len(), 1);
@@ -1243,21 +1344,32 @@ mod tests {
     fn parses_set_remove_delete_forms() {
         let s = q("MATCH (n:Person {id:'p1'}) SET n.active = true, n += {score: 9} REMOVE n.tmp");
         let clauses = &s.parts[0].query.clauses;
-        let Clause::Set(set) = &clauses[1] else { panic!("expected SET") };
+        let Clause::Set(set) = &clauses[1] else {
+            panic!("expected SET")
+        };
         assert_eq!(set.items.len(), 2);
         assert!(matches!(set.items[0], SetItem::Property { .. }));
-        assert!(matches!(set.items[1], SetItem::Properties { merge: true, .. }));
+        assert!(matches!(
+            set.items[1],
+            SetItem::Properties { merge: true, .. }
+        ));
         assert!(matches!(&clauses[2], Clause::Remove(_)));
 
         let d = q("MATCH (n) DETACH DELETE n");
-        let Clause::Delete(del) = d.parts[0].query.clauses.last().unwrap() else { panic!() };
+        let Clause::Delete(del) = d.parts[0].query.clauses.last().unwrap() else {
+            panic!()
+        };
         assert!(del.detach);
     }
 
     #[test]
     fn parses_merge_with_on_create_on_match() {
-        let query = q("MERGE (n:Person {id:'p1'}) ON CREATE SET n.created = true ON MATCH SET n.seen = true");
-        let Clause::Merge(m) = &query.parts[0].query.clauses[0] else { panic!() };
+        let query = q(
+            "MERGE (n:Person {id:'p1'}) ON CREATE SET n.created = true ON MATCH SET n.seen = true",
+        );
+        let Clause::Merge(m) = &query.parts[0].query.clauses[0] else {
+            panic!()
+        };
         assert_eq!(m.on_create.len(), 1);
         assert_eq!(m.on_match.len(), 1);
     }
@@ -1278,14 +1390,18 @@ mod tests {
     #[test]
     fn parses_optional_match() {
         let query = q("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a, b");
-        let Clause::Match(m) = &query.parts[0].query.clauses[1] else { panic!() };
+        let Clause::Match(m) = &query.parts[0].query.clauses[1] else {
+            panic!()
+        };
         assert!(m.optional);
     }
 
     #[test]
     fn parses_path_variable() {
         let query = q("MATCH p = (a)-[:R]->(b) RETURN p");
-        let Clause::Match(m) = &query.parts[0].query.clauses[0] else { panic!() };
+        let Clause::Match(m) = &query.parts[0].query.clauses[0] else {
+            panic!()
+        };
         assert_eq!(m.patterns[0].variable.as_deref(), Some("p"));
     }
 
@@ -1293,7 +1409,9 @@ mod tests {
     fn parameters_parse() {
         assert!(matches!(e("$id"), Expr::Parameter(_)));
         let query = q("MATCH (n:Person {id: $id}) RETURN n");
-        let Clause::Match(m) = &query.parts[0].query.clauses[0] else { panic!() };
+        let Clause::Match(m) = &query.parts[0].query.clauses[0] else {
+            panic!()
+        };
         let props = m.patterns[0].start.properties.as_ref().unwrap();
         assert!(matches!(props.entries[0].1, Expr::Parameter(_)));
     }
@@ -1349,8 +1467,18 @@ mod tests {
     fn not_binds_tighter_than_and() {
         // NOT a AND b  ==  (NOT a) AND b
         match e("NOT a AND b") {
-            Expr::Binary { op: BinaryOp::And, lhs, .. } => {
-                assert!(matches!(*lhs, Expr::Unary { op: UnaryOp::Not, .. }));
+            Expr::Binary {
+                op: BinaryOp::And,
+                lhs,
+                ..
+            } => {
+                assert!(matches!(
+                    *lhs,
+                    Expr::Unary {
+                        op: UnaryOp::Not,
+                        ..
+                    }
+                ));
             }
             other => panic!("expected AND at top, got {other:?}"),
         }
@@ -1360,8 +1488,17 @@ mod tests {
     fn not_captures_comparison() {
         // NOT x = y  ==  NOT (x = y)
         match e("NOT x = y") {
-            Expr::Unary { op: UnaryOp::Not, operand } => {
-                assert!(matches!(*operand, Expr::Binary { op: BinaryOp::Eq, .. }));
+            Expr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => {
+                assert!(matches!(
+                    *operand,
+                    Expr::Binary {
+                        op: BinaryOp::Eq,
+                        ..
+                    }
+                ));
             }
             other => panic!("expected NOT at top, got {other:?}"),
         }

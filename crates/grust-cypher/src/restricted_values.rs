@@ -520,7 +520,10 @@ where
     restricted_list_element_value(value, element.element)
 }
 
-pub(crate) fn restricted_list_element_value(value: Value, element: CypherReturnListElement) -> Result<Value> {
+pub(crate) fn restricted_list_element_value(
+    value: Value,
+    element: CypherReturnListElement,
+) -> Result<Value> {
     let select = |len: usize| match element {
         CypherReturnListElement::Head => 0,
         CypherReturnListElement::Last => len.saturating_sub(1),
@@ -755,7 +758,10 @@ where
     restricted_numeric_round_value(value, round.round)
 }
 
-pub(crate) fn restricted_numeric_round_value(value: Value, round: CypherReturnNumericRound) -> Result<Value> {
+pub(crate) fn restricted_numeric_round_value(
+    value: Value,
+    round: CypherReturnNumericRound,
+) -> Result<Value> {
     let round_float = |value: f64| match round {
         CypherReturnNumericRound::Ceil => value.ceil(),
         CypherReturnNumericRound::Floor => value.floor(),
@@ -926,7 +932,10 @@ where
     restricted_numeric_cast_value(value, cast.cast)
 }
 
-pub(crate) fn restricted_numeric_cast_value(value: Value, cast: CypherReturnNumericCast) -> Result<Value> {
+pub(crate) fn restricted_numeric_cast_value(
+    value: Value,
+    cast: CypherReturnNumericCast,
+) -> Result<Value> {
     match cast {
         CypherReturnNumericCast::Integer => restricted_to_integer_value(value),
         CypherReturnNumericCast::Float => restricted_to_float_value(value),
@@ -977,7 +986,10 @@ where
     restricted_list_cast_value(value, cast.cast)
 }
 
-pub(crate) fn restricted_list_cast_value(value: Value, cast: CypherReturnListCast) -> Result<Value> {
+pub(crate) fn restricted_list_cast_value(
+    value: Value,
+    cast: CypherReturnListCast,
+) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::StringArray(values) => restricted_string_array_cast_value(values, cast),
@@ -1022,7 +1034,10 @@ pub(crate) fn restricted_string_array_cast_value(
     }
 }
 
-pub(crate) fn restricted_int_array_cast_value(values: Vec<i64>, cast: CypherReturnListCast) -> Result<Value> {
+pub(crate) fn restricted_int_array_cast_value(
+    values: Vec<i64>,
+    cast: CypherReturnListCast,
+) -> Result<Value> {
     match cast {
         CypherReturnListCast::String => Ok(Value::StringArray(
             values.into_iter().map(|value| value.to_string()).collect(),
@@ -1548,7 +1563,10 @@ where
     restricted_string_trim_value(value, trim.trim)
 }
 
-pub(crate) fn restricted_string_trim_value(value: Value, trim: CypherReturnStringTrim) -> Result<Value> {
+pub(crate) fn restricted_string_trim_value(
+    value: Value,
+    trim: CypherReturnStringTrim,
+) -> Result<Value> {
     let trim_value = |value: String| match trim {
         CypherReturnStringTrim::Both => value.trim().to_string(),
         CypherReturnStringTrim::Left => value.trim_start().to_string(),
@@ -1680,7 +1698,10 @@ where
     restricted_string_split_value(value, split)
 }
 
-pub(crate) fn restricted_string_split_value(value: Value, split: &CypherReturnStringSplit) -> Result<Value> {
+pub(crate) fn restricted_string_split_value(
+    value: Value,
+    split: &CypherReturnStringSplit,
+) -> Result<Value> {
     let split_value = |value: String| {
         Value::Json(serde_json::Value::Array(
             value
@@ -1750,7 +1771,10 @@ where
     restricted_substring_value(value, substring)
 }
 
-pub(crate) fn restricted_substring_value(value: Value, substring: &CypherReturnSubstring) -> Result<Value> {
+pub(crate) fn restricted_substring_value(
+    value: Value,
+    substring: &CypherReturnSubstring,
+) -> Result<Value> {
     let slice_value = |value: String| -> String {
         let chars = value.chars().skip(substring.start);
         match substring.length {
@@ -1819,7 +1843,10 @@ where
     restricted_string_slice_value(value, slice)
 }
 
-pub(crate) fn restricted_string_slice_value(value: Value, slice: &CypherReturnStringSlice) -> Result<Value> {
+pub(crate) fn restricted_string_slice_value(
+    value: Value,
+    slice: &CypherReturnStringSlice,
+) -> Result<Value> {
     let slice_value = |value: String| -> String {
         match slice.side {
             CypherReturnStringSliceSide::Left => value.chars().take(slice.length).collect(),
@@ -1891,7 +1918,10 @@ where
     restricted_replace_value(value, replace)
 }
 
-pub(crate) fn restricted_replace_value(value: Value, replace: &CypherReturnReplace) -> Result<Value> {
+pub(crate) fn restricted_replace_value(
+    value: Value,
+    replace: &CypherReturnReplace,
+) -> Result<Value> {
     let replace_value = |value: String| value.replace(&replace.search, &replace.replacement);
     match value {
         Value::Null => Ok(Value::Null),
@@ -2205,4 +2235,3 @@ where
         projection.variable
     )))
 }
-

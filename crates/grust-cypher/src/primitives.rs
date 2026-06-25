@@ -79,7 +79,10 @@ pub(crate) fn parse_property_ref(value: &str, context: &str) -> Result<(String, 
     Ok((target, key))
 }
 
-pub(crate) fn parse_cypher_props_map_literal(value: &str, parameters: &CypherParameters) -> Result<Props> {
+pub(crate) fn parse_cypher_props_map_literal(
+    value: &str,
+    parameters: &CypherParameters,
+) -> Result<Props> {
     let value = value.trim();
     let Some(body) = value.strip_prefix('{') else {
         return Err(GrustError::Unsupported(
@@ -580,7 +583,10 @@ pub(crate) fn find_matching(value: &str, _open: char, close: char) -> Result<usi
 /// Scans `value` left to right, skipping single- and double-quoted spans (with
 /// backslash escapes inside them), and returns the first unquoted byte offset
 /// where `at_unquoted(index, rest)` returns true. `rest` is `&value[index..]`.
-pub(crate) fn scan_unquoted(value: &str, mut at_unquoted: impl FnMut(usize, &str) -> bool) -> Option<usize> {
+pub(crate) fn scan_unquoted(
+    value: &str,
+    mut at_unquoted: impl FnMut(usize, &str) -> bool,
+) -> Option<usize> {
     let mut quote = None;
     let mut escaped = false;
     for (index, ch) in value.char_indices() {
@@ -703,4 +709,3 @@ pub fn strict_create_edge_conflicts(edge: &Edge, existing: &[Edge]) -> bool {
         same_explicit_id || same_structural_identity
     })
 }
-

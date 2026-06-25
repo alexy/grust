@@ -130,10 +130,7 @@ pub fn analyze(query: &Query) -> Result<SemanticReport> {
 fn analyze_single(query: &SingleQuery, report: &mut SemanticReport) -> Result<()> {
     let mut scope = Scope::default();
     let has_update = query.clauses.iter().any(Clause::is_updating);
-    let has_return = query
-        .clauses
-        .iter()
-        .any(|c| matches!(c, Clause::Return(_)));
+    let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
 
     // Read-only MATCH ... RETURN (no updating clause) is not executable yet.
     if has_return && !has_update {
@@ -381,7 +378,9 @@ fn check_set_item(item: &SetItem, scope: &Scope) -> Result<()> {
                 require_entity(root, scope, "SET a property on")?;
             }
         }
-        SetItem::Properties { variable, value, .. } => {
+        SetItem::Properties {
+            variable, value, ..
+        } => {
             require_bound(variable, scope)?;
             require_entity(variable, scope, "SET properties on")?;
             check_expr_bound(value, scope)?;
@@ -428,7 +427,9 @@ fn require_bound(name: &str, scope: &Scope) -> Result<()> {
     if scope.get(name).is_some() {
         Ok(())
     } else {
-        Err(name_error(format!("variable `{name}` is not bound in this scope")))
+        Err(name_error(format!(
+            "variable `{name}` is not bound in this scope"
+        )))
     }
 }
 
@@ -439,7 +440,9 @@ fn require_entity(name: &str, scope: &Scope, action: &str) -> Result<()> {
             "cannot {action} `{name}`: it is a {}, not a node or relationship",
             kind.label()
         ))),
-        None => Err(name_error(format!("variable `{name}` is not bound in this scope"))),
+        None => Err(name_error(format!(
+            "variable `{name}` is not bound in this scope"
+        ))),
     }
 }
 
@@ -582,9 +585,10 @@ mod tests {
 
     #[test]
     fn with_carries_aliases_forward() {
-        let report =
-            analyze_src("MATCH (n:Person) WITH n.name AS name WHERE name STARTS WITH 'A' RETURN name")
-                .unwrap();
+        let report = analyze_src(
+            "MATCH (n:Person) WITH n.name AS name WHERE name STARTS WITH 'A' RETURN name",
+        )
+        .unwrap();
         assert!(report.uses_feature(GqlFeature::WithClause));
     }
 
@@ -597,7 +601,8 @@ mod tests {
 
     #[test]
     fn feature_gates_are_collected() {
-        let report = analyze_src("MATCH (a) OPTIONAL MATCH (a)-[:R*1..3]->(b) RETURN a, b").unwrap();
+        let report =
+            analyze_src("MATCH (a) OPTIONAL MATCH (a)-[:R*1..3]->(b) RETURN a, b").unwrap();
         assert!(report.uses_feature(GqlFeature::OptionalMatch));
         assert!(report.uses_feature(GqlFeature::QuantifiedPathPattern));
         assert!(report.uses_feature(GqlFeature::ReadOnlyMatchReturn));

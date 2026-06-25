@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use grust_cypher::{load_manifest, support_summary, GqlExpectation, GqlFeature};
+use grust_cypher::{GqlExpectation, GqlFeature, load_manifest, support_summary};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -61,7 +61,11 @@ fn every_manifest_parses_and_is_consistent() {
                     path.display()
                 );
             }
-            let global_id = format!("{}::{}", path.file_stem().unwrap().to_string_lossy(), case.id);
+            let global_id = format!(
+                "{}::{}",
+                path.file_stem().unwrap().to_string_lossy(),
+                case.id
+            );
             assert!(
                 global_ids.insert(global_id.clone()),
                 "duplicate global case id {global_id}"

@@ -211,7 +211,10 @@ pub(crate) fn parse_constraint_var_label(body: &str) -> Result<(String, Label)> 
 
 /// Parses a `variable.key IS [NOT NULL|UNIQUE]` constraint predicate, returning
 /// `(is_unique, key)`. The predicate variable must match the pattern variable.
-pub(crate) fn parse_constraint_predicate(predicate: &str, pattern_variable: &str) -> Result<(bool, String)> {
+pub(crate) fn parse_constraint_predicate(
+    predicate: &str,
+    pattern_variable: &str,
+) -> Result<(bool, String)> {
     let is_index = find_unquoted_keyword(predicate, "IS").ok_or_else(|| {
         cypher_syntax("constraint predicate requires 'IS UNIQUE' or 'IS NOT NULL'")
     })?;
@@ -573,4 +576,3 @@ pub(crate) fn match_node_cardinality(node: &ParsedCypherNode) -> GraphMutationCa
         GraphMutationCardinality::UnboundedMany
     }
 }
-

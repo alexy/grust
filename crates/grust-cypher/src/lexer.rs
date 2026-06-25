@@ -17,7 +17,7 @@ use std::fmt;
 
 use grust_core::GrustError;
 
-use crate::gql::{gql_syntax, GqlError, GqlErrorKind};
+use crate::gql::{GqlError, GqlErrorKind, gql_syntax};
 
 /// A half-open byte range `[start, end)` into the source text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -297,7 +297,10 @@ impl LexError {
 
     /// Build a structured [`GqlError`] (syntax kind) without a source handle.
     pub fn into_gql_error(self) -> GqlError {
-        GqlError::new(GqlErrorKind::Syntax, format!("{} (bytes {})", self.message, self.span))
+        GqlError::new(
+            GqlErrorKind::Syntax,
+            format!("{} (bytes {})", self.message, self.span),
+        )
     }
 }
 
@@ -436,7 +439,7 @@ impl<'a> Lexer<'a> {
                                 return Err(LexError::new(
                                     Span::new(start, self.pos),
                                     "unterminated block comment",
-                                ))
+                                ));
                             }
                         }
                     }
@@ -535,7 +538,10 @@ impl<'a> Lexer<'a> {
         let text = &self.source[start..self.pos];
         if is_float {
             let value: f64 = text.parse().map_err(|_| {
-                LexError::new(Span::new(start, self.pos), format!("invalid float literal: {text}"))
+                LexError::new(
+                    Span::new(start, self.pos),
+                    format!("invalid float literal: {text}"),
+                )
             })?;
             Ok(self.spanned(Token::Float(value), start))
         } else {
@@ -573,7 +579,7 @@ impl<'a> Lexer<'a> {
                     return Err(LexError::new(
                         Span::new(start, self.pos),
                         "unterminated quoted identifier",
-                    ))
+                    ));
                 }
             }
         }
@@ -611,7 +617,7 @@ impl<'a> Lexer<'a> {
                             return Err(LexError::new(
                                 Span::new(self.pos, self.pos + 1),
                                 format!("invalid escape sequence: \\{}", other as char),
-                            ))
+                            ));
                         }
                     }
                     self.pos += 1;
@@ -629,7 +635,7 @@ impl<'a> Lexer<'a> {
                     return Err(LexError::new(
                         Span::new(start, self.pos),
                         "unterminated string literal",
-                    ))
+                    ));
                 }
             }
         }
@@ -642,10 +648,7 @@ impl<'a> Lexer<'a> {
             self.pos += 1;
         }
         let hex_start = self.pos;
-        while self
-            .peek()
-            .is_some_and(|c| c.is_ascii_hexdigit())
-        {
+        while self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
             self.pos += 1;
         }
         let hex = &self.source[hex_start..self.pos];
@@ -663,9 +666,8 @@ impl<'a> Lexer<'a> {
                 "\\u escape requires exactly 4 hex digits (or use \\u{...})",
             ));
         }
-        let code = u32::from_str_radix(hex, 16).map_err(|_| {
-            LexError::new(Span::new(hex_start, self.pos), "invalid unicode escape")
-        })?;
+        let code = u32::from_str_radix(hex, 16)
+            .map_err(|_| LexError::new(Span::new(hex_start, self.pos), "invalid unicode escape"))?;
         char::from_u32(code).ok_or_else(|| {
             LexError::new(
                 Span::new(hex_start, self.pos),
@@ -754,7 +756,7 @@ impl<'a> Lexer<'a> {
                         return Err(LexError::new(
                             Span::new(start, self.pos),
                             format!("unexpected character: {:?}", b as char),
-                        ))
+                        ));
                     }
                 }
             }
@@ -876,11 +878,14 @@ mod tests {
 
     #[test]
     fn unicode_escape_forms() {
-        assert_eq!(toks(r#" 'A' '\u{1F600}' "#), vec![
-            Token::String("A".into()),
-            Token::String("\u{1F600}".into()),
-            Token::Eof
-        ]);
+        assert_eq!(
+            toks(r#" 'A' '\u{1F600}' "#),
+            vec![
+                Token::String("A".into()),
+                Token::String("\u{1F600}".into()),
+                Token::Eof
+            ]
+        );
     }
 
     #[test]
@@ -903,7 +908,12 @@ mod tests {
     fn range_dotdot_is_not_a_float() {
         assert_eq!(
             toks("1..3"),
-            vec![Token::Integer(1), Token::DotDot, Token::Integer(3), Token::Eof]
+            vec![
+                Token::Integer(1),
+                Token::DotDot,
+                Token::Integer(3),
+                Token::Eof
+            ]
         );
     }
 

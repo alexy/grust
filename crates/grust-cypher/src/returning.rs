@@ -32,7 +32,10 @@ pub(crate) fn parse_match_delete_targets(targets: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-pub(crate) fn split_match_edge_upsert<'a>(statement: &'a str, keyword: &str) -> Result<(&'a str, &'a str)> {
+pub(crate) fn split_match_edge_upsert<'a>(
+    statement: &'a str,
+    keyword: &str,
+) -> Result<(&'a str, &'a str)> {
     if let Some(index) = find_unquoted_keyword(statement, keyword) {
         let match_clause = statement[..index].trim();
         let edge_pattern = statement[index + keyword.len()..].trim();
@@ -48,7 +51,10 @@ pub(crate) fn split_match_edge_upsert<'a>(statement: &'a str, keyword: &str) -> 
     )))
 }
 
-pub(crate) fn parse_path_binding<'a>(pattern: &'a str, context: &str) -> Result<(Option<String>, &'a str)> {
+pub(crate) fn parse_path_binding<'a>(
+    pattern: &'a str,
+    context: &str,
+) -> Result<(Option<String>, &'a str)> {
     let Some(index) = find_unquoted(pattern, '=') else {
         return Ok((None, pattern.trim()));
     };
@@ -871,7 +877,10 @@ pub(crate) fn split_before_keywords<'a>(value: &'a str, keywords: &[&str]) -> (&
     }
 }
 
-pub(crate) fn parse_order_items(items: &str, order_keys: &[Vec<String>]) -> Result<Vec<CypherOrderItem>> {
+pub(crate) fn parse_order_items(
+    items: &str,
+    order_keys: &[Vec<String>],
+) -> Result<Vec<CypherOrderItem>> {
     let mut order_by = Vec::new();
     for item in split_top_level_commas(items)? {
         let item = item.trim();
@@ -3183,4 +3192,3 @@ pub fn cypher_written_node_identity(
         id: node.id.clone(),
     }
 }
-

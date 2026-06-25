@@ -345,4 +345,3 @@ pub fn cypher_constraints(cypher: &str) -> Result<Vec<GraphConstraint>> {
 pub fn sail_cypher_constraints(cypher: &str) -> Result<Vec<GraphConstraint>> {
     cypher_constraints(cypher)
 }
-
