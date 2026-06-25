@@ -108,6 +108,12 @@ enum Predicate {
         prop: PropRef,
         values: Vec<Scalar>,
     },
+    /// `prop STARTS WITH / ENDS WITH / CONTAINS 'needle'` (non-empty needle).
+    StringPred {
+        prop: PropRef,
+        op: StrOp,
+        needle: String,
+    },
 }
 
 /// A reference to a property of the scanned node. `label` maps to the backend's
@@ -171,6 +177,14 @@ pub enum ScalarKind {
     Int,
     Float,
     Str,
+}
+
+/// A string prefix/suffix/substring predicate operator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrOp {
+    StartsWith,
+    EndsWith,
+    Contains,
 }
 
 /// Backend-supplied property type knowledge, used to push `ORDER BY` correctly on
@@ -299,6 +313,11 @@ pub trait SqlDialect {
     fn cast_float(&self, expr: &str) -> String;
     /// Render a string literal, safely escaped for this dialect.
     fn string_literal(&self, value: &str) -> String;
+    /// Render a string prefix/suffix/substring predicate `expr <op> needle`
+    /// (`STARTS WITH`/`ENDS WITH`/`CONTAINS`). `needle` is non-empty; the dialect
+    /// escapes it. NULL `expr` must yield NULL (so the row is dropped), matching
+    /// the reference's null handling.
+    fn string_predicate(&self, expr: &str, op: StrOp, needle: &str) -> String;
     /// Whether `json_property` yields a **natively typed** scalar that sorts
     /// numerically/lexically like the reference (e.g. SQLite/libSQL `json_extract`
     /// returns INTEGER/REAL/TEXT). When false (e.g. Spark `GET_JSON_OBJECT`
@@ -336,6 +355,14 @@ impl SqlDialect for SparkDialect {
         // backslashes and single quotes (matches grust-sail's `sql_str`).
         format!("'{}'", value.replace('\\', "\\\\").replace('\'', "''"))
     }
+    fn string_predicate(&self, expr: &str, op: StrOp, needle: &str) -> String {
+        let n = self.string_literal(needle);
+        match op {
+            StrOp::StartsWith => format!("STARTSWITH({expr}, {n})"),
+            StrOp::EndsWith => format!("ENDSWITH({expr}, {n})"),
+            StrOp::Contains => format!("CONTAINS({expr}, {n})"),
+        }
+    }
 }
 
 /// SQLite / libSQL dialect (the Turso backend, also the embedded differential
@@ -362,6 +389,17 @@ impl SqlDialect for SqliteDialect {
     }
     fn string_literal(&self, value: &str) -> String {
         format!("'{}'", value.replace('\'', "''"))
+    }
+    fn string_predicate(&self, expr: &str, op: StrOp, needle: &str) -> String {
+        // `instr`/`substr` do literal (non-`LIKE`) matching, avoiding wildcard
+        // escaping; NULL `expr` propagates to NULL. `needle` is non-empty.
+        let n = self.string_literal(needle);
+        match op {
+            StrOp::StartsWith => format!("instr({expr}, {n}) = 1"),
+            StrOp::Contains => format!("instr({expr}, {n}) > 0"),
+            // Compare the last `needle.len()` characters (SQLite counts chars).
+            StrOp::EndsWith => format!("substr({expr}, -{}) = {n}", needle.chars().count()),
+        }
     }
     fn orders_json_typed(&self) -> bool {
         // SQLite / libSQL `json_extract` returns INTEGER/REAL/TEXT, so ORDER BY
@@ -585,6 +623,19 @@ fn lower_predicate(expr: &Expr, var: &str, params: &CypherParameters) -> Option<
             let values = lower_scalar_list(rhs, params)?;
             Some(Predicate::In { prop, values })
         }
+        Expr::Binary {
+            op: BinaryOp::StartsWith | BinaryOp::EndsWith | BinaryOp::Contains,
+            lhs,
+            rhs,
+        } => {
+            let prop = lower_prop_ref(lhs, var)?;
+            let needle = lower_string_needle(rhs, params)?;
+            Some(Predicate::StringPred {
+                prop,
+                op: lower_str_op(expr),
+                needle,
+            })
+        }
         Expr::Binary { op, lhs, rhs } => {
             let cmp = lower_cmp_op(*op)?;
             // Accept `prop <op> literal` or `literal <op> prop`.
@@ -681,6 +732,31 @@ fn scalar_from_value(value: &Value) -> Option<Scalar> {
         Value::Float(f) if f.is_finite() => Some(Scalar::Float(*f)),
         Value::String(s) => Some(Scalar::Str(s.clone())),
         _ => None,
+    }
+}
+
+/// Lower a `STARTS/ENDS/CONTAINS` right-hand side to a **non-empty** string
+/// needle (literal or a parameter bound to a non-empty string), else `None`.
+/// Empty needles are excluded to avoid dialect edge cases.
+fn lower_string_needle(expr: &Expr, params: &CypherParameters) -> Option<String> {
+    match lower_scalar(expr, params)? {
+        Scalar::Str(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
+}
+
+/// The [`StrOp`] for a `STARTS/ENDS/CONTAINS` binary expression.
+fn lower_str_op(expr: &Expr) -> StrOp {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::StartsWith,
+            ..
+        } => StrOp::StartsWith,
+        Expr::Binary {
+            op: BinaryOp::EndsWith,
+            ..
+        } => StrOp::EndsWith,
+        _ => StrOp::Contains,
     }
 }
 
@@ -832,6 +908,9 @@ fn render_predicate(pred: &Predicate, dialect: &dyn SqlDialect) -> String {
             let raw = render_prop(prop, dialect);
             render_in_list(raw, matches!(prop, PropRef::Label), values, dialect)
         }
+        Predicate::StringPred { prop, op, needle } => {
+            dialect.string_predicate(&render_prop(prop, dialect), *op, needle)
+        }
     }
 }
 
@@ -929,6 +1008,11 @@ enum SegPredicate {
     In {
         operand: SegOperand,
         values: Vec<Scalar>,
+    },
+    StringPred {
+        operand: SegOperand,
+        op: StrOp,
+        needle: String,
     },
 }
 
@@ -1289,6 +1373,15 @@ fn lower_seg_predicate(
             operand: lower_seg_operand(lhs, roles)?,
             values: lower_scalar_list(rhs, params)?,
         }),
+        Expr::Binary {
+            op: BinaryOp::StartsWith | BinaryOp::EndsWith | BinaryOp::Contains,
+            lhs,
+            rhs,
+        } => Some(SegPredicate::StringPred {
+            operand: lower_seg_operand(lhs, roles)?,
+            op: lower_str_op(expr),
+            needle: lower_string_needle(rhs, params)?,
+        }),
         Expr::Binary { op, lhs, rhs } => {
             let cmp = lower_cmp_op(*op)?;
             if let Some(operand) = lower_seg_operand(lhs, roles) {
@@ -1507,6 +1600,9 @@ fn render_seg_predicate(pred: &SegPredicate, dialect: &dyn SqlDialect) -> String
             let raw = render_seg_operand(operand, dialect);
             let is_label = matches!(operand, SegOperand::NodeLabel(_));
             render_in_list(raw, is_label, values, dialect)
+        }
+        SegPredicate::StringPred { operand, op, needle } => {
+            dialect.string_predicate(&render_seg_operand(operand, dialect), *op, needle)
         }
     }
 }
@@ -2019,6 +2115,44 @@ mod tests {
     }
 
     #[test]
+    fn string_predicates() {
+        assert_eq!(
+            spark_sql("MATCH (n:Person) WHERE n.name STARTS WITH 'Ad' RETURN n"),
+            "SELECT id, label, props FROM `grust_nodes` \
+             WHERE label = 'Person' AND STARTSWITH(GET_JSON_OBJECT(props, '$.name'), 'Ad')"
+        );
+        assert_eq!(
+            spark_sql("MATCH (n:Person) WHERE n.name CONTAINS 'da' RETURN n"),
+            "SELECT id, label, props FROM `grust_nodes` \
+             WHERE label = 'Person' AND CONTAINS(GET_JSON_OBJECT(props, '$.name'), 'da')"
+        );
+        // SQLite uses instr/substr (literal, NULL-propagating).
+        assert_eq!(
+            sqlite_sql("MATCH (n:Person) WHERE n.name ENDS WITH 'da' RETURN n"),
+            "SELECT id, label, props FROM \"grust_nodes\" \
+             WHERE label = 'Person' AND substr(json_extract(props, '$.name'), -2) = 'da'"
+        );
+        assert_eq!(
+            sqlite_sql("MATCH (n:Person) WHERE n.name STARTS WITH 'Ad' RETURN n"),
+            "SELECT id, label, props FROM \"grust_nodes\" \
+             WHERE label = 'Person' AND instr(json_extract(props, '$.name'), 'Ad') = 1"
+        );
+    }
+
+    #[test]
+    fn segment_string_predicate() {
+        assert_eq!(
+            seg_spark("MATCH (:Person)-[:KNOWS]->(b) WHERE b.name CONTAINS 'ra' RETURN b.name"),
+            "SELECT n1.id, n1.label, n1.props \
+             FROM `grust_nodes` n0 \
+             JOIN `grust_edges` e0 ON e0.src_id = n0.id \
+             JOIN `grust_nodes` n1 ON n1.id = e0.dst_id \
+             WHERE e0.edge_type = 'KNOWS' AND n0.label = 'Person' \
+             AND CONTAINS(GET_JSON_OBJECT(n1.props, '$.name'), 'ra')"
+        );
+    }
+
+    #[test]
     fn literal_on_left_flips_operator() {
         assert_eq!(
             spark_sql("MATCH (n:Person) WHERE 40 <= n.age RETURN n"),
@@ -2077,8 +2211,8 @@ mod tests {
         // Empty / mixed-kind IN lists are not pushable (reference fallback).
         assert!(plan("MATCH (n:Person) WHERE n.age IN [] RETURN n").is_none());
         assert!(plan("MATCH (n:Person) WHERE n.age IN [1, 'x'] RETURN n").is_none());
-        // String predicate.
-        assert!(plan("MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n").is_none());
+        // Empty needle string predicate is not pushable (dialect edge cases).
+        assert!(plan("MATCH (n:Person) WHERE n.name STARTS WITH '' RETURN n").is_none());
         // Function in WHERE.
         assert!(plan("MATCH (n:Person) WHERE toUpper(n.name) = 'A' RETURN n").is_none());
         // Property-to-property comparison.
@@ -2404,8 +2538,8 @@ mod tests {
         assert!(seg_plan("MATCH p = (a)-[:KNOWS]->(b) RETURN a").is_none());
         // Plain node pattern (handled by plan_node_read, not the segment planner).
         assert!(seg_plan("MATCH (n:Person) RETURN n").is_none());
-        // WHERE referencing an unbound variable role / unsupported predicate.
-        assert!(seg_plan("MATCH (a)-[:KNOWS]->(b) WHERE a.name STARTS WITH 'A' RETURN a").is_none());
+        // Property-to-property comparison (neither side is a literal).
+        assert!(seg_plan("MATCH (a)-[:KNOWS]->(b) WHERE a.age = b.age RETURN a").is_none());
     }
 
     #[test]

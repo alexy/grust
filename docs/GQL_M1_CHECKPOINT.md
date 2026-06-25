@@ -121,9 +121,17 @@ verifies this path against real SQLite (`rusqlite`, bundled, a grust-turso
 dev-dependency); the Spark rendering is golden-tested and depends on the engine's
 recursive-CTE support.
 
+**String predicates.** `STARTS WITH` / `ENDS WITH` / `CONTAINS` with a non-empty
+string needle are pushed on both the node and segment paths via a
+`SqlDialect::string_predicate` (Spark `STARTSWITH`/`ENDSWITH`/`CONTAINS`; SQLite
+`instr`/`substr`, literal and NULL-propagating). Matches the reference for
+string-typed properties; a non-string property value *errors* in the reference
+but *filters* under pushdown (documented caveat — pushed SQL can't abort the
+query). Empty needles fall back.
+
 Deferred (next pushdown increments, each gated by the oracle): variable-length
-with an edge-list (named relationship) binding; path variables;
-`STARTS·ENDS·CONTAINS` / arithmetic predicates; boolean literals.
+with an edge-list (named relationship) binding; path variables; arithmetic
+predicates; boolean literals.
 
 ---
 

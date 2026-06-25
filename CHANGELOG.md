@@ -27,7 +27,11 @@ reconstructed from Git history, release commits, and the shipped docs.
   (no repeated nodes, like the reference); this is row-equality-verified against
   real SQLite and depends on recursive-CTE support in the target engine.
   `WHERE … IN [literals]` (and `NOT … IN`) is also pushed, on both the node and
-  segment paths, for non-empty homogeneous int/float/string lists. `ORDER BY` /
+  segment paths, for non-empty homogeneous int/float/string lists. `STARTS WITH`
+  / `ENDS WITH` / `CONTAINS` with a non-empty string needle are pushed too
+  (Spark `STARTSWITH`/`ENDSWITH`/`CONTAINS`, SQLite `instr`/`substr`), matching
+  the reference for string-typed properties (a non-string value errors in the
+  reference but filters under pushdown). `ORDER BY` /
   `SKIP` / `LIMIT` are pushed into SQL on the single-node path for dialects whose
   JSON extraction is natively typed (SQLite/libSQL `json_extract`, not Spark
   `GET_JSON_OBJECT`), gated on no aggregate/`DISTINCT` and scan-var sort keys,

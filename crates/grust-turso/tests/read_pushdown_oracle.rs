@@ -18,7 +18,7 @@
 use grust_core::{Edge, Graph, Label, Node, NodeId, Props, Value};
 use grust_cypher::pushdown::{
     plan_node_read, plan_node_read_with_hints, plan_segment_read, plan_segment_read_with_hints,
-    plan_var_length_read, ScalarKind, SqlDialect, SqliteDialect, TypeHints,
+    plan_var_length_read, ScalarKind, SqlDialect, SqliteDialect, StrOp, TypeHints,
 };
 use grust_cypher::read::run_read_query;
 use grust_cypher::{CypherParameters, CypherResultTable};
@@ -91,6 +91,10 @@ const PUSHABLE_QUERIES: &[&str] = &[
     "MATCH (n:City) RETURN n.name",
     "MATCH (n:Person) WHERE n.age IN [36, 85] RETURN n.name ORDER BY n.name",
     "MATCH (n:Person) WHERE NOT n.name IN ['Ada'] RETURN n.name ORDER BY n.name",
+    "MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n.name ORDER BY n.name",
+    "MATCH (n:Person) WHERE n.name ENDS WITH 'e' RETURN n.name ORDER BY n.name",
+    "MATCH (n:Person) WHERE n.name CONTAINS 'l' RETURN n.name ORDER BY n.name",
+    "MATCH (n:Person) WHERE NOT n.name CONTAINS 'a' RETURN n.name ORDER BY n.name",
 ];
 
 /// Relationship-segment queries within the pushable subset.
@@ -115,6 +119,8 @@ const PUSHABLE_SEGMENTS: &[&str] = &[
     "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE c.age >= 80 RETURN a.name, c.name",
     "MATCH (a:Person)-[:KNOWS]->(b)<-[:KNOWS]-(c) RETURN a.name, c.name",
     "MATCH (a:Person)-[:KNOWS]->(b)-[:RATED]->(c) RETURN a.name, c.name",
+    "MATCH (:Person)-[:KNOWS]->(b) WHERE b.name STARTS WITH 'A' RETURN b.name",
+    "MATCH (a:Person)-[:KNOWS]->(b) WHERE b.name CONTAINS 'r' RETURN b.name",
 ];
 
 #[tokio::test]
@@ -179,6 +185,14 @@ impl SqlDialect for UntypedSqlite {
     }
     fn string_literal(&self, value: &str) -> String {
         format!("'{}'", value.replace('\'', "''"))
+    }
+    fn string_predicate(&self, expr: &str, op: StrOp, needle: &str) -> String {
+        let n = self.string_literal(needle);
+        match op {
+            StrOp::StartsWith => format!("instr({expr}, {n}) = 1"),
+            StrOp::Contains => format!("instr({expr}, {n}) > 0"),
+            StrOp::EndsWith => format!("substr({expr}, -{}) = {n}", needle.chars().count()),
+        }
     }
     // orders_json_typed defaults to false → ordering casts via TypeHints.
 }
