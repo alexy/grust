@@ -113,20 +113,38 @@ fn execute_single(
     // terminal and produces the result table.
     for clause in &query.clauses {
         match clause {
-            Clause::Match(m) => {
-                if m.optional {
-                    return Err(unsupported_gql_feature(
-                        GqlFeature::OptionalMatch,
-                        GqlConformanceProfile::PortableGql,
-                        "OPTIONAL MATCH is not supported by the read reference executor yet",
-                    ));
-                }
+            Clause::Match(m) if !m.optional => {
                 for pattern in &m.patterns {
                     rows = expand_pattern(graph, &index, pattern, rows, params)?;
                 }
                 if let Some(where_expr) = &m.where_clause {
                     rows = filter_rows(rows, where_expr, params)?;
                 }
+            }
+            Clause::Match(m) => {
+                // OPTIONAL MATCH: each incoming row produces its matches, or a
+                // single row with this match's new variables NULL-padded.
+                let new_vars = pattern_variables(&m.patterns);
+                let mut out = Vec::new();
+                for row in rows {
+                    let mut matched = vec![row.clone()];
+                    for pattern in &m.patterns {
+                        matched = expand_pattern(graph, &index, pattern, matched, params)?;
+                    }
+                    if let Some(where_expr) = &m.where_clause {
+                        matched = filter_rows(matched, where_expr, params)?;
+                    }
+                    if matched.is_empty() {
+                        let mut padded = row;
+                        for var in &new_vars {
+                            padded.entry(var.clone()).or_insert(Bound::Value(Value::Null));
+                        }
+                        out.push(padded);
+                    } else {
+                        out.extend(matched);
+                    }
+                }
+                rows = out;
             }
             Clause::With(w) => {
                 rows = project_to_bindings(&w.projection, rows, params)?;
@@ -414,6 +432,28 @@ impl NodeIndex {
     fn get<'g>(&self, graph: &'g Graph, id: &str) -> Option<&'g Node> {
         self.by_id.get(id).map(|&i| &graph.nodes[i])
     }
+}
+
+/// All variables introduced by a set of path patterns (path, node, and
+/// relationship variables), in first-seen order and de-duplicated.
+fn pattern_variables(patterns: &[PathPattern]) -> Vec<String> {
+    let mut vars: Vec<String> = Vec::new();
+    let add = |opt: &Option<String>, vars: &mut Vec<String>| {
+        if let Some(name) = opt {
+            if !vars.iter().any(|v| v == name) {
+                vars.push(name.clone());
+            }
+        }
+    };
+    for pattern in patterns {
+        add(&pattern.variable, &mut vars);
+        add(&pattern.start.variable, &mut vars);
+        for segment in &pattern.segments {
+            add(&segment.relationship.variable, &mut vars);
+            add(&segment.node.variable, &mut vars);
+        }
+    }
+    vars
 }
 
 fn expand_pattern(
@@ -1658,6 +1698,29 @@ mod tests {
     fn with_carries_node_into_later_match() {
         let t = run("MATCH (a:Person {name:'Ada'}) WITH a MATCH (a)-[:KNOWS]->(b) RETURN b.name");
         assert_eq!(t.rows, vec![vec![Value::from("Alan")]]);
+    }
+
+    #[test]
+    fn optional_match_null_pads() {
+        let t = run(
+            "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name ORDER BY a.name",
+        );
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::from("Ada"), Value::from("Alan")],
+                vec![Value::from("Alan"), Value::from("Grace")],
+                vec![Value::from("Grace"), Value::Null],
+            ]
+        );
+    }
+
+    #[test]
+    fn optional_match_where_excludes_all_null_pads() {
+        let t = run(
+            "MATCH (a:Person {name:'Ada'}) OPTIONAL MATCH (a)-[:KNOWS]->(b) WHERE b.name = 'Zzz' RETURN b.name",
+        );
+        assert_eq!(t.rows, vec![vec![Value::Null]]);
     }
 
     #[test]
