@@ -1259,6 +1259,93 @@ fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
     }
 }
 
+/// Flatten a list-shaped value into a vector of element `Value`s.
+fn list_elements(value: Value) -> Vec<Value> {
+    match value {
+        Value::StringArray(xs) => xs.into_iter().map(Value::String).collect(),
+        Value::IntArray(xs) => xs.into_iter().map(Value::Int).collect(),
+        Value::FloatArray(xs) => xs.into_iter().map(Value::Float).collect(),
+        Value::Json(serde_json::Value::Array(arr)) => arr.iter().map(json_to_value).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `range(start, end[, step])` -> inclusive integer list.
+fn eval_range(args: &[Expr], row: &Row, params: &CypherParameters) -> Result<Value> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(gql_type("range() expects 2 or 3 integer arguments".to_string()));
+    }
+    let int_arg = |e: &Expr| -> Result<i64> {
+        match eval(e, row, params)? {
+            Value::Int(n) => Ok(n),
+            other => Err(gql_type(format!("range() expects integers, got {other:?}"))),
+        }
+    };
+    let start = int_arg(&args[0])?;
+    let end = int_arg(&args[1])?;
+    let step = if args.len() == 3 { int_arg(&args[2])? } else { 1 };
+    if step == 0 {
+        return Err(gql_execution("range() step must not be zero"));
+    }
+    let mut out = Vec::new();
+    let mut i = start;
+    if step > 0 {
+        while i <= end {
+            out.push(i);
+            i += step;
+        }
+    } else {
+        while i >= end {
+            out.push(i);
+            i += step;
+        }
+    }
+    Ok(Value::IntArray(out))
+}
+
+/// `labels(n)` / `type(r)` / `id(n)`: read the element from its binding, or fall
+/// back to the element's serialized JSON shape.
+fn eval_element_function(name: &str, arg: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
+    if let Expr::Variable(v) = arg {
+        match row.get(v) {
+            Some(Bound::Node(n)) => {
+                return Ok(match name {
+                    "labels" => Value::StringArray(vec![n.label.as_str().to_string()]),
+                    "id" => Value::String(n.id.as_str().to_string()),
+                    _ => return Err(gql_type(format!("{name}() is not defined for a node"))),
+                })
+            }
+            Some(Bound::Edge(e)) => {
+                return Ok(match name {
+                    "type" => Value::String(e.label.as_str().to_string()),
+                    "id" => e
+                        .id
+                        .as_ref()
+                        .map(|id| Value::String(id.as_str().to_string()))
+                        .unwrap_or(Value::Null),
+                    _ => return Err(gql_type(format!("{name}() is not defined for a relationship"))),
+                })
+            }
+            _ => {}
+        }
+    }
+    // Fallback: evaluate to the element's JSON and read its fields.
+    match eval(arg, row, params)? {
+        Value::Null => Ok(Value::Null),
+        Value::Json(serde_json::Value::Object(map)) => match name {
+            "labels" => Ok(map
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| Value::StringArray(vec![s.to_string()]))
+                .unwrap_or(Value::Null)),
+            "type" => Ok(map.get("label").map(json_to_value).unwrap_or(Value::Null)),
+            "id" => Ok(map.get("id").map(json_to_value).unwrap_or(Value::Null)),
+            _ => Err(gql_type(format!("{name}() expects a node or relationship"))),
+        },
+        other => Err(gql_type(format!("{name}() expects a node or relationship, got {other:?}"))),
+    }
+}
+
 /// Extract the `nodes`/`relationships` array from a path value.
 fn path_component(value: Value, key: &str) -> Result<Value> {
     match value {
@@ -1330,6 +1417,19 @@ fn eval_scalar_function(
         return Ok(Value::Null);
     }
 
+    // `range(a, b[, step])` builds an inclusive integer list.
+    if lower == "range" {
+        return eval_range(args, row, params);
+    }
+
+    // Element-introspection functions need the binding (or the element's JSON).
+    if matches!(lower.as_str(), "labels" | "type" | "id") {
+        let [arg] = args else {
+            return Err(gql_type(format!("{lower}() expects exactly one argument")));
+        };
+        return eval_element_function(&lower, arg, row, params);
+    }
+
     // All remaining functions are unary.
     let [arg] = args else {
         return Err(unsupported_gql_feature(
@@ -1375,6 +1475,8 @@ fn eval_scalar_function(
         },
         "nodes" => path_component(value, "nodes"),
         "relationships" | "rels" => path_component(value, "relationships"),
+        "head" => Ok(list_elements(value).first().cloned().unwrap_or(Value::Null)),
+        "last" => Ok(list_elements(value).last().cloned().unwrap_or(Value::Null)),
         "isempty" => restricted_is_empty_value(value),
         _ => Err(unsupported_gql_feature(
             GqlFeature::ScalarFunctionRegistry,
@@ -1651,7 +1753,10 @@ fn value_to_json(value: &Value) -> serde_json::Value {
 }
 
 fn json_to_value(json: &serde_json::Value) -> Value {
-    Value::from(json.clone())
+    // `from_json` inverts the adjacently-tagged encoding that `value_to_json`
+    // produces (and falls back to a plain mapping for untagged JSON), so values
+    // round-trip losslessly through list/collect/path materialization.
+    Value::from_json(json.clone())
 }
 
 #[cfg(test)]
@@ -1845,6 +1950,37 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, GrustError::Unsupported(_)));
+    }
+
+    #[test]
+    fn range_with_unwind() {
+        let t = run("UNWIND range(1, 3) AS x RETURN x");
+        assert_eq!(
+            t.rows,
+            vec![vec![Value::Int(1)], vec![Value::Int(2)], vec![Value::Int(3)]]
+        );
+    }
+
+    #[test]
+    fn head_and_last_over_collect() {
+        let t = run("MATCH (n:Person) WITH collect(n.name) AS names RETURN head(names) AS h, last(names) AS l");
+        assert_eq!(t.rows, vec![vec![Value::from("Ada"), Value::from("Grace")]]);
+    }
+
+    #[test]
+    fn labels_type_id() {
+        assert_eq!(
+            run("MATCH (n:Person {name:'Ada'}) RETURN labels(n)").rows,
+            vec![vec![Value::StringArray(vec!["Person".to_string()])]]
+        );
+        assert_eq!(
+            run("MATCH (:Person {name:'Ada'})-[r:KNOWS]->() RETURN type(r)").rows,
+            vec![vec![Value::from("KNOWS")]]
+        );
+        assert_eq!(
+            run("MATCH (n:Person {name:'Ada'}) RETURN id(n)").rows,
+            vec![vec![Value::from("p1")]]
+        );
     }
 
     #[test]
