@@ -1,11 +1,47 @@
-# GQL Completion — Milestone M1 Checkpoint
+# GQL Completion — M1/M2 Checkpoint
 
-Branch: `cypher-gql-full` · Generated end of an autonomous overnight session.
-Goal contract: `docs/GQL_GOAL.md`. Plan: `docs/GrustCypherFull.md`.
+Branch: `cypher-gql-full` (pushed to origin). Goal contract: `docs/GQL_GOAL.md`.
+Plan: `docs/GrustCypherFull.md`.
 
-This is a **STOP-for-review checkpoint** at the M1 (Foundation) milestone
-boundary, as required by Guardrail 6 of `GQL_GOAL.md`. No publish, no push, all
-work committed on the feature branch. Nothing on `main` was touched.
+The M1 (Foundation) record is below. Since then, **M2 (Portable Query Core) read
+side** landed on the new pipeline — see the next section.
+
+## M2 progress — portable read query core (additive, on the new pipeline)
+
+`src/read.rs` is a Memory **reference executor** that runs read-only queries
+through lexer → parser → semantics → execution over a `Graph` snapshot
+(`MemoryGraphStore::graph()`), returning the existing `CypherResultTable`. The
+write planner is untouched. Implemented and tested (unit + `tests/read_conformance.rs`):
+
+- `MATCH` over node patterns and relationship segments (direction, types, inline
+  property maps), multi-hop, and **variable-length** `*min..max` (no repeated
+  nodes; rel var binds the edge list);
+- **OPTIONAL MATCH** with null-padding;
+- `WHERE` with a general expression evaluator: arithmetic, comparison,
+  three-valued boolean logic, `IN`, `IS [NOT] NULL`, `STARTS/ENDS WITH`,
+  `CONTAINS`, `CASE`, and a scalar function registry (string/numeric casts,
+  `coalesce`, `size`, …) reusing the crate's `restricted_*_value` helpers;
+- `RETURN` with aliases, `*`, `DISTINCT`, `ORDER BY`, `SKIP`, `LIMIT`, and
+  **aggregates** (`count/sum/avg/min/max/collect`) with implicit `GROUP BY`;
+- **`WITH`** horizon (projection, aggregation, `WHERE`, distinct/order/skip/limit;
+  carries node bindings into later `MATCH`), **`UNWIND`**, and **`UNION` / `UNION ALL`**.
+
+The `GqlFeature` manifest was updated so these are `Supported` (portable Memory
+reference); `tests/gql/portable_read.json` is the corpus. Still feature-gated:
+path variables, subqueries, shortest path, multi-label patterns, map/index
+projections.
+
+Not yet done for the read core (deferred): Sail/backend **pushdown** of the read
+subset (the reference executes portably; pushdown is Unit 15-ish), and wiring
+the legacy write entrypoints onto the new pipeline (below).
+
+---
+
+# M1 (Foundation) Checkpoint
+
+This was a **STOP-for-review checkpoint** at the M1 (Foundation) milestone
+boundary, as required by Guardrail 6 of `GQL_GOAL.md`. No publish, all work
+committed on the feature branch. Nothing on `main` was touched.
 
 ## What landed (all additive, all green)
 
