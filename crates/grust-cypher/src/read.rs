@@ -794,11 +794,50 @@ fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
             }
             eval_scalar_function(name, args, row, params)
         }
-        Expr::Map(_) | Expr::Case { .. } | Expr::Index { .. } => Err(unsupported_gql_feature(
+        Expr::Case {
+            operand,
+            branches,
+            default,
+        } => eval_case(operand.as_deref(), branches, default.as_deref(), row, params),
+        Expr::Map(_) | Expr::Index { .. } => Err(unsupported_gql_feature(
             GqlFeature::GeneralExpressionTree,
             GqlConformanceProfile::PortableGql,
-            "maps, CASE, and indexing are not supported by the read reference executor yet (Unit 7)",
+            "map literals and indexing are not supported by the read reference executor yet (Unit 7)",
         )),
+    }
+}
+
+/// Evaluate a `CASE` expression. Simple form (`CASE x WHEN v THEN ...`) compares
+/// `x` to each branch value; searched form (`CASE WHEN cond THEN ...`) takes the
+/// first branch whose condition is TRUE. Falls back to `ELSE` / NULL.
+fn eval_case(
+    operand: Option<&Expr>,
+    branches: &[CaseBranch],
+    default: Option<&Expr>,
+    row: &Row,
+    params: &CypherParameters,
+) -> Result<Value> {
+    match operand {
+        Some(op) => {
+            let target = eval(op, row, params)?;
+            for branch in branches {
+                let candidate = eval(&branch.when, row, params)?;
+                if values_equal(&target, &candidate) == Some(true) {
+                    return eval(&branch.then, row, params);
+                }
+            }
+        }
+        None => {
+            for branch in branches {
+                if matches!(eval(&branch.when, row, params)?, Value::Bool(true)) {
+                    return eval(&branch.then, row, params);
+                }
+            }
+        }
+    }
+    match default {
+        Some(d) => eval(d, row, params),
+        None => Ok(Value::Null),
     }
 }
 
@@ -1284,14 +1323,37 @@ mod tests {
         let err = run_read_query(&graph(), "MATCH (a) RETURN a UNION MATCH (b) RETURN b", &CypherParameters::new())
             .unwrap_err();
         assert!(matches!(err, GrustError::Unsupported(_)));
-        // CASE expressions are still unsupported (general expression engine, Unit 7+).
+        // Map literals in projections are still unsupported.
         let err = run_read_query(
             &graph(),
-            "MATCH (n:Person) RETURN CASE WHEN n.age > 0 THEN 1 ELSE 0 END",
+            "MATCH (n:Person) RETURN {age: n.age}",
             &CypherParameters::new(),
         )
         .unwrap_err();
         assert!(matches!(err, GrustError::Unsupported(_)));
+    }
+
+    #[test]
+    fn searched_case_expression() {
+        let t = run(
+            "MATCH (n:Person) RETURN CASE WHEN n.age >= 80 THEN 'senior' WHEN n.age >= 40 THEN 'mid' ELSE 'young' END AS bucket ORDER BY n.name",
+        );
+        assert_eq!(
+            t.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
+            vec![Value::from("young"), Value::from("mid"), Value::from("senior")]
+        );
+    }
+
+    #[test]
+    fn simple_case_expression() {
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN CASE n.age WHEN 36 THEN 'yes' ELSE 'no' END AS m");
+        assert_eq!(t.rows, vec![vec![Value::from("yes")]]);
+    }
+
+    #[test]
+    fn case_without_else_is_null() {
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN CASE WHEN n.age > 100 THEN 'old' END AS m");
+        assert_eq!(t.rows, vec![vec![Value::Null]]);
     }
 
     #[test]
