@@ -1352,10 +1352,12 @@ impl SailGraphStore {
             let nodes = self.run_query(&plan.to_sql(&dialect), vec![]).await?;
             return plan.project(&dialect, nodes, params);
         }
-        if let Some(plan) = grust_cypher::pushdown::plan_segment_read(cypher, params)? {
-            let sql = plan.to_sql(&grust_cypher::pushdown::SparkDialect);
-            let rows = self.run_text_query(&sql).await?;
-            return plan.project_text_rows(rows, params);
+        if let Some(plan) =
+            grust_cypher::pushdown::plan_segment_read_with_hints(cypher, params, &hints)?
+        {
+            let dialect = grust_cypher::pushdown::SparkDialect;
+            let rows = self.run_text_query(&plan.to_sql(&dialect)).await?;
+            return plan.project_text_rows(&dialect, rows, params);
         }
         let graph = self.read_graph().await?;
         grust_cypher::read::run_read_query(&graph, cypher, params)

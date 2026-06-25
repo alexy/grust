@@ -1039,6 +1039,7 @@ async fn test_read_pushdown_matches_reference() {
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b ORDER BY a, b",
         "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age >= 40 RETURN b.name ORDER BY b.name",
         "MATCH (a:Person {name:'Ada'})-[r:KNOWS]->(b) RETURN b.name ORDER BY b.name",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY b.name DESC",
         // Not pushable: exercises the read_graph reference fallback branch.
         "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN c.name ORDER BY c.name",
     ];

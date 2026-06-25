@@ -85,10 +85,23 @@ verifies pushed ordering by **exact row sequence** (tie-free fixture columns);
 Spark keeps ordering in the reference projection pending schema-aware typed-table
 pushdown.
 
-Deferred (next pushdown increments, each gated by the oracle): typed-table /
-schema-aware ordering for Spark; `ORDER BY`/`SKIP`/`LIMIT` on the segment path;
-undirected and multi-segment / variable-length paths; path variables;
-`STARTS·ENDS·CONTAINS` / arithmetic predicates; boolean literals.
+**Schema-aware ordering for untyped-JSON dialects (Spark).** A `TypeHints` trait
+(vocabulary `ScalarKind`; built from the backend's `GraphSchema`) is resolved
+into the plan at planning time (`plan_node_read_with_hints` /
+`plan_segment_read_with_hints`). On a dialect whose JSON extraction is untyped
+(`orders_json_typed() == false`, e.g. Spark `GET_JSON_OBJECT`), `pushes_ordering`
+allows pushdown only when every sort key's type is known, and `to_sql` casts
+numeric keys (`CAST(… AS BIGINT/DOUBLE)`) so the SQL order matches the reference;
+otherwise ordering stays in the reference projection. `SailGraphStore` derives
+`SailTypeHints` from its applied schema. The Turso oracle simulates this via an
+`UntypedSqlite` test dialect (casts executed by real SQLite), asserting
+exact-sequence equality. `ORDER BY`/`SKIP`/`LIMIT` pushdown now covers **both the
+node and the relationship-segment paths**.
+
+Deferred (next pushdown increments, each gated by the oracle): edge-property
+ordering on untyped dialects (needs edge type hints); undirected and
+multi-segment / variable-length paths; path variables; `STARTS·ENDS·CONTAINS` /
+arithmetic predicates; boolean literals.
 
 ---
 

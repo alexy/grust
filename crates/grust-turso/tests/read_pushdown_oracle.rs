@@ -230,6 +230,28 @@ async fn segment_pushdown_matches_reference() {
     }
 }
 
+#[tokio::test]
+async fn segment_pushed_ordering_preserves_sequence() {
+    // Segment ORDER BY / SKIP / LIMIT pushed into SQLite must reproduce the
+    // reference's exact sequence (tie-free b.age in the fixture).
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in [
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY b.age DESC",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name ORDER BY b.age SKIP 1",
+    ] {
+        let plan = plan_segment_read(cypher, &params).unwrap().unwrap();
+        assert!(
+            plan.pushes_ordering(&SqliteDialect),
+            "expected pushed ordering for `{cypher}`"
+        );
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        let actual = segment_pushdown(&conn, cypher, &params).await;
+        assert_eq!(actual, expected, "segment sequence mismatch for `{cypher}`");
+    }
+}
+
 /// Compare result tables by column names and **row multiset** — Cypher results
 /// are unordered without a total `ORDER BY`, and a SQL join's row order is not
 /// guaranteed, so set equality (not sequence) is the correctness criterion.
@@ -301,7 +323,7 @@ async fn segment_pushdown(
     while let Some(row) = rows.next().await.unwrap() {
         text_rows.push((0..n).map(|i| opt_text(&row, i)).collect());
     }
-    plan.project_text_rows(text_rows, params).unwrap()
+    plan.project_text_rows(&SqliteDialect, text_rows, params).unwrap()
 }
 
 /// Build an in-memory SQLite database with `grust_nodes(id, label, props)` and

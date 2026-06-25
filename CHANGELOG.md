@@ -29,7 +29,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   the reference projection. A `TypeHints` trait (built from the graph schema by
   the backend; `SailGraphStore` derives it from the applied `GraphSchema`) lets
   an untyped-JSON dialect like Spark push numeric `ORDER BY` too, by casting each
-  sort key to its declared type.
+  sort key to its declared type. `ORDER BY`/`SKIP`/`LIMIT` pushdown also applies
+  to the relationship-segment path (sort keys over `a`/`r`/`b`).
 - Refactored `grust-cypher` from a single ~16k-line `lib.rs` and ~17k-line
   `tests.rs` into cohesive modules (`ddl`, `parse`, `primitives`, `planner`,
   `eval_rows`, `restricted_values`, `projection`, `where_clause`, `returning`,

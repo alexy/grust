@@ -943,7 +943,27 @@ pub struct SegmentReadPushdown {
     filter: Option<SegPredicate>,
     /// Selected bindings in SELECT order (only pattern vars that are bound).
     selected: Vec<SelectedBinding>,
+    /// `ORDER BY`/`SKIP`/`LIMIT` lowered for SQL pushdown, when structurally
+    /// pushable (same rules as the node path; keys reference `a`/`r`/`b`).
+    ordering: Option<SegPushedOrdering>,
     projection: Projection,
+}
+
+/// Segment `ORDER BY`/`SKIP`/`LIMIT` resolved for SQL pushdown.
+#[derive(Clone, Debug, PartialEq)]
+struct SegPushedOrdering {
+    keys: Vec<SegOrderKey>,
+    skip: Option<usize>,
+    limit: Option<usize>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SegOrderKey {
+    operand: SegOperand,
+    descending: bool,
+    /// Scalar kind for casting on untyped-JSON dialects (`None` = unknown →
+    /// not pushable there). Edge properties are left `None` for now.
+    kind: Option<ScalarKind>,
 }
 
 /// Try to lower `cypher` into a relationship-segment read pushdown.
@@ -954,12 +974,26 @@ pub fn plan_segment_read(
     cypher: &str,
     params: &CypherParameters,
 ) -> Result<Option<SegmentReadPushdown>> {
-    let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
-    crate::semantics::analyze(&query)?;
-    Ok(lower_segment(&query, params))
+    plan_segment_read_with_hints(cypher, params, &NoTypeHints)
 }
 
-fn lower_segment(query: &Query, params: &CypherParameters) -> Option<SegmentReadPushdown> {
+/// Like [`plan_segment_read`], but resolves `ORDER BY` key types via `hints` so an
+/// untyped-JSON dialect (e.g. Spark) can push numeric ordering by casting.
+pub fn plan_segment_read_with_hints(
+    cypher: &str,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Result<Option<SegmentReadPushdown>> {
+    let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
+    crate::semantics::analyze(&query)?;
+    Ok(lower_segment(&query, params, hints))
+}
+
+fn lower_segment(
+    query: &Query,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<SegmentReadPushdown> {
     if query.parts.len() != 1 || query.parts[0].union.is_some() {
         return None;
     }
@@ -1064,15 +1098,90 @@ fn lower_segment(query: &Query, params: &CypherParameters) -> Option<SegmentRead
         });
     }
 
+    let a_label = a.labels.first().cloned();
+    let b_label = b.labels.first().cloned();
+    let roles = VarRoles {
+        a: a_var.as_deref(),
+        b: b_var.as_deref(),
+        rel: rel_var.as_deref(),
+    };
+    let projection = return_clause.projection.clone();
+    let ordering = compute_seg_ordering(
+        &projection,
+        &roles,
+        a_label.as_deref(),
+        b_label.as_deref(),
+        params,
+        hints,
+    );
+
     Some(SegmentReadPushdown {
         incoming,
-        a_label: a.labels.first().cloned(),
-        b_label: b.labels.first().cloned(),
+        a_label,
+        b_label,
         rel_types: rel.types.clone(),
         filter,
         selected,
-        projection: return_clause.projection.clone(),
+        ordering,
+        projection,
     })
+}
+
+/// Resolve segment `ORDER BY`/`SKIP`/`LIMIT` for SQL pushdown, or `None` if not
+/// structurally pushable. Mirrors `compute_pushed_ordering` but resolves sort
+/// keys against the `a`/`r`/`b` roles; node-property kinds come from `hints`
+/// keyed by the relevant endpoint label (edge properties are left unknown).
+fn compute_seg_ordering(
+    projection: &Projection,
+    roles: &VarRoles,
+    a_label: Option<&str>,
+    b_label: Option<&str>,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<SegPushedOrdering> {
+    if projection.distinct {
+        return None;
+    }
+    if projection.items.iter().any(|i| crate::read::expr_has_aggregate(&i.expr)) {
+        return None;
+    }
+    if projection.order_by.is_empty() {
+        return None;
+    }
+    let aliases: std::collections::HashMap<&str, &Expr> = projection
+        .items
+        .iter()
+        .filter_map(|i| i.alias.as_deref().map(|a| (a, &i.expr)))
+        .collect();
+
+    let mut keys = Vec::with_capacity(projection.order_by.len());
+    for item in &projection.order_by {
+        let resolved = match &item.expr {
+            Expr::Variable(name) => aliases.get(name.as_str()).copied().unwrap_or(&item.expr),
+            other => other,
+        };
+        let operand = lower_seg_operand(resolved, roles)?;
+        let kind = match &operand {
+            SegOperand::NodeLabel(_) => Some(ScalarKind::Str),
+            SegOperand::NodeProp(Endpoint::A, key) => hints.node_property_kind(a_label, key),
+            SegOperand::NodeProp(Endpoint::B, key) => hints.node_property_kind(b_label, key),
+            SegOperand::EdgeProp(_) => None,
+        };
+        keys.push(SegOrderKey {
+            operand,
+            descending: item.descending,
+            kind,
+        });
+    }
+    let skip = match &projection.skip {
+        None => None,
+        Some(e) => Some(lower_usize(e, params)?),
+    };
+    let limit = match &projection.limit {
+        None => None,
+        Some(e) => Some(lower_usize(e, params)?),
+    };
+    Some(SegPushedOrdering { keys, skip, limit })
 }
 
 /// Variable name → segment role mapping for WHERE lowering.
@@ -1300,6 +1409,55 @@ impl SegmentReadPushdown {
             sql.push_str(" WHERE ");
             sql.push_str(&conditions.join(" AND "));
         }
+        if self.pushes_ordering(dialect) {
+            sql.push_str(&self.render_order_limit(dialect));
+        }
+        sql
+    }
+
+    /// Whether `to_sql` pushes `ORDER BY`/`SKIP`/`LIMIT` for this dialect (so the
+    /// backend must NOT re-apply them in the projection). See
+    /// [`NodeReadPushdown::pushes_ordering`].
+    pub fn pushes_ordering(&self, dialect: &dyn SqlDialect) -> bool {
+        match &self.ordering {
+            None => false,
+            Some(ordering) => {
+                dialect.orders_json_typed() || ordering.keys.iter().all(|k| k.kind.is_some())
+            }
+        }
+    }
+
+    fn render_order_limit(&self, dialect: &dyn SqlDialect) -> String {
+        let ordering = self.ordering.as_ref().expect("ordering present");
+        let keys = ordering
+            .keys
+            .iter()
+            .map(|k| {
+                let col = render_seg_operand(&k.operand, dialect);
+                let col = if dialect.orders_json_typed() {
+                    col
+                } else {
+                    match k.kind {
+                        Some(ScalarKind::Int) => dialect.cast_int(&col),
+                        Some(ScalarKind::Float) => dialect.cast_float(&col),
+                        _ => col,
+                    }
+                };
+                if k.descending {
+                    format!("{col} DESC NULLS FIRST")
+                } else {
+                    format!("{col} ASC NULLS LAST")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut sql = format!(" ORDER BY {keys}");
+        match (ordering.limit, ordering.skip) {
+            (Some(n), Some(s)) => sql.push_str(&format!(" LIMIT {n} OFFSET {s}")),
+            (Some(n), None) => sql.push_str(&format!(" LIMIT {n}")),
+            (None, Some(s)) => sql.push_str(&format!(" LIMIT -1 OFFSET {s}")),
+            (None, None) => {}
+        }
         sql
     }
 
@@ -1316,9 +1474,11 @@ impl SegmentReadPushdown {
     }
 
     /// Reconstruct the `(a, r, b)` bindings from the backend's text rows and run
-    /// the shared reference projection.
+    /// the shared reference projection. When the dialect pushed
+    /// `ORDER BY`/`SKIP`/`LIMIT`, those are dropped from the in-Rust projection.
     pub fn project_text_rows(
         &self,
+        dialect: &dyn SqlDialect,
         rows: Vec<Vec<Option<String>>>,
         params: &CypherParameters,
     ) -> Result<CypherResultTable> {
@@ -1358,7 +1518,12 @@ impl SegmentReadPushdown {
             }
             binding_rows.push(bindings);
         }
-        crate::read::project_bindings(binding_rows, &self.projection, params)
+        if self.pushes_ordering(dialect) {
+            let projection = strip_order_limit(&self.projection);
+            crate::read::project_bindings(binding_rows, &projection, params)
+        } else {
+            crate::read::project_bindings(binding_rows, &self.projection, params)
+        }
     }
 }
 
@@ -1829,6 +1994,35 @@ mod tests {
     }
 
     #[test]
+    fn segment_order_limit_pushed_for_typed_dialect() {
+        let plan = seg_plan(
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name ORDER BY b.age DESC LIMIT 3",
+        )
+        .expect("pushable");
+        assert!(plan.pushes_ordering(&SqliteDialect));
+        assert!(plan
+            .to_sql(&SqliteDialect)
+            .ends_with("ORDER BY json_extract(nb.props, '$.age') DESC NULLS FIRST LIMIT 3"));
+        // Spark without hints can't type the JSON sort key → not pushed.
+        assert!(!plan.pushes_ordering(&SparkDialect));
+    }
+
+    #[test]
+    fn segment_order_pushed_for_spark_with_hints() {
+        let plan = plan_segment_read_with_hints(
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name ORDER BY b.age DESC LIMIT 3",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .expect("pushable");
+        assert!(plan.pushes_ordering(&SparkDialect));
+        assert!(plan.to_sql(&SparkDialect).ends_with(
+            "ORDER BY CAST(GET_JSON_OBJECT(nb.props, '$.age') AS BIGINT) DESC NULLS FIRST LIMIT 3"
+        ));
+    }
+
+    #[test]
     fn segment_unsupported_shapes_fall_back() {
         // Undirected.
         assert!(seg_plan("MATCH (a)-[:KNOWS]-(b) RETURN a").is_none());
@@ -1866,7 +2060,9 @@ mod tests {
             some("Person"),
             some("{\"name\":\"Alan\"}"),
         ];
-        let table = plan.project_text_rows(vec![row], &params()).unwrap();
+        let table = plan
+            .project_text_rows(&SparkDialect, vec![row], &params())
+            .unwrap();
         assert_eq!(
             table.columns,
             vec!["a.name".to_string(), "r.since".to_string(), "b.name".to_string()]
