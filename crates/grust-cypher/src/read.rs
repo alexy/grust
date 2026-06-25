@@ -29,11 +29,13 @@ use crate::ast::*;
 use crate::parser::parse_query;
 use crate::*;
 
-/// A value bound to a pattern variable in a candidate row.
+/// A value bound to a variable in a candidate row. Pattern matching binds
+/// `Node`/`Edge`; `WITH`/`UNWIND` projections bind computed `Value`s.
 #[derive(Clone, Debug)]
 enum Bound {
     Node(Node),
     Edge(Edge),
+    Value(Value),
 }
 
 /// One candidate solution: pattern variable -> bound graph element.
@@ -106,8 +108,9 @@ fn execute_single(
 ) -> Result<CypherResultTable> {
     let index = NodeIndex::build(graph);
     let mut rows: Vec<Row> = vec![Row::new()];
-    let mut return_clause: Option<&ReturnClause> = None;
 
+    // A clause pipeline: each clause transforms the binding-row stream; RETURN is
+    // terminal and produces the result table.
     for clause in &query.clauses {
         match clause {
             Clause::Match(m) => {
@@ -122,32 +125,21 @@ fn execute_single(
                     rows = expand_pattern(graph, &index, pattern, rows, params)?;
                 }
                 if let Some(where_expr) = &m.where_clause {
-                    rows.retain(|row| {
-                        matches!(eval(where_expr, row, params), Ok(Value::Bool(true)))
-                    });
-                    // Surface evaluation errors (e.g. unknown parameter) rather
-                    // than silently dropping rows.
-                    for row in &rows {
-                        eval(where_expr, row, params)?;
-                    }
+                    rows = filter_rows(rows, where_expr, params)?;
                 }
             }
-            Clause::Return(r) => {
-                return_clause = Some(r);
-            }
             Clause::With(w) => {
-                return Err(unsupported_gql_feature(
-                    GqlFeature::WithClause,
-                    GqlConformanceProfile::PortableGql,
-                    format!("WITH is not supported by the read reference executor yet ({:?})", w.span),
-                ))
+                rows = project_to_bindings(&w.projection, rows, params)?;
+                if let Some(where_expr) = &w.where_clause {
+                    rows = filter_rows(rows, where_expr, params)?;
+                }
             }
-            Clause::Unwind(_) => {
-                return Err(unsupported_gql_feature(
-                    GqlFeature::GeneralExpressionTree,
-                    GqlConformanceProfile::PortableGql,
-                    "UNWIND is not supported by the read reference executor yet",
-                ))
+            Clause::Unwind(u) => {
+                rows = unwind_rows(rows, u, params)?;
+            }
+            Clause::Return(r) => {
+                // Terminal: project the current bindings to the result table.
+                return project(graph, &rows, &r.projection, params);
             }
             Clause::Create(_)
             | Clause::Merge(_)
@@ -155,16 +147,251 @@ fn execute_single(
             | Clause::Set(_)
             | Clause::Remove(_) => {
                 return Err(gql_execution(
-                    "the read reference executor only runs read-only MATCH ... RETURN queries",
+                    "the read reference executor only runs read-only MATCH/WITH/UNWIND/RETURN queries",
                 ))
             }
         }
     }
 
-    let return_clause = return_clause.ok_or_else(|| {
-        gql_execution("read query has no RETURN clause")
-    })?;
-    project(graph, &rows, &return_clause.projection, params)
+    Err(gql_execution("read query has no RETURN clause"))
+}
+
+/// Keep rows whose `where_expr` evaluates to TRUE (NULL/FALSE drop), surfacing
+/// evaluation errors instead of silently dropping rows.
+fn filter_rows(rows: Vec<Row>, where_expr: &Expr, params: &CypherParameters) -> Result<Vec<Row>> {
+    let mut kept = Vec::with_capacity(rows.len());
+    for row in rows {
+        if matches!(eval(where_expr, &row, params)?, Value::Bool(true)) {
+            kept.push(row);
+        }
+    }
+    Ok(kept)
+}
+
+/// `UNWIND list AS x`: expand each row into one row per list element. A NULL or
+/// empty list yields no rows for that input row.
+fn unwind_rows(rows: Vec<Row>, unwind: &UnwindClause, params: &CypherParameters) -> Result<Vec<Row>> {
+    let mut out = Vec::new();
+    for row in rows {
+        // A list literal is evaluated element-wise (round-tripping a list
+        // through JSON would be lossy); other expressions evaluate to a value.
+        let elements: Vec<Value> = if let Expr::List(items) = &unwind.expr {
+            items
+                .iter()
+                .map(|e| eval(e, &row, params))
+                .collect::<Result<_>>()?
+        } else {
+            match eval(&unwind.expr, &row, params)? {
+                Value::Null => continue,
+                Value::StringArray(xs) => xs.into_iter().map(Value::String).collect(),
+                Value::IntArray(xs) => xs.into_iter().map(Value::Int).collect(),
+                Value::FloatArray(xs) => xs.into_iter().map(Value::Float).collect(),
+                Value::Json(serde_json::Value::Array(arr)) => {
+                    arr.iter().map(json_to_value).collect()
+                }
+                other => return Err(gql_type(format!("UNWIND expects a list, got {other:?}"))),
+            }
+        };
+        for element in elements {
+            let mut next = row.clone();
+            next.insert(unwind.alias.clone(), Bound::Value(element));
+            out.push(next);
+        }
+    }
+    Ok(out)
+}
+
+/// `WITH` horizon: project the binding-row stream into a new binding-row stream
+/// (bare variables keep their node/edge/value binding; computed items bind a
+/// value), then apply DISTINCT / ORDER BY / SKIP / LIMIT.
+fn project_to_bindings(
+    projection: &Projection,
+    rows: Vec<Row>,
+    params: &CypherParameters,
+) -> Result<Vec<Row>> {
+    let has_aggregate = projection.items.iter().any(|i| expr_has_aggregate(&i.expr));
+
+    let mut out: Vec<Row> = if has_aggregate {
+        if projection.star {
+            return Err(unsupported_gql_feature(
+                GqlFeature::AggregateFunctionRegistry,
+                GqlConformanceProfile::PortableGql,
+                "WITH * combined with aggregates is not supported by the read reference executor yet",
+            ));
+        }
+        grouped_bindings(&projection.items, &rows, params)?
+    } else {
+        let mut produced = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut next = if projection.star { row.clone() } else { Row::new() };
+            for item in &projection.items {
+                let (name, bound) = binding_for_item(item, row, params)?;
+                next.insert(name, bound);
+            }
+            produced.push(next);
+        }
+        produced
+    };
+
+    if projection.distinct {
+        out = dedup_bindings(out, &projection.items, projection.star, params)?;
+    }
+    order_bindings(&mut out, &projection.order_by, params)?;
+    skip_limit_bindings(&mut out, projection, params)?;
+    Ok(out)
+}
+
+/// The (name, binding) a `WITH`/`RETURN` item contributes. A bare variable keeps
+/// its existing binding (so a node stays a node downstream); anything else binds
+/// a computed value under its alias.
+fn binding_for_item(item: &ReturnItem, row: &Row, params: &CypherParameters) -> Result<(String, Bound)> {
+    match &item.expr {
+        Expr::Variable(v) => {
+            let bound = row
+                .get(v)
+                .cloned()
+                .unwrap_or(Bound::Value(Value::Null));
+            Ok((item.alias.clone().unwrap_or_else(|| v.clone()), bound))
+        }
+        other => {
+            let name = item.alias.clone().ok_or_else(|| {
+                gql_name("WITH requires an alias (AS ...) for non-variable expressions")
+            })?;
+            Ok((name, Bound::Value(eval(other, row, params)?)))
+        }
+    }
+}
+
+fn grouped_bindings(
+    items: &[ReturnItem],
+    rows: &[Row],
+    params: &CypherParameters,
+) -> Result<Vec<Row>> {
+    // Group by the non-aggregate items; carry bare-variable keys as their
+    // original binding, computed keys/aggregates as values.
+    let key_items: Vec<&ReturnItem> = items
+        .iter()
+        .filter(|i| !expr_has_aggregate(&i.expr))
+        .collect();
+
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, (Row, Vec<usize>)> = HashMap::new();
+    for (idx, row) in rows.iter().enumerate() {
+        let key_values: Vec<Value> = key_items
+            .iter()
+            .map(|i| eval(&i.expr, row, params))
+            .collect::<Result<_>>()?;
+        let key = return_row_key(&key_values, "WITH GROUP BY")?;
+        groups
+            .entry(key.clone())
+            .or_insert_with(|| {
+                order.push(key);
+                (row.clone(), Vec::new())
+            })
+            .1
+            .push(idx);
+    }
+    if key_items.is_empty() && rows.is_empty() {
+        order.push(String::new());
+        groups.insert(String::new(), (Row::new(), Vec::new()));
+    }
+
+    let mut out = Vec::with_capacity(order.len());
+    for key in &order {
+        let (representative, group_idxs) = &groups[key];
+        let group_rows: Vec<&Row> = group_idxs.iter().map(|&i| &rows[i]).collect();
+        let mut next = Row::new();
+        for item in items {
+            if expr_has_aggregate(&item.expr) {
+                let name = item.alias.clone().ok_or_else(|| {
+                    gql_name("WITH requires an alias (AS ...) for aggregate expressions")
+                })?;
+                next.insert(name, Bound::Value(eval_aggregate(&item.expr, &group_rows, params)?));
+            } else {
+                let (name, bound) = binding_for_item(item, representative, params)?;
+                next.insert(name, bound);
+            }
+        }
+        out.push(next);
+    }
+    Ok(out)
+}
+
+fn dedup_bindings(
+    rows: Vec<Row>,
+    items: &[ReturnItem],
+    star: bool,
+    params: &CypherParameters,
+) -> Result<Vec<Row>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut values: Vec<Value> = Vec::new();
+        if star {
+            for (_, bound) in &row {
+                values.push(bound_value(bound)?);
+            }
+        }
+        for item in items {
+            values.push(eval(&item.expr, &row, params)?);
+        }
+        if seen.insert(return_row_key(&values, "WITH DISTINCT")?) {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
+fn order_bindings(rows: &mut [Row], order_by: &[OrderItem], params: &CypherParameters) -> Result<()> {
+    if order_by.is_empty() {
+        return Ok(());
+    }
+    let mut keyed: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
+    for row in rows.iter() {
+        let mut keys = Vec::with_capacity(order_by.len());
+        for item in order_by {
+            keys.push(eval(&item.expr, row, params)?);
+        }
+        keyed.push(keys);
+    }
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        for (k, item) in order_by.iter().enumerate() {
+            let ord = compare_return_values(&keyed[a][k], &keyed[b][k]);
+            let ord = if item.descending { ord.reverse() } else { ord };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    let reordered: Vec<Row> = order.iter().map(|&i| rows[i].clone()).collect();
+    rows.clone_from_slice(&reordered);
+    Ok(())
+}
+
+fn skip_limit_bindings(
+    rows: &mut Vec<Row>,
+    projection: &Projection,
+    params: &CypherParameters,
+) -> Result<()> {
+    if let Some(skip) = &projection.skip {
+        let n = eval_usize(skip, params, "SKIP")?;
+        rows.drain(0..n.min(rows.len()));
+    }
+    if let Some(limit) = &projection.limit {
+        let n = eval_usize(limit, params, "LIMIT")?;
+        rows.truncate(n);
+    }
+    Ok(())
+}
+
+fn bound_value(bound: &Bound) -> Result<Value> {
+    match bound {
+        Bound::Node(node) => graph_node_value(node),
+        Bound::Edge(edge) => graph_edge_value(edge),
+        Bound::Value(value) => Ok(value.clone()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +1013,7 @@ fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
         Expr::Variable(name) => match row.get(name) {
             Some(Bound::Node(node)) => graph_node_value(node),
             Some(Bound::Edge(edge)) => graph_edge_value(edge),
+            Some(Bound::Value(value)) => Ok(value.clone()),
             None => Err(gql_name(format!("variable `{name}` is not bound"))),
         },
         Expr::Property { base, key } => eval_property(base, key, row, params),
@@ -942,6 +1170,10 @@ fn eval_property(base: &Expr, key: &str, row: &Row, params: &CypherParameters) -
         return match row.get(name) {
             Some(Bound::Node(node)) => Ok(project_node_value(node, key)),
             Some(Bound::Edge(edge)) => Ok(project_edge_value(edge, key)),
+            Some(Bound::Value(Value::Json(serde_json::Value::Object(map)))) => {
+                Ok(map.get(key).map(json_to_value).unwrap_or(Value::Null))
+            }
+            Some(Bound::Value(_)) => Ok(Value::Null),
             None => Err(gql_name(format!("variable `{name}` is not bound"))),
         };
     }
@@ -1387,6 +1619,60 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, GrustError::CypherUnresolvedIdentity(_)));
+    }
+
+    #[test]
+    fn with_carry_and_filter() {
+        let t = run("MATCH (n:Person) WITH n WHERE n.age > 40 RETURN n.name ORDER BY n.name");
+        assert_eq!(
+            t.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
+            vec![Value::from("Alan"), Value::from("Grace")]
+        );
+    }
+
+    #[test]
+    fn with_computed_alias() {
+        let t = run("MATCH (n:Person) WITH n.age AS age WHERE age >= 40 RETURN age ORDER BY age");
+        assert_eq!(t.rows, vec![vec![Value::Int(41)], vec![Value::Int(85)]]);
+    }
+
+    #[test]
+    fn with_aggregate_then_return() {
+        let t = run("MATCH (n) WITH n.label AS label, count(*) AS c RETURN label, c ORDER BY label");
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::from("City"), Value::Int(1)],
+                vec![Value::from("Person"), Value::Int(3)],
+            ]
+        );
+    }
+
+    #[test]
+    fn with_order_limit_horizon() {
+        let t = run("MATCH (n:Person) WITH n ORDER BY n.age DESC LIMIT 1 RETURN n.name");
+        assert_eq!(t.rows, vec![vec![Value::from("Grace")]]);
+    }
+
+    #[test]
+    fn with_carries_node_into_later_match() {
+        let t = run("MATCH (a:Person {name:'Ada'}) WITH a MATCH (a)-[:KNOWS]->(b) RETURN b.name");
+        assert_eq!(t.rows, vec![vec![Value::from("Alan")]]);
+    }
+
+    #[test]
+    fn unwind_list() {
+        let t = run("UNWIND [1, 2, 3] AS x RETURN x");
+        assert_eq!(
+            t.rows,
+            vec![vec![Value::Int(1)], vec![Value::Int(2)], vec![Value::Int(3)]]
+        );
+    }
+
+    #[test]
+    fn unwind_cross_product_with_match() {
+        let t = run("MATCH (n:Person) UNWIND [1, 2] AS k RETURN n.name, k");
+        assert_eq!(t.rows.len(), 6);
     }
 
     #[test]
