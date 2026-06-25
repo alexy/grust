@@ -110,6 +110,11 @@ const PUSHABLE_SEGMENTS: &[&str] = &[
     "MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN a.name, b.name",
     "MATCH (a:Person {name:'Ada'})-[:KNOWS]-(b) RETURN b.name",
     "MATCH (a:Person)-[:RATED]-(b) RETURN a.name, b.name",
+    // Multi-segment (chained) paths.
+    "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.name, b.name, c.name",
+    "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE c.age >= 80 RETURN a.name, c.name",
+    "MATCH (a:Person)-[:KNOWS]->(b)<-[:KNOWS]-(c) RETURN a.name, c.name",
+    "MATCH (a:Person)-[:KNOWS]->(b)-[:RATED]->(c) RETURN a.name, c.name",
 ];
 
 #[tokio::test]
@@ -245,7 +250,7 @@ async fn untyped_segment_edge_ordering_matches_reference() {
         .unwrap();
     assert!(plan.pushes_ordering(&UntypedSqlite));
     let sql = plan.to_sql(&UntypedSqlite);
-    assert!(sql.contains("CAST(json_extract(re.props"), "expected an edge cast in `{sql}`");
+    assert!(sql.contains("CAST(json_extract(e0.props"), "expected an edge cast in `{sql}`");
     let n = plan.column_count();
     let mut rows = conn.query(&sql, ()).await.unwrap();
     let mut text_rows = Vec::new();

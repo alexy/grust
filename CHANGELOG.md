@@ -19,7 +19,10 @@ reconstructed from Git history, release commits, and the shipped docs.
   relationship segment** (`(a)-[:T]->(b)` / `<-[:T]-`, multiple rel types, inline
   endpoint/edge properties, and `WHERE` over `a`/`r`/`b`), lowered to a
   `grust_edges`/`grust_nodes` join; the backend returns the matched columns as
-  text and `grust_cypher` reconstructs the `(a, r, b)` bindings before projecting.
+  text and `grust_cypher` reconstructs the bindings before projecting. This now
+  covers **multi-segment paths** (`(a)-[]->(b)-[]->(c)`, chained joins) and
+  **undirected** segments (`(a)-[]-(b)`, matched in either orientation), in any
+  per-segment direction.
   `WHERE … IN [literals]` (and `NOT … IN`) is also pushed, on both the node and
   segment paths, for non-empty homogeneous int/float/string lists. `ORDER BY` /
   `SKIP` / `LIMIT` are pushed into SQL on the single-node path for dialects whose

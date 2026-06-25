@@ -98,10 +98,19 @@ otherwise ordering stays in the reference projection. `SailGraphStore` derives
 exact-sequence equality. `ORDER BY`/`SKIP`/`LIMIT` pushdown now covers **both the
 node and the relationship-segment paths**.
 
-Deferred (next pushdown increments, each gated by the oracle): edge-property
-ordering on untyped dialects (needs edge type hints); undirected and
-multi-segment / variable-length paths; path variables; `STARTS·ENDS·CONTAINS` /
-arithmetic predicates; boolean literals.
+**Multi-segment and undirected paths.** The segment planner generalized to a
+chain of K segments (`SegmentReadPushdown` now holds `node_labels: Vec<…>` +
+`segments: Vec<SegSpec>`; nodes aliased `n0..nK`, edges `e0..e{K-1}`). It pushes
+`(a)-[]->(b)-[]->(c)…` (chained joins, any per-segment direction) and
+**undirected** segments (`(a)-[]-(b)`, OR join matching either orientation, both
+orientations emitted like the reference). Repeated variables across positions and
+path variables fall back to the reference. Operands/ordering are indexed by node
+position / segment. Edge-property `ORDER BY` on untyped dialects uses
+`TypeHints::edge_property_kind` when the segment has a single typed relationship.
+
+Deferred (next pushdown increments, each gated by the oracle): variable-length
+paths (`*m..n`, needs recursive CTE + no-repeated-nodes); path variables;
+`STARTS·ENDS·CONTAINS` / arithmetic predicates; boolean literals.
 
 ---
 

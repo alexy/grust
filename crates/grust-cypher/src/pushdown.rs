@@ -894,20 +894,21 @@ fn render_float(f: f64) -> String {
 use crate::read::PushedBinding;
 use grust_core::{Edge, EdgeId, Label, NodeId, Props};
 
-/// Which endpoint of the segment a property/label refers to.
+/// The role a pattern variable plays: a node at position `i`, or an edge at
+/// segment `j`. Used to resolve `WHERE`/`ORDER BY` operands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Endpoint {
-    A,
-    B,
+enum Role {
+    Node(usize),
+    Edge(usize),
 }
 
-/// An operand of a segment filter: a node label/property of an endpoint, or an
-/// edge property of the relationship.
+/// An operand of a path filter: a node label/property at position `i`, or an edge
+/// property at segment `j`.
 #[derive(Clone, Debug, PartialEq)]
 enum SegOperand {
-    NodeLabel(Endpoint),
-    NodeProp(Endpoint, String),
-    EdgeProp(String),
+    NodeLabel(usize),
+    NodeProp(usize, String),
+    EdgeProp(usize, String),
 }
 
 /// A pushable segment filter predicate.
@@ -931,13 +932,20 @@ enum SegPredicate {
     },
 }
 
-/// One binding the segment query selects and reconstructs, in SELECT-column order.
+/// One binding the path query selects and reconstructs, in SELECT-column order.
 #[derive(Clone, Debug, PartialEq)]
 enum SelectedBinding {
-    /// Endpoint node bound to `var` (3 columns: id, label, props).
-    Node { var: String, endpoint: Endpoint },
-    /// The relationship edge bound to `var` (5 columns: id, src, dst, type, props).
-    Edge { var: String },
+    /// Node at position `node` bound to `var` (3 columns: id, label, props).
+    Node { var: String, node: usize },
+    /// Edge at segment `edge` bound to `var` (5 columns: id, src, dst, type, props).
+    Edge { var: String, edge: usize },
+}
+
+/// One segment of the path: its direction and relationship types.
+#[derive(Clone, Debug, PartialEq)]
+struct SegSpec {
+    direction: SegDirection,
+    rel_types: Vec<String>,
 }
 
 /// The traversal direction of a lowered relationship segment.
@@ -951,19 +959,18 @@ enum SegDirection {
     Undirected,
 }
 
-/// A lowered single relationship segment.
+/// A lowered relationship path of one or more fixed-length segments.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SegmentReadPushdown {
-    /// How `na`/`nb` join to the edge's src/dst columns.
-    direction: SegDirection,
-    a_label: Option<String>,
-    b_label: Option<String>,
-    rel_types: Vec<String>,
+    /// Label per node position (`n0..=nK`); `None` for an unlabeled node.
+    node_labels: Vec<Option<String>>,
+    /// One spec per segment (`e0..e{K-1}`).
+    segments: Vec<SegSpec>,
     filter: Option<SegPredicate>,
     /// Selected bindings in SELECT order (only pattern vars that are bound).
     selected: Vec<SelectedBinding>,
     /// `ORDER BY`/`SKIP`/`LIMIT` lowered for SQL pushdown, when structurally
-    /// pushable (same rules as the node path; keys reference `a`/`r`/`b`).
+    /// pushable (same rules as the node path; keys reference any path variable).
     ordering: Option<SegPushedOrdering>,
     projection: Projection,
 }
@@ -1025,126 +1032,133 @@ fn lower_segment(
         return None;
     }
     let pattern = &match_clause.patterns[0];
-    if pattern.variable.is_some() || pattern.segments.len() != 1 {
+    // No path variable; at least one segment (node-only is handled by the node
+    // planner).
+    if pattern.variable.is_some() || pattern.segments.is_empty() {
         return None;
     }
-    let a = &pattern.start;
-    let segment = &pattern.segments[0];
-    let rel = &segment.relationship;
-    let b = &segment.node;
+    let k = pattern.segments.len();
 
-    let direction = match rel.direction {
-        Direction::Outgoing => SegDirection::Outgoing,
-        Direction::Incoming => SegDirection::Incoming,
-        Direction::Undirected => SegDirection::Undirected,
-    };
-    // No variable-length, no relationship var-length bound.
-    if rel.length.is_some() {
-        return None;
+    // Node patterns by position: [start, seg0.node, seg1.node, …]; ≤1 label each.
+    let mut node_patterns: Vec<&NodePattern> = Vec::with_capacity(k + 1);
+    node_patterns.push(&pattern.start);
+    for seg in &pattern.segments {
+        node_patterns.push(&seg.node);
     }
-    // At most one label per endpoint.
-    if a.labels.len() > 1 || b.labels.len() > 1 {
-        return None;
-    }
-
-    // Variable identities. Endpoints must differ to keep the join unambiguous.
-    let a_var = a.variable.clone();
-    let b_var = b.variable.clone();
-    let rel_var = rel.variable.clone();
-    if let (Some(av), Some(bv)) = (&a_var, &b_var) {
-        if av == bv {
+    let mut node_labels = Vec::with_capacity(k + 1);
+    for np in &node_patterns {
+        if np.labels.len() > 1 {
             return None;
         }
+        node_labels.push(np.labels.first().cloned());
     }
-    // A relationship variable that collides with a node variable is rejected.
-    if let Some(rv) = &rel_var {
-        if Some(rv) == a_var.as_ref() || Some(rv) == b_var.as_ref() {
+
+    // Segment specs; no variable-length bounds.
+    let mut segments = Vec::with_capacity(k);
+    for seg in &pattern.segments {
+        let rel = &seg.relationship;
+        if rel.length.is_some() {
             return None;
+        }
+        let direction = match rel.direction {
+            Direction::Outgoing => SegDirection::Outgoing,
+            Direction::Incoming => SegDirection::Incoming,
+            Direction::Undirected => SegDirection::Undirected,
+        };
+        segments.push(SegSpec {
+            direction,
+            rel_types: rel.types.clone(),
+        });
+    }
+
+    // Variable -> role. A repeated variable (any position) is rejected so the
+    // join stays unambiguous; the reference would equate them, we fall back.
+    let mut roles: std::collections::HashMap<String, Role> = std::collections::HashMap::new();
+    for (i, np) in node_patterns.iter().enumerate() {
+        if let Some(v) = &np.variable {
+            if roles.insert(v.clone(), Role::Node(i)).is_some() {
+                return None;
+            }
+        }
+    }
+    for (j, seg) in pattern.segments.iter().enumerate() {
+        if let Some(v) = &seg.relationship.variable {
+            if roles.insert(v.clone(), Role::Edge(j)).is_some() {
+                return None;
+            }
         }
     }
 
-    // Build the filter: inline endpoint props, inline rel props, then WHERE.
+    // Filter: inline node props, inline edge props, then WHERE.
     let mut filter: Option<SegPredicate> = None;
-    if let Some(map) = &a.properties {
-        for (key, value) in &map.entries {
-            filter = Some(seg_conjoin(filter, seg_inline(Endpoint::A, key, value, params)?));
+    for (i, np) in node_patterns.iter().enumerate() {
+        if let Some(map) = &np.properties {
+            for (key, value) in &map.entries {
+                let scalar = lower_scalar(value, params)?;
+                let operand = if key == "label" {
+                    SegOperand::NodeLabel(i)
+                } else {
+                    SegOperand::NodeProp(i, lower_seg_key(key)?)
+                };
+                filter = Some(seg_conjoin(
+                    filter,
+                    SegPredicate::Compare {
+                        operand,
+                        op: CmpOp::Eq,
+                        value: scalar,
+                    },
+                ));
+            }
         }
     }
-    if let Some(map) = &b.properties {
-        for (key, value) in &map.entries {
-            filter = Some(seg_conjoin(filter, seg_inline(Endpoint::B, key, value, params)?));
-        }
-    }
-    if let Some(map) = &rel.properties {
-        for (key, value) in &map.entries {
-            let scalar = lower_scalar(value, params)?;
-            let operand = SegOperand::EdgeProp(lower_seg_key(key)?);
-            filter = Some(seg_conjoin(
-                filter,
-                SegPredicate::Compare {
-                    operand,
-                    op: CmpOp::Eq,
-                    value: scalar,
-                },
-            ));
+    for (j, seg) in pattern.segments.iter().enumerate() {
+        if let Some(map) = &seg.relationship.properties {
+            for (key, value) in &map.entries {
+                let scalar = lower_scalar(value, params)?;
+                filter = Some(seg_conjoin(
+                    filter,
+                    SegPredicate::Compare {
+                        operand: SegOperand::EdgeProp(j, lower_seg_key(key)?),
+                        op: CmpOp::Eq,
+                        value: scalar,
+                    },
+                ));
+            }
         }
     }
     if let Some(where_expr) = &match_clause.where_clause {
-        let resolver = VarRoles {
-            a: a_var.as_deref(),
-            b: b_var.as_deref(),
-            rel: rel_var.as_deref(),
-        };
-        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &resolver, params)?));
+        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &roles, params)?));
     }
 
-    // Selected bindings, in SELECT order a, r, b — only those with a variable.
+    // Selected bindings in SELECT order: n0, e0, n1, e1, …, nK (vars only).
     let mut selected = Vec::new();
-    if let Some(var) = &a_var {
+    if let Some(var) = &node_patterns[0].variable {
         selected.push(SelectedBinding::Node {
             var: var.clone(),
-            endpoint: Endpoint::A,
+            node: 0,
         });
     }
-    if let Some(var) = &rel_var {
-        selected.push(SelectedBinding::Edge { var: var.clone() });
-    }
-    if let Some(var) = &b_var {
-        selected.push(SelectedBinding::Node {
-            var: var.clone(),
-            endpoint: Endpoint::B,
-        });
+    for (j, seg) in pattern.segments.iter().enumerate() {
+        if let Some(var) = &seg.relationship.variable {
+            selected.push(SelectedBinding::Edge {
+                var: var.clone(),
+                edge: j,
+            });
+        }
+        if let Some(var) = &node_patterns[j + 1].variable {
+            selected.push(SelectedBinding::Node {
+                var: var.clone(),
+                node: j + 1,
+            });
+        }
     }
 
-    let a_label = a.labels.first().cloned();
-    let b_label = b.labels.first().cloned();
-    let roles = VarRoles {
-        a: a_var.as_deref(),
-        b: b_var.as_deref(),
-        rel: rel_var.as_deref(),
-    };
-    // A single relationship type lets edge-property ordering be typed on untyped
-    // dialects; multiple/absent types leave the edge kind unknown.
-    let edge_type = match rel.types.as_slice() {
-        [one] => Some(one.as_str()),
-        _ => None,
-    };
     let projection = return_clause.projection.clone();
-    let ordering = compute_seg_ordering(
-        &projection,
-        &roles,
-        a_label.as_deref(),
-        b_label.as_deref(),
-        edge_type,
-        params,
-        hints,
-    );
+    let ordering = compute_seg_ordering(&projection, &roles, &node_labels, &segments, params, hints);
 
     Some(SegmentReadPushdown {
-        direction,
-        a_label,
-        b_label,
-        rel_types: rel.types.clone(),
+        node_labels,
+        segments,
         filter,
         selected,
         ordering,
@@ -1158,10 +1172,9 @@ fn lower_segment(
 /// keyed by the relevant endpoint label (edge properties are left unknown).
 fn compute_seg_ordering(
     projection: &Projection,
-    roles: &VarRoles,
-    a_label: Option<&str>,
-    b_label: Option<&str>,
-    edge_type: Option<&str>,
+    roles: &std::collections::HashMap<String, Role>,
+    node_labels: &[Option<String>],
+    segments: &[SegSpec],
     params: &CypherParameters,
     hints: &dyn TypeHints,
 ) -> Option<SegPushedOrdering> {
@@ -1189,9 +1202,17 @@ fn compute_seg_ordering(
         let operand = lower_seg_operand(resolved, roles)?;
         let kind = match &operand {
             SegOperand::NodeLabel(_) => Some(ScalarKind::Str),
-            SegOperand::NodeProp(Endpoint::A, key) => hints.node_property_kind(a_label, key),
-            SegOperand::NodeProp(Endpoint::B, key) => hints.node_property_kind(b_label, key),
-            SegOperand::EdgeProp(key) => hints.edge_property_kind(edge_type, key),
+            SegOperand::NodeProp(i, key) => {
+                hints.node_property_kind(node_labels[*i].as_deref(), key)
+            }
+            SegOperand::EdgeProp(j, key) => {
+                // A single relationship type lets the edge property be typed.
+                let edge_type = match segments[*j].rel_types.as_slice() {
+                    [one] => Some(one.as_str()),
+                    _ => None,
+                };
+                hints.edge_property_kind(edge_type, key)
+            }
         };
         keys.push(SegOrderKey {
             operand,
@@ -1210,37 +1231,14 @@ fn compute_seg_ordering(
     Some(SegPushedOrdering { keys, skip, limit })
 }
 
-/// Variable name → segment role mapping for WHERE lowering.
-struct VarRoles<'a> {
-    a: Option<&'a str>,
-    b: Option<&'a str>,
-    rel: Option<&'a str>,
-}
+/// A map from variable name to its path role, for WHERE/ORDER lowering.
+type RoleMap = std::collections::HashMap<String, Role>;
 
 fn seg_conjoin(existing: Option<SegPredicate>, next: SegPredicate) -> SegPredicate {
     match existing {
         None => next,
         Some(prev) => SegPredicate::And(Box::new(prev), Box::new(next)),
     }
-}
-
-fn seg_inline(
-    endpoint: Endpoint,
-    key: &str,
-    value: &Expr,
-    params: &CypherParameters,
-) -> Option<SegPredicate> {
-    let scalar = lower_scalar(value, params)?;
-    let operand = if key == "label" {
-        SegOperand::NodeLabel(endpoint)
-    } else {
-        SegOperand::NodeProp(endpoint, lower_seg_key(key)?)
-    };
-    Some(SegPredicate::Compare {
-        operand,
-        op: CmpOp::Eq,
-        value: scalar,
-    })
 }
 
 fn lower_seg_key(key: &str) -> Option<String> {
@@ -1253,7 +1251,7 @@ fn lower_seg_key(key: &str) -> Option<String> {
 
 fn lower_seg_predicate(
     expr: &Expr,
-    roles: &VarRoles,
+    roles: &RoleMap,
     params: &CypherParameters,
 ) -> Option<SegPredicate> {
     match expr {
@@ -1313,66 +1311,50 @@ fn lower_seg_predicate(
     }
 }
 
-fn lower_seg_operand(expr: &Expr, roles: &VarRoles) -> Option<SegOperand> {
+fn lower_seg_operand(expr: &Expr, roles: &RoleMap) -> Option<SegOperand> {
     let Expr::Property { base, key } = expr else {
         return None;
     };
     let Expr::Variable(name) = base.as_ref() else {
         return None;
     };
-    let name = name.as_str();
-    if roles.a == Some(name) {
-        Some(if key == "label" {
-            SegOperand::NodeLabel(Endpoint::A)
+    match roles.get(name.as_str())? {
+        Role::Node(i) => Some(if key == "label" {
+            SegOperand::NodeLabel(*i)
         } else {
-            SegOperand::NodeProp(Endpoint::A, lower_seg_key(key)?)
-        })
-    } else if roles.b == Some(name) {
-        Some(if key == "label" {
-            SegOperand::NodeLabel(Endpoint::B)
-        } else {
-            SegOperand::NodeProp(Endpoint::B, lower_seg_key(key)?)
-        })
-    } else if roles.rel == Some(name) {
+            SegOperand::NodeProp(*i, lower_seg_key(key)?)
+        }),
         // Edges have no synthetic `label`; `r.key` is always a property.
-        Some(SegOperand::EdgeProp(lower_seg_key(key)?))
-    } else {
-        None
+        Role::Edge(j) => Some(SegOperand::EdgeProp(*j, lower_seg_key(key)?)),
     }
 }
 
 impl SegmentReadPushdown {
-    /// The SQL alias for endpoint A's node table (`na`) / B's (`nb`).
-    fn endpoint_alias(endpoint: Endpoint) -> &'static str {
-        match endpoint {
-            Endpoint::A => "na",
-            Endpoint::B => "nb",
-        }
-    }
-
-    /// The `na`/`nb` join clauses for the segment's direction. Undirected matches
-    /// either orientation, so (like the reference) each non-self-loop edge yields
-    /// both `(a=src,b=dst)` and `(a=dst,b=src)`.
-    fn join_clauses(&self) -> (String, String) {
-        match self.direction {
+    /// The `e{j}`/`n{j+1}` join clauses connecting node `j` to node `j+1` through
+    /// segment `j`. Undirected matches either orientation, reproducing the
+    /// reference's two-orientation behavior for non-self-loop edges.
+    fn segment_join(j: usize, direction: SegDirection) -> (String, String) {
+        let (nj, ej, nj1) = (format!("n{j}"), format!("e{j}"), format!("n{}", j + 1));
+        match direction {
             SegDirection::Outgoing => (
-                "na.id = re.src_id".to_string(),
-                "nb.id = re.dst_id".to_string(),
+                format!("{ej}.src_id = {nj}.id"),
+                format!("{nj1}.id = {ej}.dst_id"),
             ),
             SegDirection::Incoming => (
-                "na.id = re.dst_id".to_string(),
-                "nb.id = re.src_id".to_string(),
+                format!("{ej}.dst_id = {nj}.id"),
+                format!("{nj1}.id = {ej}.src_id"),
             ),
             SegDirection::Undirected => (
-                "(na.id = re.src_id OR na.id = re.dst_id)".to_string(),
-                "((na.id = re.src_id AND nb.id = re.dst_id) \
-                 OR (na.id = re.dst_id AND nb.id = re.src_id))"
-                    .to_string(),
+                format!("({ej}.src_id = {nj}.id OR {ej}.dst_id = {nj}.id)"),
+                format!(
+                    "(({ej}.src_id = {nj}.id AND {nj1}.id = {ej}.dst_id) \
+                     OR ({ej}.dst_id = {nj}.id AND {nj1}.id = {ej}.src_id))"
+                ),
             ),
         }
     }
 
-    /// Render the segment join + filter. The SELECT list emits, in order, the
+    /// Render the path join chain + filter. The SELECT list emits, in order, the
     /// columns for each selected binding (node: id,label,props; edge:
     /// id,src_id,dst_id,edge_type,props) — all text columns, reconstructed by
     /// [`Self::project_text_rows`].
@@ -1383,18 +1365,17 @@ impl SegmentReadPushdown {
         let mut cols: Vec<String> = Vec::new();
         for binding in &self.selected {
             match binding {
-                SelectedBinding::Node { endpoint, .. } => {
-                    let a = Self::endpoint_alias(*endpoint);
-                    cols.push(format!("{a}.id"));
-                    cols.push(format!("{a}.label"));
-                    cols.push(format!("{a}.props"));
+                SelectedBinding::Node { node, .. } => {
+                    cols.push(format!("n{node}.id"));
+                    cols.push(format!("n{node}.label"));
+                    cols.push(format!("n{node}.props"));
                 }
-                SelectedBinding::Edge { .. } => {
-                    cols.push("re.id".to_string());
-                    cols.push("re.src_id".to_string());
-                    cols.push("re.dst_id".to_string());
-                    cols.push("re.edge_type".to_string());
-                    cols.push("re.props".to_string());
+                SelectedBinding::Edge { edge, .. } => {
+                    cols.push(format!("e{edge}.id"));
+                    cols.push(format!("e{edge}.src_id"));
+                    cols.push(format!("e{edge}.dst_id"));
+                    cols.push(format!("e{edge}.edge_type"));
+                    cols.push(format!("e{edge}.props"));
                 }
             }
         }
@@ -1406,31 +1387,37 @@ impl SegmentReadPushdown {
             cols.join(", ")
         };
 
-        let (na_on, nb_on) = self.join_clauses();
-        let mut sql = format!(
-            "SELECT {select_list} FROM {edges} re \
-             JOIN {nodes} na ON {na_on} \
-             JOIN {nodes} nb ON {nb_on}",
-        );
+        // FROM n0, then chain: JOIN e{j} JOIN n{j+1} per segment.
+        let mut sql = format!("SELECT {select_list} FROM {nodes} n0");
+        for (j, seg) in self.segments.iter().enumerate() {
+            let (edge_on, node_on) = Self::segment_join(j, seg.direction);
+            sql.push_str(&format!(
+                " JOIN {edges} e{j} ON {edge_on} JOIN {nodes} n{} ON {node_on}",
+                j + 1
+            ));
+        }
 
         let mut conditions: Vec<String> = Vec::new();
-        match self.rel_types.as_slice() {
-            [] => {}
-            [one] => conditions.push(format!("re.edge_type = {}", dialect.string_literal(one))),
-            many => {
-                let list = many
-                    .iter()
-                    .map(|t| dialect.string_literal(t))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                conditions.push(format!("re.edge_type IN ({list})"));
+        for (j, seg) in self.segments.iter().enumerate() {
+            match seg.rel_types.as_slice() {
+                [] => {}
+                [one] => {
+                    conditions.push(format!("e{j}.edge_type = {}", dialect.string_literal(one)))
+                }
+                many => {
+                    let list = many
+                        .iter()
+                        .map(|t| dialect.string_literal(t))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    conditions.push(format!("e{j}.edge_type IN ({list})"));
+                }
             }
         }
-        if let Some(label) = &self.a_label {
-            conditions.push(format!("na.label = {}", dialect.string_literal(label)));
-        }
-        if let Some(label) = &self.b_label {
-            conditions.push(format!("nb.label = {}", dialect.string_literal(label)));
+        for (i, label) in self.node_labels.iter().enumerate() {
+            if let Some(label) = label {
+                conditions.push(format!("n{i}.label = {}", dialect.string_literal(label)));
+            }
         }
         if let Some(filter) = &self.filter {
             conditions.push(render_seg_predicate(filter, dialect));
@@ -1533,7 +1520,7 @@ impl SegmentReadPushdown {
                             }),
                         ));
                     }
-                    SelectedBinding::Edge { var } => {
+                    SelectedBinding::Edge { var, .. } => {
                         let id = cell(idx).map(EdgeId::new);
                         let from = cell(idx + 1).unwrap_or_default().to_string();
                         let to = cell(idx + 2).unwrap_or_default().to_string();
@@ -1591,14 +1578,9 @@ fn render_seg_predicate(pred: &SegPredicate, dialect: &dyn SqlDialect) -> String
 
 fn render_seg_operand(operand: &SegOperand, dialect: &dyn SqlDialect) -> String {
     match operand {
-        SegOperand::NodeLabel(endpoint) => {
-            format!("{}.label", SegmentReadPushdown::endpoint_alias(*endpoint))
-        }
-        SegOperand::NodeProp(endpoint, key) => {
-            let props = format!("{}.props", SegmentReadPushdown::endpoint_alias(*endpoint));
-            dialect.json_property(&props, key)
-        }
-        SegOperand::EdgeProp(key) => dialect.json_property("re.props", key),
+        SegOperand::NodeLabel(i) => format!("n{i}.label"),
+        SegOperand::NodeProp(i, key) => dialect.json_property(&format!("n{i}.props"), key),
+        SegOperand::EdgeProp(j, key) => dialect.json_property(&format!("e{j}.props"), key),
     }
 }
 
@@ -1953,11 +1935,26 @@ mod tests {
     fn outgoing_segment_join() {
         assert_eq!(
             seg_spark("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name"),
-            "SELECT na.id, na.label, na.props, nb.id, nb.label, nb.props \
-             FROM `grust_edges` re \
-             JOIN `grust_nodes` na ON na.id = re.src_id \
-             JOIN `grust_nodes` nb ON nb.id = re.dst_id \
-             WHERE re.edge_type = 'KNOWS' AND na.label = 'Person' AND nb.label = 'Person'"
+            "SELECT n0.id, n0.label, n0.props, n1.id, n1.label, n1.props \
+             FROM `grust_nodes` n0 \
+             JOIN `grust_edges` e0 ON e0.src_id = n0.id \
+             JOIN `grust_nodes` n1 ON n1.id = e0.dst_id \
+             WHERE e0.edge_type = 'KNOWS' AND n0.label = 'Person' AND n1.label = 'Person'"
+        );
+    }
+
+    #[test]
+    fn two_segment_path_join() {
+        // Friend-of-friend: a chained join over two segments.
+        assert_eq!(
+            seg_spark("MATCH (a:Person)-[:KNOWS]->()-[:KNOWS]->(c) RETURN a.name, c.name"),
+            "SELECT n0.id, n0.label, n0.props, n2.id, n2.label, n2.props \
+             FROM `grust_nodes` n0 \
+             JOIN `grust_edges` e0 ON e0.src_id = n0.id \
+             JOIN `grust_nodes` n1 ON n1.id = e0.dst_id \
+             JOIN `grust_edges` e1 ON e1.src_id = n1.id \
+             JOIN `grust_nodes` n2 ON n2.id = e1.dst_id \
+             WHERE e0.edge_type = 'KNOWS' AND e1.edge_type = 'KNOWS' AND n0.label = 'Person'"
         );
     }
 
@@ -1965,13 +1962,13 @@ mod tests {
     fn incoming_segment_with_rel_var_and_where() {
         assert_eq!(
             seg_spark("MATCH (a:Person)<-[r:KNOWS]-(b) WHERE b.age > 30 RETURN a.name"),
-            "SELECT na.id, na.label, na.props, re.id, re.src_id, re.dst_id, re.edge_type, re.props, \
-             nb.id, nb.label, nb.props \
-             FROM `grust_edges` re \
-             JOIN `grust_nodes` na ON na.id = re.dst_id \
-             JOIN `grust_nodes` nb ON nb.id = re.src_id \
-             WHERE re.edge_type = 'KNOWS' AND na.label = 'Person' \
-             AND CAST(GET_JSON_OBJECT(nb.props, '$.age') AS BIGINT) > 30"
+            "SELECT n0.id, n0.label, n0.props, e0.id, e0.src_id, e0.dst_id, e0.edge_type, e0.props, \
+             n1.id, n1.label, n1.props \
+             FROM `grust_nodes` n0 \
+             JOIN `grust_edges` e0 ON e0.dst_id = n0.id \
+             JOIN `grust_nodes` n1 ON n1.id = e0.src_id \
+             WHERE e0.edge_type = 'KNOWS' AND n0.label = 'Person' \
+             AND CAST(GET_JSON_OBJECT(n1.props, '$.age') AS BIGINT) > 30"
         );
     }
 
@@ -1979,12 +1976,12 @@ mod tests {
     fn segment_multiple_rel_types_and_inline_props() {
         assert_eq!(
             seg_spark("MATCH (a {city:'London'})-[:KNOWS|FOLLOWS]->(b) RETURN a.name, b.name"),
-            "SELECT na.id, na.label, na.props, nb.id, nb.label, nb.props \
-             FROM `grust_edges` re \
-             JOIN `grust_nodes` na ON na.id = re.src_id \
-             JOIN `grust_nodes` nb ON nb.id = re.dst_id \
-             WHERE re.edge_type IN ('KNOWS', 'FOLLOWS') \
-             AND GET_JSON_OBJECT(na.props, '$.city') = 'London'"
+            "SELECT n0.id, n0.label, n0.props, n1.id, n1.label, n1.props \
+             FROM `grust_nodes` n0 \
+             JOIN `grust_edges` e0 ON e0.src_id = n0.id \
+             JOIN `grust_nodes` n1 ON n1.id = e0.dst_id \
+             WHERE e0.edge_type IN ('KNOWS', 'FOLLOWS') \
+             AND GET_JSON_OBJECT(n0.props, '$.city') = 'London'"
         );
     }
 
@@ -1994,11 +1991,11 @@ mod tests {
             seg_plan("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name")
                 .unwrap()
                 .to_sql(&SqliteDialect),
-            "SELECT na.id, na.label, na.props, nb.id, nb.label, nb.props \
-             FROM \"grust_edges\" re \
-             JOIN \"grust_nodes\" na ON na.id = re.src_id \
-             JOIN \"grust_nodes\" nb ON nb.id = re.dst_id \
-             WHERE re.edge_type = 'KNOWS' AND na.label = 'Person' AND nb.label = 'Person'"
+            "SELECT n0.id, n0.label, n0.props, n1.id, n1.label, n1.props \
+             FROM \"grust_nodes\" n0 \
+             JOIN \"grust_edges\" e0 ON e0.src_id = n0.id \
+             JOIN \"grust_nodes\" n1 ON n1.id = e0.dst_id \
+             WHERE e0.edge_type = 'KNOWS' AND n0.label = 'Person' AND n1.label = 'Person'"
         );
     }
 
@@ -2007,12 +2004,12 @@ mod tests {
         // Anonymous source endpoint: only `r` and `b` are selected.
         assert_eq!(
             seg_spark("MATCH ()-[r:RATED]->(b) WHERE r.stars >= 4 RETURN b.name"),
-            "SELECT re.id, re.src_id, re.dst_id, re.edge_type, re.props, nb.id, nb.label, nb.props \
-             FROM `grust_edges` re \
-             JOIN `grust_nodes` na ON na.id = re.src_id \
-             JOIN `grust_nodes` nb ON nb.id = re.dst_id \
-             WHERE re.edge_type = 'RATED' \
-             AND CAST(GET_JSON_OBJECT(re.props, '$.stars') AS BIGINT) >= 4"
+            "SELECT e0.id, e0.src_id, e0.dst_id, e0.edge_type, e0.props, n1.id, n1.label, n1.props \
+             FROM `grust_nodes` n0 \
+             JOIN `grust_edges` e0 ON e0.src_id = n0.id \
+             JOIN `grust_nodes` n1 ON n1.id = e0.dst_id \
+             WHERE e0.edge_type = 'RATED' \
+             AND CAST(GET_JSON_OBJECT(e0.props, '$.stars') AS BIGINT) >= 4"
         );
     }
 
@@ -2020,12 +2017,12 @@ mod tests {
     fn segment_in_predicate() {
         assert_eq!(
             seg_spark("MATCH (:Person)-[:KNOWS]->(b) WHERE b.name IN ['Alan', 'Grace'] RETURN b.name"),
-            "SELECT nb.id, nb.label, nb.props \
-             FROM `grust_edges` re \
-             JOIN `grust_nodes` na ON na.id = re.src_id \
-             JOIN `grust_nodes` nb ON nb.id = re.dst_id \
-             WHERE re.edge_type = 'KNOWS' AND na.label = 'Person' \
-             AND GET_JSON_OBJECT(nb.props, '$.name') IN ('Alan', 'Grace')"
+            "SELECT n1.id, n1.label, n1.props \
+             FROM `grust_nodes` n0 \
+             JOIN `grust_edges` e0 ON e0.src_id = n0.id \
+             JOIN `grust_nodes` n1 ON n1.id = e0.dst_id \
+             WHERE e0.edge_type = 'KNOWS' AND n0.label = 'Person' \
+             AND GET_JSON_OBJECT(n1.props, '$.name') IN ('Alan', 'Grace')"
         );
     }
 
@@ -2038,7 +2035,7 @@ mod tests {
         assert!(plan.pushes_ordering(&SqliteDialect));
         assert!(plan
             .to_sql(&SqliteDialect)
-            .ends_with("ORDER BY json_extract(nb.props, '$.age') DESC NULLS FIRST LIMIT 3"));
+            .ends_with("ORDER BY json_extract(n1.props, '$.age') DESC NULLS FIRST LIMIT 3"));
         // Spark without hints can't type the JSON sort key → not pushed.
         assert!(!plan.pushes_ordering(&SparkDialect));
     }
@@ -2054,7 +2051,7 @@ mod tests {
         .expect("pushable");
         assert!(plan.pushes_ordering(&SparkDialect));
         assert!(plan.to_sql(&SparkDialect).ends_with(
-            "ORDER BY CAST(GET_JSON_OBJECT(nb.props, '$.age') AS BIGINT) DESC NULLS FIRST LIMIT 3"
+            "ORDER BY CAST(GET_JSON_OBJECT(n1.props, '$.age') AS BIGINT) DESC NULLS FIRST LIMIT 3"
         ));
     }
 
@@ -2070,12 +2067,12 @@ mod tests {
         .expect("pushable");
         assert!(plan.pushes_ordering(&SparkDialect));
         assert!(plan.to_sql(&SparkDialect).ends_with(
-            "ORDER BY CAST(GET_JSON_OBJECT(re.props, '$.stars') AS BIGINT) DESC NULLS FIRST"
+            "ORDER BY CAST(GET_JSON_OBJECT(e0.props, '$.stars') AS BIGINT) DESC NULLS FIRST"
         ));
         // Typed-JSON dialects order the edge property directly (no hints needed).
         assert!(plan
             .to_sql(&SqliteDialect)
-            .ends_with("ORDER BY json_extract(re.props, '$.stars') DESC NULLS FIRST"));
+            .ends_with("ORDER BY json_extract(e0.props, '$.stars') DESC NULLS FIRST"));
     }
 
     #[test]
@@ -2083,12 +2080,12 @@ mod tests {
         // Either orientation matches; the OR join reproduces both like the reference.
         assert_eq!(
             seg_spark("MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN a.name, b.name"),
-            "SELECT na.id, na.label, na.props, nb.id, nb.label, nb.props \
-             FROM `grust_edges` re \
-             JOIN `grust_nodes` na ON (na.id = re.src_id OR na.id = re.dst_id) \
-             JOIN `grust_nodes` nb ON ((na.id = re.src_id AND nb.id = re.dst_id) \
-             OR (na.id = re.dst_id AND nb.id = re.src_id)) \
-             WHERE re.edge_type = 'KNOWS' AND na.label = 'Person' AND nb.label = 'Person'"
+            "SELECT n0.id, n0.label, n0.props, n1.id, n1.label, n1.props \
+             FROM `grust_nodes` n0 \
+             JOIN `grust_edges` e0 ON (e0.src_id = n0.id OR e0.dst_id = n0.id) \
+             JOIN `grust_nodes` n1 ON ((e0.src_id = n0.id AND n1.id = e0.dst_id) \
+             OR (e0.dst_id = n0.id AND n1.id = e0.src_id)) \
+             WHERE e0.edge_type = 'KNOWS' AND n0.label = 'Person' AND n1.label = 'Person'"
         );
     }
 
@@ -2096,10 +2093,9 @@ mod tests {
     fn segment_unsupported_shapes_fall_back() {
         // Variable length.
         assert!(seg_plan("MATCH (a)-[:KNOWS*1..2]->(b) RETURN a").is_none());
-        // Two segments.
-        assert!(seg_plan("MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a").is_none());
-        // Same variable on both endpoints.
+        // Repeated variable across positions (the reference would equate them).
         assert!(seg_plan("MATCH (a)-[:KNOWS]->(a) RETURN a").is_none());
+        assert!(seg_plan("MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(a) RETURN a").is_none());
         // Path variable.
         assert!(seg_plan("MATCH p = (a)-[:KNOWS]->(b) RETURN a").is_none());
         // Plain node pattern (handled by plan_node_read, not the segment planner).
@@ -2113,7 +2109,7 @@ mod tests {
         let plan =
             seg_plan("MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, r.since, b.name")
                 .expect("pushable");
-        // Columns: na(3) + re(5) + nb(3) = 11.
+        // Columns: n0(3) + e0(5) + n1(3) = 11.
         assert_eq!(plan.column_count(), 11);
         let row = vec![
             some("p1"),
