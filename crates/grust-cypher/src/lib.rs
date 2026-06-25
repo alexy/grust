@@ -618,7 +618,7 @@ pub fn sail_cypher_mutation_plan_with_return_options(
 }
 
 #[derive(Default)]
-struct CypherMutationPlanner {
+pub(crate) struct CypherMutationPlanner {
     node_bindings: HashMap<String, NodeId>,
     edge_bindings: HashMap<String, CypherBoundEdgeIdentity>,
     row_node_bindings: HashMap<String, GraphNodeMatch>,
@@ -2143,7 +2143,7 @@ pub fn cypher_execution_error(error: GrustError) -> GrustError {
     }
 }
 
-fn parse_cypher_ddl_statement(statement: &str) -> Result<CypherDdlStatement> {
+pub(crate) fn parse_cypher_ddl_statement(statement: &str) -> Result<CypherDdlStatement> {
     if let Some(rest) = strip_leading_keyword(statement, "CREATE") {
         let rest = rest.trim_start();
         if let Some(rest) = strip_leading_keyword(rest, "CONSTRAINT") {
@@ -2167,7 +2167,7 @@ fn parse_cypher_ddl_statement(statement: &str) -> Result<CypherDdlStatement> {
     )))
 }
 
-fn parse_create_constraint(rest: &str) -> Result<CypherDdlStatement> {
+pub(crate) fn parse_create_constraint(rest: &str) -> Result<CypherDdlStatement> {
     // Split the header (`[name] [IF NOT EXISTS]`) from the body, which starts
     // at `FOR` (or the legacy `ON`).
     let (for_index, body) = find_unquoted_keyword(rest, "FOR")
@@ -2218,7 +2218,7 @@ fn parse_create_constraint(rest: &str) -> Result<CypherDdlStatement> {
     })
 }
 
-fn parse_drop_constraint(rest: &str) -> Result<CypherDdlStatement> {
+pub(crate) fn parse_drop_constraint(rest: &str) -> Result<CypherDdlStatement> {
     let (name, if_exists) = if let Some(if_index) = find_unquoted_keyword(rest, "IF") {
         let tail = rest[if_index + "IF".len()..].trim();
         if !tail.eq_ignore_ascii_case("EXISTS") {
@@ -2240,7 +2240,7 @@ fn parse_drop_constraint(rest: &str) -> Result<CypherDdlStatement> {
 }
 
 /// Parses the optional constraint name in a `CREATE CONSTRAINT` header.
-fn constraint_name(header: &str) -> Result<Option<String>> {
+pub(crate) fn constraint_name(header: &str) -> Result<Option<String>> {
     let header = header.trim();
     if header.is_empty() {
         return Ok(None);
@@ -2256,7 +2256,7 @@ fn constraint_name(header: &str) -> Result<Option<String>> {
 
 /// Parses a constraint `FOR` pattern, returning whether it is a relationship
 /// pattern, the bound variable, and the single label/type.
-fn parse_constraint_pattern(pattern: &str) -> Result<(bool, String, Label)> {
+pub(crate) fn parse_constraint_pattern(pattern: &str) -> Result<(bool, String, Label)> {
     let pattern = pattern.trim();
     if let Some(open) = pattern.find('[') {
         let close = pattern[open + 1..]
@@ -2278,7 +2278,7 @@ fn parse_constraint_pattern(pattern: &str) -> Result<(bool, String, Label)> {
 }
 
 /// Parses the `variable:Label` body inside a constraint pattern.
-fn parse_constraint_var_label(body: &str) -> Result<(String, Label)> {
+pub(crate) fn parse_constraint_var_label(body: &str) -> Result<(String, Label)> {
     let (variable, label) = body
         .split_once(':')
         .ok_or_else(|| cypher_syntax("constraint pattern requires variable:Label"))?;
@@ -2292,7 +2292,7 @@ fn parse_constraint_var_label(body: &str) -> Result<(String, Label)> {
 
 /// Parses a `variable.key IS [NOT NULL|UNIQUE]` constraint predicate, returning
 /// `(is_unique, key)`. The predicate variable must match the pattern variable.
-fn parse_constraint_predicate(predicate: &str, pattern_variable: &str) -> Result<(bool, String)> {
+pub(crate) fn parse_constraint_predicate(predicate: &str, pattern_variable: &str) -> Result<(bool, String)> {
     let is_index = find_unquoted_keyword(predicate, "IS").ok_or_else(|| {
         cypher_syntax("constraint predicate requires 'IS UNIQUE' or 'IS NOT NULL'")
     })?;
@@ -2360,7 +2360,7 @@ pub fn unique_edge_conflict(
         .map(edge_key)
 }
 
-fn split_cypher_statements(cypher: &str) -> Result<Vec<&str>> {
+pub(crate) fn split_cypher_statements(cypher: &str) -> Result<Vec<&str>> {
     let mut statements = Vec::new();
     let mut start = 0usize;
     let mut quote = None;
@@ -2404,7 +2404,7 @@ fn split_cypher_statements(cypher: &str) -> Result<Vec<&str>> {
     Ok(statements)
 }
 
-fn strip_cypher_comments(cypher: &str) -> Result<String> {
+pub(crate) fn strip_cypher_comments(cypher: &str) -> Result<String> {
     let mut output = String::with_capacity(cypher.len());
     let mut chars = cypher.char_indices().peekable();
     let mut quote = None;
@@ -2467,7 +2467,7 @@ fn strip_cypher_comments(cypher: &str) -> Result<String> {
 }
 
 #[derive(Clone, Debug)]
-struct ParsedCypherNode {
+pub(crate) struct ParsedCypherNode {
     variable: Option<String>,
     label: Option<Label>,
     props: Props,
@@ -2475,21 +2475,21 @@ struct ParsedCypherNode {
 }
 
 #[derive(Debug)]
-struct ParsedCypherEdge {
+pub(crate) struct ParsedCypherEdge {
     from_id: NodeId,
     to_id: NodeId,
     edge: Edge,
 }
 
 #[derive(Clone, Debug)]
-struct ParsedCypherEdgeMatch {
+pub(crate) struct ParsedCypherEdgeMatch {
     from: ParsedCypherNode,
     relationship: ParsedCypherRelationship,
     to: ParsedCypherNode,
 }
 
 #[derive(Clone, Debug)]
-struct ParsedCypherRelationship {
+pub(crate) struct ParsedCypherRelationship {
     variable: Option<String>,
     label: Label,
     props: Props,
@@ -2524,20 +2524,20 @@ pub struct CypherRowProducedPathBinding {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ParsedWherePredicate {
+pub(crate) struct ParsedWherePredicate {
     target: String,
     predicate: GraphPropertyPredicate,
 }
 
 #[derive(Clone, Debug, PartialEq)]
-enum CypherWhereBoolean<'a> {
+pub(crate) enum CypherWhereBoolean<'a> {
     Predicate(&'a str),
     Not(Box<CypherWhereBoolean<'a>>),
     And(Vec<CypherWhereBoolean<'a>>),
     Or(Vec<CypherWhereBoolean<'a>>),
 }
 
-fn parse_cypher_node_pattern<'a>(
+pub(crate) fn parse_cypher_node_pattern<'a>(
     input: &'a str,
     parameters: &CypherParameters,
 ) -> Result<(ParsedCypherNode, &'a str)> {
@@ -2560,7 +2560,7 @@ fn parse_cypher_node_pattern<'a>(
     ))
 }
 
-fn parse_cypher_node_body(
+pub(crate) fn parse_cypher_node_body(
     body: &str,
     parameters: &CypherParameters,
 ) -> Result<(Option<String>, Option<Label>, Props)> {
@@ -2582,7 +2582,7 @@ fn parse_cypher_node_body(
     Ok((variable, label, props))
 }
 
-fn parse_optional_cypher_variable(value: &str) -> Result<Option<String>> {
+pub(crate) fn parse_optional_cypher_variable(value: &str) -> Result<Option<String>> {
     let value = value.trim();
     if value.is_empty() {
         return Ok(None);
@@ -2595,12 +2595,12 @@ fn parse_optional_cypher_variable(value: &str) -> Result<Option<String>> {
     )))
 }
 
-fn parse_required_cypher_variable(value: &str, context: &str) -> Result<String> {
+pub(crate) fn parse_required_cypher_variable(value: &str, context: &str) -> Result<String> {
     parse_optional_cypher_variable(value)?
         .ok_or_else(|| GrustError::Unsupported(format!("{context} requires a variable name")))
 }
 
-fn is_cypher_identifier(value: &str) -> bool {
+pub(crate) fn is_cypher_identifier(value: &str) -> bool {
     let mut chars = value.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -2609,7 +2609,7 @@ fn is_cypher_identifier(value: &str) -> bool {
         && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
 }
 
-fn parse_cypher_relationship(
+pub(crate) fn parse_cypher_relationship(
     body: &str,
     parameters: &CypherParameters,
 ) -> Result<ParsedCypherRelationship> {
@@ -2633,7 +2633,7 @@ fn parse_cypher_relationship(
     })
 }
 
-fn validate_optional_edge_id_property(props: &Props) -> Result<()> {
+pub(crate) fn validate_optional_edge_id_property(props: &Props) -> Result<()> {
     edge_id_from_props(props).map(|_| ())
 }
 
@@ -2647,7 +2647,7 @@ pub fn edge_id_from_props(props: &Props) -> Result<Option<String>> {
     }
 }
 
-fn match_node_cardinality(node: &ParsedCypherNode) -> GraphMutationCardinality {
+pub(crate) fn match_node_cardinality(node: &ParsedCypherNode) -> GraphMutationCardinality {
     if node.label.is_some() || !node.props.is_empty() || !node.predicates.is_empty() {
         GraphMutationCardinality::BoundedMany
     } else {
@@ -2655,7 +2655,7 @@ fn match_node_cardinality(node: &ParsedCypherNode) -> GraphMutationCardinality {
     }
 }
 
-fn split_match_where<'a>(
+pub(crate) fn split_match_where<'a>(
     pattern: &'a str,
     parameters: &CypherParameters,
 ) -> Result<(&'a str, Vec<ParsedWherePredicate>)> {
@@ -2675,7 +2675,7 @@ fn split_match_where<'a>(
     Ok((match_pattern, predicates))
 }
 
-fn canonicalize_where_predicates(predicates: &mut Vec<ParsedWherePredicate>) -> Result<()> {
+pub(crate) fn canonicalize_where_predicates(predicates: &mut Vec<ParsedWherePredicate>) -> Result<()> {
     dedupe_where_predicates(predicates);
     merge_where_membership_predicates(predicates)?;
     merge_where_equality_membership_predicates(predicates)?;
@@ -2685,7 +2685,7 @@ fn canonicalize_where_predicates(predicates: &mut Vec<ParsedWherePredicate>) -> 
     Ok(())
 }
 
-fn dedupe_where_predicates(predicates: &mut Vec<ParsedWherePredicate>) {
+pub(crate) fn dedupe_where_predicates(predicates: &mut Vec<ParsedWherePredicate>) {
     let mut deduped = Vec::with_capacity(predicates.len());
     for predicate in predicates.drain(..) {
         if !deduped.contains(&predicate) {
@@ -2695,7 +2695,7 @@ fn dedupe_where_predicates(predicates: &mut Vec<ParsedWherePredicate>) {
     *predicates = deduped;
 }
 
-fn merge_where_membership_predicates(predicates: &mut Vec<ParsedWherePredicate>) -> Result<()> {
+pub(crate) fn merge_where_membership_predicates(predicates: &mut Vec<ParsedWherePredicate>) -> Result<()> {
     let mut merged = Vec::with_capacity(predicates.len());
     for predicate in predicates.drain(..) {
         if !matches!(
@@ -2738,7 +2738,7 @@ fn merge_where_membership_predicates(predicates: &mut Vec<ParsedWherePredicate>)
     Ok(())
 }
 
-fn intersect_membership_values(left: &Value, right: &Value) -> Result<Vec<serde_json::Value>> {
+pub(crate) fn intersect_membership_values(left: &Value, right: &Value) -> Result<Vec<serde_json::Value>> {
     let right_values = cypher_in_predicate_values(right)?
         .into_iter()
         .map(|value| value.to_json())
@@ -2753,7 +2753,7 @@ fn intersect_membership_values(left: &Value, right: &Value) -> Result<Vec<serde_
     Ok(intersection)
 }
 
-fn union_membership_values(left: &Value, right: &Value) -> Result<Vec<serde_json::Value>> {
+pub(crate) fn union_membership_values(left: &Value, right: &Value) -> Result<Vec<serde_json::Value>> {
     let mut union = Vec::new();
     for value in cypher_in_predicate_values(left)?
         .into_iter()
@@ -2764,7 +2764,7 @@ fn union_membership_values(left: &Value, right: &Value) -> Result<Vec<serde_json
     Ok(union)
 }
 
-fn merge_where_equality_membership_predicates(
+pub(crate) fn merge_where_equality_membership_predicates(
     predicates: &mut Vec<ParsedWherePredicate>,
 ) -> Result<()> {
     let mut merged = Vec::with_capacity(predicates.len());
@@ -2806,7 +2806,7 @@ fn merge_where_equality_membership_predicates(
     Ok(())
 }
 
-fn merge_where_equality_membership_pair(
+pub(crate) fn merge_where_equality_membership_pair(
     existing: &mut ParsedWherePredicate,
     incoming: &ParsedWherePredicate,
 ) -> Result<bool> {
@@ -2918,14 +2918,14 @@ fn merge_where_equality_membership_pair(
     Ok(true)
 }
 
-fn membership_contains_value(membership: &Value, value: &Value) -> Result<bool> {
+pub(crate) fn membership_contains_value(membership: &Value, value: &Value) -> Result<bool> {
     let value = value.to_json();
     Ok(cypher_in_predicate_values(membership)?
         .into_iter()
         .any(|candidate| candidate.to_json() == value))
 }
 
-fn difference_membership_values(
+pub(crate) fn difference_membership_values(
     positive: &Value,
     excluded: &Value,
 ) -> Result<Vec<serde_json::Value>> {
@@ -2943,7 +2943,7 @@ fn difference_membership_values(
     Ok(difference)
 }
 
-fn difference_membership_json_values(
+pub(crate) fn difference_membership_json_values(
     positive: &Value,
     excluded: &[serde_json::Value],
 ) -> Result<Vec<serde_json::Value>> {
@@ -2957,7 +2957,7 @@ fn difference_membership_json_values(
     Ok(difference)
 }
 
-fn union_membership_json_values(
+pub(crate) fn union_membership_json_values(
     membership: &Value,
     value: serde_json::Value,
 ) -> Result<Vec<serde_json::Value>> {
@@ -2969,17 +2969,17 @@ fn union_membership_json_values(
     Ok(union)
 }
 
-fn membership_item_json(value: &Value) -> Option<serde_json::Value> {
+pub(crate) fn membership_item_json(value: &Value) -> Option<serde_json::Value> {
     validate_cypher_in_item(value).ok()?;
     Some(value.to_json())
 }
 
-fn set_where_no_match(predicate: &mut ParsedWherePredicate) {
+pub(crate) fn set_where_no_match(predicate: &mut ParsedWherePredicate) {
     predicate.predicate.op = GraphPredicateOp::In;
     predicate.predicate.value = Value::Json(serde_json::Value::Array(Vec::new()));
 }
 
-fn is_where_no_match(predicate: &ParsedWherePredicate) -> bool {
+pub(crate) fn is_where_no_match(predicate: &ParsedWherePredicate) -> bool {
     predicate.predicate.op == GraphPredicateOp::In
         && matches!(
             &predicate.predicate.value,
@@ -2987,7 +2987,7 @@ fn is_where_no_match(predicate: &ParsedWherePredicate) -> bool {
         )
 }
 
-fn merge_where_order_predicates(predicates: &mut Vec<ParsedWherePredicate>) {
+pub(crate) fn merge_where_order_predicates(predicates: &mut Vec<ParsedWherePredicate>) {
     let mut merged = Vec::with_capacity(predicates.len());
     for predicate in predicates.drain(..) {
         if !is_order_predicate_op(predicate.predicate.op) {
@@ -3014,7 +3014,7 @@ fn merge_where_order_predicates(predicates: &mut Vec<ParsedWherePredicate>) {
     *predicates = merged;
 }
 
-fn merge_where_equality_order_predicates(predicates: &mut Vec<ParsedWherePredicate>) {
+pub(crate) fn merge_where_equality_order_predicates(predicates: &mut Vec<ParsedWherePredicate>) {
     let mut merged = Vec::with_capacity(predicates.len());
     for predicate in predicates.drain(..) {
         if !matches!(predicate.predicate.op, GraphPredicateOp::Equal)
@@ -3044,7 +3044,7 @@ fn merge_where_equality_order_predicates(predicates: &mut Vec<ParsedWherePredica
     *predicates = merged;
 }
 
-fn merge_where_equality_order_pair(
+pub(crate) fn merge_where_equality_order_pair(
     existing: &mut ParsedWherePredicate,
     incoming: &ParsedWherePredicate,
 ) -> bool {
@@ -3076,7 +3076,7 @@ fn merge_where_equality_order_pair(
     }
 }
 
-fn equality_satisfies_order_bound(
+pub(crate) fn equality_satisfies_order_bound(
     equality_value: &Value,
     bound_op: GraphPredicateOp,
     bound_value: &Value,
@@ -3090,7 +3090,7 @@ fn equality_satisfies_order_bound(
     })
 }
 
-fn order_bound_excludes_value(
+pub(crate) fn order_bound_excludes_value(
     bound_op: GraphPredicateOp,
     bound_value: &Value,
     value: &Value,
@@ -3100,7 +3100,7 @@ fn order_bound_excludes_value(
         .unwrap_or(false)
 }
 
-fn merge_where_membership_order_predicates(
+pub(crate) fn merge_where_membership_order_predicates(
     predicates: &mut Vec<ParsedWherePredicate>,
 ) -> Result<()> {
     loop {
@@ -3113,7 +3113,7 @@ fn merge_where_membership_order_predicates(
     Ok(())
 }
 
-fn merge_where_membership_order_predicates_once(
+pub(crate) fn merge_where_membership_order_predicates_once(
     predicates: &mut Vec<ParsedWherePredicate>,
 ) -> Result<()> {
     let mut merged = Vec::with_capacity(predicates.len());
@@ -3146,7 +3146,7 @@ fn merge_where_membership_order_predicates_once(
     Ok(())
 }
 
-fn merge_where_membership_order_pair(
+pub(crate) fn merge_where_membership_order_pair(
     existing: &mut ParsedWherePredicate,
     incoming: &ParsedWherePredicate,
 ) -> Result<bool> {
@@ -3174,7 +3174,7 @@ fn merge_where_membership_order_pair(
     }
 }
 
-fn filter_membership_values_by_order_bound(
+pub(crate) fn filter_membership_values_by_order_bound(
     membership: &Value,
     bound_op: GraphPredicateOp,
     bound_value: &Value,
@@ -3188,7 +3188,7 @@ fn filter_membership_values_by_order_bound(
     Ok(filtered)
 }
 
-fn is_order_predicate_op(op: GraphPredicateOp) -> bool {
+pub(crate) fn is_order_predicate_op(op: GraphPredicateOp) -> bool {
     matches!(
         op,
         GraphPredicateOp::GreaterThan
@@ -3198,14 +3198,14 @@ fn is_order_predicate_op(op: GraphPredicateOp) -> bool {
     )
 }
 
-fn is_positive_string_predicate_op(op: GraphPredicateOp) -> bool {
+pub(crate) fn is_positive_string_predicate_op(op: GraphPredicateOp) -> bool {
     matches!(
         op,
         GraphPredicateOp::StartsWith | GraphPredicateOp::EndsWith | GraphPredicateOp::Contains
     )
 }
 
-fn where_predicate_uses_only_string_values(predicate: &ParsedWherePredicate) -> Result<bool> {
+pub(crate) fn where_predicate_uses_only_string_values(predicate: &ParsedWherePredicate) -> Result<bool> {
     match predicate.predicate.op {
         GraphPredicateOp::Equal => Ok(matches!(predicate.predicate.value, Value::String(_))),
         GraphPredicateOp::In => {
@@ -3217,7 +3217,7 @@ fn where_predicate_uses_only_string_values(predicate: &ParsedWherePredicate) -> 
     }
 }
 
-fn merge_where_order_pair(
+pub(crate) fn merge_where_order_pair(
     existing: &mut ParsedWherePredicate,
     incoming: &ParsedWherePredicate,
 ) -> bool {
@@ -3280,12 +3280,12 @@ fn merge_where_order_pair(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OrderBoundKind {
+pub(crate) enum OrderBoundKind {
     Lower,
     Upper,
 }
 
-fn order_bound_kind(op: GraphPredicateOp) -> Option<OrderBoundKind> {
+pub(crate) fn order_bound_kind(op: GraphPredicateOp) -> Option<OrderBoundKind> {
     match op {
         GraphPredicateOp::GreaterThan | GraphPredicateOp::GreaterThanOrEqual => {
             Some(OrderBoundKind::Lower)
@@ -3297,7 +3297,7 @@ fn order_bound_kind(op: GraphPredicateOp) -> Option<OrderBoundKind> {
     }
 }
 
-fn order_lower_is_stricter(
+pub(crate) fn order_lower_is_stricter(
     candidate_op: GraphPredicateOp,
     candidate_value: &Value,
     current_op: GraphPredicateOp,
@@ -3313,7 +3313,7 @@ fn order_lower_is_stricter(
     }
 }
 
-fn order_upper_is_stricter(
+pub(crate) fn order_upper_is_stricter(
     candidate_op: GraphPredicateOp,
     candidate_value: &Value,
     current_op: GraphPredicateOp,
@@ -3329,7 +3329,7 @@ fn order_upper_is_stricter(
     }
 }
 
-fn order_bounds_are_contradictory(
+pub(crate) fn order_bounds_are_contradictory(
     lower_op: GraphPredicateOp,
     lower_value: &Value,
     upper_op: GraphPredicateOp,
@@ -3344,7 +3344,7 @@ fn order_bounds_are_contradictory(
     }
 }
 
-fn compare_where_order_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+pub(crate) fn compare_where_order_values(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
     match (left, right) {
         (Value::Int(left), Value::Int(right)) => Some(left.cmp(right)),
         (Value::Float(left), Value::Float(right)) => left.partial_cmp(right),
@@ -3355,7 +3355,7 @@ fn compare_where_order_values(left: &Value, right: &Value) -> Option<std::cmp::O
     }
 }
 
-fn split_top_level_and(value: &str) -> Result<Vec<&str>> {
+pub(crate) fn split_top_level_and(value: &str) -> Result<Vec<&str>> {
     let mut parts = Vec::new();
     let mut rest = value.trim();
     while let Some(index) = find_top_level_keyword(rest, "AND")? {
@@ -3386,7 +3386,7 @@ fn split_top_level_and(value: &str) -> Result<Vec<&str>> {
     Ok(flattened)
 }
 
-fn split_top_level_or(value: &str) -> Result<Vec<&str>> {
+pub(crate) fn split_top_level_or(value: &str) -> Result<Vec<&str>> {
     let mut parts = Vec::new();
     let mut rest = value.trim();
     while let Some(index) = find_top_level_keyword(rest, "OR")? {
@@ -3413,7 +3413,7 @@ fn split_top_level_or(value: &str) -> Result<Vec<&str>> {
     Ok(flattened)
 }
 
-fn parse_where_boolean_ast(predicate: &str) -> Result<CypherWhereBoolean<'_>> {
+pub(crate) fn parse_where_boolean_ast(predicate: &str) -> Result<CypherWhereBoolean<'_>> {
     let predicate = strip_enclosing_parentheses(predicate.trim())?;
     if predicate.is_empty() {
         return Err(cypher_syntax("MATCH WHERE requires a predicate"));
@@ -3450,7 +3450,7 @@ fn parse_where_boolean_ast(predicate: &str) -> Result<CypherWhereBoolean<'_>> {
     Ok(CypherWhereBoolean::Predicate(predicate))
 }
 
-fn lower_where_boolean_ast(
+pub(crate) fn lower_where_boolean_ast(
     predicate: &CypherWhereBoolean<'_>,
     parameters: &CypherParameters,
 ) -> Result<Vec<ParsedWherePredicate>> {
@@ -3478,7 +3478,7 @@ fn lower_where_boolean_ast(
     }
 }
 
-fn lower_where_boolean_or_branches(
+pub(crate) fn lower_where_boolean_or_branches(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Vec<ParsedWherePredicate>> {
@@ -3493,7 +3493,7 @@ fn lower_where_boolean_or_branches(
     lower_where_or_branches(branches)
 }
 
-fn lower_negated_where_boolean_ast(
+pub(crate) fn lower_negated_where_boolean_ast(
     predicate: &CypherWhereBoolean<'_>,
     parameters: &CypherParameters,
 ) -> Result<Vec<ParsedWherePredicate>> {
@@ -3620,7 +3620,7 @@ fn lower_negated_where_boolean_ast(
     }
 }
 
-fn lower_negated_null_or_terms(
+pub(crate) fn lower_negated_null_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -3684,7 +3684,7 @@ fn lower_negated_null_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_null_string_or_terms(
+pub(crate) fn lower_negated_null_string_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -3759,7 +3759,7 @@ fn lower_negated_null_string_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_null_string_order_or_terms(
+pub(crate) fn lower_negated_null_string_order_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -3849,7 +3849,7 @@ fn lower_negated_null_string_order_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_null_mixed_string_order_or_terms(
+pub(crate) fn lower_negated_null_mixed_string_order_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -3952,7 +3952,7 @@ fn lower_negated_null_mixed_string_order_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_null_mixed_string_or_terms(
+pub(crate) fn lower_negated_null_mixed_string_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -4044,7 +4044,7 @@ fn lower_negated_null_mixed_string_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_null_order_or_terms(
+pub(crate) fn lower_negated_null_order_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -4118,7 +4118,7 @@ fn lower_negated_null_order_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_null_mixed_order_or_terms(
+pub(crate) fn lower_negated_null_mixed_order_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -4231,7 +4231,7 @@ fn lower_negated_null_mixed_order_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_order_or_terms(
+pub(crate) fn lower_negated_order_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -4270,7 +4270,7 @@ fn lower_negated_order_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_string_order_or_terms(
+pub(crate) fn lower_negated_string_order_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -4342,7 +4342,7 @@ fn lower_negated_string_order_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_mixed_string_or_terms(
+pub(crate) fn lower_negated_mixed_string_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -4417,7 +4417,7 @@ fn lower_negated_mixed_string_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_mixed_string_order_or_terms(
+pub(crate) fn lower_negated_mixed_string_order_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -4498,7 +4498,7 @@ fn lower_negated_mixed_string_order_or_terms(
     Ok(Some(predicates))
 }
 
-fn lower_negated_mixed_order_or_terms(
+pub(crate) fn lower_negated_mixed_order_or_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
 ) -> Result<Option<Vec<ParsedWherePredicate>>> {
@@ -4584,7 +4584,7 @@ fn lower_negated_mixed_order_or_terms(
     Ok(Some(predicates))
 }
 
-fn where_boolean_contains_and(predicate: &CypherWhereBoolean<'_>) -> bool {
+pub(crate) fn where_boolean_contains_and(predicate: &CypherWhereBoolean<'_>) -> bool {
     match predicate {
         CypherWhereBoolean::And(_) => true,
         CypherWhereBoolean::Not(inner) => where_boolean_contains_and(inner),
@@ -4593,7 +4593,7 @@ fn where_boolean_contains_and(predicate: &CypherWhereBoolean<'_>) -> bool {
     }
 }
 
-fn parse_where_or_fold_ast_terms(
+pub(crate) fn parse_where_or_fold_ast_terms(
     terms: &[CypherWhereBoolean<'_>],
     parameters: &CypherParameters,
     op: GraphPredicateOp,
@@ -4605,7 +4605,7 @@ fn parse_where_or_fold_ast_terms(
     parse_where_or_fold_parsed_terms(parsed, op)
 }
 
-fn collect_where_or_fold_ast_terms(
+pub(crate) fn collect_where_or_fold_ast_terms(
     predicate: &CypherWhereBoolean<'_>,
     parameters: &CypherParameters,
     parsed: &mut Vec<ParsedWherePredicate>,
@@ -4624,7 +4624,7 @@ fn collect_where_or_fold_ast_terms(
     }
 }
 
-fn parse_where_single_predicate_ast(
+pub(crate) fn parse_where_single_predicate_ast(
     predicate: &CypherWhereBoolean<'_>,
     parameters: &CypherParameters,
 ) -> Result<ParsedWherePredicate> {
@@ -4636,7 +4636,7 @@ fn parse_where_single_predicate_ast(
     }
 }
 
-fn parse_where_or_fold_parsed_terms(
+pub(crate) fn parse_where_or_fold_parsed_terms(
     parsed: Vec<ParsedWherePredicate>,
     op: GraphPredicateOp,
 ) -> Result<ParsedWherePredicate> {
@@ -4665,7 +4665,7 @@ fn parse_where_or_fold_parsed_terms(
     ))
 }
 
-fn lower_where_or_branches(
+pub(crate) fn lower_where_or_branches(
     branches: Vec<Vec<ParsedWherePredicate>>,
 ) -> Result<Vec<ParsedWherePredicate>> {
     let mut no_match_predicate = None;
@@ -4730,7 +4730,7 @@ fn lower_where_or_branches(
     ))
 }
 
-fn prune_subsumed_where_or_branches(branches: &mut Vec<Vec<ParsedWherePredicate>>) -> Result<()> {
+pub(crate) fn prune_subsumed_where_or_branches(branches: &mut Vec<Vec<ParsedWherePredicate>>) -> Result<()> {
     let mut keep = Vec::with_capacity(branches.len());
     for index in 0..branches.len() {
         let mut redundant = false;
@@ -4760,7 +4760,7 @@ fn prune_subsumed_where_or_branches(branches: &mut Vec<Vec<ParsedWherePredicate>
     Ok(())
 }
 
-fn where_branch_implies_all(
+pub(crate) fn where_branch_implies_all(
     branch: &[ParsedWherePredicate],
     required: &[ParsedWherePredicate],
 ) -> Result<bool> {
@@ -4779,7 +4779,7 @@ fn where_branch_implies_all(
     Ok(true)
 }
 
-fn where_branch_preferred_for_subsumption(
+pub(crate) fn where_branch_preferred_for_subsumption(
     candidate: &[ParsedWherePredicate],
     branch: &[ParsedWherePredicate],
 ) -> Result<bool> {
@@ -4817,7 +4817,7 @@ fn where_branch_preferred_for_subsumption(
     Ok(false)
 }
 
-fn where_predicate_implies(
+pub(crate) fn where_predicate_implies(
     predicate: &ParsedWherePredicate,
     required: &ParsedWherePredicate,
 ) -> Result<bool> {
@@ -4947,7 +4947,7 @@ fn where_predicate_implies(
     }
 }
 
-fn where_predicate_implies_is_null(predicate: &ParsedWherePredicate) -> Result<bool> {
+pub(crate) fn where_predicate_implies_is_null(predicate: &ParsedWherePredicate) -> Result<bool> {
     match predicate.predicate.op {
         GraphPredicateOp::Equal => Ok(predicate.predicate.value == Value::Null),
         GraphPredicateOp::In => {
@@ -4959,7 +4959,7 @@ fn where_predicate_implies_is_null(predicate: &ParsedWherePredicate) -> Result<b
     }
 }
 
-fn where_predicate_implies_is_not_null(predicate: &ParsedWherePredicate) -> Result<bool> {
+pub(crate) fn where_predicate_implies_is_not_null(predicate: &ParsedWherePredicate) -> Result<bool> {
     match predicate.predicate.op {
         GraphPredicateOp::Equal => Ok(predicate.predicate.value != Value::Null),
         GraphPredicateOp::NotEqual => Ok(predicate.predicate.value == Value::Null),
@@ -4991,7 +4991,7 @@ fn where_predicate_implies_is_not_null(predicate: &ParsedWherePredicate) -> Resu
     }
 }
 
-fn string_group_contains_value(group: &Value, value: &Value) -> Result<bool> {
+pub(crate) fn string_group_contains_value(group: &Value, value: &Value) -> Result<bool> {
     let Value::String(needle) = value else {
         return Ok(false);
     };
@@ -5004,7 +5004,7 @@ fn string_group_contains_value(group: &Value, value: &Value) -> Result<bool> {
     })
 }
 
-fn string_group_values_all_satisfy(
+pub(crate) fn string_group_values_all_satisfy(
     group: &Value,
     mut predicate: impl FnMut(&Value) -> Result<bool>,
 ) -> Result<bool> {
@@ -5035,7 +5035,7 @@ fn string_group_values_all_satisfy(
     }
 }
 
-fn order_predicate_implies_order_bound(
+pub(crate) fn order_predicate_implies_order_bound(
     op: GraphPredicateOp,
     value: &Value,
     required_op: GraphPredicateOp,
@@ -5052,7 +5052,7 @@ fn order_predicate_implies_order_bound(
     }
 }
 
-fn membership_values_all_satisfy(
+pub(crate) fn membership_values_all_satisfy(
     membership: &Value,
     mut predicate: impl FnMut(&Value) -> Result<bool>,
 ) -> Result<bool> {
@@ -5064,7 +5064,7 @@ fn membership_values_all_satisfy(
     Ok(true)
 }
 
-fn parse_where_or_membership_fold_terms(
+pub(crate) fn parse_where_or_membership_fold_terms(
     mut parsed: Vec<ParsedWherePredicate>,
     op: GraphPredicateOp,
 ) -> Result<ParsedWherePredicate> {
@@ -5115,7 +5115,7 @@ fn parse_where_or_membership_fold_terms(
     })
 }
 
-fn parse_where_or_string_fold_terms(
+pub(crate) fn parse_where_or_string_fold_terms(
     mut parsed: Vec<ParsedWherePredicate>,
     op: GraphPredicateOp,
 ) -> Result<ParsedWherePredicate> {
@@ -5207,7 +5207,7 @@ fn parse_where_or_string_fold_terms(
     })
 }
 
-fn string_fold_base_op(op: GraphPredicateOp) -> Option<GraphPredicateOp> {
+pub(crate) fn string_fold_base_op(op: GraphPredicateOp) -> Option<GraphPredicateOp> {
     match op {
         GraphPredicateOp::StartsWith
         | GraphPredicateOp::StartsWithAny
@@ -5225,13 +5225,13 @@ fn string_fold_base_op(op: GraphPredicateOp) -> Option<GraphPredicateOp> {
     }
 }
 
-fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
+pub(crate) fn push_unique<T: PartialEq>(values: &mut Vec<T>, value: T) {
     if !values.contains(&value) {
         values.push(value);
     }
 }
 
-fn parse_where_predicate(
+pub(crate) fn parse_where_predicate(
     predicate: &str,
     parameters: &CypherParameters,
 ) -> Result<ParsedWherePredicate> {
@@ -5360,7 +5360,7 @@ fn parse_where_predicate(
     ))
 }
 
-fn inverted_graph_predicate_op(op: GraphPredicateOp) -> GraphPredicateOp {
+pub(crate) fn inverted_graph_predicate_op(op: GraphPredicateOp) -> GraphPredicateOp {
     match op {
         GraphPredicateOp::Equal => GraphPredicateOp::NotEqual,
         GraphPredicateOp::NotEqual => GraphPredicateOp::Equal,
@@ -5387,7 +5387,7 @@ fn inverted_graph_predicate_op(op: GraphPredicateOp) -> GraphPredicateOp {
     }
 }
 
-fn apply_node_where_predicates(
+pub(crate) fn apply_node_where_predicates(
     node: &mut ParsedCypherNode,
     predicates: Vec<ParsedWherePredicate>,
     context: &str,
@@ -5405,7 +5405,7 @@ fn apply_node_where_predicates(
     Ok(())
 }
 
-fn apply_match_where_predicates(
+pub(crate) fn apply_match_where_predicates(
     nodes: &mut BTreeMap<String, ParsedCypherNode>,
     predicates: Vec<ParsedWherePredicate>,
     context: &str,
@@ -5422,7 +5422,7 @@ fn apply_match_where_predicates(
     Ok(())
 }
 
-fn apply_edge_where_predicates(
+pub(crate) fn apply_edge_where_predicates(
     edge: &mut ParsedCypherEdgeMatch,
     predicates: Vec<ParsedWherePredicate>,
     context: &str,
@@ -5444,7 +5444,7 @@ fn apply_edge_where_predicates(
     Ok(())
 }
 
-fn split_match_delete(statement: &str) -> Result<(&str, &str)> {
+pub(crate) fn split_match_delete(statement: &str) -> Result<(&str, &str)> {
     if let Some(index) = find_unquoted_keyword(statement, "DELETE") {
         let pattern = statement[..index].trim();
         let target = statement[index + "DELETE".len()..].trim();
@@ -5460,7 +5460,7 @@ fn split_match_delete(statement: &str) -> Result<(&str, &str)> {
     ))
 }
 
-fn parse_match_delete_targets(targets: &str) -> Result<Vec<String>> {
+pub(crate) fn parse_match_delete_targets(targets: &str) -> Result<Vec<String>> {
     split_top_level_commas(targets)?
         .into_iter()
         .map(str::trim)
@@ -5474,7 +5474,7 @@ fn parse_match_delete_targets(targets: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-fn split_match_edge_upsert<'a>(statement: &'a str, keyword: &str) -> Result<(&'a str, &'a str)> {
+pub(crate) fn split_match_edge_upsert<'a>(statement: &'a str, keyword: &str) -> Result<(&'a str, &'a str)> {
     if let Some(index) = find_unquoted_keyword(statement, keyword) {
         let match_clause = statement[..index].trim();
         let edge_pattern = statement[index + keyword.len()..].trim();
@@ -5490,7 +5490,7 @@ fn split_match_edge_upsert<'a>(statement: &'a str, keyword: &str) -> Result<(&'a
     )))
 }
 
-fn parse_path_binding<'a>(pattern: &'a str, context: &str) -> Result<(Option<String>, &'a str)> {
+pub(crate) fn parse_path_binding<'a>(pattern: &'a str, context: &str) -> Result<(Option<String>, &'a str)> {
     let Some(index) = find_unquoted(pattern, '=') else {
         return Ok((None, pattern.trim()));
     };
@@ -5507,11 +5507,11 @@ fn parse_path_binding<'a>(pattern: &'a str, context: &str) -> Result<(Option<Str
     Ok((Some(variable), relationship_pattern))
 }
 
-fn parse_row_path_binding(pattern: &str) -> Result<(Option<String>, &str)> {
+pub(crate) fn parse_row_path_binding(pattern: &str) -> Result<(Option<String>, &str)> {
     parse_path_binding(pattern, "MATCH CREATE/MERGE")
 }
 
-fn split_match_set(statement: &str) -> Result<(&str, &str)> {
+pub(crate) fn split_match_set(statement: &str) -> Result<(&str, &str)> {
     if let Some(index) = find_unquoted_keyword(statement, "SET") {
         let pattern = statement[..index].trim();
         let assignment = statement[index + "SET".len()..].trim();
@@ -5527,7 +5527,7 @@ fn split_match_set(statement: &str) -> Result<(&str, &str)> {
     ))
 }
 
-fn split_match_remove(statement: &str) -> Result<(&str, &str)> {
+pub(crate) fn split_match_remove(statement: &str) -> Result<(&str, &str)> {
     if let Some(index) = find_unquoted_keyword(statement, "REMOVE") {
         let pattern = statement[..index].trim();
         let target = statement[index + "REMOVE".len()..].trim();
@@ -5543,7 +5543,7 @@ fn split_match_remove(statement: &str) -> Result<(&str, &str)> {
     ))
 }
 
-fn split_final_return(statement: &str) -> Result<(&str, &str)> {
+pub(crate) fn split_final_return(statement: &str) -> Result<(&str, &str)> {
     let Some(index) = find_unquoted_keyword(statement, "RETURN") else {
         return Err(cypher_syntax(
             "writable Cypher returning execution requires a final RETURN clause",
@@ -5557,7 +5557,7 @@ fn split_final_return(statement: &str) -> Result<(&str, &str)> {
     Ok((mutation, return_clause))
 }
 
-fn find_return_control_clause(return_clause: &str) -> Option<usize> {
+pub(crate) fn find_return_control_clause(return_clause: &str) -> Option<usize> {
     let mut earliest: Option<usize> = None;
     for keyword in ["ORDER", "LIMIT", "SKIP", "OFFSET"] {
         let mut offset = 0usize;
@@ -5591,7 +5591,7 @@ fn find_return_control_clause(return_clause: &str) -> Option<usize> {
     earliest
 }
 
-fn is_return_alias_keyword_prefix(prefix: &str) -> bool {
+pub(crate) fn is_return_alias_keyword_prefix(prefix: &str) -> bool {
     let mut words = prefix.split_whitespace().rev();
     words
         .next()
@@ -5691,7 +5691,7 @@ pub struct CypherReturnMapProjection {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct CypherReturnMapProjectionEntry {
+pub(crate) struct CypherReturnMapProjectionEntry {
     output_key: String,
     value: CypherReturnTarget,
 }
@@ -5876,7 +5876,7 @@ pub struct CypherReturnListContains {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CypherReturnListPredicate {
+pub(crate) enum CypherReturnListPredicate {
     Any,
     All,
     None,
@@ -5893,7 +5893,7 @@ pub struct CypherReturnListPredicateProjection {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CypherReturnStringSliceSide {
+pub(crate) enum CypherReturnStringSliceSide {
     Left,
     Right,
 }
@@ -5915,7 +5915,7 @@ pub struct CypherReturnStringPredicateProjection {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CypherReturnStringPredicate {
+pub(crate) enum CypherReturnStringPredicate {
     StartsWith,
     EndsWith,
     Contains,
@@ -5943,7 +5943,7 @@ pub enum CypherReturnAggregate {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CypherReturnTargetMaterialization {
+pub(crate) enum CypherReturnTargetMaterialization {
     Star,
     Element,
     DirectProperty,
@@ -5953,7 +5953,7 @@ enum CypherReturnTargetMaterialization {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CypherReturnScalarProjectionKind {
+pub(crate) enum CypherReturnScalarProjectionKind {
     Star,
     Element,
     DirectProperty,
@@ -5973,7 +5973,7 @@ enum CypherReturnScalarProjectionKind {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CypherReturnScalarAstFamily {
+pub(crate) enum CypherReturnScalarAstFamily {
     Binding,
     Wrapper,
     Value,
@@ -5985,7 +5985,7 @@ enum CypherReturnScalarAstFamily {
     String,
 }
 
-enum CypherReturnScalarAst<'a> {
+pub(crate) enum CypherReturnScalarAst<'a> {
     Star,
     Element,
     DirectProperty(&'a str),
@@ -6022,7 +6022,7 @@ enum CypherReturnScalarAst<'a> {
     PathFunction,
 }
 
-fn parse_cypher_return_clause(
+pub(crate) fn parse_cypher_return_clause(
     clause: &str,
     node_bindings: &HashMap<String, NodeId>,
     edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
@@ -6255,7 +6255,7 @@ fn parse_cypher_return_clause(
 
 /// Splits a RETURN clause into its projection list and the optional trailing
 /// `ORDER BY` / `SKIP` / `LIMIT` control clause.
-fn split_return_control(clause: &str) -> (&str, &str) {
+pub(crate) fn split_return_control(clause: &str) -> (&str, &str) {
     match find_return_control_clause(clause) {
         Some(index) => (clause[..index].trim(), clause[index..].trim()),
         None => (clause.trim(), ""),
@@ -6265,7 +6265,7 @@ fn split_return_control(clause: &str) -> (&str, &str) {
 /// Parses a `ORDER BY ... [SKIP/OFFSET n] [LIMIT n]` control clause. Cypher's
 /// canonical `ORDER BY`, then row offset, then `LIMIT` ordering is required,
 /// and `ORDER BY` terms must reference returned column names or aliases.
-fn parse_return_control(
+pub(crate) fn parse_return_control(
     control: &str,
     order_keys: &[Vec<String>],
 ) -> Result<(Vec<CypherOrderItem>, Option<usize>, Option<usize>)> {
@@ -6302,7 +6302,7 @@ fn parse_return_control(
 
 /// Returns the slice of `value` before the first top-level occurrence of any of
 /// `keywords`, plus the remainder starting at that keyword.
-fn split_before_keywords<'a>(value: &'a str, keywords: &[&str]) -> (&'a str, &'a str) {
+pub(crate) fn split_before_keywords<'a>(value: &'a str, keywords: &[&str]) -> (&'a str, &'a str) {
     let split = keywords
         .iter()
         .filter_map(|keyword| find_unquoted_keyword(value, keyword))
@@ -6313,7 +6313,7 @@ fn split_before_keywords<'a>(value: &'a str, keywords: &[&str]) -> (&'a str, &'a
     }
 }
 
-fn parse_order_items(items: &str, order_keys: &[Vec<String>]) -> Result<Vec<CypherOrderItem>> {
+pub(crate) fn parse_order_items(items: &str, order_keys: &[Vec<String>]) -> Result<Vec<CypherOrderItem>> {
     let mut order_by = Vec::new();
     for item in split_top_level_commas(items)? {
         let item = item.trim();
@@ -6348,7 +6348,7 @@ fn parse_order_items(items: &str, order_keys: &[Vec<String>]) -> Result<Vec<Cyph
     Ok(order_by)
 }
 
-fn parse_aggregate_projection(
+pub(crate) fn parse_aggregate_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<
@@ -6461,7 +6461,7 @@ fn parse_aggregate_projection(
     )))
 }
 
-fn parse_restricted_return_target_expression(
+pub(crate) fn parse_restricted_return_target_expression(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnTarget)>> {
@@ -6650,7 +6650,7 @@ fn parse_restricted_return_target_expression(
     Ok(None)
 }
 
-fn parse_return_literal_projection(
+pub(crate) fn parse_return_literal_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<Value>> {
@@ -6661,7 +6661,7 @@ fn parse_return_literal_projection(
     parse_cypher_literal(expression, parameters).map(Some)
 }
 
-fn parse_return_range_projection(
+pub(crate) fn parse_return_range_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<Value>> {
@@ -6695,7 +6695,7 @@ fn parse_return_range_projection(
     restricted_range_value(start, end, step).map(Some)
 }
 
-fn parse_integer_literal_argument(
+pub(crate) fn parse_integer_literal_argument(
     expression: &str,
     parameters: &CypherParameters,
     context: &str,
@@ -6709,7 +6709,7 @@ fn parse_integer_literal_argument(
     Ok(value)
 }
 
-fn restricted_range_value(start: i64, end: i64, step: i64) -> Result<Value> {
+pub(crate) fn restricted_range_value(start: i64, end: i64, step: i64) -> Result<Value> {
     const MAX_RANGE_VALUES: usize = 1_000_000;
 
     if step == 0 {
@@ -6735,7 +6735,7 @@ fn restricted_range_value(start: i64, end: i64, step: i64) -> Result<Value> {
     Ok(Value::IntArray(values))
 }
 
-fn parse_return_list_slice_projection(
+pub(crate) fn parse_return_list_slice_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(String, CypherReturnListSlice)>> {
@@ -6803,7 +6803,7 @@ fn parse_return_list_slice_projection(
     Ok(Some((variable, CypherReturnListSlice { key, start, end })))
 }
 
-fn parse_optional_list_bound(
+pub(crate) fn parse_optional_list_bound(
     expression: &str,
     parameters: &CypherParameters,
     context: &str,
@@ -6814,7 +6814,7 @@ fn parse_optional_list_bound(
     parse_return_list_bound(expression, parameters, context).map(Some)
 }
 
-fn parse_return_list_bound(
+pub(crate) fn parse_return_list_bound(
     expression: &str,
     parameters: &CypherParameters,
     context: &str,
@@ -6831,7 +6831,7 @@ fn parse_return_list_bound(
     })
 }
 
-fn parse_return_list_contains_projection(
+pub(crate) fn parse_return_list_contains_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(String, CypherReturnListContains)>> {
@@ -6865,7 +6865,7 @@ fn parse_return_list_contains_projection(
     Ok(Some((variable, CypherReturnListContains { key, needle })))
 }
 
-fn parse_return_list_predicate_projection(
+pub(crate) fn parse_return_list_predicate_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(String, CypherReturnListPredicateProjection)>> {
@@ -6961,7 +6961,7 @@ fn parse_return_list_predicate_projection(
     )))
 }
 
-fn parse_return_list_index_projection(
+pub(crate) fn parse_return_list_index_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(String, CypherReturnListIndexProjection)>> {
@@ -7006,7 +7006,7 @@ fn parse_return_list_index_projection(
     )))
 }
 
-fn is_return_literal_candidate(expression: &str) -> bool {
+pub(crate) fn is_return_literal_candidate(expression: &str) -> bool {
     if expression.starts_with('\'')
         || expression.starts_with('"')
         || expression.starts_with('$')
@@ -7022,7 +7022,7 @@ fn is_return_literal_candidate(expression: &str) -> bool {
         .is_some_and(|ch| ch == '-' || ch == '+' || ch.is_ascii_digit())
 }
 
-fn parse_return_coalesce_projection(
+pub(crate) fn parse_return_coalesce_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnCoalesce)>> {
@@ -7063,7 +7063,7 @@ fn parse_return_coalesce_projection(
     )))
 }
 
-fn parse_return_coalesce_argument(
+pub(crate) fn parse_return_coalesce_argument(
     argument: &str,
     parameters: &CypherParameters,
 ) -> Result<(Option<String>, CypherReturnTarget)> {
@@ -7075,7 +7075,7 @@ fn parse_return_coalesce_argument(
     )
 }
 
-fn parse_nested_restricted_scalar_target(
+pub(crate) fn parse_nested_restricted_scalar_target(
     expression: &str,
     parameters: &CypherParameters,
     property_context: &str,
@@ -7097,7 +7097,7 @@ fn parse_nested_restricted_scalar_target(
     Ok((Some(variable), CypherReturnTarget::Property(key)))
 }
 
-fn merge_return_coalesce_variable(
+pub(crate) fn merge_return_coalesce_variable(
     variable: &mut Option<String>,
     argument_variable: Option<String>,
 ) -> Result<()> {
@@ -7108,7 +7108,7 @@ fn merge_return_coalesce_variable(
     )
 }
 
-fn merge_single_return_variable(
+pub(crate) fn merge_single_return_variable(
     variable: &mut Option<String>,
     argument_variable: Option<String>,
     message: &'static str,
@@ -7126,7 +7126,7 @@ fn merge_single_return_variable(
     Ok(())
 }
 
-fn parse_return_exists_projection(expression: &str) -> Result<Option<(String, String)>> {
+pub(crate) fn parse_return_exists_projection(expression: &str) -> Result<Option<(String, String)>> {
     let expression = expression.trim();
     let Some(open) = expression.find('(') else {
         return Ok(None);
@@ -7157,7 +7157,7 @@ fn parse_return_exists_projection(expression: &str) -> Result<Option<(String, St
         })
 }
 
-fn parse_return_size_projection(expression: &str) -> Result<Option<(String, String)>> {
+pub(crate) fn parse_return_size_projection(expression: &str) -> Result<Option<(String, String)>> {
     let expression = expression.trim();
     let Some(open) = expression.find('(') else {
         return Ok(None);
@@ -7188,7 +7188,7 @@ fn parse_return_size_projection(expression: &str) -> Result<Option<(String, Stri
         })
 }
 
-fn parse_return_list_element_projection(
+pub(crate) fn parse_return_list_element_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnListElementProjection)>> {
@@ -7228,7 +7228,7 @@ fn parse_return_list_element_projection(
     )))
 }
 
-fn parse_return_list_tail_projection(
+pub(crate) fn parse_return_list_tail_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnListTailProjection)>> {
@@ -7261,7 +7261,7 @@ fn parse_return_list_tail_projection(
     )))
 }
 
-fn parse_return_abs_projection(
+pub(crate) fn parse_return_abs_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnAbsProjection)>> {
@@ -7294,7 +7294,7 @@ fn parse_return_abs_projection(
     )))
 }
 
-fn parse_return_numeric_round_projection(
+pub(crate) fn parse_return_numeric_round_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnNumericRoundProjection)>> {
@@ -7334,7 +7334,7 @@ fn parse_return_numeric_round_projection(
     )))
 }
 
-fn parse_return_numeric_sign_projection(
+pub(crate) fn parse_return_numeric_sign_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnNumericSignProjection)>> {
@@ -7367,7 +7367,7 @@ fn parse_return_numeric_sign_projection(
     )))
 }
 
-fn parse_return_numeric_cast_projection(
+pub(crate) fn parse_return_numeric_cast_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnNumericCastProjection)>> {
@@ -7407,7 +7407,7 @@ fn parse_return_numeric_cast_projection(
     )))
 }
 
-fn parse_return_list_cast_projection(
+pub(crate) fn parse_return_list_cast_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnListCastProjection)>> {
@@ -7447,7 +7447,7 @@ fn parse_return_list_cast_projection(
     )))
 }
 
-fn parse_return_to_boolean_projection(
+pub(crate) fn parse_return_to_boolean_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnToBooleanProjection)>> {
@@ -7482,7 +7482,7 @@ fn parse_return_to_boolean_projection(
     )))
 }
 
-fn parse_return_to_string_projection(
+pub(crate) fn parse_return_to_string_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnToStringProjection)>> {
@@ -7517,7 +7517,7 @@ fn parse_return_to_string_projection(
     )))
 }
 
-fn parse_return_is_empty_projection(
+pub(crate) fn parse_return_is_empty_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnIsEmptyProjection)>> {
@@ -7552,7 +7552,7 @@ fn parse_return_is_empty_projection(
     )))
 }
 
-fn parse_return_string_transform_projection(
+pub(crate) fn parse_return_string_transform_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnStringTransformProjection)>> {
@@ -7592,7 +7592,7 @@ fn parse_return_string_transform_projection(
     )))
 }
 
-fn parse_return_string_trim_projection(
+pub(crate) fn parse_return_string_trim_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnStringTrimProjection)>> {
@@ -7633,7 +7633,7 @@ fn parse_return_string_trim_projection(
     )))
 }
 
-fn parse_return_string_reverse_projection(
+pub(crate) fn parse_return_string_reverse_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnStringReverseProjection)>> {
@@ -7670,7 +7670,7 @@ fn parse_return_string_reverse_projection(
     )))
 }
 
-fn parse_return_string_split_projection(
+pub(crate) fn parse_return_string_split_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnStringSplit)>> {
@@ -7724,7 +7724,7 @@ fn parse_return_string_split_projection(
     )))
 }
 
-fn parse_return_substring_projection(
+pub(crate) fn parse_return_substring_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnSubstring)>> {
@@ -7781,7 +7781,7 @@ fn parse_return_substring_projection(
     )))
 }
 
-fn parse_non_negative_usize_literal(
+pub(crate) fn parse_non_negative_usize_literal(
     expression: &str,
     parameters: &CypherParameters,
     context: &str,
@@ -7797,7 +7797,7 @@ fn parse_non_negative_usize_literal(
     })
 }
 
-fn parse_return_string_slice_projection(
+pub(crate) fn parse_return_string_slice_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnStringSlice)>> {
@@ -7849,7 +7849,7 @@ fn parse_return_string_slice_projection(
     )))
 }
 
-fn parse_return_replace_projection(
+pub(crate) fn parse_return_replace_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnReplace)>> {
@@ -7899,7 +7899,7 @@ fn parse_return_replace_projection(
     )))
 }
 
-fn parse_return_string_predicate_projection(
+pub(crate) fn parse_return_string_predicate_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(Option<String>, CypherReturnStringPredicateProjection)>> {
@@ -7952,7 +7952,7 @@ fn parse_return_string_predicate_projection(
     )))
 }
 
-fn parse_string_literal_argument(
+pub(crate) fn parse_string_literal_argument(
     expression: &str,
     parameters: &CypherParameters,
     context: &str,
@@ -7966,7 +7966,7 @@ fn parse_string_literal_argument(
     Ok(value)
 }
 
-fn parse_return_element_function_projection(
+pub(crate) fn parse_return_element_function_projection(
     expression: &str,
 ) -> Result<Option<(String, CypherReturnTarget)>> {
     let expression = expression.trim();
@@ -7998,7 +7998,7 @@ fn parse_return_element_function_projection(
     Ok(Some((variable, target)))
 }
 
-fn parse_return_map_projection(
+pub(crate) fn parse_return_map_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<CypherReturnMapProjection>> {
@@ -8074,7 +8074,7 @@ fn parse_return_map_projection(
     Ok(Some(CypherReturnMapProjection { variable, entries }))
 }
 
-fn parse_return_map_projection_value(
+pub(crate) fn parse_return_map_projection_value(
     value: &str,
     map_variable: &str,
     parameters: &CypherParameters,
@@ -8095,7 +8095,7 @@ fn parse_return_map_projection_value(
     Ok(target)
 }
 
-fn parse_return_list_projection(
+pub(crate) fn parse_return_list_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<CypherReturnListProjection>> {
@@ -8128,7 +8128,7 @@ fn parse_return_list_projection(
     Ok(Some(CypherReturnListProjection { variable, terms }))
 }
 
-fn parse_return_list_projection_term(
+pub(crate) fn parse_return_list_projection_term(
     item: &str,
     parameters: &CypherParameters,
 ) -> Result<(Option<String>, CypherReturnTarget)> {
@@ -8140,7 +8140,7 @@ fn parse_return_list_projection_term(
     )
 }
 
-fn merge_return_list_projection_variable(
+pub(crate) fn merge_return_list_projection_variable(
     variable: &mut Option<String>,
     item_variable: Option<String>,
 ) -> Result<()> {
@@ -8159,7 +8159,7 @@ fn merge_return_list_projection_variable(
     Ok(())
 }
 
-fn parse_return_case_projection(
+pub(crate) fn parse_return_case_projection(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<(String, CypherReturnCase)>> {
@@ -8237,7 +8237,7 @@ fn parse_return_case_projection(
     )))
 }
 
-fn parse_return_path_function_projection(
+pub(crate) fn parse_return_path_function_projection(
     expression: &str,
 ) -> Result<Option<(String, CypherReturnTarget)>> {
     let expression = expression.trim();
@@ -8265,7 +8265,7 @@ fn parse_return_path_function_projection(
     Ok(Some((variable, target)))
 }
 
-fn append_star_return_projections(
+pub(crate) fn append_star_return_projections(
     projections: &mut Vec<CypherReturnProjection>,
     node_bindings: &HashMap<String, NodeId>,
     edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
@@ -8313,7 +8313,7 @@ fn append_star_return_projections(
     Ok(())
 }
 
-fn cypher_return_element_for_variable(
+pub(crate) fn cypher_return_element_for_variable(
     variable: &str,
     node_bindings: &HashMap<String, NodeId>,
     edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
@@ -8360,7 +8360,7 @@ fn cypher_return_element_for_variable(
     }
 }
 
-fn row_edge_endpoint_variable(
+pub(crate) fn row_edge_endpoint_variable(
     variable: &str,
     row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
 ) -> bool {
@@ -8369,7 +8369,7 @@ fn row_edge_endpoint_variable(
         .any(|binding| binding.from_variable == variable || binding.to_variable == variable)
 }
 
-fn validate_return_variable_binding(
+pub(crate) fn validate_return_variable_binding(
     variable: &str,
     node_bindings: &HashMap<String, NodeId>,
     edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
@@ -8416,7 +8416,7 @@ fn validate_return_variable_binding(
     }
 }
 
-fn validate_return_function_target(
+pub(crate) fn validate_return_function_target(
     target: &CypherReturnTarget,
     element: CypherReturnElement,
 ) -> Result<()> {
@@ -8470,7 +8470,7 @@ fn validate_return_function_target(
     }
 }
 
-fn strip_trailing_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> {
+pub(crate) fn strip_trailing_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> {
     let value = value.trim_end();
     let candidate = value.get(value.len().checked_sub(keyword.len())?..)?;
     if !candidate.eq_ignore_ascii_case(keyword) {
@@ -8488,7 +8488,7 @@ fn strip_trailing_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> 
     Some(prefix.trim_end())
 }
 
-fn parse_return_count(value: &str, context: &str) -> Result<usize> {
+pub(crate) fn parse_return_count(value: &str, context: &str) -> Result<usize> {
     let value = value.trim();
     value.parse::<usize>().map_err(|_| {
         cypher_syntax(format!(
@@ -8497,7 +8497,7 @@ fn parse_return_count(value: &str, context: &str) -> Result<usize> {
     })
 }
 
-fn parse_return_limit(value: &str) -> Result<Option<usize>> {
+pub(crate) fn parse_return_limit(value: &str) -> Result<Option<usize>> {
     let value = value.trim();
     if value.eq_ignore_ascii_case("ALL") {
         return Ok(None);
@@ -8505,7 +8505,7 @@ fn parse_return_limit(value: &str) -> Result<Option<usize>> {
     Ok(Some(parse_return_count(value, "LIMIT")?))
 }
 
-fn split_return_alias(projection: &str) -> Result<(&str, Option<String>)> {
+pub(crate) fn split_return_alias(projection: &str) -> Result<(&str, Option<String>)> {
     let Some(index) = find_unquoted_keyword(projection, "AS") else {
         return Ok((projection, None));
     };
@@ -8520,12 +8520,12 @@ fn split_return_alias(projection: &str) -> Result<(&str, Option<String>)> {
     Ok((expression, Some(alias)))
 }
 
-struct PatchAssignment {
+pub(crate) struct PatchAssignment {
     target: String,
     kind: PatchAssignmentKind,
 }
 
-enum PatchAssignmentKind {
+pub(crate) enum PatchAssignmentKind {
     Props(Props),
     RemoveProperty {
         key: String,
@@ -8539,7 +8539,7 @@ enum PatchAssignmentKind {
     },
 }
 
-fn parse_patch_assignment(
+pub(crate) fn parse_patch_assignment(
     assignment: &str,
     parameters: &CypherParameters,
     null_assignment: CypherNullAssignment,
@@ -8584,7 +8584,7 @@ fn parse_patch_assignment(
     })
 }
 
-fn parse_patch_assignments(
+pub(crate) fn parse_patch_assignments(
     assignments: &str,
     parameters: &CypherParameters,
     null_assignment: CypherNullAssignment,
@@ -8626,7 +8626,7 @@ pub fn cypher_written_node_identity(
     }
 }
 
-fn cypher_mutation_result_from_plan(
+pub(crate) fn cypher_mutation_result_from_plan(
     report: CypherMutationReport,
     generated_node_ids: Vec<CypherGeneratedNodeId>,
     plan: &GraphMutationPlan,
@@ -8690,14 +8690,14 @@ fn cypher_mutation_result_from_plan(
 /// It is not a general Cypher read-query row model. Keeping this vocabulary
 /// explicit prevents restricted writable `RETURN` from growing path or
 /// arbitrary read-query semantics accidentally.
-struct CypherWriteResultRows<'a> {
+pub(crate) struct CypherWriteResultRows<'a> {
     row_nodes: &'a HashMap<String, Vec<Node>>,
     row_edges: &'a HashMap<String, Vec<Edge>>,
     row_paths: &'a HashMap<String, CypherRowProducedPathBinding>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CypherWriteResultBindingKind {
+pub(crate) enum CypherWriteResultBindingKind {
     RowNode,
     RowEdge,
     RowPath,
@@ -8938,12 +8938,12 @@ where
     Ok(CypherResultTable { columns, rows })
 }
 
-struct CypherReturnGroup {
+pub(crate) struct CypherReturnGroup {
     scalar_values: Vec<Value>,
     aggregate_states: Vec<Option<CypherGroupedAggregateState>>,
 }
 
-enum CypherGroupedAggregateState {
+pub(crate) enum CypherGroupedAggregateState {
     Count {
         count: usize,
         distinct: Option<BTreeSet<String>>,
@@ -10696,7 +10696,7 @@ where
     restricted_size_value(value)
 }
 
-fn restricted_size_value(value: Value) -> Result<Value> {
+pub(crate) fn restricted_size_value(value: Value) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::String(value) => Ok(Value::Int(value.chars().count() as i64)),
@@ -10818,7 +10818,7 @@ where
     })
 }
 
-fn restricted_list_index_value(value: Value, index: usize) -> Result<Value> {
+pub(crate) fn restricted_list_index_value(value: Value, index: usize) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::StringArray(values) => Ok(values.get(index).map(Value::from).unwrap_or(Value::Null)),
@@ -10924,7 +10924,7 @@ where
     restricted_list_slice_value(value, start, end)
 }
 
-fn bounded_list_slice_indexes(
+pub(crate) fn bounded_list_slice_indexes(
     len: usize,
     start: Option<usize>,
     end: Option<usize>,
@@ -10938,7 +10938,7 @@ fn bounded_list_slice_indexes(
     }
 }
 
-fn restricted_list_slice_value(
+pub(crate) fn restricted_list_slice_value(
     value: Value,
     start: Option<usize>,
     end: Option<usize>,
@@ -11008,7 +11008,7 @@ where
     restricted_list_contains_value(value, &contains.needle)
 }
 
-fn restricted_list_contains_value(value: Value, needle: &Value) -> Result<Value> {
+pub(crate) fn restricted_list_contains_value(value: Value, needle: &Value) -> Result<Value> {
     if matches!(needle, Value::Null) {
         return Ok(Value::Null);
     }
@@ -11102,7 +11102,7 @@ where
     restricted_list_predicate_value(value, needle, predicate.predicate)
 }
 
-fn restricted_list_predicate_value(
+pub(crate) fn restricted_list_predicate_value(
     value: Value,
     needle: Value,
     predicate: CypherReturnListPredicate,
@@ -11150,7 +11150,7 @@ fn restricted_list_predicate_value(
     }
 }
 
-fn evaluate_list_predicate_matches(
+pub(crate) fn evaluate_list_predicate_matches(
     matches: impl IntoIterator<Item = bool>,
     predicate: CypherReturnListPredicate,
 ) -> bool {
@@ -11214,7 +11214,7 @@ where
     restricted_list_element_value(value, element.element)
 }
 
-fn restricted_list_element_value(value: Value, element: CypherReturnListElement) -> Result<Value> {
+pub(crate) fn restricted_list_element_value(value: Value, element: CypherReturnListElement) -> Result<Value> {
     let select = |len: usize| match element {
         CypherReturnListElement::Head => 0,
         CypherReturnListElement::Last => len.saturating_sub(1),
@@ -11295,7 +11295,7 @@ where
     restricted_list_tail_value(value)
 }
 
-fn restricted_list_tail_value(value: Value) -> Result<Value> {
+pub(crate) fn restricted_list_tail_value(value: Value) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::StringArray(values) => Ok(Value::StringArray(
@@ -11365,7 +11365,7 @@ where
     restricted_abs_value(value)
 }
 
-fn restricted_abs_value(value: Value) -> Result<Value> {
+pub(crate) fn restricted_abs_value(value: Value) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::Int(value) => value
@@ -11449,7 +11449,7 @@ where
     restricted_numeric_round_value(value, round.round)
 }
 
-fn restricted_numeric_round_value(value: Value, round: CypherReturnNumericRound) -> Result<Value> {
+pub(crate) fn restricted_numeric_round_value(value: Value, round: CypherReturnNumericRound) -> Result<Value> {
     let round_float = |value: f64| match round {
         CypherReturnNumericRound::Ceil => value.ceil(),
         CypherReturnNumericRound::Floor => value.floor(),
@@ -11534,7 +11534,7 @@ where
     restricted_numeric_sign_value(value)
 }
 
-fn restricted_numeric_sign_value(value: Value) -> Result<Value> {
+pub(crate) fn restricted_numeric_sign_value(value: Value) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::Int(value) => Ok(Value::Int(value.signum())),
@@ -11620,7 +11620,7 @@ where
     restricted_numeric_cast_value(value, cast.cast)
 }
 
-fn restricted_numeric_cast_value(value: Value, cast: CypherReturnNumericCast) -> Result<Value> {
+pub(crate) fn restricted_numeric_cast_value(value: Value, cast: CypherReturnNumericCast) -> Result<Value> {
     match cast {
         CypherReturnNumericCast::Integer => restricted_to_integer_value(value),
         CypherReturnNumericCast::Float => restricted_to_float_value(value),
@@ -11671,7 +11671,7 @@ where
     restricted_list_cast_value(value, cast.cast)
 }
 
-fn restricted_list_cast_value(value: Value, cast: CypherReturnListCast) -> Result<Value> {
+pub(crate) fn restricted_list_cast_value(value: Value, cast: CypherReturnListCast) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::StringArray(values) => restricted_string_array_cast_value(values, cast),
@@ -11692,7 +11692,7 @@ fn restricted_list_cast_value(value: Value, cast: CypherReturnListCast) -> Resul
     }
 }
 
-fn restricted_string_array_cast_value(
+pub(crate) fn restricted_string_array_cast_value(
     values: Vec<String>,
     cast: CypherReturnListCast,
 ) -> Result<Value> {
@@ -11716,7 +11716,7 @@ fn restricted_string_array_cast_value(
     }
 }
 
-fn restricted_int_array_cast_value(values: Vec<i64>, cast: CypherReturnListCast) -> Result<Value> {
+pub(crate) fn restricted_int_array_cast_value(values: Vec<i64>, cast: CypherReturnListCast) -> Result<Value> {
     match cast {
         CypherReturnListCast::String => Ok(Value::StringArray(
             values.into_iter().map(|value| value.to_string()).collect(),
@@ -11731,7 +11731,7 @@ fn restricted_int_array_cast_value(values: Vec<i64>, cast: CypherReturnListCast)
     }
 }
 
-fn restricted_float_array_cast_value(
+pub(crate) fn restricted_float_array_cast_value(
     values: Vec<f64>,
     cast: CypherReturnListCast,
 ) -> Result<Value> {
@@ -11758,7 +11758,7 @@ fn restricted_float_array_cast_value(
     }
 }
 
-fn restricted_json_array_cast_value(
+pub(crate) fn restricted_json_array_cast_value(
     values: Vec<Value>,
     cast: CypherReturnListCast,
 ) -> Result<Value> {
@@ -11786,7 +11786,7 @@ fn restricted_json_array_cast_value(
     }
 }
 
-fn expect_string_value(value: Value) -> Result<String> {
+pub(crate) fn expect_string_value(value: Value) -> Result<String> {
     match value {
         Value::String(value) => Ok(value),
         Value::Null => Err(cypher_unsupported_cardinality(
@@ -11798,7 +11798,7 @@ fn expect_string_value(value: Value) -> Result<String> {
     }
 }
 
-fn expect_int_value(value: Value) -> Result<i64> {
+pub(crate) fn expect_int_value(value: Value) -> Result<i64> {
     match value {
         Value::Int(value) => Ok(value),
         Value::Null => Err(cypher_unsupported_cardinality(
@@ -11810,7 +11810,7 @@ fn expect_int_value(value: Value) -> Result<i64> {
     }
 }
 
-fn expect_float_value(value: Value) -> Result<f64> {
+pub(crate) fn expect_float_value(value: Value) -> Result<f64> {
     match value {
         Value::Float(value) => Ok(value),
         Value::Null => Err(cypher_unsupported_cardinality(
@@ -11822,7 +11822,7 @@ fn expect_float_value(value: Value) -> Result<f64> {
     }
 }
 
-fn expect_bool_value(value: Value) -> Result<serde_json::Value> {
+pub(crate) fn expect_bool_value(value: Value) -> Result<serde_json::Value> {
     match value {
         Value::Bool(value) => Ok(serde_json::Value::Bool(value)),
         Value::Null => Err(cypher_unsupported_cardinality(
@@ -11834,7 +11834,7 @@ fn expect_bool_value(value: Value) -> Result<serde_json::Value> {
     }
 }
 
-fn restricted_to_integer_value(value: Value) -> Result<Value> {
+pub(crate) fn restricted_to_integer_value(value: Value) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::Int(value) => Ok(Value::Int(value)),
@@ -11864,7 +11864,7 @@ fn restricted_to_integer_value(value: Value) -> Result<Value> {
     }
 }
 
-fn restricted_to_float_value(value: Value) -> Result<Value> {
+pub(crate) fn restricted_to_float_value(value: Value) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::Int(value) => Ok(Value::Float(value as f64)),
@@ -11895,7 +11895,7 @@ fn restricted_to_float_value(value: Value) -> Result<Value> {
     }
 }
 
-fn float_to_integer_value(value: f64) -> Result<Value> {
+pub(crate) fn float_to_integer_value(value: f64) -> Result<Value> {
     if !value.is_finite() || value.trunc() < i64::MIN as f64 || value.trunc() > i64::MAX as f64 {
         return Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN toInteger only supports finite in-range numeric values",
@@ -11904,7 +11904,7 @@ fn float_to_integer_value(value: f64) -> Result<Value> {
     Ok(Value::Int(value.trunc() as i64))
 }
 
-fn parse_integer_string_value(value: &str) -> Result<Value> {
+pub(crate) fn parse_integer_string_value(value: &str) -> Result<Value> {
     value.trim().parse::<i64>().map(Value::Int).map_err(|_| {
         cypher_unsupported_cardinality(
             "writable Cypher RETURN toInteger only supports integer-string values",
@@ -11912,7 +11912,7 @@ fn parse_integer_string_value(value: &str) -> Result<Value> {
     })
 }
 
-fn parse_float_string_value(value: &str) -> Result<Value> {
+pub(crate) fn parse_float_string_value(value: &str) -> Result<Value> {
     value
         .trim()
         .parse::<f64>()
@@ -11970,7 +11970,7 @@ where
     restricted_to_boolean_value(value)
 }
 
-fn restricted_to_boolean_value(value: Value) -> Result<Value> {
+pub(crate) fn restricted_to_boolean_value(value: Value) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::Bool(value) => Ok(Value::Bool(value)),
@@ -11990,7 +11990,7 @@ fn restricted_to_boolean_value(value: Value) -> Result<Value> {
     }
 }
 
-fn parse_boolean_string_value(value: &str) -> Result<Value> {
+pub(crate) fn parse_boolean_string_value(value: &str) -> Result<Value> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" => Ok(Value::Bool(true)),
         "false" => Ok(Value::Bool(false)),
@@ -12044,7 +12044,7 @@ where
     restricted_to_string_value(value)
 }
 
-fn restricted_to_string_value(value: Value) -> Result<Value> {
+pub(crate) fn restricted_to_string_value(value: Value) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::Bool(value) => Ok(Value::from(value.to_string())),
@@ -12110,7 +12110,7 @@ where
     restricted_is_empty_value(value)
 }
 
-fn restricted_is_empty_value(value: Value) -> Result<Value> {
+pub(crate) fn restricted_is_empty_value(value: Value) -> Result<Value> {
     match value {
         Value::Null => Ok(Value::Null),
         Value::String(value) => Ok(Value::Bool(value.is_empty())),
@@ -12173,7 +12173,7 @@ where
     restricted_string_transform_value(value, transform.transform)
 }
 
-fn restricted_string_transform_value(
+pub(crate) fn restricted_string_transform_value(
     value: Value,
     transform: CypherReturnStringTransform,
 ) -> Result<Value> {
@@ -12242,7 +12242,7 @@ where
     restricted_string_trim_value(value, trim.trim)
 }
 
-fn restricted_string_trim_value(value: Value, trim: CypherReturnStringTrim) -> Result<Value> {
+pub(crate) fn restricted_string_trim_value(value: Value, trim: CypherReturnStringTrim) -> Result<Value> {
     let trim_value = |value: String| match trim {
         CypherReturnStringTrim::Both => value.trim().to_string(),
         CypherReturnStringTrim::Left => value.trim_start().to_string(),
@@ -12309,7 +12309,7 @@ where
     restricted_string_reverse_value(value)
 }
 
-fn restricted_string_reverse_value(value: Value) -> Result<Value> {
+pub(crate) fn restricted_string_reverse_value(value: Value) -> Result<Value> {
     let reverse_value = |value: String| value.chars().rev().collect::<String>();
     match value {
         Value::Null => Ok(Value::Null),
@@ -12374,7 +12374,7 @@ where
     restricted_string_split_value(value, split)
 }
 
-fn restricted_string_split_value(value: Value, split: &CypherReturnStringSplit) -> Result<Value> {
+pub(crate) fn restricted_string_split_value(value: Value, split: &CypherReturnStringSplit) -> Result<Value> {
     let split_value = |value: String| {
         Value::Json(serde_json::Value::Array(
             value
@@ -12444,7 +12444,7 @@ where
     restricted_substring_value(value, substring)
 }
 
-fn restricted_substring_value(value: Value, substring: &CypherReturnSubstring) -> Result<Value> {
+pub(crate) fn restricted_substring_value(value: Value, substring: &CypherReturnSubstring) -> Result<Value> {
     let slice_value = |value: String| -> String {
         let chars = value.chars().skip(substring.start);
         match substring.length {
@@ -12513,7 +12513,7 @@ where
     restricted_string_slice_value(value, slice)
 }
 
-fn restricted_string_slice_value(value: Value, slice: &CypherReturnStringSlice) -> Result<Value> {
+pub(crate) fn restricted_string_slice_value(value: Value, slice: &CypherReturnStringSlice) -> Result<Value> {
     let slice_value = |value: String| -> String {
         match slice.side {
             CypherReturnStringSliceSide::Left => value.chars().take(slice.length).collect(),
@@ -12585,7 +12585,7 @@ where
     restricted_replace_value(value, replace)
 }
 
-fn restricted_replace_value(value: Value, replace: &CypherReturnReplace) -> Result<Value> {
+pub(crate) fn restricted_replace_value(value: Value, replace: &CypherReturnReplace) -> Result<Value> {
     let replace_value = |value: String| value.replace(&replace.search, &replace.replacement);
     match value {
         Value::Null => Ok(Value::Null),
@@ -12648,7 +12648,7 @@ where
     restricted_string_predicate_value(value, predicate)
 }
 
-fn restricted_string_predicate_value(
+pub(crate) fn restricted_string_predicate_value(
     value: Value,
     predicate: &CypherReturnStringPredicateProjection,
 ) -> Result<Value> {
@@ -12900,7 +12900,7 @@ where
     )))
 }
 
-fn props_value(props: &Props) -> Value {
+pub(crate) fn props_value(props: &Props) -> Value {
     Value::Json(serde_json::Value::Object(
         props
             .iter()
@@ -13141,7 +13141,7 @@ where
     }
 }
 
-fn return_row_key(values: &[Value], context: &str) -> Result<String> {
+pub(crate) fn return_row_key(values: &[Value], context: &str) -> Result<String> {
     serde_json::to_string(
         &values
             .iter()
@@ -13363,7 +13363,7 @@ where
     )))
 }
 
-fn count_materialized_return_values(values: Vec<Value>, distinct: bool) -> Result<usize> {
+pub(crate) fn count_materialized_return_values(values: Vec<Value>, distinct: bool) -> Result<usize> {
     if distinct {
         Ok(distinct_return_values(values)?.len())
     } else {
@@ -13490,7 +13490,7 @@ where
     Ok(values)
 }
 
-fn classify_return_target_materialization(
+pub(crate) fn classify_return_target_materialization(
     target: &CypherReturnTarget,
 ) -> CypherReturnTargetMaterialization {
     match target {
@@ -13543,7 +13543,7 @@ fn classify_return_target_materialization(
     }
 }
 
-fn classify_return_scalar_projection(
+pub(crate) fn classify_return_scalar_projection(
     target: &CypherReturnTarget,
 ) -> CypherReturnScalarProjectionKind {
     match scalar_return_ast(target) {
@@ -13598,7 +13598,7 @@ fn classify_return_scalar_projection(
     }
 }
 
-fn classify_return_scalar_ast_family(
+pub(crate) fn classify_return_scalar_ast_family(
     expression: &CypherReturnScalarAst<'_>,
 ) -> CypherReturnScalarAstFamily {
     match expression {
@@ -13642,7 +13642,7 @@ fn classify_return_scalar_ast_family(
     }
 }
 
-fn scalar_return_ast(target: &CypherReturnTarget) -> CypherReturnScalarAst<'_> {
+pub(crate) fn scalar_return_ast(target: &CypherReturnTarget) -> CypherReturnScalarAst<'_> {
     match target {
         CypherReturnTarget::All => CypherReturnScalarAst::Star,
         CypherReturnTarget::Element => CypherReturnScalarAst::Element,
@@ -14080,7 +14080,7 @@ where
     Ok(values)
 }
 
-fn evaluate_non_count_aggregate(
+pub(crate) fn evaluate_non_count_aggregate(
     aggregate: CypherReturnAggregate,
     values: Vec<Value>,
 ) -> Result<Value> {
@@ -14102,7 +14102,7 @@ fn evaluate_non_count_aggregate(
     }
 }
 
-fn distinct_return_values(values: Vec<Value>) -> Result<Vec<Value>> {
+pub(crate) fn distinct_return_values(values: Vec<Value>) -> Result<Vec<Value>> {
     let mut seen = BTreeSet::new();
     let mut distinct = Vec::with_capacity(values.len());
     for value in values {
@@ -14118,7 +14118,7 @@ fn distinct_return_values(values: Vec<Value>) -> Result<Vec<Value>> {
     Ok(distinct)
 }
 
-fn sum_return_values(values: &[Value]) -> Result<Value> {
+pub(crate) fn sum_return_values(values: &[Value]) -> Result<Value> {
     let mut int_sum = 0i64;
     let mut float_sum = 0.0f64;
     let mut saw_float = false;
@@ -14156,7 +14156,7 @@ fn sum_return_values(values: &[Value]) -> Result<Value> {
     }
 }
 
-fn avg_return_values(values: &[Value]) -> Result<Value> {
+pub(crate) fn avg_return_values(values: &[Value]) -> Result<Value> {
     if values.is_empty() {
         return Ok(Value::Null);
     }
@@ -14176,7 +14176,7 @@ fn avg_return_values(values: &[Value]) -> Result<Value> {
     Ok(Value::Float(sum / values.len() as f64))
 }
 
-fn count_distinct_elements(
+pub(crate) fn count_distinct_elements(
     node_bindings: &HashMap<String, NodeId>,
     edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
     row_node_values: &HashMap<String, Vec<Node>>,
@@ -14218,7 +14218,7 @@ fn count_distinct_elements(
     )))
 }
 
-fn count_distinct_values(values: impl IntoIterator<Item = Value>) -> Result<usize> {
+pub(crate) fn count_distinct_values(values: impl IntoIterator<Item = Value>) -> Result<usize> {
     let mut distinct = BTreeSet::new();
     for value in values {
         let key = serde_json::to_string(&value.to_json()).map_err(|err| {
@@ -14231,11 +14231,11 @@ fn count_distinct_values(values: impl IntoIterator<Item = Value>) -> Result<usiz
     Ok(distinct.len())
 }
 
-fn non_null_return_value(value: Value) -> Option<Value> {
+pub(crate) fn non_null_return_value(value: Value) -> Option<Value> {
     (value != Value::Null).then_some(value)
 }
 
-fn edge_identity_count_key(identity: &CypherBoundEdgeIdentity) -> String {
+pub(crate) fn edge_identity_count_key(identity: &CypherBoundEdgeIdentity) -> String {
     identity
         .id
         .as_ref()
@@ -14250,7 +14250,7 @@ fn edge_identity_count_key(identity: &CypherBoundEdgeIdentity) -> String {
         })
 }
 
-fn edge_count_key(edge: &Edge) -> String {
+pub(crate) fn edge_count_key(edge: &Edge) -> String {
     edge.id
         .as_ref()
         .map(|id| format!("id:{}", id.as_str()))
@@ -14264,13 +14264,13 @@ fn edge_count_key(edge: &Edge) -> String {
         })
 }
 
-fn count_value(count: usize) -> Result<Value> {
+pub(crate) fn count_value(count: usize) -> Result<Value> {
     i64::try_from(count).map(Value::Int).map_err(|_| {
         GrustError::CypherExecution(format!("RETURN count {count} cannot fit in int64"))
     })
 }
 
-fn apply_return_distinct(rows: &mut Vec<Vec<Value>>) -> Result<()> {
+pub(crate) fn apply_return_distinct(rows: &mut Vec<Vec<Value>>) -> Result<()> {
     let mut seen = BTreeSet::new();
     let mut distinct = Vec::with_capacity(rows.len());
     for row in rows.drain(..) {
@@ -14291,7 +14291,7 @@ fn apply_return_distinct(rows: &mut Vec<Vec<Value>>) -> Result<()> {
 }
 
 /// Applies `ORDER BY` (stable), then `SKIP`, then `LIMIT` to materialized rows.
-fn apply_return_control(
+pub(crate) fn apply_return_control(
     rows: &mut Vec<Vec<Value>>,
     order_by: &[CypherOrderItem],
     skip: Option<usize>,
@@ -14324,7 +14324,7 @@ fn apply_return_control(
 /// Total ordering over result values for `ORDER BY`. Nulls sort last (ascending),
 /// numbers compare numerically, strings and bools compare naturally, and values
 /// of different kinds fall back to a stable type rank so sorting is deterministic.
-fn compare_return_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+pub(crate) fn compare_return_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
     match (a, b) {
         (Value::Null, Value::Null) => Ordering::Equal,
@@ -14340,7 +14340,7 @@ fn compare_return_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     }
 }
 
-fn value_kind_rank(value: &Value) -> u8 {
+pub(crate) fn value_kind_rank(value: &Value) -> u8 {
     match value {
         Value::Bool(_) => 0,
         Value::Int(_) | Value::Float(_) => 1,
@@ -14511,7 +14511,7 @@ where
 }
 
 #[derive(Clone, Copy)]
-enum RowEdgeEndpoint {
+pub(crate) enum RowEdgeEndpoint {
     From,
     To,
 }
@@ -14677,7 +14677,7 @@ where
     Ok(())
 }
 
-fn operation_node_match(operation: &GraphMutationPlanOp) -> Option<GraphNodeMatch> {
+pub(crate) fn operation_node_match(operation: &GraphMutationPlanOp) -> Option<GraphNodeMatch> {
     match operation {
         GraphMutationPlanOp::PatchMatchingNodes {
             label,
@@ -14705,7 +14705,7 @@ fn operation_node_match(operation: &GraphMutationPlanOp) -> Option<GraphNodeMatc
     }
 }
 
-fn operation_relationship_match(operation: &GraphMutationPlanOp) -> Option<GraphRelationshipMatch> {
+pub(crate) fn operation_relationship_match(operation: &GraphMutationPlanOp) -> Option<GraphRelationshipMatch> {
     match operation {
         GraphMutationPlanOp::PatchMatchingEdges { relationship, .. }
         | GraphMutationPlanOp::UpdateMatchingEdgeProperty { relationship, .. }
@@ -14778,7 +14778,7 @@ where
     Ok(None)
 }
 
-fn merge_cypher_reports(report: &mut CypherMutationReport, next: CypherMutationReport) {
+pub(crate) fn merge_cypher_reports(report: &mut CypherMutationReport, next: CypherMutationReport) {
     report.creates += next.creates;
     report.merges += next.merges;
     report.deletes += next.deletes;
@@ -14947,13 +14947,13 @@ where
         .collect())
 }
 
-fn props_match(actual: &Props, expected: &Props) -> bool {
+pub(crate) fn props_match(actual: &Props, expected: &Props) -> bool {
     expected
         .iter()
         .all(|(key, value)| actual.get(key) == Some(value))
 }
 
-fn node_match(node: &Node, expected: &GraphNodeMatch) -> bool {
+pub(crate) fn node_match(node: &Node, expected: &GraphNodeMatch) -> bool {
     expected
         .label
         .as_ref()
@@ -15012,7 +15012,7 @@ where
         .expect("edge inserted before projection evaluation"))
 }
 
-fn project_node_value(node: &Node, key: &str) -> Value {
+pub(crate) fn project_node_value(node: &Node, key: &str) -> Value {
     if key == "label" {
         Value::from(node.label.as_str())
     } else {
@@ -15020,17 +15020,17 @@ fn project_node_value(node: &Node, key: &str) -> Value {
     }
 }
 
-fn project_edge_value(edge: &Edge, key: &str) -> Value {
+pub(crate) fn project_edge_value(edge: &Edge, key: &str) -> Value {
     edge.props.get(key).cloned().unwrap_or(Value::Null)
 }
 
-fn graph_node_value(node: &Node) -> Result<Value> {
+pub(crate) fn graph_node_value(node: &Node) -> Result<Value> {
     serde_json::to_value(node).map(Value::from).map_err(|err| {
         GrustError::CypherExecution(format!("RETURN node serialization failed: {err}"))
     })
 }
 
-fn graph_edge_value(edge: &Edge) -> Result<Value> {
+pub(crate) fn graph_edge_value(edge: &Edge) -> Result<Value> {
     serde_json::to_value(edge).map(Value::from).map_err(|err| {
         GrustError::CypherExecution(format!("RETURN relationship serialization failed: {err}"))
     })
@@ -15255,14 +15255,14 @@ pub fn check_strict_create_plan_conflicts(plan: &GraphMutationPlan) -> Result<()
     Ok(())
 }
 
-struct NumericExpression {
+pub(crate) struct NumericExpression {
     source_target: String,
     source_key: String,
     op: GraphNumericOp,
     operand: Value,
 }
 
-fn parse_numeric_expression(
+pub(crate) fn parse_numeric_expression(
     expression: &str,
     parameters: &CypherParameters,
 ) -> Result<Option<NumericExpression>> {
@@ -15289,7 +15289,7 @@ fn parse_numeric_expression(
     Ok(None)
 }
 
-fn find_numeric_operator_candidates(expression: &str) -> Vec<(usize, GraphNumericOp)> {
+pub(crate) fn find_numeric_operator_candidates(expression: &str) -> Vec<(usize, GraphNumericOp)> {
     let mut candidates = Vec::new();
     let mut quote = None;
     let mut escaped = false;
@@ -15320,7 +15320,7 @@ fn find_numeric_operator_candidates(expression: &str) -> Vec<(usize, GraphNumeri
     candidates
 }
 
-fn parse_property_ref(value: &str, context: &str) -> Result<(String, String)> {
+pub(crate) fn parse_property_ref(value: &str, context: &str) -> Result<(String, String)> {
     let value = value.trim();
     let Some(index) = find_unquoted(value, '.') else {
         return Err(cypher_syntax(format!(
@@ -15332,7 +15332,7 @@ fn parse_property_ref(value: &str, context: &str) -> Result<(String, String)> {
     Ok((target, key))
 }
 
-fn parse_cypher_props_map_literal(value: &str, parameters: &CypherParameters) -> Result<Props> {
+pub(crate) fn parse_cypher_props_map_literal(value: &str, parameters: &CypherParameters) -> Result<Props> {
     let value = value.trim();
     let Some(body) = value.strip_prefix('{') else {
         return Err(GrustError::Unsupported(
@@ -15348,7 +15348,7 @@ fn parse_cypher_props_map_literal(value: &str, parameters: &CypherParameters) ->
     parse_cypher_props(&body[..close], parameters)
 }
 
-fn split_cypher_body_props<'a>(
+pub(crate) fn split_cypher_body_props<'a>(
     body: &'a str,
     parameters: &CypherParameters,
 ) -> Result<(&'a str, Props)> {
@@ -15369,7 +15369,7 @@ fn split_cypher_body_props<'a>(
     }
 }
 
-fn parse_cypher_props(body: &str, parameters: &CypherParameters) -> Result<Props> {
+pub(crate) fn parse_cypher_props(body: &str, parameters: &CypherParameters) -> Result<Props> {
     let mut props = Props::new();
     for entry in split_top_level_commas(body)? {
         let entry = entry.trim();
@@ -15386,7 +15386,7 @@ fn parse_cypher_props(body: &str, parameters: &CypherParameters) -> Result<Props
     Ok(props)
 }
 
-fn parse_cypher_prop_key(key: &str) -> Result<String> {
+pub(crate) fn parse_cypher_prop_key(key: &str) -> Result<String> {
     let key = key.trim();
     if key.is_empty() {
         return Err(GrustError::Unsupported(
@@ -15407,7 +15407,7 @@ fn parse_cypher_prop_key(key: &str) -> Result<String> {
     }
 }
 
-fn parse_cypher_literal(value: &str, parameters: &CypherParameters) -> Result<Value> {
+pub(crate) fn parse_cypher_literal(value: &str, parameters: &CypherParameters) -> Result<Value> {
     let value = value.trim();
     if value.is_empty() {
         return Err(GrustError::Unsupported(
@@ -15444,7 +15444,7 @@ fn parse_cypher_literal(value: &str, parameters: &CypherParameters) -> Result<Va
         .map_err(|_| GrustError::Unsupported(format!("unsupported Cypher literal value: {value}")))
 }
 
-fn parse_cypher_in_values(value: &str, parameters: &CypherParameters) -> Result<Value> {
+pub(crate) fn parse_cypher_in_values(value: &str, parameters: &CypherParameters) -> Result<Value> {
     let value = value.trim();
     if let Some(parameter) = value.strip_prefix('$') {
         let parsed = parse_cypher_literal(value, parameters)?;
@@ -15473,7 +15473,7 @@ fn parse_cypher_in_values(value: &str, parameters: &CypherParameters) -> Result<
     Ok(Value::Json(serde_json::Value::Array(values)))
 }
 
-fn validate_cypher_in_values(value: &Value) -> Result<()> {
+pub(crate) fn validate_cypher_in_values(value: &Value) -> Result<()> {
     match value {
         Value::StringArray(_) | Value::IntArray(_) | Value::FloatArray(_) => Ok(()),
         Value::Json(serde_json::Value::Array(values)) => {
@@ -15499,7 +15499,7 @@ fn validate_cypher_in_values(value: &Value) -> Result<()> {
     }
 }
 
-fn validate_cypher_in_item(value: &Value) -> Result<()> {
+pub(crate) fn validate_cypher_in_item(value: &Value) -> Result<()> {
     match value {
         Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => Ok(()),
         Value::Null
@@ -15513,7 +15513,7 @@ fn validate_cypher_in_item(value: &Value) -> Result<()> {
     }
 }
 
-fn parse_cypher_string(value: &str) -> Result<String> {
+pub(crate) fn parse_cypher_string(value: &str) -> Result<String> {
     let value = value.trim();
     if !is_quoted(value) {
         return Err(GrustError::Unsupported(format!(
@@ -15545,15 +15545,15 @@ fn parse_cypher_string(value: &str) -> Result<String> {
     Ok(output)
 }
 
-fn optional_string_prop(props: &Props, key: &str) -> Option<String> {
+pub(crate) fn optional_string_prop(props: &Props, key: &str) -> Option<String> {
     props.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-fn has_relationship_predicates_beyond_id(props: &Props) -> bool {
+pub(crate) fn has_relationship_predicates_beyond_id(props: &Props) -> bool {
     props.keys().any(|key| key.as_str() != "id")
 }
 
-fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
+pub(crate) fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut quote = None;
@@ -15616,11 +15616,11 @@ fn split_top_level_commas(value: &str) -> Result<Vec<&str>> {
     Ok(parts)
 }
 
-fn find_top_level_keyword(value: &str, keyword: &str) -> Result<Option<usize>> {
+pub(crate) fn find_top_level_keyword(value: &str, keyword: &str) -> Result<Option<usize>> {
     find_top_level_keyword_sequence(value, keyword)
 }
 
-fn find_top_level_keyword_sequence(value: &str, keyword: &str) -> Result<Option<usize>> {
+pub(crate) fn find_top_level_keyword_sequence(value: &str, keyword: &str) -> Result<Option<usize>> {
     let mut quote = None;
     let mut escaped = false;
     let mut paren_depth = 0usize;
@@ -15687,7 +15687,7 @@ fn find_top_level_keyword_sequence(value: &str, keyword: &str) -> Result<Option<
     Ok(None)
 }
 
-fn strip_enclosing_parentheses(value: &str) -> Result<&str> {
+pub(crate) fn strip_enclosing_parentheses(value: &str) -> Result<&str> {
     let mut value = value.trim();
     loop {
         let Some(after_open) = value.strip_prefix('(') else {
@@ -15747,7 +15747,7 @@ fn strip_enclosing_parentheses(value: &str) -> Result<&str> {
     }
 }
 
-fn split_top_level_patterns(value: &str) -> Result<Vec<&str>> {
+pub(crate) fn split_top_level_patterns(value: &str) -> Result<Vec<&str>> {
     let mut parts = Vec::new();
     let mut start = 0;
     let mut quote = None;
@@ -15801,7 +15801,7 @@ fn split_top_level_patterns(value: &str) -> Result<Vec<&str>> {
     Ok(parts)
 }
 
-fn find_matching(value: &str, _open: char, close: char) -> Result<usize> {
+pub(crate) fn find_matching(value: &str, _open: char, close: char) -> Result<usize> {
     let mut quote = None;
     let mut escaped = false;
     for (index, ch) in value.char_indices() {
@@ -15833,7 +15833,7 @@ fn find_matching(value: &str, _open: char, close: char) -> Result<usize> {
 /// Scans `value` left to right, skipping single- and double-quoted spans (with
 /// backslash escapes inside them), and returns the first unquoted byte offset
 /// where `at_unquoted(index, rest)` returns true. `rest` is `&value[index..]`.
-fn scan_unquoted(value: &str, mut at_unquoted: impl FnMut(usize, &str) -> bool) -> Option<usize> {
+pub(crate) fn scan_unquoted(value: &str, mut at_unquoted: impl FnMut(usize, &str) -> bool) -> Option<usize> {
     let mut quote = None;
     let mut escaped = false;
     for (index, ch) in value.char_indices() {
@@ -15862,15 +15862,15 @@ fn scan_unquoted(value: &str, mut at_unquoted: impl FnMut(usize, &str) -> bool) 
     None
 }
 
-fn find_unquoted(value: &str, target: char) -> Option<usize> {
+pub(crate) fn find_unquoted(value: &str, target: char) -> Option<usize> {
     scan_unquoted(value, |_, rest| rest.starts_with(target))
 }
 
-fn find_unquoted_sequence(value: &str, target: &str) -> Option<usize> {
+pub(crate) fn find_unquoted_sequence(value: &str, target: &str) -> Option<usize> {
     scan_unquoted(value, |_, rest| rest.starts_with(target))
 }
 
-fn find_unquoted_keyword(value: &str, keyword: &str) -> Option<usize> {
+pub(crate) fn find_unquoted_keyword(value: &str, keyword: &str) -> Option<usize> {
     scan_unquoted(value, |index, rest| {
         rest.get(..keyword.len())
             .is_some_and(|candidate| candidate.eq_ignore_ascii_case(keyword))
@@ -15879,11 +15879,11 @@ fn find_unquoted_keyword(value: &str, keyword: &str) -> Option<usize> {
     })
 }
 
-fn keyword_boundary(ch: Option<char>) -> bool {
+pub(crate) fn keyword_boundary(ch: Option<char>) -> bool {
     ch.is_none_or(char::is_whitespace)
 }
 
-fn strip_leading_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> {
+pub(crate) fn strip_leading_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> {
     let candidate = value.get(..keyword.len())?;
     if !candidate.eq_ignore_ascii_case(keyword) {
         return None;
@@ -15896,7 +15896,7 @@ fn strip_leading_keyword<'a>(value: &'a str, keyword: &str) -> Option<&'a str> {
     Some(rest.trim_start())
 }
 
-fn is_quoted(value: &str) -> bool {
+pub(crate) fn is_quoted(value: &str) -> bool {
     let bytes = value.as_bytes();
     bytes.len() >= 2
         && ((bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'')
