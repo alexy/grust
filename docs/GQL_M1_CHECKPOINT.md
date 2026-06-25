@@ -31,9 +31,36 @@ reference); `tests/gql/portable_read.json` is the corpus. Still feature-gated:
 path variables, subqueries, shortest path, multi-label patterns, map/index
 projections.
 
-Not yet done for the read core (deferred): Sail/backend **pushdown** of the read
-subset (the reference executes portably; pushdown is Unit 15-ish), and wiring
-the legacy write entrypoints onto the new pipeline (below).
+Not yet done for the read core (deferred): wiring the legacy write entrypoints
+onto the new pipeline (below).
+
+## Unit 15 progress — read pushdown, milestone 1 (additive)
+
+`src/pushdown.rs` is the backend-neutral lowering. `plan_node_read(cypher,
+params)` lowers the **pushable subset** — a single node pattern
+`MATCH (var[:Label] [{k: lit}]) [WHERE pred] RETURN …` where `pred` is a
+conjunction/disjunction/negation of property comparisons (`=,<>,<,<=,>,>=`) vs
+int/float/string literals (or a parameter resolving to one) and `IS [NOT] NULL`
+— into a `NodeReadPushdown`. `to_sql(&dyn SqlDialect)` renders the scan + filter
+(`SparkDialect` and `SqliteDialect` provided); the `RETURN` projection is **not**
+pushed — it runs through the shared reference (`read::project_nodes`), so a
+pushdown result is byte-identical to `read::run_read_query` **by construction**.
+Anything outside the subset returns `Ok(None)` → the backend falls back to the
+reference rather than risk a wrong answer.
+
+- **Oracle:** `crates/grust-turso/tests/read_pushdown_oracle.rs` executes the
+  `SqliteDialect` SQL against an **embedded** in-memory SQLite engine (the `turso`
+  crate, no server) over an untagged `grust_nodes` table and asserts row equality
+  vs the Memory reference across 17 queries + parameters. Automated, CI-green.
+- **Sail:** `SailGraphStore::run_read_query` pushes the filter into Spark SQL for
+  the pushable subset and falls back to `read_graph()` + reference otherwise; a
+  `#[ignore]` live-server differential test pins row equality.
+
+Deferred (next pushdown increments, each gated by the oracle): relationship
+segments (joins), `IN` / `STARTS·ENDS·CONTAINS` / arithmetic predicates, boolean
+literals, and pushing `ORDER BY`/`SKIP`/`LIMIT`/projection into SQL (requires
+establishing cross-dialect ordering/typing equivalence — NULLS ordering, bool
+encoding, cross-type compares).
 
 ---
 
