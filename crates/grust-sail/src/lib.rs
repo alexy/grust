@@ -1324,6 +1324,31 @@ impl SailGraphStore {
         Ok(Graph::new(nodes, edges))
     }
 
+    /// Execute a bounded read-only Cypher query, pushing the `MATCH`/`WHERE`
+    /// filter down into Sail/Spark SQL where possible (Unit 15 of
+    /// `docs/GQL_GOAL.md`).
+    ///
+    /// For the pushable subset — a single node pattern with property comparisons
+    /// (see [`grust_cypher::pushdown`]) — the scan and filter are lowered to SQL
+    /// over `grust_nodes`, so only the surviving rows leave Spark; the `RETURN`
+    /// projection then runs through the shared Memory reference, making the result
+    /// identical to [`grust_cypher::read::run_read_query`] by construction. Any
+    /// other shape falls back to loading the graph and running the portable
+    /// reference directly (correct, but unfiltered).
+    pub async fn run_read_query(
+        &self,
+        cypher: &str,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        if let Some(plan) = grust_cypher::pushdown::plan_node_read(cypher, params)? {
+            let sql = plan.to_sql(&grust_cypher::pushdown::SparkDialect);
+            let nodes = self.run_query(&sql, vec![]).await?;
+            return plan.project(nodes, params);
+        }
+        let graph = self.read_graph().await?;
+        grust_cypher::read::run_read_query(&graph, cypher, params)
+    }
+
     /// Computes out-degrees over the generic persisted Sail edge table.
     pub async fn out_degrees(&self) -> Result<Vec<SailDegreeRow>> {
         self.run_degree_query(sail_out_degrees_sql()).await

@@ -6,6 +6,16 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added backend-neutral read-query **pushdown** (`grust_cypher::pushdown`): a
+  bounded `MATCH … RETURN` query's `MATCH`/`WHERE` filter is lowered into SQL via
+  a `SqlDialect` (Spark and SQLite provided), while the `RETURN` projection runs
+  through the shared Memory reference so pushdown results are identical to
+  `grust_cypher::read::run_read_query` by construction. `SailGraphStore` gains a
+  public `run_read_query` that pushes the filter into Spark SQL for the pushable
+  subset (single node pattern with property comparisons) and falls back to the
+  portable reference otherwise (additive public API). An embedded-SQLite
+  differential oracle (`grust-turso`) verifies reference-vs-pushdown row equality
+  without a server.
 - Refactored `grust-cypher` from a single ~16k-line `lib.rs` and ~17k-line
   `tests.rs` into cohesive modules (`ddl`, `parse`, `primitives`, `planner`,
   `eval_rows`, `restricted_values`, `projection`, `where_clause`, `returning`,
