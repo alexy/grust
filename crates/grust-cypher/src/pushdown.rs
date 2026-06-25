@@ -940,11 +940,22 @@ enum SelectedBinding {
     Edge { var: String },
 }
 
-/// A lowered single directed relationship segment.
+/// The traversal direction of a lowered relationship segment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegDirection {
+    /// `(a)-[..]->(b)`: a = src, b = dst.
+    Outgoing,
+    /// `(a)<-[..]-(b)`: a = dst, b = src.
+    Incoming,
+    /// `(a)-[..]-(b)`: either orientation (both appear, like the reference).
+    Undirected,
+}
+
+/// A lowered single relationship segment.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SegmentReadPushdown {
-    /// `na`-side endpoint and `nb`-side endpoint join targets depend on direction.
-    incoming: bool,
+    /// How `na`/`nb` join to the edge's src/dst columns.
+    direction: SegDirection,
     a_label: Option<String>,
     b_label: Option<String>,
     rel_types: Vec<String>,
@@ -1022,11 +1033,10 @@ fn lower_segment(
     let rel = &segment.relationship;
     let b = &segment.node;
 
-    // Direction: only directed segments for now.
-    let incoming = match rel.direction {
-        Direction::Outgoing => false,
-        Direction::Incoming => true,
-        Direction::Undirected => return None,
+    let direction = match rel.direction {
+        Direction::Outgoing => SegDirection::Outgoing,
+        Direction::Incoming => SegDirection::Incoming,
+        Direction::Undirected => SegDirection::Undirected,
     };
     // No variable-length, no relationship var-length bound.
     if rel.length.is_some() {
@@ -1131,7 +1141,7 @@ fn lower_segment(
     );
 
     Some(SegmentReadPushdown {
-        incoming,
+        direction,
         a_label,
         b_label,
         rel_types: rel.types.clone(),
@@ -1340,20 +1350,25 @@ impl SegmentReadPushdown {
         }
     }
 
-    /// The edge column that endpoint A joins on, given direction.
-    fn a_edge_col(&self) -> &'static str {
-        if self.incoming {
-            "dst_id"
-        } else {
-            "src_id"
-        }
-    }
-
-    fn b_edge_col(&self) -> &'static str {
-        if self.incoming {
-            "src_id"
-        } else {
-            "dst_id"
+    /// The `na`/`nb` join clauses for the segment's direction. Undirected matches
+    /// either orientation, so (like the reference) each non-self-loop edge yields
+    /// both `(a=src,b=dst)` and `(a=dst,b=src)`.
+    fn join_clauses(&self) -> (String, String) {
+        match self.direction {
+            SegDirection::Outgoing => (
+                "na.id = re.src_id".to_string(),
+                "nb.id = re.dst_id".to_string(),
+            ),
+            SegDirection::Incoming => (
+                "na.id = re.dst_id".to_string(),
+                "nb.id = re.src_id".to_string(),
+            ),
+            SegDirection::Undirected => (
+                "(na.id = re.src_id OR na.id = re.dst_id)".to_string(),
+                "((na.id = re.src_id AND nb.id = re.dst_id) \
+                 OR (na.id = re.dst_id AND nb.id = re.src_id))"
+                    .to_string(),
+            ),
         }
     }
 
@@ -1391,12 +1406,11 @@ impl SegmentReadPushdown {
             cols.join(", ")
         };
 
+        let (na_on, nb_on) = self.join_clauses();
         let mut sql = format!(
             "SELECT {select_list} FROM {edges} re \
-             JOIN {nodes} na ON na.id = re.{a_col} \
-             JOIN {nodes} nb ON nb.id = re.{b_col}",
-            a_col = self.a_edge_col(),
-            b_col = self.b_edge_col(),
+             JOIN {nodes} na ON {na_on} \
+             JOIN {nodes} nb ON {nb_on}",
         );
 
         let mut conditions: Vec<String> = Vec::new();
@@ -2065,9 +2079,21 @@ mod tests {
     }
 
     #[test]
+    fn undirected_segment_join() {
+        // Either orientation matches; the OR join reproduces both like the reference.
+        assert_eq!(
+            seg_spark("MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN a.name, b.name"),
+            "SELECT na.id, na.label, na.props, nb.id, nb.label, nb.props \
+             FROM `grust_edges` re \
+             JOIN `grust_nodes` na ON (na.id = re.src_id OR na.id = re.dst_id) \
+             JOIN `grust_nodes` nb ON ((na.id = re.src_id AND nb.id = re.dst_id) \
+             OR (na.id = re.dst_id AND nb.id = re.src_id)) \
+             WHERE re.edge_type = 'KNOWS' AND na.label = 'Person' AND nb.label = 'Person'"
+        );
+    }
+
+    #[test]
     fn segment_unsupported_shapes_fall_back() {
-        // Undirected.
-        assert!(seg_plan("MATCH (a)-[:KNOWS]-(b) RETURN a").is_none());
         // Variable length.
         assert!(seg_plan("MATCH (a)-[:KNOWS*1..2]->(b) RETURN a").is_none());
         // Two segments.

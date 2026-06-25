@@ -106,6 +106,10 @@ const PUSHABLE_SEGMENTS: &[&str] = &[
     "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN count(*) AS c",
     "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE NOT b.age >= 80 RETURN b.name",
     "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.name IN ['Alan', 'Grace'] RETURN a.name, b.name",
+    // Undirected: both orientations of each edge appear (compared as a multiset).
+    "MATCH (a:Person)-[:KNOWS]-(b:Person) RETURN a.name, b.name",
+    "MATCH (a:Person {name:'Ada'})-[:KNOWS]-(b) RETURN b.name",
+    "MATCH (a:Person)-[:RATED]-(b) RETURN a.name, b.name",
 ];
 
 #[tokio::test]
