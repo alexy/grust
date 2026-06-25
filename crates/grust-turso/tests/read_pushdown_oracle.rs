@@ -18,7 +18,7 @@
 use grust_core::{Edge, Graph, Label, Node, NodeId, Props, Value};
 use grust_cypher::pushdown::{
     plan_node_read, plan_node_read_with_hints, plan_segment_read, plan_segment_read_with_hints,
-    ScalarKind, SqlDialect, SqliteDialect, TypeHints,
+    plan_var_length_read, ScalarKind, SqlDialect, SqliteDialect, TypeHints,
 };
 use grust_cypher::read::run_read_query;
 use grust_cypher::{CypherParameters, CypherResultTable};
@@ -299,6 +299,96 @@ async fn segment_pushed_ordering_preserves_sequence() {
         let actual = segment_pushdown(&conn, cypher, &params).await;
         assert_eq!(actual, expected, "segment sequence mismatch for `{cypher}`");
     }
+}
+
+#[test]
+fn var_length_pushdown_matches_reference() {
+    // Variable-length lowers to a recursive CTE; the embedded `turso` engine does
+    // not support `WITH RECURSIVE`, so this oracle runs against real SQLite
+    // (`rusqlite`, bundled) — the dialect `SqliteDialect` targets.
+    //
+    // A chain p1 -> p11 -> p2 -> p3 plus an alternate p1 -> p2. The ids p1/p11
+    // are prefix-colliding to exercise the U+001F-delimited visited check, so the
+    // no-repeated-nodes rule matches the reference exactly.
+    let nodes = vec![
+        node("N", "p1", &[("name", Value::from("A"))]),
+        node("N", "p11", &[("name", Value::from("B"))]),
+        node("N", "p2", &[("name", Value::from("C"))]),
+        node("N", "p3", &[("name", Value::from("D"))]),
+    ];
+    let edges = vec![
+        Edge::new("R", "p1", "p11", Props::new()),
+        Edge::new("R", "p11", "p2", Props::new()),
+        Edge::new("R", "p2", "p3", Props::new()),
+        Edge::new("R", "p1", "p2", Props::new()),
+    ];
+    let graph = Graph::new(nodes, edges);
+    let conn = embed_sqlite(&graph);
+    let params = CypherParameters::new();
+    for cypher in [
+        "MATCH (a:N {name:'A'})-[:R*1..2]->(b) RETURN b.name",
+        "MATCH (a:N {name:'A'})-[:R*1..3]->(b) RETURN b.name",
+        "MATCH (a:N)-[:R*2..2]->(b) RETURN a.name, b.name",
+        "MATCH (a:N)-[:R*1..3]->(b) WHERE b.name <> 'A' RETURN a.name, b.name",
+        "MATCH (a:N {name:'A'})-[:R*1..2]-(b) RETURN b.name",
+    ] {
+        let plan = plan_var_length_read(cypher, &params)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be var-length pushable"));
+        let sql = plan.to_sql(&SqliteDialect);
+        let n = plan.column_count();
+        let mut stmt = conn
+            .prepare(&sql)
+            .unwrap_or_else(|e| panic!("prepare failed for `{sql}`: {e}"));
+        let text_rows: Vec<Vec<Option<String>>> = stmt
+            .query_map([], |row| {
+                (0..n).map(|i| row.get::<usize, Option<String>>(i)).collect()
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        let actual = plan
+            .project_text_rows(&SqliteDialect, text_rows, &params)
+            .unwrap();
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}
+
+/// Build a real in-memory SQLite database (rusqlite) populated from the graph.
+fn embed_sqlite(graph: &Graph) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE grust_nodes (id TEXT, label TEXT, props TEXT); \
+         CREATE TABLE grust_edges (id TEXT, src_id TEXT, dst_id TEXT, edge_type TEXT, props TEXT);",
+    )
+    .unwrap();
+    for n in &graph.nodes {
+        conn.execute_batch(&format!(
+            "INSERT INTO grust_nodes (id, label, props) VALUES ({}, {}, {});",
+            lit(n.id.as_str()),
+            lit(n.label.as_str()),
+            lit(&untagged_props(&n.props)),
+        ))
+        .unwrap();
+    }
+    for e in &graph.edges {
+        let id = e
+            .id
+            .as_ref()
+            .map(|i| lit(i.as_str()))
+            .unwrap_or_else(|| "NULL".to_string());
+        conn.execute_batch(&format!(
+            "INSERT INTO grust_edges (id, src_id, dst_id, edge_type, props) VALUES ({}, {}, {}, {}, {});",
+            id,
+            lit(e.from.as_str()),
+            lit(e.to.as_str()),
+            lit(e.label.as_str()),
+            lit(&untagged_props(&e.props)),
+        ))
+        .unwrap();
+    }
+    conn
 }
 
 /// Compare result tables by column names and **row multiset** — Cypher results

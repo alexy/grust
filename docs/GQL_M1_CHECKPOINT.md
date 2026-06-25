@@ -108,8 +108,21 @@ path variables fall back to the reference. Operands/ordering are indexed by node
 position / segment. Edge-property `ORDER BY` on untyped dialects uses
 `TypeHints::edge_property_kind` when the segment has a single typed relationship.
 
+**Variable-length paths.** `(a)-[:T*m..n]->(b)` with an **anonymous**
+relationship lowers (via `plan_var_length_read` / `VarLengthReadPushdown`) to a
+**recursive CTE** that enumerates simple paths (no repeated nodes, matching the
+reference) of length `[min, max]`, then joins the start/end nodes. The visited
+set is a U+001F-delimited string (the separator Grust already reserves in keys),
+tested with `instr(...)` so prefix-colliding ids (`p1`/`p11`) don't collide. min
+defaults to 1, max is open if unspecified; direction may be out/in/undirected.
+Named relationships (edge-list binding) and path variables fall back. The
+embedded `turso` engine does **not** support `WITH RECURSIVE`, so the oracle
+verifies this path against real SQLite (`rusqlite`, bundled, a grust-turso
+dev-dependency); the Spark rendering is golden-tested and depends on the engine's
+recursive-CTE support.
+
 Deferred (next pushdown increments, each gated by the oracle): variable-length
-paths (`*m..n`, needs recursive CTE + no-repeated-nodes); path variables;
+with an edge-list (named relationship) binding; path variables;
 `STARTS·ENDS·CONTAINS` / arithmetic predicates; boolean literals.
 
 ---

@@ -22,7 +22,10 @@ reconstructed from Git history, release commits, and the shipped docs.
   text and `grust_cypher` reconstructs the bindings before projecting. This now
   covers **multi-segment paths** (`(a)-[]->(b)-[]->(c)`, chained joins) and
   **undirected** segments (`(a)-[]-(b)`, matched in either orientation), in any
-  per-segment direction.
+  per-segment direction. **Variable-length** segments (`(a)-[:T*m..n]->(b)`, with
+  an anonymous relationship) lower to a recursive CTE enumerating simple paths
+  (no repeated nodes, like the reference); this is row-equality-verified against
+  real SQLite and depends on recursive-CTE support in the target engine.
   `WHERE … IN [literals]` (and `NOT … IN`) is also pushed, on both the node and
   segment paths, for non-empty homogeneous int/float/string lists. `ORDER BY` /
   `SKIP` / `LIMIT` are pushed into SQL on the single-node path for dialects whose

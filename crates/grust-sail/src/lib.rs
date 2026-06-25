@@ -1359,6 +1359,15 @@ impl SailGraphStore {
             let rows = self.run_text_query(&plan.to_sql(&dialect)).await?;
             return plan.project_text_rows(&dialect, rows, params);
         }
+        // Variable-length paths lower to a recursive CTE (requires recursive-CTE
+        // support in the engine; see grust_cypher::pushdown).
+        if let Some(plan) =
+            grust_cypher::pushdown::plan_var_length_read_with_hints(cypher, params, &hints)?
+        {
+            let dialect = grust_cypher::pushdown::SparkDialect;
+            let rows = self.run_text_query(&plan.to_sql(&dialect)).await?;
+            return plan.project_text_rows(&dialect, rows, params);
+        }
         let graph = self.read_graph().await?;
         grust_cypher::read::run_read_query(&graph, cypher, params)
     }

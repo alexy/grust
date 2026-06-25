@@ -1042,8 +1042,8 @@ async fn test_read_pushdown_matches_reference() {
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY b.name DESC",
         // Multi-segment chained path pushdown.
         "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.name, c.name ORDER BY c.name",
-        // Not pushable (variable-length): exercises the read_graph fallback branch.
-        "MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name ORDER BY b.name",
+        // Not pushable (OPTIONAL MATCH): exercises the read_graph fallback branch.
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name ORDER BY a.name",
     ];
     for cypher in queries {
         let expected = grust_cypher::read::run_read_query(&graph, cypher, &params)

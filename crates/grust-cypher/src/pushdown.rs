@@ -1445,37 +1445,7 @@ impl SegmentReadPushdown {
     }
 
     fn render_order_limit(&self, dialect: &dyn SqlDialect) -> String {
-        let ordering = self.ordering.as_ref().expect("ordering present");
-        let keys = ordering
-            .keys
-            .iter()
-            .map(|k| {
-                let col = render_seg_operand(&k.operand, dialect);
-                let col = if dialect.orders_json_typed() {
-                    col
-                } else {
-                    match k.kind {
-                        Some(ScalarKind::Int) => dialect.cast_int(&col),
-                        Some(ScalarKind::Float) => dialect.cast_float(&col),
-                        _ => col,
-                    }
-                };
-                if k.descending {
-                    format!("{col} DESC NULLS FIRST")
-                } else {
-                    format!("{col} ASC NULLS LAST")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(", ");
-        let mut sql = format!(" ORDER BY {keys}");
-        match (ordering.limit, ordering.skip) {
-            (Some(n), Some(s)) => sql.push_str(&format!(" LIMIT {n} OFFSET {s}")),
-            (Some(n), None) => sql.push_str(&format!(" LIMIT {n}")),
-            (None, Some(s)) => sql.push_str(&format!(" LIMIT -1 OFFSET {s}")),
-            (None, None) => {}
-        }
-        sql
+        render_seg_order_limit(self.ordering.as_ref().expect("ordering present"), dialect)
     }
 
     /// Number of text columns the SQL emits (for the backend to read row cells).
@@ -1499,42 +1469,7 @@ impl SegmentReadPushdown {
         rows: Vec<Vec<Option<String>>>,
         params: &CypherParameters,
     ) -> Result<CypherResultTable> {
-        let mut binding_rows = Vec::with_capacity(rows.len());
-        for cells in rows {
-            let mut idx = 0;
-            let cell = |i: usize| cells.get(i).and_then(|c| c.as_deref());
-            let mut bindings = Vec::with_capacity(self.selected.len());
-            for binding in &self.selected {
-                match binding {
-                    SelectedBinding::Node { var, .. } => {
-                        let id = cell(idx).unwrap_or_default().to_string();
-                        let label = cell(idx + 1).unwrap_or_default().to_string();
-                        let props = parse_props(cell(idx + 2))?;
-                        idx += 3;
-                        bindings.push((
-                            var.clone(),
-                            PushedBinding::Node(Node {
-                                id: NodeId::new(id),
-                                label: Label::new(label),
-                                props,
-                            }),
-                        ));
-                    }
-                    SelectedBinding::Edge { var, .. } => {
-                        let id = cell(idx).map(EdgeId::new);
-                        let from = cell(idx + 1).unwrap_or_default().to_string();
-                        let to = cell(idx + 2).unwrap_or_default().to_string();
-                        let label = cell(idx + 3).unwrap_or_default().to_string();
-                        let props = parse_props(cell(idx + 4))?;
-                        idx += 5;
-                        let mut edge = Edge::new(label, from, to, props);
-                        edge.id = id;
-                        bindings.push((var.clone(), PushedBinding::Edge(edge)));
-                    }
-                }
-            }
-            binding_rows.push(bindings);
-        }
+        let binding_rows = reconstruct_bindings(&self.selected, rows)?;
         if self.pushes_ordering(dialect) {
             let projection = strip_order_limit(&self.projection);
             crate::read::project_bindings(binding_rows, &projection, params)
@@ -1604,6 +1539,375 @@ fn render_seg_compare(
         Scalar::Str(s) => (raw, dialect.string_literal(s)),
     };
     format!("{lhs} {} {rhs}", op.sql())
+}
+
+/// Render ` ORDER BY … [LIMIT …] [OFFSET …]` for a path/var-length ordering,
+/// casting numeric keys on untyped-JSON dialects. Shared by both planners.
+fn render_seg_order_limit(ordering: &SegPushedOrdering, dialect: &dyn SqlDialect) -> String {
+    let keys = ordering
+        .keys
+        .iter()
+        .map(|k| {
+            let col = render_seg_operand(&k.operand, dialect);
+            let col = if dialect.orders_json_typed() {
+                col
+            } else {
+                match k.kind {
+                    Some(ScalarKind::Int) => dialect.cast_int(&col),
+                    Some(ScalarKind::Float) => dialect.cast_float(&col),
+                    _ => col,
+                }
+            };
+            if k.descending {
+                format!("{col} DESC NULLS FIRST")
+            } else {
+                format!("{col} ASC NULLS LAST")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut sql = format!(" ORDER BY {keys}");
+    match (ordering.limit, ordering.skip) {
+        (Some(n), Some(s)) => sql.push_str(&format!(" LIMIT {n} OFFSET {s}")),
+        (Some(n), None) => sql.push_str(&format!(" LIMIT {n}")),
+        (None, Some(s)) => sql.push_str(&format!(" LIMIT -1 OFFSET {s}")),
+        (None, None) => {}
+    }
+    sql
+}
+
+/// Reconstruct binding rows from a backend's text rows, consuming columns per
+/// selected binding (node: id,label,props; edge: id,src,dst,type,props).
+fn reconstruct_bindings(
+    selected: &[SelectedBinding],
+    rows: Vec<Vec<Option<String>>>,
+) -> Result<Vec<Vec<(String, PushedBinding)>>> {
+    let mut binding_rows = Vec::with_capacity(rows.len());
+    for cells in rows {
+        let cell = |i: usize| cells.get(i).and_then(|c| c.as_deref());
+        let mut idx = 0;
+        let mut bindings = Vec::with_capacity(selected.len());
+        for binding in selected {
+            match binding {
+                SelectedBinding::Node { var, .. } => {
+                    let node = Node {
+                        id: NodeId::new(cell(idx).unwrap_or_default()),
+                        label: Label::new(cell(idx + 1).unwrap_or_default()),
+                        props: parse_props(cell(idx + 2))?,
+                    };
+                    idx += 3;
+                    bindings.push((var.clone(), PushedBinding::Node(node)));
+                }
+                SelectedBinding::Edge { var, .. } => {
+                    let mut edge = Edge::new(
+                        cell(idx + 3).unwrap_or_default(),
+                        cell(idx + 1).unwrap_or_default(),
+                        cell(idx + 2).unwrap_or_default(),
+                        parse_props(cell(idx + 4))?,
+                    );
+                    edge.id = cell(idx).map(EdgeId::new);
+                    idx += 5;
+                    bindings.push((var.clone(), PushedBinding::Edge(edge)));
+                }
+            }
+        }
+        binding_rows.push(bindings);
+    }
+    Ok(binding_rows)
+}
+
+// ===========================================================================
+// Variable-length path pushdown (`(a)-[:T*m..n]->(b)`, anonymous relationship)
+// ===========================================================================
+//
+// Lowers a single variable-length segment to a recursive CTE that enumerates
+// **simple paths** (no repeated nodes, matching the reference) of length in
+// `[min, max]`, then joins the start/end nodes for projection. The relationship
+// must be anonymous (no edge-list binding) and there is no path variable. Node
+// `a` is aliased `n0`, end node `b` is `n1`, so the segment filter/ordering
+// machinery (operand indices 0 and 1) is reused.
+//
+// NOTE: verified for typed-JSON/SQLite via the differential oracle; the Spark
+// rendering is golden-tested only and depends on recursive-CTE support.
+
+/// A lowered single variable-length relationship segment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VarLengthReadPushdown {
+    direction: SegDirection,
+    rel_types: Vec<String>,
+    /// Inclusive lower bound (default 1) and optional upper bound (open if None).
+    min: u64,
+    max: Option<u64>,
+    a_label: Option<String>,
+    b_label: Option<String>,
+    filter: Option<SegPredicate>,
+    /// Selected bindings (`a` at node 0, `b` at node 1) in SELECT order.
+    selected: Vec<SelectedBinding>,
+    ordering: Option<SegPushedOrdering>,
+    projection: Projection,
+}
+
+/// Try to lower `cypher` into a variable-length path pushdown. Same contract as
+/// the other planners.
+pub fn plan_var_length_read(
+    cypher: &str,
+    params: &CypherParameters,
+) -> Result<Option<VarLengthReadPushdown>> {
+    plan_var_length_read_with_hints(cypher, params, &NoTypeHints)
+}
+
+/// Like [`plan_var_length_read`], with `ORDER BY` type hints for untyped dialects.
+pub fn plan_var_length_read_with_hints(
+    cypher: &str,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Result<Option<VarLengthReadPushdown>> {
+    let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
+    crate::semantics::analyze(&query)?;
+    Ok(lower_var_length(&query, params, hints))
+}
+
+fn lower_var_length(
+    query: &Query,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<VarLengthReadPushdown> {
+    if query.parts.len() != 1 || query.parts[0].union.is_some() {
+        return None;
+    }
+    let single = &query.parts[0].query;
+    let (match_clause, return_clause) = match single.clauses.as_slice() {
+        [Clause::Match(m), Clause::Return(r)] if !m.optional => (m, r),
+        _ => return None,
+    };
+    if match_clause.patterns.len() != 1 {
+        return None;
+    }
+    let pattern = &match_clause.patterns[0];
+    // Exactly one segment, which must be variable-length, no path variable.
+    if pattern.variable.is_some() || pattern.segments.len() != 1 {
+        return None;
+    }
+    let a = &pattern.start;
+    let segment = &pattern.segments[0];
+    let rel = &segment.relationship;
+    let b = &segment.node;
+    let range = rel.length?; // must be variable-length
+    // An edge-list binding (named relationship) is not reconstructed here.
+    if rel.variable.is_some() {
+        return None;
+    }
+    if a.labels.len() > 1 || b.labels.len() > 1 {
+        return None;
+    }
+    let a_var = a.variable.clone();
+    let b_var = b.variable.clone();
+    if let (Some(av), Some(bv)) = (&a_var, &b_var) {
+        if av == bv {
+            return None;
+        }
+    }
+    let direction = match rel.direction {
+        Direction::Outgoing => SegDirection::Outgoing,
+        Direction::Incoming => SegDirection::Incoming,
+        Direction::Undirected => SegDirection::Undirected,
+    };
+    // Match the reference: min defaults to 1, max is open if unspecified.
+    let min = range.min.unwrap_or(1);
+    let max = range.max;
+
+    // Roles: a -> node 0, b -> node 1 (reuse the segment operand machinery).
+    let mut roles: RoleMap = std::collections::HashMap::new();
+    if let Some(v) = &a_var {
+        roles.insert(v.clone(), Role::Node(0));
+    }
+    if let Some(v) = &b_var {
+        if roles.insert(v.clone(), Role::Node(1)).is_some() {
+            return None;
+        }
+    }
+
+    // Filter: inline props on a/b, then WHERE (over a/b only).
+    let mut filter: Option<SegPredicate> = None;
+    for (i, np) in [a, b].iter().enumerate() {
+        if let Some(map) = &np.properties {
+            for (key, value) in &map.entries {
+                let scalar = lower_scalar(value, params)?;
+                let operand = if key == "label" {
+                    SegOperand::NodeLabel(i)
+                } else {
+                    SegOperand::NodeProp(i, lower_seg_key(key)?)
+                };
+                filter = Some(seg_conjoin(
+                    filter,
+                    SegPredicate::Compare {
+                        operand,
+                        op: CmpOp::Eq,
+                        value: scalar,
+                    },
+                ));
+            }
+        }
+    }
+    if let Some(where_expr) = &match_clause.where_clause {
+        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &roles, params)?));
+    }
+
+    let mut selected = Vec::new();
+    if let Some(var) = &a_var {
+        selected.push(SelectedBinding::Node {
+            var: var.clone(),
+            node: 0,
+        });
+    }
+    if let Some(var) = &b_var {
+        selected.push(SelectedBinding::Node {
+            var: var.clone(),
+            node: 1,
+        });
+    }
+
+    let a_label = a.labels.first().cloned();
+    let b_label = b.labels.first().cloned();
+    let node_labels = [a_label.clone(), b_label.clone()];
+    let projection = return_clause.projection.clone();
+    let ordering = compute_seg_ordering(&projection, &roles, &node_labels, &[], params, hints);
+
+    Some(VarLengthReadPushdown {
+        direction,
+        rel_types: rel.types.clone(),
+        min,
+        max,
+        a_label,
+        b_label,
+        filter,
+        selected,
+        ordering,
+        projection,
+    })
+}
+
+impl VarLengthReadPushdown {
+    pub fn pushes_ordering(&self, dialect: &dyn SqlDialect) -> bool {
+        match &self.ordering {
+            None => false,
+            Some(ordering) => {
+                dialect.orders_json_typed() || ordering.keys.iter().all(|k| k.kind.is_some())
+            }
+        }
+    }
+
+    pub fn column_count(&self) -> usize {
+        (self.selected.len() * 3).max(1)
+    }
+
+    /// The recursive-CTE `next`-endpoint expression and the edge-incidence
+    /// predicate connecting walk row `w` to an edge `ed`, per direction.
+    fn step(&self) -> (String, String) {
+        match self.direction {
+            SegDirection::Outgoing => {
+                ("ed.dst_id".to_string(), "ed.src_id = w.e".to_string())
+            }
+            SegDirection::Incoming => {
+                ("ed.src_id".to_string(), "ed.dst_id = w.e".to_string())
+            }
+            SegDirection::Undirected => (
+                "CASE WHEN ed.src_id = w.e THEN ed.dst_id ELSE ed.src_id END".to_string(),
+                "(ed.src_id = w.e OR ed.dst_id = w.e)".to_string(),
+            ),
+        }
+    }
+
+    pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
+        let nodes = dialect.quote_ident(dialect.nodes_table());
+        let edges = dialect.quote_ident(dialect.edges_table());
+        // U+001F (unit separator) is the delimiter Grust already reserves in keys,
+        // so wrapping ids with it makes the visited-set membership unambiguous.
+        let sep = dialect.string_literal("\u{1f}");
+        let (next, incident) = self.step();
+
+        // Recursion edge-type filter.
+        let edge_filter = match self.rel_types.as_slice() {
+            [] => String::new(),
+            [one] => format!(" AND ed.edge_type = {}", dialect.string_literal(one)),
+            many => {
+                let list = many
+                    .iter()
+                    .map(|t| dialect.string_literal(t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" AND ed.edge_type IN ({list})")
+            }
+        };
+        let depth_cap = match self.max {
+            Some(m) => format!(" AND w.depth + 1 <= {m}"),
+            None => String::new(),
+        };
+
+        let mut cte = format!(
+            "WITH RECURSIVE walk(s, e, depth, visited) AS (\
+             SELECT id, id, 0, {sep} || id || {sep} FROM {nodes} \
+             UNION ALL \
+             SELECT w.s, {next}, w.depth + 1, w.visited || {next} || {sep} \
+             FROM walk w JOIN {edges} ed ON {incident} \
+             WHERE instr(w.visited, {sep} || {next} || {sep}) = 0{edge_filter}{depth_cap}) ",
+        );
+
+        let mut cols: Vec<String> = Vec::new();
+        for binding in &self.selected {
+            if let SelectedBinding::Node { node, .. } = binding {
+                cols.push(format!("n{node}.id"));
+                cols.push(format!("n{node}.label"));
+                cols.push(format!("n{node}.props"));
+            }
+        }
+        let select_list = if cols.is_empty() {
+            "1".to_string()
+        } else {
+            cols.join(", ")
+        };
+
+        cte.push_str(&format!(
+            "SELECT {select_list} FROM walk w \
+             JOIN {nodes} n0 ON n0.id = w.s \
+             JOIN {nodes} n1 ON n1.id = w.e",
+        ));
+
+        let mut conditions = vec![format!("w.depth >= {}", self.min)];
+        if let Some(label) = &self.a_label {
+            conditions.push(format!("n0.label = {}", dialect.string_literal(label)));
+        }
+        if let Some(label) = &self.b_label {
+            conditions.push(format!("n1.label = {}", dialect.string_literal(label)));
+        }
+        if let Some(filter) = &self.filter {
+            conditions.push(render_seg_predicate(filter, dialect));
+        }
+        cte.push_str(" WHERE ");
+        cte.push_str(&conditions.join(" AND "));
+        if self.pushes_ordering(dialect) {
+            cte.push_str(&render_seg_order_limit(
+                self.ordering.as_ref().unwrap(),
+                dialect,
+            ));
+        }
+        cte
+    }
+
+    pub fn project_text_rows(
+        &self,
+        dialect: &dyn SqlDialect,
+        rows: Vec<Vec<Option<String>>>,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        let binding_rows = reconstruct_bindings(&self.selected, rows)?;
+        if self.pushes_ordering(dialect) {
+            let projection = strip_order_limit(&self.projection);
+            crate::read::project_bindings(binding_rows, &projection, params)
+        } else {
+            crate::read::project_bindings(binding_rows, &self.projection, params)
+        }
+    }
 }
 
 /// Parse a JSON `props` text cell (untagged) into [`Props`]. NULL/empty → empty.
@@ -2139,5 +2443,63 @@ mod tests {
 
     fn some(s: &str) -> Option<String> {
         Some(s.to_string())
+    }
+
+    // ---- variable-length path pushdown ------------------------------------
+
+    fn varlen(cypher: &str) -> Option<VarLengthReadPushdown> {
+        plan_var_length_read(cypher, &params()).unwrap()
+    }
+
+    #[test]
+    fn var_length_recursive_cte() {
+        let sql = varlen("MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name")
+            .expect("pushable")
+            .to_sql(&SqliteDialect);
+        assert!(
+            sql.starts_with("WITH RECURSIVE walk(s, e, depth, visited) AS ("),
+            "{sql}"
+        );
+        // Outgoing step + simple-path (no-repeat) membership via instr.
+        assert!(sql.contains("JOIN \"grust_edges\" ed ON ed.src_id = w.e"), "{sql}");
+        assert!(sql.contains("WHERE instr(w.visited,"), "{sql}");
+        assert!(sql.contains("AND ed.edge_type = 'KNOWS'"), "{sql}");
+        assert!(sql.contains("AND w.depth + 1 <= 2"), "{sql}");
+        assert!(sql.contains(" WHERE w.depth >= 1"), "{sql}");
+        assert!(sql.contains("json_extract(n0.props, '$.name') = 'Ada'"), "{sql}");
+        assert!(sql.contains("n0.label = 'Person'"), "{sql}");
+
+        // Incoming and undirected step expressions.
+        let inc = varlen("MATCH (a)<-[:KNOWS*1..3]-(b) RETURN b.name")
+            .expect("pushable")
+            .to_sql(&SqliteDialect);
+        assert!(inc.contains("JOIN \"grust_edges\" ed ON ed.dst_id = w.e"), "{inc}");
+        assert!(inc.contains("AND w.depth + 1 <= 3"), "{inc}");
+        let und = varlen("MATCH (a)-[:KNOWS*2..3]-(b) RETURN b.name")
+            .expect("pushable")
+            .to_sql(&SqliteDialect);
+        assert!(
+            und.contains("CASE WHEN ed.src_id = w.e THEN ed.dst_id ELSE ed.src_id END"),
+            "{und}"
+        );
+        assert!(und.contains(" WHERE w.depth >= 2"), "{und}");
+
+        // Spark renders the same recursive shape with GET_JSON_OBJECT.
+        let spark = varlen("MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name")
+            .expect("pushable")
+            .to_sql(&SparkDialect);
+        assert!(spark.contains("GET_JSON_OBJECT(n0.props, '$.name') = 'Ada'"), "{spark}");
+    }
+
+    #[test]
+    fn var_length_unsupported_shapes_fall_back() {
+        // Named relationship binds an edge list — not reconstructed here.
+        assert!(varlen("MATCH (a)-[r:KNOWS*1..2]->(b) RETURN b").is_none());
+        // Fixed-length segment is handled by the segment planner, not here.
+        assert!(varlen("MATCH (a)-[:KNOWS]->(b) RETURN b").is_none());
+        // Plain node pattern.
+        assert!(varlen("MATCH (n) RETURN n").is_none());
+        // Path variable.
+        assert!(varlen("MATCH p = (a)-[:KNOWS*1..2]->(b) RETURN b").is_none());
     }
 }
