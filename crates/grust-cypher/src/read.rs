@@ -500,12 +500,53 @@ fn expand_segments(
     }
     let segment = &segments[idx];
     let rel = &segment.relationship;
-    if rel.length.is_some() {
-        return Err(unsupported_gql_feature(
-            GqlFeature::QuantifiedPathPattern,
-            GqlConformanceProfile::PortableGql,
-            "variable-length relationships are not supported by the read reference executor yet",
-        ));
+
+    // Variable-length relationship: expand bounded paths (no repeated nodes, so
+    // the search is finite even with an open upper bound). The relationship
+    // variable binds to the list of traversed edges.
+    if let Some(range) = rel.length {
+        let min = range.min.unwrap_or(1) as usize;
+        let max = range.max.map(|m| m as usize);
+        let mut paths: Vec<(Node, Vec<Edge>)> = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(current.id.as_str().to_string());
+        collect_var_length_paths(
+            graph,
+            index,
+            rel,
+            current,
+            min,
+            max,
+            &mut Vec::new(),
+            &mut visited,
+            params,
+            &mut paths,
+        )?;
+        for (end_node, edges) in paths {
+            if !node_matches(&end_node, &segment.node, params)? {
+                continue;
+            }
+            if let Some(var) = &segment.node.variable {
+                if let Some(Bound::Node(bound)) = row.get(var) {
+                    if bound.id != end_node.id {
+                        continue;
+                    }
+                }
+            }
+            let mut next_row = row.clone();
+            if let Some(var) = &rel.variable {
+                let mut arr = Vec::with_capacity(edges.len());
+                for edge in &edges {
+                    arr.push(value_to_json(&graph_edge_value(edge)?));
+                }
+                next_row.insert(var.clone(), Bound::Value(Value::Json(serde_json::Value::Array(arr))));
+            }
+            if let Some(var) = &segment.node.variable {
+                next_row.insert(var.clone(), Bound::Node(end_node.clone()));
+            }
+            expand_segments(graph, index, segments, idx + 1, &end_node, next_row, params, out)?;
+        }
+        return Ok(());
     }
 
     for edge in &graph.edges {
@@ -540,6 +581,56 @@ fn expand_segments(
             next_row.insert(var.clone(), Bound::Node(next_node.clone()));
         }
         expand_segments(graph, index, segments, idx + 1, next_node, next_row, params, out)?;
+    }
+    Ok(())
+}
+
+/// Depth-first collection of variable-length paths from `node`. Records `(end,
+/// edges)` for every prefix whose length is within `[min, max]`. Nodes are not
+/// revisited within a path, so the search terminates even when `max` is open.
+#[allow(clippy::too_many_arguments)]
+fn collect_var_length_paths(
+    graph: &Graph,
+    index: &NodeIndex,
+    rel: &RelationshipPattern,
+    node: &Node,
+    min: usize,
+    max: Option<usize>,
+    edges_so_far: &mut Vec<Edge>,
+    visited: &mut std::collections::HashSet<String>,
+    params: &CypherParameters,
+    results: &mut Vec<(Node, Vec<Edge>)>,
+) -> Result<()> {
+    let depth = edges_so_far.len();
+    if depth >= min {
+        results.push((node.clone(), edges_so_far.clone()));
+    }
+    if max.is_some_and(|m| depth >= m) {
+        return Ok(());
+    }
+    for edge in &graph.edges {
+        let Some(next_id) = edge_other_endpoint(edge, node, rel.direction) else {
+            continue;
+        };
+        if !rel.types.is_empty() && !rel.types.iter().any(|t| t == edge.label.as_str()) {
+            continue;
+        }
+        if !props_match(&edge.props, rel.properties.as_ref(), params)? {
+            continue;
+        }
+        if visited.contains(next_id) {
+            continue;
+        }
+        let Some(next_node) = index.get(graph, next_id) else {
+            continue;
+        };
+        edges_so_far.push(edge.clone());
+        visited.insert(next_id.to_string());
+        collect_var_length_paths(
+            graph, index, rel, next_node, min, max, edges_so_far, visited, params, results,
+        )?;
+        visited.remove(next_id);
+        edges_so_far.pop();
     }
     Ok(())
 }
@@ -1616,10 +1707,34 @@ mod tests {
     }
 
     #[test]
+    fn variable_length_paths() {
+        let t = run("MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name ORDER BY b.name");
+        assert_eq!(
+            t.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
+            vec![Value::from("Alan"), Value::from("Grace")]
+        );
+    }
+
+    #[test]
+    fn variable_length_exact_bound() {
+        let t = run("MATCH (a:Person {name:'Ada'})-[:KNOWS*2..2]->(b) RETURN b.name");
+        assert_eq!(t.rows, vec![vec![Value::from("Grace")]]);
+    }
+
+    #[test]
+    fn variable_length_binds_edge_list() {
+        let t = run("MATCH (a:Person {name:'Ada'})-[r:KNOWS*1..2]->(b) RETURN b.name AS name, size(r) AS hops ORDER BY name");
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::from("Alan"), Value::Int(1)],
+                vec![Value::from("Grace"), Value::Int(2)],
+            ]
+        );
+    }
+
+    #[test]
     fn unsupported_shapes_are_feature_tagged() {
-        let err = run_read_query(&graph(), "MATCH (a)-[:KNOWS*1..3]->(b) RETURN b", &CypherParameters::new())
-            .unwrap_err();
-        assert!(matches!(err, GrustError::Unsupported(_)));
         // Map literals in projections are still unsupported.
         let err = run_read_query(
             &graph(),
