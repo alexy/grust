@@ -8,7 +8,24 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use async_trait::async_trait;
 use grust_core::prelude::*;
-pub use grust_cypher::*;
+// Internal access to the full shared Cypher language layer (parser, planner,
+// returning evaluator, errors, and the gql/lexer/parser/ast/semantics modules).
+use grust_cypher::*;
+// Explicit public re-export of the portable Cypher API that Sail executes, so
+// `grust_sail::cypher_*` stays available without re-exporting the entire crate.
+pub use grust_cypher::{
+    CypherConstraintRegistry, CypherCreateMode, CypherDdlApplicationReport, CypherDdlStatement,
+    CypherGeneratedNodeId, CypherMutationOptions, CypherMutationReport, CypherMutationResult,
+    CypherMutationTableResult, CypherNodeIdPolicy, CypherNullAssignment, CypherParameters,
+    CypherRelationshipIdPolicy, CypherResultTable, CypherSchemaApplication, CypherSchemaManager,
+    CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity, NamedGraphConstraint,
+    apply_cypher_ddl_to_schema, apply_cypher_native_constraints, cypher_constraints, cypher_ddl,
+    cypher_mutation_plan, cypher_mutation_plan_with_options,
+    cypher_mutation_plan_with_return_options,
+    execute_cypher_mutation_returning_with_options_on_store, sail_cypher_constraints,
+    sail_cypher_ddl, sail_cypher_mutation_plan, sail_cypher_mutation_plan_with_options,
+    sail_cypher_mutation_plan_with_return_options,
+};
 use tonic::transport::Channel;
 
 #[allow(clippy::all, unused_imports, dead_code)]

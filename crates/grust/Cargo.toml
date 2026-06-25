@@ -23,7 +23,10 @@ memory = ["dep:grust-memory"]
 postgres = ["dep:grust-postgres"]
 postgres-pgq = ["dep:grust-postgres-pgq"]
 pggraph = ["dep:grust-pggraph"]
-sail = ["dep:grust-sail"]
+# Sail is a Cypher execution backend, so it depends on the shared Cypher
+# language layer; enabling `sail` enables `cypher` (the facade re-exports the
+# Cypher language surface once, from the `cypher` block).
+sail = ["dep:grust-sail", "cypher"]
 surreal = ["dep:grust-surreal"]
 turso = ["dep:grust-turso"]
 turso-sync = ["turso", "grust-turso/sync"]

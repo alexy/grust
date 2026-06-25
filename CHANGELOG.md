@@ -6,6 +6,21 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Refactored `grust-cypher` from a single ~16k-line `lib.rs` and ~17k-line
+  `tests.rs` into cohesive modules (`ddl`, `parse`, `primitives`, `planner`,
+  `eval_rows`, `restricted_values`, `projection`, `where_clause`, `returning`,
+  plus the new `gql`, `lexer`, `ast`, `parser`, `semantics`) and a per-area
+  `tests/` directory. The public API is unchanged; crate internals are now
+  `pub(crate)`.
+- Tightened the `grust-sail` and `grust-graph` Cypher re-export surface
+  (public-API change). `grust-sail` no longer re-exports all of `grust-cypher`
+  via a glob — it now explicitly re-exports the portable Cypher API it executes.
+  The `grust-graph` `sail` feature now enables `cypher`, and the facade
+  re-exports the Cypher language surface once (from the `cypher` block) while the
+  `sail` block re-exports only Sail-native items; this also fixes building the
+  facade with `cypher` and `sail` enabled together. Removed dead
+  `helix`/`ladybug` facade re-export blocks left over from those backends being
+  dropped from the facade.
 - Added `grust-postgres-pgq`, a PostgreSQL 19 SQL/PGQ backend that reuses the
   shared PostgreSQL universal-table store, creates a native `PROPERTY GRAPH`,
   executes bounded traversal through `GRAPH_TABLE`, and is exposed through the
