@@ -376,14 +376,28 @@ fn project(
         .filter_map(|i| i.alias.clone().map(|a| (a, i.expr.clone())))
         .collect();
 
-    let mut out_rows: Vec<Vec<Value>> = Vec::with_capacity(rows.len());
-    for row in rows {
-        let mut values = Vec::with_capacity(exprs.len());
-        for expr in &exprs {
-            values.push(eval(expr, row, params)?);
+    let has_aggregate = exprs.iter().any(expr_has_aggregate);
+
+    let mut out_rows: Vec<Vec<Value>> = if has_aggregate {
+        if projection.star {
+            return Err(unsupported_gql_feature(
+                GqlFeature::AggregateFunctionRegistry,
+                GqlConformanceProfile::PortableGql,
+                "RETURN * combined with aggregates is not supported by the read reference executor yet",
+            ));
         }
-        out_rows.push(values);
-    }
+        grouped_project(&exprs, rows, params)?
+    } else {
+        let mut rs = Vec::with_capacity(rows.len());
+        for row in rows {
+            let mut values = Vec::with_capacity(exprs.len());
+            for expr in &exprs {
+                values.push(eval(expr, row, params)?);
+            }
+            rs.push(values);
+        }
+        rs
+    };
 
     if projection.distinct {
         let mut seen = std::collections::HashSet::new();
@@ -397,13 +411,249 @@ fn project(
         out_rows = deduped;
     }
 
-    apply_order_by(&mut out_rows, &projection.order_by, rows, &aliases, params)?;
+    if has_aggregate {
+        // Grouped rows no longer align with the source bindings, so ORDER BY
+        // resolves against the output columns instead.
+        order_by_columns(&mut out_rows, &columns, &projection.order_by)?;
+    } else {
+        apply_order_by(&mut out_rows, &projection.order_by, rows, &aliases, params)?;
+    }
     apply_skip_limit(&mut out_rows, projection, params)?;
 
     Ok(CypherResultTable {
         columns,
         rows: out_rows,
     })
+}
+
+/// Aggregate function names recognized by the read reference executor.
+fn is_aggregate_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "count" | "sum" | "avg" | "min" | "max" | "collect"
+    )
+}
+
+/// True if `expr` contains an aggregate function call anywhere.
+fn expr_has_aggregate(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function { name, args, .. } => {
+            is_aggregate_name(name) || args.iter().any(expr_has_aggregate)
+        }
+        Expr::Property { base, .. } => expr_has_aggregate(base),
+        Expr::Index { base, index } => expr_has_aggregate(base) || expr_has_aggregate(index),
+        Expr::List(items) => items.iter().any(expr_has_aggregate),
+        Expr::Map(entries) => entries.iter().any(|(_, e)| expr_has_aggregate(e)),
+        Expr::Unary { operand, .. } => expr_has_aggregate(operand),
+        Expr::Binary { lhs, rhs, .. } => expr_has_aggregate(lhs) || expr_has_aggregate(rhs),
+        Expr::IsNull { operand, .. } => expr_has_aggregate(operand),
+        Expr::Case {
+            operand,
+            branches,
+            default,
+        } => {
+            operand.as_deref().is_some_and(expr_has_aggregate)
+                || branches
+                    .iter()
+                    .any(|b| expr_has_aggregate(&b.when) || expr_has_aggregate(&b.then))
+                || default.as_deref().is_some_and(expr_has_aggregate)
+        }
+        _ => false,
+    }
+}
+
+/// Group rows by the non-aggregate (grouping-key) projection items and fold the
+/// aggregate items per group. Each item must be either aggregate-free (a key) or
+/// a single top-level aggregate call; nested aggregates are not supported.
+fn grouped_project(
+    exprs: &[Expr],
+    rows: &[Row],
+    params: &CypherParameters,
+) -> Result<Vec<Vec<Value>>> {
+    enum Kind<'a> {
+        Key(&'a Expr),
+        Aggregate(&'a Expr),
+    }
+    let mut kinds = Vec::with_capacity(exprs.len());
+    for expr in exprs {
+        match expr {
+            Expr::Function { name, .. } if is_aggregate_name(name) => {
+                kinds.push(Kind::Aggregate(expr))
+            }
+            _ if expr_has_aggregate(expr) => {
+                return Err(unsupported_gql_feature(
+                    GqlFeature::AggregateFunctionRegistry,
+                    GqlConformanceProfile::PortableGql,
+                    "aggregates nested inside larger expressions are not supported by the read reference executor yet",
+                ))
+            }
+            _ => kinds.push(Kind::Key(expr)),
+        }
+    }
+
+    let key_exprs: Vec<&Expr> = kinds
+        .iter()
+        .filter_map(|k| match k {
+            Kind::Key(e) => Some(*e),
+            Kind::Aggregate(_) => None,
+        })
+        .collect();
+
+    // Group rows, preserving first-seen order for deterministic output.
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, (Vec<Value>, Vec<&Row>)> = HashMap::new();
+    for row in rows {
+        let key_values: Vec<Value> = key_exprs
+            .iter()
+            .map(|e| eval(e, row, params))
+            .collect::<Result<_>>()?;
+        let key = return_row_key(&key_values, "GROUP BY")?;
+        groups
+            .entry(key.clone())
+            .or_insert_with(|| {
+                order.push(key);
+                (key_values, Vec::new())
+            })
+            .1
+            .push(row);
+    }
+
+    // A pure aggregate with no grouping keys yields exactly one row even over an
+    // empty match (e.g. `RETURN count(*)` -> 0).
+    if key_exprs.is_empty() && rows.is_empty() {
+        order.push(String::new());
+        groups.insert(String::new(), (Vec::new(), Vec::new()));
+    }
+
+    let mut out_rows = Vec::with_capacity(order.len());
+    for key in &order {
+        let (key_values, group_rows) = &groups[key];
+        let mut key_iter = key_values.iter();
+        let mut values = Vec::with_capacity(kinds.len());
+        for kind in &kinds {
+            match kind {
+                Kind::Key(_) => values.push(
+                    key_iter
+                        .next()
+                        .cloned()
+                        .unwrap_or(Value::Null),
+                ),
+                Kind::Aggregate(expr) => {
+                    values.push(eval_aggregate(expr, group_rows, params)?)
+                }
+            }
+        }
+        out_rows.push(values);
+    }
+    Ok(out_rows)
+}
+
+fn eval_aggregate(expr: &Expr, group_rows: &[&Row], params: &CypherParameters) -> Result<Value> {
+    let Expr::Function {
+        name,
+        distinct,
+        star,
+        args,
+    } = expr
+    else {
+        unreachable!("eval_aggregate called on a non-function expression");
+    };
+    let name = name.to_ascii_lowercase();
+
+    if name == "count" && *star {
+        return count_value(group_rows.len());
+    }
+    if args.len() != 1 {
+        return Err(gql_type(format!(
+            "aggregate {name}() expects exactly one argument"
+        )));
+    }
+    let arg = &args[0];
+
+    // Evaluate the argument per row, dropping NULLs (standard aggregate rule).
+    let mut values: Vec<Value> = Vec::with_capacity(group_rows.len());
+    for row in group_rows {
+        if let Some(v) = non_null_return_value(eval(arg, row, params)?) {
+            values.push(v);
+        }
+    }
+    if *distinct {
+        values = distinct_return_values(values)?;
+    }
+
+    match name.as_str() {
+        "count" => count_value(values.len()),
+        "sum" => sum_return_values(&values),
+        "avg" => avg_return_values(&values),
+        "collect" => {
+            let json: Vec<serde_json::Value> = values.iter().map(value_to_json).collect();
+            Ok(Value::Json(serde_json::Value::Array(json)))
+        }
+        "min" | "max" => {
+            let want_max = name == "max";
+            let mut best: Option<Value> = None;
+            for v in values {
+                best = Some(match best {
+                    None => v,
+                    Some(current) => {
+                        let ord = compare_return_values(&v, &current);
+                        let pick_v = if want_max {
+                            ord.is_gt()
+                        } else {
+                            ord.is_lt()
+                        };
+                        if pick_v {
+                            v
+                        } else {
+                            current
+                        }
+                    }
+                });
+            }
+            Ok(best.unwrap_or(Value::Null))
+        }
+        _ => unreachable!("is_aggregate_name gates the set"),
+    }
+}
+
+/// ORDER BY for the aggregate path: keys must reference output columns by name.
+fn order_by_columns(
+    out_rows: &mut [Vec<Value>],
+    columns: &[String],
+    order_by: &[OrderItem],
+) -> Result<()> {
+    if order_by.is_empty() {
+        return Ok(());
+    }
+    let mut keys = Vec::with_capacity(order_by.len());
+    for item in order_by {
+        let name = match &item.expr {
+            Expr::Variable(name) => name.clone(),
+            Expr::Property { base, key } => format!("{}.{}", column_name(base), key),
+            _ => {
+                return Err(unsupported_gql_feature(
+                    GqlFeature::AggregateFunctionRegistry,
+                    GqlConformanceProfile::PortableGql,
+                    "ORDER BY with aggregates must reference an output column by name",
+                ))
+            }
+        };
+        let idx = columns.iter().position(|c| c == &name).ok_or_else(|| {
+            gql_name(format!("ORDER BY column `{name}` is not in the RETURN list"))
+        })?;
+        keys.push((idx, item.descending));
+    }
+    out_rows.sort_by(|a, b| {
+        for (idx, descending) in &keys {
+            let ord = compare_return_values(&a[*idx], &b[*idx]);
+            let ord = if *descending { ord.reverse() } else { ord };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    Ok(())
 }
 
 fn apply_order_by(
@@ -948,7 +1198,8 @@ mod tests {
         let err = run_read_query(&graph(), "MATCH (a) RETURN a UNION MATCH (b) RETURN b", &CypherParameters::new())
             .unwrap_err();
         assert!(matches!(err, GrustError::Unsupported(_)));
-        let err = run_read_query(&graph(), "MATCH (n) RETURN count(*)", &CypherParameters::new())
+        // Scalar (non-aggregate) functions are still unsupported (Unit 7).
+        let err = run_read_query(&graph(), "MATCH (n:Person) RETURN toString(n.age)", &CypherParameters::new())
             .unwrap_err();
         assert!(matches!(err, GrustError::Unsupported(_)));
     }
@@ -991,5 +1242,59 @@ mod tests {
         .unwrap();
         assert_eq!(table.columns, vec!["friend".to_string()]);
         assert_eq!(table.rows, vec![vec![Value::from("Alan")]]);
+    }
+
+    #[test]
+    fn count_star() {
+        let t = run("MATCH (n:Person) RETURN count(*)");
+        assert_eq!(t.rows, vec![vec![Value::Int(3)]]);
+    }
+
+    #[test]
+    fn count_over_empty_match_is_zero() {
+        let t = run("MATCH (n:Nonexistent) RETURN count(*)");
+        assert_eq!(t.rows, vec![vec![Value::Int(0)]]);
+    }
+
+    #[test]
+    fn min_max_avg() {
+        let t = run("MATCH (n:Person) RETURN min(n.age) AS lo, max(n.age) AS hi");
+        assert_eq!(t.columns, vec!["lo".to_string(), "hi".to_string()]);
+        assert_eq!(t.rows, vec![vec![Value::Int(36), Value::Int(85)]]);
+    }
+
+    #[test]
+    fn group_by_label_with_count() {
+        let t = run("MATCH (n) RETURN n.label AS label, count(*) AS c ORDER BY label");
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::from("City"), Value::Int(1)],
+                vec![Value::from("Person"), Value::Int(3)],
+            ]
+        );
+    }
+
+    #[test]
+    fn count_property_skips_nulls() {
+        // No Person has `population`, so count(n.population) == 0.
+        let t = run("MATCH (n:Person) RETURN count(n.population)");
+        assert_eq!(t.rows, vec![vec![Value::Int(0)]]);
+    }
+
+    #[test]
+    fn collect_gathers_values() {
+        let t = run("MATCH (n:Person) RETURN collect(n.name) AS names");
+        assert_eq!(t.rows.len(), 1);
+        match &t.rows[0][0] {
+            Value::Json(serde_json::Value::Array(items)) => assert_eq!(items.len(), 3),
+            other => panic!("expected a list, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn count_distinct() {
+        let t = run("MATCH (n) RETURN count(DISTINCT n.label) AS kinds");
+        assert_eq!(t.rows, vec![vec![Value::Int(2)]]);
     }
 }
