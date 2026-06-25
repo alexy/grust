@@ -412,6 +412,33 @@ fn bound_value(bound: &Bound) -> Result<Value> {
     }
 }
 
+/// Project a set of already-matched nodes through a `RETURN`/`WITH` projection.
+///
+/// This is the shared tail used by backend **read pushdown** (Unit 15): a
+/// persistent backend lowers the `MATCH`/`WHERE` filter into its own SQL, fetches
+/// the surviving nodes, and hands them here so the `RETURN` projection (aliases,
+/// `*`, `DISTINCT`, `ORDER BY`, `SKIP`/`LIMIT`, aggregates) runs through the
+/// **exact same** reference code path as [`run_read_query`]. The pushdown result
+/// is therefore byte-identical to the in-memory reference by construction; only
+/// the upstream filter equivalence has to be established per backend.
+pub(crate) fn project_nodes(
+    var: &str,
+    nodes: Vec<Node>,
+    projection: &Projection,
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
+    let rows: Vec<Row> = nodes
+        .into_iter()
+        .map(|node| {
+            let mut row = Row::new();
+            row.insert(var.to_string(), Bound::Node(node));
+            row
+        })
+        .collect();
+    let empty = Graph::default();
+    project(&empty, &rows, projection, params)
+}
+
 // ---------------------------------------------------------------------------
 // Pattern matching
 // ---------------------------------------------------------------------------

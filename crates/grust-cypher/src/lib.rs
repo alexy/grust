@@ -25,6 +25,7 @@ mod projection;
 pub use projection::*;
 mod primitives;
 pub use primitives::*;
+pub mod pushdown;
 pub mod read;
 pub mod semantics;
 pub use gql::{
