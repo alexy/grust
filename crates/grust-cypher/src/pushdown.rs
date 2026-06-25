@@ -120,6 +120,39 @@ enum Predicate {
         op: CmpOp,
         value: bool,
     },
+    /// `<arith> <op> <arith>`, where at least one side references a property.
+    ArithCompare {
+        lhs: ArithExpr,
+        op: CmpOp,
+        rhs: ArithExpr,
+    },
+}
+
+/// A pushable arithmetic operand: `+`/`-`/`*` over typed numeric properties and
+/// numeric literals. Each property carries its (numeric) kind so it can be cast.
+#[derive(Clone, Debug, PartialEq)]
+enum ArithExpr {
+    Prop(PropRef, ScalarKind),
+    Int(i64),
+    Float(f64),
+    Bin(ArithOp, Box<ArithExpr>, Box<ArithExpr>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+}
+
+impl ArithOp {
+    fn sql(self) -> &'static str {
+        match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+        }
+    }
 }
 
 /// A reference to a property of the scanned node. `label` maps to the backend's
@@ -502,7 +535,7 @@ fn lower_query(
         }
     }
     if let Some(where_expr) = &match_clause.where_clause {
-        let predicate = lower_predicate(where_expr, &var, params)?;
+        let predicate = lower_predicate(where_expr, &var, label.as_deref(), params, hints)?;
         filter = Some(conjoin(filter, predicate));
     }
 
@@ -599,30 +632,37 @@ fn conjoin(existing: Option<Predicate>, next: Predicate) -> Predicate {
 }
 
 /// Lower a boolean `WHERE` expression into a pushable [`Predicate`], or `None`
-/// if any part is outside the milestone-1 subset.
-fn lower_predicate(expr: &Expr, var: &str, params: &CypherParameters) -> Option<Predicate> {
+/// if any part is outside the pushable subset. `label`/`hints` resolve property
+/// types for arithmetic operands.
+fn lower_predicate(
+    expr: &Expr,
+    var: &str,
+    label: Option<&str>,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<Predicate> {
     match expr {
         Expr::Binary {
             op: BinaryOp::And,
             lhs,
             rhs,
         } => Some(Predicate::And(
-            Box::new(lower_predicate(lhs, var, params)?),
-            Box::new(lower_predicate(rhs, var, params)?),
+            Box::new(lower_predicate(lhs, var, label, params, hints)?),
+            Box::new(lower_predicate(rhs, var, label, params, hints)?),
         )),
         Expr::Binary {
             op: BinaryOp::Or,
             lhs,
             rhs,
         } => Some(Predicate::Or(
-            Box::new(lower_predicate(lhs, var, params)?),
-            Box::new(lower_predicate(rhs, var, params)?),
+            Box::new(lower_predicate(lhs, var, label, params, hints)?),
+            Box::new(lower_predicate(rhs, var, label, params, hints)?),
         )),
         Expr::Unary {
             op: UnaryOp::Not,
             operand,
         } => Some(Predicate::Not(Box::new(lower_predicate(
-            operand, var, params,
+            operand, var, label, params, hints,
         )?))),
         Expr::IsNull { operand, negated } => {
             let prop = lower_prop_ref(operand, var)?;
@@ -666,26 +706,92 @@ fn lower_predicate(expr: &Expr, var: &str, params: &CypherParameters) -> Option<
                     return Some(Predicate::BoolCompare { prop, op: cmp, value });
                 }
             }
-            // Accept `prop <op> literal` or `literal <op> prop`.
+            // `prop <op> literal` / `literal <op> prop`.
             if let Some(prop) = lower_prop_ref(lhs, var) {
-                let value = lower_scalar(rhs, params)?;
-                Some(Predicate::Compare {
-                    prop,
-                    op: cmp,
-                    value,
-                })
-            } else if let Some(prop) = lower_prop_ref(rhs, var) {
-                let value = lower_scalar(lhs, params)?;
-                Some(Predicate::Compare {
-                    prop,
-                    op: cmp.flipped(),
-                    value,
-                })
+                if let Some(value) = lower_scalar(rhs, params) {
+                    return Some(Predicate::Compare { prop, op: cmp, value });
+                }
+            }
+            if let Some(prop) = lower_prop_ref(rhs, var) {
+                if let Some(value) = lower_scalar(lhs, params) {
+                    return Some(Predicate::Compare {
+                        prop,
+                        op: cmp.flipped(),
+                        value,
+                    });
+                }
+            }
+            // Arithmetic comparison (`+`/`-`/`*` over typed numeric properties).
+            let l = lower_arith(lhs, var, label, params, hints)?;
+            let r = lower_arith(rhs, var, label, params, hints)?;
+            if arith_has_prop(&l) || arith_has_prop(&r) {
+                Some(Predicate::ArithCompare { lhs: l, op: cmp, rhs: r })
             } else {
                 None
             }
         }
         _ => None,
+    }
+}
+
+/// Lower an expression to a pushable arithmetic operand (`+`/`-`/`*` over typed
+/// numeric properties of `var`, numeric literals, and parameters). `None` if any
+/// part is non-numeric, an unknown-typed property, or uses `/`/`%`/`^` (which are
+/// dialect-divergent for exact reference equality).
+fn lower_arith(
+    expr: &Expr,
+    var: &str,
+    label: Option<&str>,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<ArithExpr> {
+    match expr {
+        Expr::Integer(n) => Some(ArithExpr::Int(*n)),
+        Expr::Float(f) if f.is_finite() => Some(ArithExpr::Float(*f)),
+        Expr::Parameter(name) => match params.get(name)? {
+            Value::Int(n) => Some(ArithExpr::Int(*n)),
+            Value::Float(f) if f.is_finite() => Some(ArithExpr::Float(*f)),
+            _ => None,
+        },
+        Expr::Property { base, key } => {
+            let Expr::Variable(name) = base.as_ref() else {
+                return None;
+            };
+            if name != var {
+                return None;
+            }
+            let kind = match hints.node_property_kind(label, key)? {
+                ScalarKind::Int => ScalarKind::Int,
+                ScalarKind::Float => ScalarKind::Float,
+                ScalarKind::Str => return None,
+            };
+            Some(ArithExpr::Prop(PropRef::Key(lower_seg_key(key)?), kind))
+        }
+        Expr::Binary {
+            op: op @ (BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply),
+            lhs,
+            rhs,
+        } => {
+            let op = match op {
+                BinaryOp::Add => ArithOp::Add,
+                BinaryOp::Subtract => ArithOp::Sub,
+                _ => ArithOp::Mul,
+            };
+            Some(ArithExpr::Bin(
+                op,
+                Box::new(lower_arith(lhs, var, label, params, hints)?),
+                Box::new(lower_arith(rhs, var, label, params, hints)?),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn arith_has_prop(expr: &ArithExpr) -> bool {
+    match expr {
+        ArithExpr::Prop(..) => true,
+        ArithExpr::Int(_) | ArithExpr::Float(_) => false,
+        ArithExpr::Bin(_, l, r) => arith_has_prop(l) || arith_has_prop(r),
     }
 }
 
@@ -959,6 +1065,29 @@ fn render_predicate(pred: &Predicate, dialect: &dyn SqlDialect) -> String {
                 op.sql(),
                 dialect.bool_literal_sql(*value)
             )
+        }
+        Predicate::ArithCompare { lhs, op, rhs } => {
+            format!(
+                "{} {} {}",
+                render_arith(lhs, dialect),
+                op.sql(),
+                render_arith(rhs, dialect)
+            )
+        }
+    }
+}
+
+/// Render an arithmetic operand. Properties are cast to their known numeric type
+/// (so untyped-JSON dialects compute numerically, not lexically); the cast is
+/// harmless on typed-JSON dialects.
+fn render_arith(expr: &ArithExpr, dialect: &dyn SqlDialect) -> String {
+    match expr {
+        ArithExpr::Prop(prop, ScalarKind::Int) => dialect.cast_int(&render_prop(prop, dialect)),
+        ArithExpr::Prop(prop, _) => dialect.cast_float(&render_prop(prop, dialect)),
+        ArithExpr::Int(n) => n.to_string(),
+        ArithExpr::Float(f) => render_float(*f),
+        ArithExpr::Bin(op, l, r) => {
+            format!("({} {} {})", render_arith(l, dialect), op.sql(), render_arith(r, dialect))
         }
     }
 }
@@ -2211,6 +2340,55 @@ mod tests {
             "SELECT id, label, props FROM \"grust_nodes\" \
              WHERE label = 'Person' AND instr(json_extract(props, '$.name'), 'Ad') = 1"
         );
+    }
+
+    #[test]
+    fn arithmetic_comparison() {
+        let plan = plan_node_read_with_hints(
+            "MATCH (n:Person) WHERE n.age + 1 > 40 RETURN n.name",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .expect("pushable");
+        assert_eq!(
+            plan.to_sql(&SparkDialect),
+            "SELECT id, label, props FROM `grust_nodes` WHERE label = 'Person' \
+             AND (CAST(GET_JSON_OBJECT(props, '$.age') AS BIGINT) + 1) > 40"
+        );
+        // Float property * literal, SQLite casts.
+        let f = plan_node_read_with_hints(
+            "MATCH (n:Person) WHERE n.score * 2 >= 15.0 RETURN n.name",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .expect("pushable")
+        .to_sql(&SqliteDialect);
+        assert!(
+            f.contains("(CAST(json_extract(props, '$.score') AS REAL) * 2) >= 15.0"),
+            "{f}"
+        );
+        // Without type hints the property type is unknown → not pushable.
+        assert!(plan_node_read("MATCH (n:Person) WHERE n.age + 1 > 40 RETURN n", &params())
+            .unwrap()
+            .is_none());
+        // Division is dialect-divergent → not pushable.
+        assert!(plan_node_read_with_hints(
+            "MATCH (n:Person) WHERE n.age / 2 > 20 RETURN n",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .is_none());
+        // String property in arithmetic → not pushable.
+        assert!(plan_node_read_with_hints(
+            "MATCH (n:Person) WHERE n.name + 1 > 40 RETURN n",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]

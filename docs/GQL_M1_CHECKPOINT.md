@@ -134,15 +134,22 @@ both paths via `SqlDialect::bool_literal_sql` (SQLite compares the `json_extract
 integer `1`/`0`; Spark the `GET_JSON_OBJECT` text `'true'`/`'false'`). Ordered
 comparisons against booleans and bool inline-map props fall back.
 
-**Arithmetic predicates: deferred by design.** Arithmetic in WHERE operands
-(`n.age + 1 > 40`) is *not* pushed: it is dialect-divergent for exact reference
-equality — integer-vs-float division differs (SQLite `5/2 = 2`, Spark `5/2 = 2.5`,
-the reference is float), and schemaless operand-type promotion can't be resolved
-without per-operand type info. It correctly falls back to the reference.
+**Arithmetic predicates (node path): the safe subset.** `+`/`-`/`*` over typed
+numeric properties (`n.age + 1 > 40`, `n.score * 2 >= 15.0`) are pushed: the
+comparison operand becomes a small `ArithExpr` tree (property/literal/`+`·`-`·`*`),
+each property cast to its declared type from `TypeHints` (so it computes
+numerically on untyped-JSON dialects; the cast is harmless on typed). `+`/`-`/`*`
+of ints/floats match SQL's promotion and the reference's f64-then-narrow result.
+`/`, `%`, `^` are **excluded** (integer-vs-float division diverges: SQLite
+`5/2 = 2`, Spark `5/2 = 2.5`, reference is float), as are unknown-typed and
+string properties — those fall back. Requires type hints (a property's type must
+be known), so a schemaless backend falls back. Segment-path arithmetic is not
+yet pushed.
 
-Deferred (each gated by the oracle): arithmetic predicates (above);
-variable-length with an edge-list (named relationship) binding; path variables;
-`OPTIONAL MATCH` / `WITH` / `UNION` / multi-pattern `MATCH` (multi-clause shapes).
+Deferred (each gated by the oracle): segment-path arithmetic; `/`·`%`·`^`
+arithmetic (dialect-divergent); variable-length with an edge-list (named
+relationship) binding; path variables; `OPTIONAL MATCH` / `WITH` / `UNION` /
+multi-pattern `MATCH` (multi-clause shapes).
 
 ---
 

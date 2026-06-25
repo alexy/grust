@@ -296,6 +296,40 @@ async fn untyped_segment_edge_ordering_matches_reference() {
 }
 
 #[tokio::test]
+async fn arithmetic_pushdown_matches_reference() {
+    // `+`/`-`/`*` over typed numeric properties (hints supply the types).
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in [
+        "MATCH (n:Person) WHERE n.age + 1 > 40 RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) WHERE n.age - 6 = 30 RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) WHERE n.score * 2 > 15.0 RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) WHERE n.age * 2 >= 100 RETURN n.name ORDER BY n.name",
+    ] {
+        let plan = plan_node_read_with_hints(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"));
+        let sql = plan.to_sql(&SqliteDialect);
+        let mut rows = conn
+            .query(&sql, ())
+            .await
+            .unwrap_or_else(|e| panic!("arith query failed for `{sql}`: {e}"));
+        let mut nodes = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            nodes.push(Node {
+                id: NodeId::new(text(&row, 0)),
+                label: Label::new(text(&row, 1)),
+                props: parse_props(&text(&row, 2)),
+            });
+        }
+        let actual = plan.project(&SqliteDialect, nodes, &params).unwrap();
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}
+
+#[tokio::test]
 async fn segment_pushdown_matches_reference() {
     let graph = fixture();
     let conn = embed(&graph).await;
