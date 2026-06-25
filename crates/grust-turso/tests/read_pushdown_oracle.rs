@@ -16,7 +16,10 @@
 //! gives high confidence in that path too.
 
 use grust_core::{Edge, Graph, Label, Node, NodeId, Props, Value};
-use grust_cypher::pushdown::{plan_node_read, plan_segment_read, SqliteDialect};
+use grust_cypher::pushdown::{
+    plan_node_read, plan_node_read_with_hints, plan_segment_read, ScalarKind, SqlDialect,
+    SqliteDialect, TypeHints,
+};
 use grust_cypher::read::run_read_query;
 use grust_cypher::{CypherParameters, CypherResultTable};
 
@@ -134,6 +137,82 @@ async fn pushed_ordering_preserves_sequence() {
         );
         let expected = run_read_query(&graph, cypher, &params).unwrap();
         let actual = pushdown(&conn, cypher, &params).await;
+        assert_eq!(actual, expected, "sequence mismatch for `{cypher}`");
+    }
+}
+
+/// An SQLite dialect that reports **untyped** JSON extraction, to simulate
+/// Spark's `GET_JSON_OBJECT` (text) cast path against the embedded engine: numeric
+/// `ORDER BY` keys are cast via `TypeHints`. SQLite executes the same `CAST(...)`,
+/// so this verifies the schema-aware ordering Spark relies on without a server.
+struct UntypedSqlite;
+
+impl SqlDialect for UntypedSqlite {
+    fn nodes_table(&self) -> &str {
+        "grust_nodes"
+    }
+    fn quote_ident(&self, ident: &str) -> String {
+        format!("\"{ident}\"")
+    }
+    fn json_property(&self, props_column: &str, key: &str) -> String {
+        format!("json_extract({props_column}, '$.{key}')")
+    }
+    fn cast_int(&self, expr: &str) -> String {
+        format!("CAST({expr} AS INTEGER)")
+    }
+    fn cast_float(&self, expr: &str) -> String {
+        format!("CAST({expr} AS REAL)")
+    }
+    fn string_literal(&self, value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+    // orders_json_typed defaults to false → ordering casts via TypeHints.
+}
+
+struct OracleHints;
+impl TypeHints for OracleHints {
+    fn node_property_kind(&self, label: Option<&str>, key: &str) -> Option<ScalarKind> {
+        match (label, key) {
+            (Some("Person"), "age") => Some(ScalarKind::Int),
+            (Some("Person"), "score") => Some(ScalarKind::Float),
+            (Some("Person"), "name") => Some(ScalarKind::Str),
+            _ => None,
+        }
+    }
+}
+
+#[tokio::test]
+async fn schema_aware_ordering_casts_match_reference() {
+    // Simulates the Spark path: untyped JSON dialect + schema hints → numeric
+    // ORDER BY keys are cast, executed by SQLite, compared to the reference.
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in [
+        "MATCH (n:Person) RETURN n.name ORDER BY n.age",
+        "MATCH (n:Person) RETURN n.name ORDER BY n.age DESC SKIP 1 LIMIT 2",
+        "MATCH (n:Person) WHERE n.score IS NOT NULL RETURN n.name ORDER BY n.score, n.name",
+    ] {
+        let plan = plan_node_read_with_hints(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap();
+        assert!(
+            plan.pushes_ordering(&UntypedSqlite),
+            "hints should make `{cypher}` pushable on an untyped dialect"
+        );
+        let sql = plan.to_sql(&UntypedSqlite);
+        assert!(sql.contains("CAST(json_extract"), "expected a cast in `{sql}`");
+        let mut rows = conn.query(&sql, ()).await.unwrap();
+        let mut nodes = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            nodes.push(Node {
+                id: NodeId::new(text(&row, 0)),
+                label: Label::new(text(&row, 1)),
+                props: parse_props(&text(&row, 2)),
+            });
+        }
+        let actual = plan.project(&UntypedSqlite, nodes, &params).unwrap();
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
         assert_eq!(actual, expected, "sequence mismatch for `{cypher}`");
     }
 }

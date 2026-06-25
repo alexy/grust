@@ -80,6 +80,10 @@ struct PushedOrdering {
 struct OrderKey {
     prop: PropRef,
     descending: bool,
+    /// The property's scalar kind from [`TypeHints`] (`Some(Str)` for the label
+    /// column). Used to cast the sort key on untyped-JSON dialects; `None` means
+    /// the kind is unknown, so ordering is not pushable on such dialects.
+    kind: Option<ScalarKind>,
 }
 
 /// A backend-neutral, pushable filter predicate over the scanned node.
@@ -160,12 +164,36 @@ enum Scalar {
     Str(String),
 }
 
-/// Coarse kind of a [`Scalar`], for casting and homogeneity checks.
+/// Coarse kind of a [`Scalar`], for casting and homogeneity checks. Also the
+/// vocabulary of [`TypeHints`] (a backend's per-property type knowledge).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ScalarKind {
+pub enum ScalarKind {
     Int,
     Float,
     Str,
+}
+
+/// Backend-supplied property type knowledge, used to push `ORDER BY` correctly on
+/// dialects whose JSON extraction is *untyped* (e.g. Spark `GET_JSON_OBJECT`
+/// returns text). With a known numeric kind, the sort key is cast to that type so
+/// the SQL order matches the reference; without it, ordering stays in the
+/// reference projection. Dialects with typed JSON extraction (SQLite/libSQL)
+/// ignore hints. Build one from a `GraphSchema` in the backend.
+pub trait TypeHints {
+    /// The scalar kind of property `key` on a node of `label` (if known). `label`
+    /// is `None` for an unlabeled pattern.
+    fn node_property_kind(&self, label: Option<&str>, key: &str) -> Option<ScalarKind>;
+}
+
+/// A [`TypeHints`] that knows nothing — every lookup returns `None`. Backends
+/// without an applied schema use this; untyped-JSON dialects then keep ordering
+/// in the reference projection.
+pub struct NoTypeHints;
+
+impl TypeHints for NoTypeHints {
+    fn node_property_kind(&self, _label: Option<&str>, _key: &str) -> Option<ScalarKind> {
+        None
+    }
 }
 
 impl Scalar {
@@ -347,12 +375,26 @@ pub fn plan_node_read(
     cypher: &str,
     params: &CypherParameters,
 ) -> Result<Option<NodeReadPushdown>> {
-    let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
-    crate::semantics::analyze(&query)?;
-    Ok(lower_query(&query, params))
+    plan_node_read_with_hints(cypher, params, &NoTypeHints)
 }
 
-fn lower_query(query: &Query, params: &CypherParameters) -> Option<NodeReadPushdown> {
+/// Like [`plan_node_read`], but resolves `ORDER BY` key types via `hints` so an
+/// untyped-JSON dialect (e.g. Spark) can still push numeric ordering by casting.
+pub fn plan_node_read_with_hints(
+    cypher: &str,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Result<Option<NodeReadPushdown>> {
+    let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
+    crate::semantics::analyze(&query)?;
+    Ok(lower_query(&query, params, hints))
+}
+
+fn lower_query(
+    query: &Query,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<NodeReadPushdown> {
     // Milestone 1: a single, non-UNION query.
     if query.parts.len() != 1 || query.parts[0].union.is_some() {
         return None;
@@ -402,7 +444,7 @@ fn lower_query(query: &Query, params: &CypherParameters) -> Option<NodeReadPushd
     }
 
     let projection = return_clause.projection.clone();
-    let ordering = compute_pushed_ordering(&projection, &var, params);
+    let ordering = compute_pushed_ordering(&projection, &var, label.as_deref(), params, hints);
     Some(NodeReadPushdown {
         var,
         label,
@@ -420,7 +462,9 @@ fn lower_query(query: &Query, params: &CypherParameters) -> Option<NodeReadPushd
 fn compute_pushed_ordering(
     projection: &Projection,
     var: &str,
+    label: Option<&str>,
     params: &CypherParameters,
+    hints: &dyn TypeHints,
 ) -> Option<PushedOrdering> {
     if projection.distinct {
         return None;
@@ -447,9 +491,16 @@ fn compute_pushed_ordering(
             other => other,
         };
         let prop = lower_prop_ref(resolved, var)?;
+        // The label column is text; other keys take their kind from the hints
+        // (used only to cast on untyped-JSON dialects).
+        let kind = match &prop {
+            PropRef::Label => Some(ScalarKind::Str),
+            PropRef::Key(key) => hints.node_property_kind(label, key),
+        };
         keys.push(OrderKey {
             prop,
             descending: item.descending,
+            kind,
         });
     }
     let skip = match &projection.skip {
@@ -663,8 +714,18 @@ impl NodeReadPushdown {
 
     /// Whether `to_sql` pushes `ORDER BY`/`SKIP`/`LIMIT` for this dialect (so the
     /// backend must NOT re-apply them in the projection).
+    ///
+    /// Typed-JSON dialects can always push a structurally-pushable ordering.
+    /// Untyped-JSON dialects (Spark) can push only when every sort key's type is
+    /// known (resolved from `TypeHints` at plan time), so numeric keys can be
+    /// cast; otherwise ordering stays in the reference projection.
     pub fn pushes_ordering(&self, dialect: &dyn SqlDialect) -> bool {
-        dialect.orders_json_typed() && self.ordering.is_some()
+        match &self.ordering {
+            None => false,
+            Some(ordering) => {
+                dialect.orders_json_typed() || ordering.keys.iter().all(|k| k.kind.is_some())
+            }
+        }
     }
 
     /// Run the `RETURN` projection over the nodes the backend fetched, producing
@@ -696,6 +757,17 @@ fn render_order_limit(ordering: &PushedOrdering, dialect: &dyn SqlDialect) -> St
         .iter()
         .map(|k| {
             let col = render_prop(&k.prop, dialect);
+            // Typed-JSON dialects sort the extracted value directly; untyped ones
+            // cast numeric keys to their known type (label/strings sort as text).
+            let col = if dialect.orders_json_typed() {
+                col
+            } else {
+                match k.kind {
+                    Some(ScalarKind::Int) => dialect.cast_int(&col),
+                    Some(ScalarKind::Float) => dialect.cast_float(&col),
+                    _ => col,
+                }
+            };
             if k.descending {
                 format!("{col} DESC NULLS FIRST")
             } else {
@@ -1595,6 +1667,46 @@ mod tests {
         assert!(plan.pushes_ordering(&SqliteDialect));
         // Spark's GET_JSON_OBJECT returns text → ordering stays in the reference.
         assert!(!plan.to_sql(&SparkDialect).contains("ORDER BY"));
+        assert!(!plan.pushes_ordering(&SparkDialect));
+    }
+
+    struct TestHints;
+    impl TypeHints for TestHints {
+        fn node_property_kind(&self, label: Option<&str>, key: &str) -> Option<ScalarKind> {
+            match (label, key) {
+                (Some("Person"), "age") => Some(ScalarKind::Int),
+                (Some("Person"), "score") => Some(ScalarKind::Float),
+                (Some("Person"), "name") => Some(ScalarKind::Str),
+                _ => None,
+            }
+        }
+    }
+
+    #[test]
+    fn schema_hints_let_spark_push_numeric_ordering() {
+        let plan = plan_node_read_with_hints(
+            "MATCH (n:Person) RETURN n.name ORDER BY n.age DESC LIMIT 5",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .expect("pushable");
+        // With a known Int type, Spark casts the JSON sort key so it orders
+        // numerically (not lexicographically).
+        assert!(plan.pushes_ordering(&SparkDialect));
+        assert_eq!(
+            plan.to_sql(&SparkDialect),
+            "SELECT id, label, props FROM `grust_nodes` WHERE label = 'Person' \
+             ORDER BY CAST(GET_JSON_OBJECT(props, '$.age') AS BIGINT) DESC NULLS FIRST LIMIT 5"
+        );
+        // An unknown property type is still not pushable on Spark.
+        let plan = plan_node_read_with_hints(
+            "MATCH (n:Person) RETURN n.name ORDER BY n.height",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .expect("pushable");
         assert!(!plan.pushes_ordering(&SparkDialect));
     }
 

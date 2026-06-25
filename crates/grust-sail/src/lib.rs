@@ -1340,7 +1340,14 @@ impl SailGraphStore {
         cypher: &str,
         params: &CypherParameters,
     ) -> Result<CypherResultTable> {
-        if let Some(plan) = grust_cypher::pushdown::plan_node_read(cypher, params)? {
+        // Schema type hints let Spark push numeric `ORDER BY` (its
+        // `GET_JSON_OBJECT` returns text, so the sort key must be cast).
+        let hints = SailTypeHints {
+            schema: self.current_schema(),
+        };
+        if let Some(plan) =
+            grust_cypher::pushdown::plan_node_read_with_hints(cypher, params, &hints)?
+        {
             let dialect = grust_cypher::pushdown::SparkDialect;
             let nodes = self.run_query(&plan.to_sql(&dialect), vec![]).await?;
             return plan.project(&dialect, nodes, params);
@@ -3276,6 +3283,37 @@ fn parse_optional_single_string_from_arrow(
         }
     }
     Ok(value)
+}
+
+/// Property type hints for read pushdown, derived from the applied graph schema.
+/// Lets Spark push numeric `ORDER BY` by casting JSON sort keys to their declared
+/// type (only `Int`/`Float`/`String` are mapped; other field types stay unpushed).
+struct SailTypeHints {
+    schema: Option<GraphSchema>,
+}
+
+impl grust_cypher::pushdown::TypeHints for SailTypeHints {
+    fn node_property_kind(
+        &self,
+        label: Option<&str>,
+        key: &str,
+    ) -> Option<grust_cypher::pushdown::ScalarKind> {
+        use grust_cypher::pushdown::ScalarKind;
+        let label = label?;
+        let node_type = self
+            .schema
+            .as_ref()?
+            .nodes
+            .iter()
+            .find(|n| n.label.as_str() == label)?;
+        let field = node_type.fields.iter().find(|f| f.name == key)?;
+        match field.ty {
+            FieldType::Int => Some(ScalarKind::Int),
+            FieldType::Float => Some(ScalarKind::Float),
+            FieldType::String => Some(ScalarKind::Str),
+            _ => None,
+        }
+    }
 }
 
 /// Parse an Arrow IPC chunk whose columns are all UTF-8 strings into rows of
