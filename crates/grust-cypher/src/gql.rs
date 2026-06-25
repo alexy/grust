@@ -594,9 +594,9 @@ impl GqlFeature {
             GqlFeature::ReturnStar => d!(
                 "return-star",
                 ReturningAndAggregates,
-                Planned,
+                Supported,
                 PortableGql,
-                "RETURN * with deterministic, documented ordering"
+                "RETURN * / WITH * over bound variables (read reference; deterministic ordering)"
             ),
             GqlFeature::EqualityPredicate => d!(
                 "equality-predicate",
@@ -643,30 +643,30 @@ impl GqlFeature {
             GqlFeature::GeneralExpressionTree => d!(
                 "general-expression-tree",
                 PredicatesAndExpressions,
-                Future,
+                Supported,
                 PortableGql,
-                "General expression AST + evaluator (Unit 7)"
+                "General expression evaluator in the read reference (arithmetic, boolean, comparison, null, list, CASE, property/parameter)"
             ),
             GqlFeature::ThreeValuedLogic => d!(
                 "three-valued-logic",
                 PredicatesAndExpressions,
-                Future,
+                Supported,
                 PortableGql,
-                "TRUE/FALSE/UNKNOWN boolean logic with WHERE keep-only-TRUE (Unit 7)"
+                "TRUE/FALSE/UNKNOWN boolean logic with WHERE keep-only-TRUE (read reference)"
             ),
             GqlFeature::ScalarFunctionRegistry => d!(
                 "scalar-function-registry",
                 PredicatesAndExpressions,
-                Future,
+                Supported,
                 PortableGql,
-                "Scalar function registry with feature gates and pushdown metadata (Unit 7)"
+                "Scalar function registry in the read reference (string/numeric casts, coalesce, size, ...)"
             ),
             GqlFeature::AggregateFunctionRegistry => d!(
                 "aggregate-function-registry",
                 PredicatesAndExpressions,
-                Future,
+                Supported,
                 PortableGql,
-                "Aggregate/window function classification (Units 7-8)"
+                "count/sum/avg/min/max/collect with implicit GROUP BY (read reference)"
             ),
             GqlFeature::CreateConstraint => d!(
                 "create-constraint",
@@ -699,23 +699,23 @@ impl GqlFeature {
             GqlFeature::ReadOnlyMatchReturn => d!(
                 "read-only-match-return",
                 ReadOnlyMatching,
-                Planned,
+                Supported,
                 PortableGql,
-                "Read-only MATCH ... RETURN without a write (Unit 6)"
+                "Read-only MATCH ... RETURN on the Memory reference (no write)"
             ),
             GqlFeature::LabelTypePredicateMatch => d!(
                 "label-type-predicate-match",
                 ReadOnlyMatching,
-                Planned,
+                Supported,
                 PortableGql,
-                "Label/type expressions and property predicates in read matching (Units 6, 9)"
+                "Single label + property-equality predicates in read matching (Memory reference)"
             ),
             GqlFeature::OptionalMatch => d!(
                 "optional-match",
                 ReadOnlyMatching,
-                Future,
+                Supported,
                 PortableGql,
-                "OPTIONAL MATCH with null-padding semantics (Unit 9)"
+                "OPTIONAL MATCH with null-padding semantics (Memory reference)"
             ),
             GqlFeature::PathVariableBinding => d!(
                 "path-variable-binding",
@@ -727,16 +727,16 @@ impl GqlFeature {
             GqlFeature::BoundedPathPattern => d!(
                 "bounded-path-pattern",
                 PathMatching,
-                Future,
+                Supported,
                 PortableGql,
-                "Bounded node/edge/path patterns (Unit 9)"
+                "Fixed-length node/edge/path patterns with direction (Memory reference)"
             ),
             GqlFeature::QuantifiedPathPattern => d!(
                 "quantified-path-pattern",
                 PathMatching,
-                Future,
+                Supported,
                 PortableGql,
-                "Quantified path patterns and reachability (Unit 9)"
+                "Variable-length relationships (*min..max), no repeated nodes (Memory reference)"
             ),
             GqlFeature::ShortestPath => d!(
                 "shortest-path",
@@ -748,16 +748,16 @@ impl GqlFeature {
             GqlFeature::WithClause => d!(
                 "with-clause",
                 QueryComposition,
-                Future,
+                Supported,
                 PortableGql,
-                "WITH multi-part query pipelines and scope boundaries (Unit 8)"
+                "WITH horizon: projection, aggregation, WHERE, DISTINCT/ORDER/SKIP/LIMIT (read reference)"
             ),
             GqlFeature::UnionClause => d!(
                 "union-clause",
                 QueryComposition,
-                Future,
+                Supported,
                 PortableGql,
-                "UNION / UNION ALL set composition (Unit 8)"
+                "UNION / UNION ALL set composition (read reference)"
             ),
             GqlFeature::Subquery => d!(
                 "subquery",
@@ -769,9 +769,9 @@ impl GqlFeature {
             GqlFeature::DistinctOrderingLimit => d!(
                 "distinct-ordering-limit",
                 QueryComposition,
-                Planned,
+                Supported,
                 PortableGql,
-                "DISTINCT, ORDER BY, SKIP/OFFSET, LIMIT in read composition (Unit 8)"
+                "DISTINCT, ORDER BY, SKIP, LIMIT in read composition (read reference)"
             ),
             GqlFeature::TemporalValues => d!(
                 "temporal-values",
@@ -1355,9 +1355,7 @@ mod tests {
             );
         }
         // A future feature is not supported yet, even at the widest profile.
-        assert!(
-            !GqlFeature::GeneralExpressionTree.is_supported_in(GqlConformanceProfile::Full39075)
-        );
+        assert!(!GqlFeature::TransactionControl.is_supported_in(GqlConformanceProfile::Full39075));
     }
 
     #[test]

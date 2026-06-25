@@ -1,0 +1,87 @@
+{
+  "profile": "portable-gql",
+  "cases": [
+    {
+      "id": "read-only-match-return",
+      "feature": "read-only-match-return",
+      "requirement": "required",
+      "statement": "MATCH (n:Person) RETURN n.name",
+      "expectation": "supported",
+      "notes": "Executable on the Memory reference (Unit 6)."
+    },
+    {
+      "id": "label-and-property-predicate",
+      "feature": "label-type-predicate-match",
+      "requirement": "required",
+      "statement": "MATCH (n:Person {name: 'Ada'}) WHERE n.age >= 18 RETURN n.name",
+      "expectation": "supported"
+    },
+    {
+      "id": "optional-match",
+      "feature": "optional-match",
+      "requirement": "required",
+      "statement": "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name",
+      "expectation": "supported"
+    },
+    {
+      "id": "variable-length-path",
+      "feature": "quantified-path-pattern",
+      "requirement": "required",
+      "statement": "MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name",
+      "expectation": "supported"
+    },
+    {
+      "id": "aggregate-group-by",
+      "feature": "aggregate-function-registry",
+      "requirement": "required",
+      "statement": "MATCH (n) RETURN n.label AS label, count(*) AS c",
+      "expectation": "supported"
+    },
+    {
+      "id": "with-horizon",
+      "feature": "with-clause",
+      "requirement": "required",
+      "statement": "MATCH (n:Person) WITH n.age AS age WHERE age >= 40 RETURN age ORDER BY age",
+      "expectation": "supported"
+    },
+    {
+      "id": "union-all",
+      "feature": "union-clause",
+      "requirement": "required",
+      "statement": "MATCH (n:Person) RETURN n.name AS x UNION ALL MATCH (m:City) RETURN m.name AS x",
+      "expectation": "supported"
+    },
+    {
+      "id": "scalar-function",
+      "feature": "scalar-function-registry",
+      "requirement": "optional",
+      "statement": "MATCH (n:Person {name:'Ada'}) RETURN toUpper(n.name)",
+      "expectation": "supported"
+    },
+    {
+      "id": "case-expression",
+      "feature": "general-expression-tree",
+      "requirement": "optional",
+      "statement": "MATCH (n:Person) RETURN CASE WHEN n.age >= 80 THEN 'senior' ELSE 'other' END",
+      "expectation": "supported"
+    },
+    {
+      "id": "path-variable-future",
+      "feature": "path-variable-binding",
+      "requirement": "future",
+      "statement": "MATCH p = (:Person)-[:KNOWS]->(:Person) RETURN p",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature",
+      "notes": "Path variables are not yet supported by the read reference executor."
+    },
+    {
+      "id": "subquery-future",
+      "feature": "subquery",
+      "requirement": "future",
+      "statement": "MATCH (n:Person) CALL { RETURN 1 AS one } RETURN n.name, one",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature",
+      "notes": "CALL subqueries are not supported yet (Unit 8/14)."
+    }
+  ]
+}
