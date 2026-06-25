@@ -7,6 +7,7 @@ pub mod ast;
 pub mod gql;
 pub mod lexer;
 pub mod parser;
+pub mod semantics;
 pub use gql::{
     feature_manifest, gql_cardinality, gql_execution, gql_name, gql_syntax, gql_type, load_manifest,
     load_manifest_cases, support_counts, support_summary, unsupported_gql_feature,
