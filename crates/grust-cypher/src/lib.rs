@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use grust_core::prelude::*;
 use serde::{Deserialize, Serialize};
 
+pub mod ast;
 pub mod gql;
 pub mod lexer;
 pub use gql::{
