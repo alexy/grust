@@ -463,11 +463,12 @@ fn expand_pattern(
     base_rows: Vec<Row>,
     params: &CypherParameters,
 ) -> Result<Vec<Row>> {
-    if pattern.variable.is_some() {
+    let path_var = pattern.variable.as_deref();
+    if path_var.is_some() && pattern.segments.iter().any(|s| s.relationship.length.is_some()) {
         return Err(unsupported_gql_feature(
             GqlFeature::PathVariableBinding,
             GqlConformanceProfile::PortableGql,
-            "path variables are not supported by the read reference executor yet",
+            "path variables over variable-length relationships are not supported by the read reference executor yet",
         ));
     }
     let mut out = Vec::new();
@@ -477,10 +478,43 @@ fn expand_pattern(
             if let Some(var) = &pattern.start.variable {
                 next_row.insert(var.clone(), Bound::Node(start.clone()));
             }
-            expand_segments(graph, index, &pattern.segments, 0, &start, next_row, params, &mut out)?;
+            let acc_nodes = if path_var.is_some() {
+                vec![start.clone()]
+            } else {
+                Vec::new()
+            };
+            expand_segments(
+                graph,
+                index,
+                &pattern.segments,
+                0,
+                &start,
+                next_row,
+                params,
+                path_var,
+                acc_nodes,
+                Vec::new(),
+                &mut out,
+            )?;
         }
     }
     Ok(out)
+}
+
+/// A bound path value: `{ "nodes": [...], "relationships": [...] }`.
+fn path_value(nodes: &[Node], edges: &[Edge]) -> Result<Value> {
+    let mut node_arr = Vec::with_capacity(nodes.len());
+    for node in nodes {
+        node_arr.push(value_to_json(&graph_node_value(node)?));
+    }
+    let mut edge_arr = Vec::with_capacity(edges.len());
+    for edge in edges {
+        edge_arr.push(value_to_json(&graph_edge_value(edge)?));
+    }
+    let mut obj = serde_json::Map::new();
+    obj.insert("nodes".to_string(), serde_json::Value::Array(node_arr));
+    obj.insert("relationships".to_string(), serde_json::Value::Array(edge_arr));
+    Ok(Value::Json(serde_json::Value::Object(obj)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -492,9 +526,16 @@ fn expand_segments(
     current: &Node,
     row: Row,
     params: &CypherParameters,
+    path_var: Option<&str>,
+    acc_nodes: Vec<Node>,
+    acc_edges: Vec<Edge>,
     out: &mut Vec<Row>,
 ) -> Result<()> {
     if idx == segments.len() {
+        let mut row = row;
+        if let Some(p) = path_var {
+            row.insert(p.to_string(), Bound::Value(path_value(&acc_nodes, &acc_edges)?));
+        }
         out.push(row);
         return Ok(());
     }
@@ -544,7 +585,20 @@ fn expand_segments(
             if let Some(var) = &segment.node.variable {
                 next_row.insert(var.clone(), Bound::Node(end_node.clone()));
             }
-            expand_segments(graph, index, segments, idx + 1, &end_node, next_row, params, out)?;
+            // path_var is guaranteed None here (rejected with variable-length).
+            expand_segments(
+                graph,
+                index,
+                segments,
+                idx + 1,
+                &end_node,
+                next_row,
+                params,
+                path_var,
+                acc_nodes.clone(),
+                acc_edges.clone(),
+                out,
+            )?;
         }
         return Ok(());
     }
@@ -580,7 +634,18 @@ fn expand_segments(
         if let Some(var) = &segment.node.variable {
             next_row.insert(var.clone(), Bound::Node(next_node.clone()));
         }
-        expand_segments(graph, index, segments, idx + 1, next_node, next_row, params, out)?;
+        let (na, ea) = if path_var.is_some() {
+            let mut na = acc_nodes.clone();
+            na.push(next_node.clone());
+            let mut ea = acc_edges.clone();
+            ea.push(edge.clone());
+            (na, ea)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        expand_segments(
+            graph, index, segments, idx + 1, next_node, next_row, params, path_var, na, ea, out,
+        )?;
     }
     Ok(())
 }
@@ -1194,6 +1259,19 @@ fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
     }
 }
 
+/// Extract the `nodes`/`relationships` array from a path value.
+fn path_component(value: Value, key: &str) -> Result<Value> {
+    match value {
+        Value::Json(serde_json::Value::Object(mut m)) => {
+            Ok(m.remove(key).map(Value::Json).unwrap_or(Value::Null))
+        }
+        Value::Null => Ok(Value::Null),
+        other => Err(gql_type(format!(
+            "{key}() expects a path value, got {other:?}"
+        ))),
+    }
+}
+
 /// Evaluate a `CASE` expression. Simple form (`CASE x WHEN v THEN ...`) compares
 /// `x` to each branch value; searched form (`CASE WHEN cond THEN ...`) takes the
 /// first branch whose condition is TRUE. Falls back to `ELSE` / NULL.
@@ -1286,7 +1364,17 @@ fn eval_scalar_function(
             Value::Float(f) => Ok(Value::Float(f.round())),
             other => Err(gql_type(format!("round() expects a number, got {other:?}"))),
         },
-        "size" | "length" => restricted_size_value(value),
+        "size" => restricted_size_value(value),
+        // `length` is the path hop count for a path value; otherwise falls back
+        // to collection size.
+        "length" => match &value {
+            Value::Json(serde_json::Value::Object(m)) if m.contains_key("relationships") => Ok(
+                Value::Int(m["relationships"].as_array().map_or(0, |a| a.len()) as i64),
+            ),
+            _ => restricted_size_value(value),
+        },
+        "nodes" => path_component(value, "nodes"),
+        "relationships" | "rels" => path_component(value, "relationships"),
         "isempty" => restricted_is_empty_value(value),
         _ => Err(unsupported_gql_feature(
             GqlFeature::ScalarFunctionRegistry,
@@ -1731,6 +1819,32 @@ mod tests {
                 vec![Value::from("Grace"), Value::Int(2)],
             ]
         );
+    }
+
+    #[test]
+    fn path_variable_length_and_nodes() {
+        let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(:Person) RETURN length(p) AS len");
+        assert_eq!(t.rows, vec![vec![Value::Int(1)]]);
+        // nodes(p) returns the 2 nodes on the path.
+        let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(b:Person) RETURN size(nodes(p)) AS n");
+        assert_eq!(t.rows, vec![vec![Value::Int(2)]]);
+    }
+
+    #[test]
+    fn path_variable_two_hop() {
+        let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->()-[:KNOWS]->() RETURN length(p) AS len");
+        assert_eq!(t.rows, vec![vec![Value::Int(2)]]);
+    }
+
+    #[test]
+    fn path_variable_over_var_length_rejected() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH p = (:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN p",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GrustError::Unsupported(_)));
     }
 
     #[test]

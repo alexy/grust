@@ -140,18 +140,27 @@ fn parameters() {
 }
 
 #[test]
+fn path_variable_and_functions() {
+    // p binds a path; length(p)/nodes(p)/relationships(p) read it.
+    assert_eq!(
+        col0("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(:Person) RETURN length(p)"),
+        vec![Value::Int(1)]
+    );
+}
+
+#[test]
 fn unsupported_read_shapes_error() {
-    // Path variables are not yet supported.
-    assert!(run_read_query(
-        &fixture(),
-        "MATCH p = (:Person)-[:KNOWS]->(:Person) RETURN p",
-        &CypherParameters::new()
-    )
-    .is_err());
     // Writes are rejected by the read executor.
     assert!(run_read_query(
         &fixture(),
         "CREATE (:Person {id:'x'})",
+        &CypherParameters::new()
+    )
+    .is_err());
+    // Path variables over variable-length relationships are not supported yet.
+    assert!(run_read_query(
+        &fixture(),
+        "MATCH p = (:Person)-[:KNOWS*1..2]->(:Person) RETURN p",
         &CypherParameters::new()
     )
     .is_err());

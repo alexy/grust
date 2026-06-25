@@ -720,9 +720,9 @@ impl GqlFeature {
             GqlFeature::PathVariableBinding => d!(
                 "path-variable-binding",
                 PathMatching,
-                Planned,
+                Supported,
                 PortableGql,
-                "Path variables and path values in read matching (Unit 9)"
+                "Fixed-length path variables + nodes()/relationships()/length() (read reference; not yet over variable-length)"
             ),
             GqlFeature::BoundedPathPattern => d!(
                 "bounded-path-pattern",

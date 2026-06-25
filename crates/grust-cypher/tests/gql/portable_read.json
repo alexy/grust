@@ -66,13 +66,12 @@
       "expectation": "supported"
     },
     {
-      "id": "path-variable-future",
+      "id": "path-variable-fixed-length",
       "feature": "path-variable-binding",
-      "requirement": "future",
-      "statement": "MATCH p = (:Person)-[:KNOWS]->(:Person) RETURN p",
-      "expectation": "rejected",
-      "errorKind": "unsupported-feature",
-      "notes": "Path variables are not yet supported by the read reference executor."
+      "requirement": "required",
+      "statement": "MATCH p = (:Person)-[:KNOWS]->(:Person) RETURN length(p)",
+      "expectation": "supported",
+      "notes": "Fixed-length path variables are supported; over variable-length they are not yet."
     },
     {
       "id": "subquery-future",
