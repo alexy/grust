@@ -143,13 +143,13 @@ of ints/floats match SQL's promotion and the reference's f64-then-narrow result.
 `/`, `%`, `^` are **excluded** (integer-vs-float division diverges: SQLite
 `5/2 = 2`, Spark `5/2 = 2.5`, reference is float), as are unknown-typed and
 string properties — those fall back. Requires type hints (a property's type must
-be known), so a schemaless backend falls back. Segment-path arithmetic is not
-yet pushed.
+be known), so a schemaless backend falls back. Applies to **both the node and
+segment paths** (segment operands resolved through the variable→role map, node
+kinds keyed by endpoint label, edge kinds by single relationship type).
 
-Deferred (each gated by the oracle): segment-path arithmetic; `/`·`%`·`^`
-arithmetic (dialect-divergent); variable-length with an edge-list (named
-relationship) binding; path variables; `OPTIONAL MATCH` / `WITH` / `UNION` /
-multi-pattern `MATCH` (multi-clause shapes).
+Deferred (each gated by the oracle): `/`·`%`·`^` arithmetic (dialect-divergent);
+variable-length with an edge-list (named relationship) binding; path variables;
+`OPTIONAL MATCH` / `WITH` / `UNION` / multi-pattern `MATCH` (multi-clause shapes).
 
 ---
 

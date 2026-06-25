@@ -330,6 +330,33 @@ async fn arithmetic_pushdown_matches_reference() {
 }
 
 #[tokio::test]
+async fn segment_arithmetic_matches_reference() {
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in [
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age + 1 > 42 RETURN a.name, b.name",
+        "MATCH (a)-[r:RATED]->(b) WHERE r.stars * 2 >= 8 RETURN a.name, r.stars",
+    ] {
+        let plan = plan_segment_read_with_hints(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"));
+        let sql = plan.to_sql(&SqliteDialect);
+        let n = plan.column_count();
+        let mut rows = conn.query(&sql, ()).await.unwrap();
+        let mut text_rows = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            text_rows.push((0..n).map(|i| opt_text(&row, i)).collect());
+        }
+        let actual = plan
+            .project_text_rows(&SqliteDialect, text_rows, &params)
+            .unwrap();
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}
+
+#[tokio::test]
 async fn segment_pushdown_matches_reference() {
     let graph = fixture();
     let conn = embed(&graph).await;

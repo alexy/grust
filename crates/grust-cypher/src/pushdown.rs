@@ -1197,6 +1197,20 @@ enum SegPredicate {
         op: CmpOp,
         value: bool,
     },
+    ArithCompare {
+        lhs: SegArithExpr,
+        op: CmpOp,
+        rhs: SegArithExpr,
+    },
+}
+
+/// Segment-path arithmetic operand (mirrors [`ArithExpr`] with [`SegOperand`]s).
+#[derive(Clone, Debug, PartialEq)]
+enum SegArithExpr {
+    Operand(SegOperand, ScalarKind),
+    Int(i64),
+    Float(f64),
+    Bin(ArithOp, Box<SegArithExpr>, Box<SegArithExpr>),
 }
 
 /// One binding the path query selects and reconstructs, in SELECT-column order.
@@ -1394,7 +1408,13 @@ fn lower_segment(
         }
     }
     if let Some(where_expr) = &match_clause.where_clause {
-        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &roles, params)?));
+        let ctx = SegCtx {
+            roles: &roles,
+            node_labels: &node_labels,
+            segments: &segments,
+            hints,
+        };
+        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &ctx, params)?));
     }
 
     // Selected bindings in SELECT order: n0, e0, n1, e1, …, nK (vars only).
@@ -1516,9 +1536,18 @@ fn lower_seg_key(key: &str) -> Option<String> {
     }
 }
 
+/// Context for lowering a segment `WHERE` clause: variable roles plus the type
+/// information arithmetic operands need.
+struct SegCtx<'a> {
+    roles: &'a RoleMap,
+    node_labels: &'a [Option<String>],
+    segments: &'a [SegSpec],
+    hints: &'a dyn TypeHints,
+}
+
 fn lower_seg_predicate(
     expr: &Expr,
-    roles: &RoleMap,
+    ctx: &SegCtx,
     params: &CypherParameters,
 ) -> Option<SegPredicate> {
     match expr {
@@ -1527,25 +1556,25 @@ fn lower_seg_predicate(
             lhs,
             rhs,
         } => Some(SegPredicate::And(
-            Box::new(lower_seg_predicate(lhs, roles, params)?),
-            Box::new(lower_seg_predicate(rhs, roles, params)?),
+            Box::new(lower_seg_predicate(lhs, ctx, params)?),
+            Box::new(lower_seg_predicate(rhs, ctx, params)?),
         )),
         Expr::Binary {
             op: BinaryOp::Or,
             lhs,
             rhs,
         } => Some(SegPredicate::Or(
-            Box::new(lower_seg_predicate(lhs, roles, params)?),
-            Box::new(lower_seg_predicate(rhs, roles, params)?),
+            Box::new(lower_seg_predicate(lhs, ctx, params)?),
+            Box::new(lower_seg_predicate(rhs, ctx, params)?),
         )),
         Expr::Unary {
             op: UnaryOp::Not,
             operand,
         } => Some(SegPredicate::Not(Box::new(lower_seg_predicate(
-            operand, roles, params,
+            operand, ctx, params,
         )?))),
         Expr::IsNull { operand, negated } => Some(SegPredicate::IsNull {
-            operand: lower_seg_operand(operand, roles)?,
+            operand: lower_seg_operand(operand, ctx.roles)?,
             negated: *negated,
         }),
         Expr::Binary {
@@ -1553,7 +1582,7 @@ fn lower_seg_predicate(
             lhs,
             rhs,
         } => Some(SegPredicate::In {
-            operand: lower_seg_operand(lhs, roles)?,
+            operand: lower_seg_operand(lhs, ctx.roles)?,
             values: lower_scalar_list(rhs, params)?,
         }),
         Expr::Binary {
@@ -1561,7 +1590,7 @@ fn lower_seg_predicate(
             lhs,
             rhs,
         } => Some(SegPredicate::StringPred {
-            operand: lower_seg_operand(lhs, roles)?,
+            operand: lower_seg_operand(lhs, ctx.roles)?,
             op: lower_str_op(expr),
             needle: lower_string_needle(rhs, params)?,
         }),
@@ -1569,33 +1598,98 @@ fn lower_seg_predicate(
             let cmp = lower_cmp_op(*op)?;
             if matches!(cmp, CmpOp::Eq | CmpOp::Ne) {
                 if let (Some(operand), Some(value)) =
-                    (lower_seg_operand(lhs, roles), lower_bool(rhs, params))
+                    (lower_seg_operand(lhs, ctx.roles), lower_bool(rhs, params))
                 {
                     return Some(SegPredicate::BoolCompare { operand, op: cmp, value });
                 }
                 if let (Some(operand), Some(value)) =
-                    (lower_seg_operand(rhs, roles), lower_bool(lhs, params))
+                    (lower_seg_operand(rhs, ctx.roles), lower_bool(lhs, params))
                 {
                     return Some(SegPredicate::BoolCompare { operand, op: cmp, value });
                 }
             }
-            if let Some(operand) = lower_seg_operand(lhs, roles) {
-                Some(SegPredicate::Compare {
-                    operand,
-                    op: cmp,
-                    value: lower_scalar(rhs, params)?,
-                })
-            } else if let Some(operand) = lower_seg_operand(rhs, roles) {
-                Some(SegPredicate::Compare {
-                    operand,
-                    op: cmp.flipped(),
-                    value: lower_scalar(lhs, params)?,
-                })
+            if let Some(operand) = lower_seg_operand(lhs, ctx.roles) {
+                if let Some(value) = lower_scalar(rhs, params) {
+                    return Some(SegPredicate::Compare { operand, op: cmp, value });
+                }
+            }
+            if let Some(operand) = lower_seg_operand(rhs, ctx.roles) {
+                if let Some(value) = lower_scalar(lhs, params) {
+                    return Some(SegPredicate::Compare {
+                        operand,
+                        op: cmp.flipped(),
+                        value,
+                    });
+                }
+            }
+            // Arithmetic comparison (`+`/`-`/`*` over typed numeric properties).
+            let l = lower_seg_arith(lhs, ctx, params)?;
+            let r = lower_seg_arith(rhs, ctx, params)?;
+            if seg_arith_has_operand(&l) || seg_arith_has_operand(&r) {
+                Some(SegPredicate::ArithCompare { lhs: l, op: cmp, rhs: r })
             } else {
                 None
             }
         }
         _ => None,
+    }
+}
+
+/// Lower a segment-path arithmetic operand. See [`lower_arith`].
+fn lower_seg_arith(expr: &Expr, ctx: &SegCtx, params: &CypherParameters) -> Option<SegArithExpr> {
+    match expr {
+        Expr::Integer(n) => Some(SegArithExpr::Int(*n)),
+        Expr::Float(f) if f.is_finite() => Some(SegArithExpr::Float(*f)),
+        Expr::Parameter(name) => match params.get(name)? {
+            Value::Int(n) => Some(SegArithExpr::Int(*n)),
+            Value::Float(f) if f.is_finite() => Some(SegArithExpr::Float(*f)),
+            _ => None,
+        },
+        Expr::Property { .. } => {
+            let operand = lower_seg_operand(expr, ctx.roles)?;
+            let kind = match &operand {
+                SegOperand::NodeLabel(_) => return None,
+                SegOperand::NodeProp(i, key) => {
+                    ctx.hints.node_property_kind(ctx.node_labels[*i].as_deref(), key)?
+                }
+                SegOperand::EdgeProp(j, key) => {
+                    let edge_type = match ctx.segments[*j].rel_types.as_slice() {
+                        [one] => Some(one.as_str()),
+                        _ => None,
+                    };
+                    ctx.hints.edge_property_kind(edge_type, key)?
+                }
+            };
+            match kind {
+                ScalarKind::Int | ScalarKind::Float => Some(SegArithExpr::Operand(operand, kind)),
+                ScalarKind::Str => None,
+            }
+        }
+        Expr::Binary {
+            op: op @ (BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply),
+            lhs,
+            rhs,
+        } => {
+            let op = match op {
+                BinaryOp::Add => ArithOp::Add,
+                BinaryOp::Subtract => ArithOp::Sub,
+                _ => ArithOp::Mul,
+            };
+            Some(SegArithExpr::Bin(
+                op,
+                Box::new(lower_seg_arith(lhs, ctx, params)?),
+                Box::new(lower_seg_arith(rhs, ctx, params)?),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn seg_arith_has_operand(expr: &SegArithExpr) -> bool {
+    match expr {
+        SegArithExpr::Operand(..) => true,
+        SegArithExpr::Int(_) | SegArithExpr::Float(_) => false,
+        SegArithExpr::Bin(_, l, r) => seg_arith_has_operand(l) || seg_arith_has_operand(r),
     }
 }
 
@@ -1807,6 +1901,33 @@ fn render_seg_predicate(pred: &SegPredicate, dialect: &dyn SqlDialect) -> String
                 dialect.bool_literal_sql(*value)
             )
         }
+        SegPredicate::ArithCompare { lhs, op, rhs } => {
+            format!(
+                "{} {} {}",
+                render_seg_arith(lhs, dialect),
+                op.sql(),
+                render_seg_arith(rhs, dialect)
+            )
+        }
+    }
+}
+
+fn render_seg_arith(expr: &SegArithExpr, dialect: &dyn SqlDialect) -> String {
+    match expr {
+        SegArithExpr::Operand(operand, ScalarKind::Int) => {
+            dialect.cast_int(&render_seg_operand(operand, dialect))
+        }
+        SegArithExpr::Operand(operand, _) => {
+            dialect.cast_float(&render_seg_operand(operand, dialect))
+        }
+        SegArithExpr::Int(n) => n.to_string(),
+        SegArithExpr::Float(f) => render_float(*f),
+        SegArithExpr::Bin(op, l, r) => format!(
+            "({} {} {})",
+            render_seg_arith(l, dialect),
+            op.sql(),
+            render_seg_arith(r, dialect)
+        ),
     }
 }
 
@@ -2048,8 +2169,17 @@ fn lower_var_length(
             }
         }
     }
+    let a_label = a.labels.first().cloned();
+    let b_label = b.labels.first().cloned();
+    let node_labels = [a_label.clone(), b_label.clone()];
     if let Some(where_expr) = &match_clause.where_clause {
-        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &roles, params)?));
+        let ctx = SegCtx {
+            roles: &roles,
+            node_labels: &node_labels,
+            segments: &[],
+            hints,
+        };
+        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &ctx, params)?));
     }
 
     let mut selected = Vec::new();
@@ -2066,9 +2196,6 @@ fn lower_var_length(
         });
     }
 
-    let a_label = a.labels.first().cloned();
-    let b_label = b.labels.first().cloned();
-    let node_labels = [a_label.clone(), b_label.clone()];
     let projection = return_clause.projection.clone();
     let ordering = compute_seg_ordering(&projection, &roles, &node_labels, &[], params, hints);
 
@@ -2793,6 +2920,42 @@ mod tests {
              OR (e0.dst_id = n0.id AND n1.id = e0.src_id)) \
              WHERE e0.edge_type = 'KNOWS' AND n0.label = 'Person' AND n1.label = 'Person'"
         );
+    }
+
+    #[test]
+    fn segment_arithmetic_comparison() {
+        let sql = plan_segment_read_with_hints(
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age + 1 > 40 RETURN b.name",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .expect("pushable")
+        .to_sql(&SparkDialect);
+        assert!(
+            sql.ends_with("AND (CAST(GET_JSON_OBJECT(n1.props, '$.age') AS BIGINT) + 1) > 40"),
+            "{sql}"
+        );
+        // Edge-property arithmetic.
+        let e = plan_segment_read_with_hints(
+            "MATCH (a)-[r:RATED]->(b) WHERE r.stars * 2 >= 8 RETURN b.name",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .expect("pushable")
+        .to_sql(&SqliteDialect);
+        assert!(
+            e.contains("(CAST(json_extract(e0.props, '$.stars') AS INTEGER) * 2) >= 8"),
+            "{e}"
+        );
+        // No hints → unknown types → not pushable.
+        assert!(plan_segment_read(
+            "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age + 1 > 40 RETURN b.name",
+            &params(),
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
