@@ -61,14 +61,42 @@ pub fn execute_read_query(
     query: &Query,
     params: &CypherParameters,
 ) -> Result<CypherResultTable> {
-    if query.parts.len() != 1 || query.parts[0].union.is_some() {
-        return Err(unsupported_gql_feature(
-            GqlFeature::UnionClause,
-            GqlConformanceProfile::PortableGql,
-            "UNION is not supported by the read reference executor yet",
-        ));
+    let mut combined: Option<CypherResultTable> = None;
+    // `UNION` (without ALL) deduplicates the whole result; `UNION ALL` keeps
+    // duplicates. A mixed chain dedups if any boundary is a distinct UNION.
+    let mut distinct = false;
+
+    for part in &query.parts {
+        if part.union == Some(UnionKind::Distinct) {
+            distinct = true;
+        }
+        let table = execute_single(graph, &part.query, params)?;
+        match combined.as_mut() {
+            None => combined = Some(table),
+            Some(acc) => {
+                if acc.columns != table.columns {
+                    return Err(gql_name(
+                        "all UNION arms must return the same column names in the same order",
+                    ));
+                }
+                acc.rows.extend(table.rows);
+            }
+        }
     }
-    execute_single(graph, &query.parts[0].query, params)
+
+    let mut table = combined.ok_or_else(|| gql_execution("query has no parts"))?;
+    if distinct {
+        let mut seen = std::collections::HashSet::new();
+        let mut deduped = Vec::with_capacity(table.rows.len());
+        for values in std::mem::take(&mut table.rows) {
+            let key = return_row_key(&values, "UNION")?;
+            if seen.insert(key) {
+                deduped.push(values);
+            }
+        }
+        table.rows = deduped;
+    }
+    Ok(table)
 }
 
 fn execute_single(
@@ -1320,9 +1348,6 @@ mod tests {
         let err = run_read_query(&graph(), "MATCH (a)-[:KNOWS*1..3]->(b) RETURN b", &CypherParameters::new())
             .unwrap_err();
         assert!(matches!(err, GrustError::Unsupported(_)));
-        let err = run_read_query(&graph(), "MATCH (a) RETURN a UNION MATCH (b) RETURN b", &CypherParameters::new())
-            .unwrap_err();
-        assert!(matches!(err, GrustError::Unsupported(_)));
         // Map literals in projections are still unsupported.
         let err = run_read_query(
             &graph(),
@@ -1331,6 +1356,37 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, GrustError::Unsupported(_)));
+    }
+
+    #[test]
+    fn union_all_concatenates() {
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN n.name AS x UNION ALL MATCH (m:City) RETURN m.name AS x");
+        assert_eq!(t.columns, vec!["x".to_string()]);
+        assert_eq!(t.rows.len(), 2);
+    }
+
+    #[test]
+    fn union_deduplicates() {
+        // The same row from both arms collapses under UNION (distinct).
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION MATCH (m:Person {name:'Alan'}) RETURN m.label AS l");
+        assert_eq!(t.rows, vec![vec![Value::from("Person")]]);
+    }
+
+    #[test]
+    fn union_all_keeps_duplicates() {
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION ALL MATCH (m:Person {name:'Alan'}) RETURN m.label AS l");
+        assert_eq!(t.rows.len(), 2);
+    }
+
+    #[test]
+    fn union_mismatched_columns_rejected() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH (n:Person) RETURN n.name AS a UNION MATCH (m:City) RETURN m.name AS b",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GrustError::CypherUnresolvedIdentity(_)));
     }
 
     #[test]
