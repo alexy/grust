@@ -1018,20 +1018,28 @@ async fn test_read_pushdown_matches_reference() {
             Node::new("Person", "p3", person("Grace", 85, Some("London"))),
             Node::new("City", "c1", city),
         ],
-        vec![Edge::new("KNOWS", "p1", "p2", Props::new())],
+        vec![
+            Edge::new("KNOWS", "p1", "p2", Props::new()),
+            Edge::new("KNOWS", "p2", "p3", Props::new()),
+        ],
     );
     store.put_graph(&graph).await.expect("put_graph");
 
     let params = CypherParameters::new();
     let queries = [
+        // Single-node filter pushdown.
         "MATCH (n:Person) RETURN n.name ORDER BY n.name",
         "MATCH (n:Person) WHERE n.age >= 40 RETURN n.name ORDER BY n.name",
         "MATCH (n:Person {name:'Ada'}) RETURN n.age",
         "MATCH (n:Person) WHERE n.city IS NULL RETURN n.name ORDER BY n.name",
         "MATCH (n:Person) WHERE n.age > 30 AND n.city = 'London' RETURN n.name ORDER BY n.name",
         "MATCH (n) RETURN n.label AS label, count(*) AS c ORDER BY label",
+        // Relationship-segment join pushdown.
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b ORDER BY a, b",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age >= 40 RETURN b.name ORDER BY b.name",
+        "MATCH (a:Person {name:'Ada'})-[r:KNOWS]->(b) RETURN b.name ORDER BY b.name",
         // Not pushable: exercises the read_graph reference fallback branch.
-        "MATCH (:Person {name:'Ada'})-[:KNOWS]->(b) RETURN b.name",
+        "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN c.name ORDER BY c.name",
     ];
     for cypher in queries {
         let expected = grust_cypher::read::run_read_query(&graph, cypher, &params)
@@ -1040,7 +1048,15 @@ async fn test_read_pushdown_matches_reference() {
             .run_read_query(cypher, &params)
             .await
             .unwrap_or_else(|e| panic!("pushdown failed for `{cypher}`: {e}"));
-        assert_eq!(actual, expected, "row mismatch for `{cypher}`");
+        // Compare as a row multiset (join order is backend-defined without a
+        // total ORDER BY; these queries order by the projected columns anyway).
+        let sorted = |t: &CypherResultTable| {
+            let mut r: Vec<String> = t.rows.iter().map(|row| format!("{row:?}")).collect();
+            r.sort();
+            r
+        };
+        assert_eq!(actual.columns, expected.columns, "columns for `{cypher}`");
+        assert_eq!(sorted(&actual), sorted(&expected), "rows for `{cypher}`");
     }
 }
 

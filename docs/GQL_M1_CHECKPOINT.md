@@ -56,11 +56,24 @@ reference rather than risk a wrong answer.
   the pushable subset and falls back to `read_graph()` + reference otherwise; a
   `#[ignore]` live-server differential test pins row equality.
 
-Deferred (next pushdown increments, each gated by the oracle): relationship
-segments (joins), `IN` / `STARTS·ENDS·CONTAINS` / arithmetic predicates, boolean
-literals, and pushing `ORDER BY`/`SKIP`/`LIMIT`/projection into SQL (requires
-establishing cross-dialect ordering/typing equivalence — NULLS ordering, bool
-encoding, cross-type compares).
+**Milestone 2 — relationship segments.** The pushable subset now also covers a
+single **directed relationship segment** `(a[:LA] [{..}])-[r?:T [{..}]]->(b[:LB]
+[{..}])` (and the `<-[..]-` incoming form): `plan_segment_read` →
+`SegmentReadPushdown` lowers it to a `grust_edges`/`grust_nodes` join (multiple
+rel types → `edge_type IN (…)`, inline endpoint/edge props + `WHERE` over
+`a`/`r`/`b`). The backend executes the join and returns the selected columns as
+**text rows**; `project_text_rows` reconstructs the `(a, r, b)` bindings (parsing
+the JSON `props` columns) and runs the shared reference projection. The Turso
+oracle gained an edge table + 10 segment queries (compared as a row **multiset**,
+since join order is backend-defined); Sail's live test gained segment + a
+multi-hop fallback case.
+
+Deferred (next pushdown increments, each gated by the oracle): undirected and
+multi-segment / variable-length paths, path variables, `IN` /
+`STARTS·ENDS·CONTAINS` / arithmetic predicates, boolean literals, and pushing
+`ORDER BY`/`SKIP`/`LIMIT`/projection into SQL (requires establishing
+cross-dialect ordering/typing equivalence — NULLS ordering, bool encoding,
+cross-type compares).
 
 ---
 

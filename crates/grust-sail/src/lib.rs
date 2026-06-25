@@ -1345,8 +1345,26 @@ impl SailGraphStore {
             let nodes = self.run_query(&sql, vec![]).await?;
             return plan.project(nodes, params);
         }
+        if let Some(plan) = grust_cypher::pushdown::plan_segment_read(cypher, params)? {
+            let sql = plan.to_sql(&grust_cypher::pushdown::SparkDialect);
+            let rows = self.run_text_query(&sql).await?;
+            return plan.project_text_rows(rows, params);
+        }
         let graph = self.read_graph().await?;
         grust_cypher::read::run_read_query(&graph, cypher, params)
+    }
+
+    /// Execute SQL whose result columns are all strings, returning each row as a
+    /// vector of optional text cells (used by relationship-segment pushdown,
+    /// which reconstructs `(a, r, b)` bindings from the projected text columns).
+    async fn run_text_query(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>> {
+        let mut rows = Vec::new();
+        self.run_plan(self.query_request(sql, vec![])?, |data| {
+            rows.extend(parse_text_rows_from_arrow(data)?);
+            Ok(())
+        })
+        .await?;
+        Ok(rows)
     }
 
     /// Computes out-degrees over the generic persisted Sail edge table.
@@ -3258,6 +3276,43 @@ fn parse_optional_single_string_from_arrow(
         }
     }
     Ok(value)
+}
+
+/// Parse an Arrow IPC chunk whose columns are all UTF-8 strings into rows of
+/// optional text cells, preserving column order. Used by segment pushdown.
+fn parse_text_rows_from_arrow(data: &[u8]) -> Result<Vec<Vec<Option<String>>>> {
+    let reader = StreamReader::try_new(Cursor::new(data), None)
+        .map_err(|e| GrustError::Backend(format!("Arrow IPC read failed: {e}")))?;
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| GrustError::Backend(format!("Arrow batch error: {e}")))?;
+        let columns: Vec<&StringArray> = (0..batch.num_columns())
+            .map(|i| {
+                batch
+                    .column(i)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| {
+                        GrustError::Schema(format!("pushdown result column {i} is not a string"))
+                    })
+            })
+            .collect::<Result<_>>()?;
+        for row in 0..batch.num_rows() {
+            out.push(
+                columns
+                    .iter()
+                    .map(|c| {
+                        if c.is_null(row) {
+                            None
+                        } else {
+                            Some(c.value(row).to_string())
+                        }
+                    })
+                    .collect(),
+            );
+        }
+    }
+    Ok(out)
 }
 
 fn parse_nodes_from_arrow(data: &[u8]) -> Result<Vec<Node>> {

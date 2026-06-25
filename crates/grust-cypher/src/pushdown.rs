@@ -145,6 +145,10 @@ enum Scalar {
 pub trait SqlDialect {
     /// The generic node table name (e.g. `grust_nodes`).
     fn nodes_table(&self) -> &str;
+    /// The generic edge table name (e.g. `grust_edges`).
+    fn edges_table(&self) -> &str {
+        "grust_edges"
+    }
     /// Quote a table/column identifier (e.g. backticks for Spark).
     fn quote_ident(&self, ident: &str) -> String;
     /// Extract JSON property `key` from the props column, yielding a SQL scalar.
@@ -539,6 +543,563 @@ fn render_float(f: f64) -> String {
     }
 }
 
+// ===========================================================================
+// Relationship-segment pushdown (milestone 2: one directed segment)
+// ===========================================================================
+//
+// `MATCH (a[:LA] [{..}])-[r?:T [{..}]]->(b[:LB] [{..}]) [WHERE pred] RETURN …`
+// (and the `<-[..]-` incoming form) lowers to a join of `grust_edges` against
+// `grust_nodes` twice. The backend executes the SQL and returns the selected
+// columns as text rows; [`SegmentReadPushdown::project_text_rows`] reconstructs
+// the `(a, r, b)` bindings (parsing the JSON `props` columns) and runs the
+// shared reference projection — so the result is identical to
+// [`crate::read::run_read_query`] by construction.
+
+use crate::read::PushedBinding;
+use grust_core::{Edge, EdgeId, Label, NodeId, Props};
+
+/// Which endpoint of the segment a property/label refers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Endpoint {
+    A,
+    B,
+}
+
+/// An operand of a segment filter: a node label/property of an endpoint, or an
+/// edge property of the relationship.
+#[derive(Clone, Debug, PartialEq)]
+enum SegOperand {
+    NodeLabel(Endpoint),
+    NodeProp(Endpoint, String),
+    EdgeProp(String),
+}
+
+/// A pushable segment filter predicate.
+#[derive(Clone, Debug, PartialEq)]
+enum SegPredicate {
+    And(Box<SegPredicate>, Box<SegPredicate>),
+    Or(Box<SegPredicate>, Box<SegPredicate>),
+    Not(Box<SegPredicate>),
+    Compare {
+        operand: SegOperand,
+        op: CmpOp,
+        value: Scalar,
+    },
+    IsNull {
+        operand: SegOperand,
+        negated: bool,
+    },
+}
+
+/// One binding the segment query selects and reconstructs, in SELECT-column order.
+#[derive(Clone, Debug, PartialEq)]
+enum SelectedBinding {
+    /// Endpoint node bound to `var` (3 columns: id, label, props).
+    Node { var: String, endpoint: Endpoint },
+    /// The relationship edge bound to `var` (5 columns: id, src, dst, type, props).
+    Edge { var: String },
+}
+
+/// A lowered single directed relationship segment.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SegmentReadPushdown {
+    /// `na`-side endpoint and `nb`-side endpoint join targets depend on direction.
+    incoming: bool,
+    a_label: Option<String>,
+    b_label: Option<String>,
+    rel_types: Vec<String>,
+    filter: Option<SegPredicate>,
+    /// Selected bindings in SELECT order (only pattern vars that are bound).
+    selected: Vec<SelectedBinding>,
+    projection: Projection,
+}
+
+/// Try to lower `cypher` into a relationship-segment read pushdown.
+///
+/// Same contract as [`plan_node_read`]: `Ok(Some(_))` for the pushable subset,
+/// `Ok(None)` for a valid query outside it, `Err` only for invalid input.
+pub fn plan_segment_read(
+    cypher: &str,
+    params: &CypherParameters,
+) -> Result<Option<SegmentReadPushdown>> {
+    let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
+    crate::semantics::analyze(&query)?;
+    Ok(lower_segment(&query, params))
+}
+
+fn lower_segment(query: &Query, params: &CypherParameters) -> Option<SegmentReadPushdown> {
+    if query.parts.len() != 1 || query.parts[0].union.is_some() {
+        return None;
+    }
+    let single = &query.parts[0].query;
+    let (match_clause, return_clause) = match single.clauses.as_slice() {
+        [Clause::Match(m), Clause::Return(r)] if !m.optional => (m, r),
+        _ => return None,
+    };
+    if match_clause.patterns.len() != 1 {
+        return None;
+    }
+    let pattern = &match_clause.patterns[0];
+    if pattern.variable.is_some() || pattern.segments.len() != 1 {
+        return None;
+    }
+    let a = &pattern.start;
+    let segment = &pattern.segments[0];
+    let rel = &segment.relationship;
+    let b = &segment.node;
+
+    // Direction: only directed segments for now.
+    let incoming = match rel.direction {
+        Direction::Outgoing => false,
+        Direction::Incoming => true,
+        Direction::Undirected => return None,
+    };
+    // No variable-length, no relationship var-length bound.
+    if rel.length.is_some() {
+        return None;
+    }
+    // At most one label per endpoint.
+    if a.labels.len() > 1 || b.labels.len() > 1 {
+        return None;
+    }
+
+    // Variable identities. Endpoints must differ to keep the join unambiguous.
+    let a_var = a.variable.clone();
+    let b_var = b.variable.clone();
+    let rel_var = rel.variable.clone();
+    if let (Some(av), Some(bv)) = (&a_var, &b_var) {
+        if av == bv {
+            return None;
+        }
+    }
+    // A relationship variable that collides with a node variable is rejected.
+    if let Some(rv) = &rel_var {
+        if Some(rv) == a_var.as_ref() || Some(rv) == b_var.as_ref() {
+            return None;
+        }
+    }
+
+    // Build the filter: inline endpoint props, inline rel props, then WHERE.
+    let mut filter: Option<SegPredicate> = None;
+    if let Some(map) = &a.properties {
+        for (key, value) in &map.entries {
+            filter = Some(seg_conjoin(filter, seg_inline(Endpoint::A, key, value, params)?));
+        }
+    }
+    if let Some(map) = &b.properties {
+        for (key, value) in &map.entries {
+            filter = Some(seg_conjoin(filter, seg_inline(Endpoint::B, key, value, params)?));
+        }
+    }
+    if let Some(map) = &rel.properties {
+        for (key, value) in &map.entries {
+            let scalar = lower_scalar(value, params)?;
+            let operand = SegOperand::EdgeProp(lower_seg_key(key)?);
+            filter = Some(seg_conjoin(
+                filter,
+                SegPredicate::Compare {
+                    operand,
+                    op: CmpOp::Eq,
+                    value: scalar,
+                },
+            ));
+        }
+    }
+    if let Some(where_expr) = &match_clause.where_clause {
+        let resolver = VarRoles {
+            a: a_var.as_deref(),
+            b: b_var.as_deref(),
+            rel: rel_var.as_deref(),
+        };
+        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &resolver, params)?));
+    }
+
+    // Selected bindings, in SELECT order a, r, b — only those with a variable.
+    let mut selected = Vec::new();
+    if let Some(var) = &a_var {
+        selected.push(SelectedBinding::Node {
+            var: var.clone(),
+            endpoint: Endpoint::A,
+        });
+    }
+    if let Some(var) = &rel_var {
+        selected.push(SelectedBinding::Edge { var: var.clone() });
+    }
+    if let Some(var) = &b_var {
+        selected.push(SelectedBinding::Node {
+            var: var.clone(),
+            endpoint: Endpoint::B,
+        });
+    }
+
+    Some(SegmentReadPushdown {
+        incoming,
+        a_label: a.labels.first().cloned(),
+        b_label: b.labels.first().cloned(),
+        rel_types: rel.types.clone(),
+        filter,
+        selected,
+        projection: return_clause.projection.clone(),
+    })
+}
+
+/// Variable name → segment role mapping for WHERE lowering.
+struct VarRoles<'a> {
+    a: Option<&'a str>,
+    b: Option<&'a str>,
+    rel: Option<&'a str>,
+}
+
+fn seg_conjoin(existing: Option<SegPredicate>, next: SegPredicate) -> SegPredicate {
+    match existing {
+        None => next,
+        Some(prev) => SegPredicate::And(Box::new(prev), Box::new(next)),
+    }
+}
+
+fn seg_inline(
+    endpoint: Endpoint,
+    key: &str,
+    value: &Expr,
+    params: &CypherParameters,
+) -> Option<SegPredicate> {
+    let scalar = lower_scalar(value, params)?;
+    let operand = if key == "label" {
+        SegOperand::NodeLabel(endpoint)
+    } else {
+        SegOperand::NodeProp(endpoint, lower_seg_key(key)?)
+    };
+    Some(SegPredicate::Compare {
+        operand,
+        op: CmpOp::Eq,
+        value: scalar,
+    })
+}
+
+fn lower_seg_key(key: &str) -> Option<String> {
+    if is_safe_key(key) {
+        Some(key.to_string())
+    } else {
+        None
+    }
+}
+
+fn lower_seg_predicate(
+    expr: &Expr,
+    roles: &VarRoles,
+    params: &CypherParameters,
+) -> Option<SegPredicate> {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::And,
+            lhs,
+            rhs,
+        } => Some(SegPredicate::And(
+            Box::new(lower_seg_predicate(lhs, roles, params)?),
+            Box::new(lower_seg_predicate(rhs, roles, params)?),
+        )),
+        Expr::Binary {
+            op: BinaryOp::Or,
+            lhs,
+            rhs,
+        } => Some(SegPredicate::Or(
+            Box::new(lower_seg_predicate(lhs, roles, params)?),
+            Box::new(lower_seg_predicate(rhs, roles, params)?),
+        )),
+        Expr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } => Some(SegPredicate::Not(Box::new(lower_seg_predicate(
+            operand, roles, params,
+        )?))),
+        Expr::IsNull { operand, negated } => Some(SegPredicate::IsNull {
+            operand: lower_seg_operand(operand, roles)?,
+            negated: *negated,
+        }),
+        Expr::Binary { op, lhs, rhs } => {
+            let cmp = lower_cmp_op(*op)?;
+            if let Some(operand) = lower_seg_operand(lhs, roles) {
+                Some(SegPredicate::Compare {
+                    operand,
+                    op: cmp,
+                    value: lower_scalar(rhs, params)?,
+                })
+            } else if let Some(operand) = lower_seg_operand(rhs, roles) {
+                Some(SegPredicate::Compare {
+                    operand,
+                    op: cmp.flipped(),
+                    value: lower_scalar(lhs, params)?,
+                })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn lower_seg_operand(expr: &Expr, roles: &VarRoles) -> Option<SegOperand> {
+    let Expr::Property { base, key } = expr else {
+        return None;
+    };
+    let Expr::Variable(name) = base.as_ref() else {
+        return None;
+    };
+    let name = name.as_str();
+    if roles.a == Some(name) {
+        Some(if key == "label" {
+            SegOperand::NodeLabel(Endpoint::A)
+        } else {
+            SegOperand::NodeProp(Endpoint::A, lower_seg_key(key)?)
+        })
+    } else if roles.b == Some(name) {
+        Some(if key == "label" {
+            SegOperand::NodeLabel(Endpoint::B)
+        } else {
+            SegOperand::NodeProp(Endpoint::B, lower_seg_key(key)?)
+        })
+    } else if roles.rel == Some(name) {
+        // Edges have no synthetic `label`; `r.key` is always a property.
+        Some(SegOperand::EdgeProp(lower_seg_key(key)?))
+    } else {
+        None
+    }
+}
+
+impl SegmentReadPushdown {
+    /// The SQL alias for endpoint A's node table (`na`) / B's (`nb`).
+    fn endpoint_alias(endpoint: Endpoint) -> &'static str {
+        match endpoint {
+            Endpoint::A => "na",
+            Endpoint::B => "nb",
+        }
+    }
+
+    /// The edge column that endpoint A joins on, given direction.
+    fn a_edge_col(&self) -> &'static str {
+        if self.incoming {
+            "dst_id"
+        } else {
+            "src_id"
+        }
+    }
+
+    fn b_edge_col(&self) -> &'static str {
+        if self.incoming {
+            "src_id"
+        } else {
+            "dst_id"
+        }
+    }
+
+    /// Render the segment join + filter. The SELECT list emits, in order, the
+    /// columns for each selected binding (node: id,label,props; edge:
+    /// id,src_id,dst_id,edge_type,props) — all text columns, reconstructed by
+    /// [`Self::project_text_rows`].
+    pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
+        let nodes = dialect.quote_ident(dialect.nodes_table());
+        let edges = dialect.quote_ident(dialect.edges_table());
+
+        let mut cols: Vec<String> = Vec::new();
+        for binding in &self.selected {
+            match binding {
+                SelectedBinding::Node { endpoint, .. } => {
+                    let a = Self::endpoint_alias(*endpoint);
+                    cols.push(format!("{a}.id"));
+                    cols.push(format!("{a}.label"));
+                    cols.push(format!("{a}.props"));
+                }
+                SelectedBinding::Edge { .. } => {
+                    cols.push("re.id".to_string());
+                    cols.push("re.src_id".to_string());
+                    cols.push("re.dst_id".to_string());
+                    cols.push("re.edge_type".to_string());
+                    cols.push("re.props".to_string());
+                }
+            }
+        }
+        // No selected binding (e.g. RETURN count(*)): still need one column so the
+        // backend gets one row per match.
+        let select_list = if cols.is_empty() {
+            "1".to_string()
+        } else {
+            cols.join(", ")
+        };
+
+        let mut sql = format!(
+            "SELECT {select_list} FROM {edges} re \
+             JOIN {nodes} na ON na.id = re.{a_col} \
+             JOIN {nodes} nb ON nb.id = re.{b_col}",
+            a_col = self.a_edge_col(),
+            b_col = self.b_edge_col(),
+        );
+
+        let mut conditions: Vec<String> = Vec::new();
+        match self.rel_types.as_slice() {
+            [] => {}
+            [one] => conditions.push(format!("re.edge_type = {}", dialect.string_literal(one))),
+            many => {
+                let list = many
+                    .iter()
+                    .map(|t| dialect.string_literal(t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                conditions.push(format!("re.edge_type IN ({list})"));
+            }
+        }
+        if let Some(label) = &self.a_label {
+            conditions.push(format!("na.label = {}", dialect.string_literal(label)));
+        }
+        if let Some(label) = &self.b_label {
+            conditions.push(format!("nb.label = {}", dialect.string_literal(label)));
+        }
+        if let Some(filter) = &self.filter {
+            conditions.push(render_seg_predicate(filter, dialect));
+        }
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+        sql
+    }
+
+    /// Number of text columns the SQL emits (for the backend to read row cells).
+    pub fn column_count(&self) -> usize {
+        self.selected
+            .iter()
+            .map(|b| match b {
+                SelectedBinding::Node { .. } => 3,
+                SelectedBinding::Edge { .. } => 5,
+            })
+            .sum::<usize>()
+            .max(1)
+    }
+
+    /// Reconstruct the `(a, r, b)` bindings from the backend's text rows and run
+    /// the shared reference projection.
+    pub fn project_text_rows(
+        &self,
+        rows: Vec<Vec<Option<String>>>,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        let mut binding_rows = Vec::with_capacity(rows.len());
+        for cells in rows {
+            let mut idx = 0;
+            let cell = |i: usize| cells.get(i).and_then(|c| c.as_deref());
+            let mut bindings = Vec::with_capacity(self.selected.len());
+            for binding in &self.selected {
+                match binding {
+                    SelectedBinding::Node { var, .. } => {
+                        let id = cell(idx).unwrap_or_default().to_string();
+                        let label = cell(idx + 1).unwrap_or_default().to_string();
+                        let props = parse_props(cell(idx + 2))?;
+                        idx += 3;
+                        bindings.push((
+                            var.clone(),
+                            PushedBinding::Node(Node {
+                                id: NodeId::new(id),
+                                label: Label::new(label),
+                                props,
+                            }),
+                        ));
+                    }
+                    SelectedBinding::Edge { var } => {
+                        let id = cell(idx).map(EdgeId::new);
+                        let from = cell(idx + 1).unwrap_or_default().to_string();
+                        let to = cell(idx + 2).unwrap_or_default().to_string();
+                        let label = cell(idx + 3).unwrap_or_default().to_string();
+                        let props = parse_props(cell(idx + 4))?;
+                        idx += 5;
+                        let mut edge = Edge::new(label, from, to, props);
+                        edge.id = id;
+                        bindings.push((var.clone(), PushedBinding::Edge(edge)));
+                    }
+                }
+            }
+            binding_rows.push(bindings);
+        }
+        crate::read::project_bindings(binding_rows, &self.projection, params)
+    }
+}
+
+fn render_seg_predicate(pred: &SegPredicate, dialect: &dyn SqlDialect) -> String {
+    match pred {
+        SegPredicate::And(lhs, rhs) => format!(
+            "({} AND {})",
+            render_seg_predicate(lhs, dialect),
+            render_seg_predicate(rhs, dialect)
+        ),
+        SegPredicate::Or(lhs, rhs) => format!(
+            "({} OR {})",
+            render_seg_predicate(lhs, dialect),
+            render_seg_predicate(rhs, dialect)
+        ),
+        SegPredicate::Not(inner) => format!("(NOT {})", render_seg_predicate(inner, dialect)),
+        SegPredicate::Compare { operand, op, value } => {
+            render_seg_compare(operand, *op, value, dialect)
+        }
+        SegPredicate::IsNull { operand, negated } => {
+            let p = render_seg_operand(operand, dialect);
+            if *negated {
+                format!("{p} IS NOT NULL")
+            } else {
+                format!("{p} IS NULL")
+            }
+        }
+    }
+}
+
+fn render_seg_operand(operand: &SegOperand, dialect: &dyn SqlDialect) -> String {
+    match operand {
+        SegOperand::NodeLabel(endpoint) => {
+            format!("{}.label", SegmentReadPushdown::endpoint_alias(*endpoint))
+        }
+        SegOperand::NodeProp(endpoint, key) => {
+            let props = format!("{}.props", SegmentReadPushdown::endpoint_alias(*endpoint));
+            dialect.json_property(&props, key)
+        }
+        SegOperand::EdgeProp(key) => dialect.json_property("re.props", key),
+    }
+}
+
+fn render_seg_compare(
+    operand: &SegOperand,
+    op: CmpOp,
+    value: &Scalar,
+    dialect: &dyn SqlDialect,
+) -> String {
+    let raw = render_seg_operand(operand, dialect);
+    let is_label = matches!(operand, SegOperand::NodeLabel(_));
+    let (lhs, rhs) = match value {
+        Scalar::Int(n) => {
+            let lhs = if is_label { raw } else { dialect.cast_int(&raw) };
+            (lhs, n.to_string())
+        }
+        Scalar::Float(f) => {
+            let lhs = if is_label { raw } else { dialect.cast_float(&raw) };
+            (lhs, render_float(*f))
+        }
+        Scalar::Str(s) => (raw, dialect.string_literal(s)),
+    };
+    format!("{lhs} {} {rhs}", op.sql())
+}
+
+/// Parse a JSON `props` text cell (untagged) into [`Props`]. NULL/empty → empty.
+fn parse_props(text: Option<&str>) -> Result<Props> {
+    match text {
+        None => Ok(Props::new()),
+        Some(s) if s.is_empty() => Ok(Props::new()),
+        Some(s) => {
+            let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(s)
+                .map_err(|e| crate::gql::gql_execution(format!("pushdown props JSON parse: {e}")))?;
+            Ok(map
+                .into_iter()
+                .map(|(k, v)| (k, Value::from_json(v)))
+                .collect())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -728,5 +1289,135 @@ mod tests {
         let table = plan.project(nodes, &params()).unwrap();
         assert_eq!(table.columns, vec!["c".to_string()]);
         assert_eq!(table.rows, vec![vec![Value::Int(2)]]);
+    }
+
+    // ---- relationship segment pushdown ------------------------------------
+
+    fn seg_plan(cypher: &str) -> Option<SegmentReadPushdown> {
+        plan_segment_read(cypher, &params()).unwrap()
+    }
+
+    fn seg_spark(cypher: &str) -> String {
+        seg_plan(cypher).expect("pushable").to_sql(&SparkDialect)
+    }
+
+    #[test]
+    fn outgoing_segment_join() {
+        assert_eq!(
+            seg_spark("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name"),
+            "SELECT na.id, na.label, na.props, nb.id, nb.label, nb.props \
+             FROM `grust_edges` re \
+             JOIN `grust_nodes` na ON na.id = re.src_id \
+             JOIN `grust_nodes` nb ON nb.id = re.dst_id \
+             WHERE re.edge_type = 'KNOWS' AND na.label = 'Person' AND nb.label = 'Person'"
+        );
+    }
+
+    #[test]
+    fn incoming_segment_with_rel_var_and_where() {
+        assert_eq!(
+            seg_spark("MATCH (a:Person)<-[r:KNOWS]-(b) WHERE b.age > 30 RETURN a.name"),
+            "SELECT na.id, na.label, na.props, re.id, re.src_id, re.dst_id, re.edge_type, re.props, \
+             nb.id, nb.label, nb.props \
+             FROM `grust_edges` re \
+             JOIN `grust_nodes` na ON na.id = re.dst_id \
+             JOIN `grust_nodes` nb ON nb.id = re.src_id \
+             WHERE re.edge_type = 'KNOWS' AND na.label = 'Person' \
+             AND CAST(GET_JSON_OBJECT(nb.props, '$.age') AS BIGINT) > 30"
+        );
+    }
+
+    #[test]
+    fn segment_multiple_rel_types_and_inline_props() {
+        assert_eq!(
+            seg_spark("MATCH (a {city:'London'})-[:KNOWS|FOLLOWS]->(b) RETURN a.name, b.name"),
+            "SELECT na.id, na.label, na.props, nb.id, nb.label, nb.props \
+             FROM `grust_edges` re \
+             JOIN `grust_nodes` na ON na.id = re.src_id \
+             JOIN `grust_nodes` nb ON nb.id = re.dst_id \
+             WHERE re.edge_type IN ('KNOWS', 'FOLLOWS') \
+             AND GET_JSON_OBJECT(na.props, '$.city') = 'London'"
+        );
+    }
+
+    #[test]
+    fn segment_sqlite_dialect() {
+        assert_eq!(
+            seg_plan("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN b.name")
+                .unwrap()
+                .to_sql(&SqliteDialect),
+            "SELECT na.id, na.label, na.props, nb.id, nb.label, nb.props \
+             FROM \"grust_edges\" re \
+             JOIN \"grust_nodes\" na ON na.id = re.src_id \
+             JOIN \"grust_nodes\" nb ON nb.id = re.dst_id \
+             WHERE re.edge_type = 'KNOWS' AND na.label = 'Person' AND nb.label = 'Person'"
+        );
+    }
+
+    #[test]
+    fn segment_edge_property_filter() {
+        // Anonymous source endpoint: only `r` and `b` are selected.
+        assert_eq!(
+            seg_spark("MATCH ()-[r:RATED]->(b) WHERE r.stars >= 4 RETURN b.name"),
+            "SELECT re.id, re.src_id, re.dst_id, re.edge_type, re.props, nb.id, nb.label, nb.props \
+             FROM `grust_edges` re \
+             JOIN `grust_nodes` na ON na.id = re.src_id \
+             JOIN `grust_nodes` nb ON nb.id = re.dst_id \
+             WHERE re.edge_type = 'RATED' \
+             AND CAST(GET_JSON_OBJECT(re.props, '$.stars') AS BIGINT) >= 4"
+        );
+    }
+
+    #[test]
+    fn segment_unsupported_shapes_fall_back() {
+        // Undirected.
+        assert!(seg_plan("MATCH (a)-[:KNOWS]-(b) RETURN a").is_none());
+        // Variable length.
+        assert!(seg_plan("MATCH (a)-[:KNOWS*1..2]->(b) RETURN a").is_none());
+        // Two segments.
+        assert!(seg_plan("MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a").is_none());
+        // Same variable on both endpoints.
+        assert!(seg_plan("MATCH (a)-[:KNOWS]->(a) RETURN a").is_none());
+        // Path variable.
+        assert!(seg_plan("MATCH p = (a)-[:KNOWS]->(b) RETURN a").is_none());
+        // Plain node pattern (handled by plan_node_read, not the segment planner).
+        assert!(seg_plan("MATCH (n:Person) RETURN n").is_none());
+        // WHERE referencing an unbound variable role / unsupported predicate.
+        assert!(seg_plan("MATCH (a)-[:KNOWS]->(b) WHERE a.name STARTS WITH 'A' RETURN a").is_none());
+    }
+
+    #[test]
+    fn segment_reconstructs_and_projects() {
+        let plan =
+            seg_plan("MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, r.since, b.name")
+                .expect("pushable");
+        // Columns: na(3) + re(5) + nb(3) = 11.
+        assert_eq!(plan.column_count(), 11);
+        let row = vec![
+            some("p1"),
+            some("Person"),
+            some("{\"name\":\"Ada\"}"),
+            None, // edge id
+            some("p1"),
+            some("p2"),
+            some("KNOWS"),
+            some("{\"since\":2020}"),
+            some("p2"),
+            some("Person"),
+            some("{\"name\":\"Alan\"}"),
+        ];
+        let table = plan.project_text_rows(vec![row], &params()).unwrap();
+        assert_eq!(
+            table.columns,
+            vec!["a.name".to_string(), "r.since".to_string(), "b.name".to_string()]
+        );
+        assert_eq!(
+            table.rows,
+            vec![vec![Value::from("Ada"), Value::Int(2020), Value::from("Alan")]]
+        );
+    }
+
+    fn some(s: &str) -> Option<String> {
+        Some(s.to_string())
     }
 }

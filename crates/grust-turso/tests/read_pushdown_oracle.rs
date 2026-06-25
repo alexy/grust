@@ -16,9 +16,9 @@
 //! gives high confidence in that path too.
 
 use grust_core::{Edge, Graph, Label, Node, NodeId, Props, Value};
-use grust_cypher::pushdown::{plan_node_read, SqliteDialect};
+use grust_cypher::pushdown::{plan_node_read, plan_segment_read, SqliteDialect};
 use grust_cypher::read::run_read_query;
-use grust_cypher::CypherParameters;
+use grust_cypher::{CypherParameters, CypherResultTable};
 
 /// A small social/geo graph with varied types: ints, a float, missing props
 /// (NULLs), and a name with an apostrophe (to exercise string escaping).
@@ -30,7 +30,15 @@ fn fixture() -> Graph {
         person("p4", "O'Hara", 50, None, Some(7.0)),
         node("City", "c1", &[("name", Value::from("London"))]),
     ];
-    let edges = vec![Edge::new("KNOWS", "p1", "p2", Props::new())];
+    let mut rated = Props::new();
+    rated.insert("stars".into(), Value::Int(5));
+    let edges = vec![
+        Edge::new("KNOWS", "p1", "p2", Props::new()),
+        Edge::new("KNOWS", "p2", "p3", Props::new()),
+        Edge::new("KNOWS", "p1", "p4", Props::new()),
+        Edge::new("FOLLOWS", "p3", "p1", Props::new()),
+        Edge::new("RATED", "p1", "c1", rated),
+    ];
     Graph::new(nodes, edges)
 }
 
@@ -75,6 +83,20 @@ const PUSHABLE_QUERIES: &[&str] = &[
     "MATCH (n:City) RETURN n.name",
 ];
 
+/// Relationship-segment queries within the pushable subset.
+const PUSHABLE_SEGMENTS: &[&str] = &[
+    "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name",
+    "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age >= 40 RETURN a.name, b.name",
+    "MATCH (a:Person)<-[:KNOWS]-(b:Person) RETURN a.name AS who, b.name AS via",
+    "MATCH (a:Person {name:'Ada'})-[:KNOWS]->(b) RETURN b.name",
+    "MATCH (a)-[r:KNOWS]->(b) RETURN a.name, b.name",
+    "MATCH (a)-[:KNOWS|FOLLOWS]->(b:Person) RETURN a.name, b.name",
+    "MATCH (a)-[r:RATED]->(b) WHERE r.stars >= 4 RETURN b.name, r.stars",
+    "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE a.name <> 'Ada' RETURN a.name, b.name",
+    "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN count(*) AS c",
+    "MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE NOT b.age >= 80 RETURN b.name",
+];
+
 #[tokio::test]
 async fn pushdown_matches_reference() {
     let graph = fixture();
@@ -84,8 +106,34 @@ async fn pushdown_matches_reference() {
         let expected = run_read_query(&graph, cypher, &params)
             .unwrap_or_else(|e| panic!("reference failed for `{cypher}`: {e}"));
         let actual = pushdown(&conn, cypher, &params).await;
-        assert_eq!(actual, expected, "row mismatch for `{cypher}`");
+        assert_same(cypher, &actual, &expected);
     }
+}
+
+#[tokio::test]
+async fn segment_pushdown_matches_reference() {
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in PUSHABLE_SEGMENTS {
+        let expected = run_read_query(&graph, cypher, &params)
+            .unwrap_or_else(|e| panic!("reference failed for `{cypher}`: {e}"));
+        let actual = segment_pushdown(&conn, cypher, &params).await;
+        assert_same(cypher, &actual, &expected);
+    }
+}
+
+/// Compare result tables by column names and **row multiset** — Cypher results
+/// are unordered without a total `ORDER BY`, and a SQL join's row order is not
+/// guaranteed, so set equality (not sequence) is the correctness criterion.
+fn assert_same(cypher: &str, actual: &CypherResultTable, expected: &CypherResultTable) {
+    assert_eq!(actual.columns, expected.columns, "columns for `{cypher}`");
+    let sorted = |t: &CypherResultTable| {
+        let mut rows: Vec<String> = t.rows.iter().map(|r| format!("{r:?}")).collect();
+        rows.sort();
+        rows
+    };
+    assert_eq!(sorted(actual), sorted(expected), "row multiset for `{cypher}`");
 }
 
 #[tokio::test]
@@ -126,20 +174,63 @@ async fn pushdown(
     plan.project(nodes, params).unwrap()
 }
 
-/// Build an in-memory SQLite database with a `grust_nodes(id, label, props)`
-/// table populated from the graph, props stored as untagged JSON.
+/// Run a relationship-segment query via the pushdown path: lower to SQLite SQL,
+/// execute, read the selected columns as text cells, reconstruct + project.
+async fn segment_pushdown(
+    conn: &turso::Connection,
+    cypher: &str,
+    params: &CypherParameters,
+) -> CypherResultTable {
+    let plan = plan_segment_read(cypher, params)
+        .unwrap()
+        .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable as a segment"));
+    let sql = plan.to_sql(&SqliteDialect);
+    let n = plan.column_count();
+    let mut rows = conn
+        .query(&sql, ())
+        .await
+        .unwrap_or_else(|e| panic!("embedded segment query failed for `{sql}`: {e}"));
+    let mut text_rows = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        text_rows.push((0..n).map(|i| opt_text(&row, i)).collect());
+    }
+    plan.project_text_rows(text_rows, params).unwrap()
+}
+
+/// Build an in-memory SQLite database with `grust_nodes(id, label, props)` and
+/// `grust_edges(id, src_id, dst_id, edge_type, props)` populated from the graph,
+/// props stored as untagged JSON.
 async fn embed(graph: &Graph) -> turso::Connection {
     let db = turso::Builder::new_local(":memory:").build().await.unwrap();
     let conn = db.connect().unwrap();
-    conn.execute_batch("CREATE TABLE grust_nodes (id TEXT, label TEXT, props TEXT);")
-        .await
-        .unwrap();
+    conn.execute_batch(
+        "CREATE TABLE grust_nodes (id TEXT, label TEXT, props TEXT); \
+         CREATE TABLE grust_edges (id TEXT, src_id TEXT, dst_id TEXT, edge_type TEXT, props TEXT);",
+    )
+    .await
+    .unwrap();
     for n in &graph.nodes {
         let sql = format!(
             "INSERT INTO grust_nodes (id, label, props) VALUES ({}, {}, {});",
             lit(n.id.as_str()),
             lit(n.label.as_str()),
             lit(&untagged_props(&n.props)),
+        );
+        conn.execute_batch(&sql).await.unwrap();
+    }
+    for e in &graph.edges {
+        let id = e
+            .id
+            .as_ref()
+            .map(|i| lit(i.as_str()))
+            .unwrap_or_else(|| "NULL".to_string());
+        let sql = format!(
+            "INSERT INTO grust_edges (id, src_id, dst_id, edge_type, props) VALUES ({}, {}, {}, {}, {});",
+            id,
+            lit(e.from.as_str()),
+            lit(e.to.as_str()),
+            lit(e.label.as_str()),
+            lit(&untagged_props(&e.props)),
         );
         conn.execute_batch(&sql).await.unwrap();
     }
@@ -170,6 +261,14 @@ fn text(row: &turso::Row, idx: usize) -> String {
     match row.get_value(idx).unwrap() {
         turso::Value::Text(s) => s,
         other => panic!("expected text at column {idx}, got {other:?}"),
+    }
+}
+
+fn opt_text(row: &turso::Row, idx: usize) -> Option<String> {
+    match row.get_value(idx).unwrap() {
+        turso::Value::Text(s) => Some(s),
+        turso::Value::Null => None,
+        other => panic!("expected text/null at column {idx}, got {other:?}"),
     }
 }
 

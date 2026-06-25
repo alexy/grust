@@ -412,26 +412,56 @@ fn bound_value(bound: &Bound) -> Result<Value> {
     }
 }
 
+/// A graph element a backend's pushdown query reconstructed for one binding.
+#[derive(Clone, Debug)]
+pub enum PushedBinding {
+    Node(Node),
+    Edge(Edge),
+}
+
 /// Project a set of already-matched nodes through a `RETURN`/`WITH` projection.
 ///
-/// This is the shared tail used by backend **read pushdown** (Unit 15): a
-/// persistent backend lowers the `MATCH`/`WHERE` filter into its own SQL, fetches
-/// the surviving nodes, and hands them here so the `RETURN` projection (aliases,
-/// `*`, `DISTINCT`, `ORDER BY`, `SKIP`/`LIMIT`, aggregates) runs through the
-/// **exact same** reference code path as [`run_read_query`]. The pushdown result
-/// is therefore byte-identical to the in-memory reference by construction; only
-/// the upstream filter equivalence has to be established per backend.
+/// This is the shared tail used by single-node backend **read pushdown**
+/// (Unit 15): a persistent backend lowers the `MATCH`/`WHERE` filter into its own
+/// SQL, fetches the surviving nodes, and hands them here so the `RETURN`
+/// projection (aliases, `*`, `DISTINCT`, `ORDER BY`, `SKIP`/`LIMIT`, aggregates)
+/// runs through the **exact same** reference code path as [`run_read_query`]. The
+/// pushdown result is therefore byte-identical to the in-memory reference by
+/// construction; only the upstream filter equivalence has to be established per
+/// backend.
 pub(crate) fn project_nodes(
     var: &str,
     nodes: Vec<Node>,
     projection: &Projection,
     params: &CypherParameters,
 ) -> Result<CypherResultTable> {
-    let rows: Vec<Row> = nodes
+    let binding_rows = nodes
         .into_iter()
-        .map(|node| {
+        .map(|node| vec![(var.to_string(), PushedBinding::Node(node))])
+        .collect();
+    project_bindings(binding_rows, projection, params)
+}
+
+/// Project already-matched **multi-binding** rows (e.g. a relationship segment's
+/// `(a, r, b)`) through a `RETURN`/`WITH` projection — the generalization of
+/// [`project_nodes`] used by pushdown over patterns with more than one binding.
+/// Each inner vector is one solution row: `(variable, bound element)` pairs.
+pub(crate) fn project_bindings(
+    binding_rows: Vec<Vec<(String, PushedBinding)>>,
+    projection: &Projection,
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
+    let rows: Vec<Row> = binding_rows
+        .into_iter()
+        .map(|bindings| {
             let mut row = Row::new();
-            row.insert(var.to_string(), Bound::Node(node));
+            for (var, binding) in bindings {
+                let bound = match binding {
+                    PushedBinding::Node(node) => Bound::Node(node),
+                    PushedBinding::Edge(edge) => Bound::Edge(edge),
+                };
+                row.insert(var, bound);
+            }
             row
         })
         .collect();
