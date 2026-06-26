@@ -109,12 +109,17 @@ pub fn parse_expression(source: &str) -> PResult<Expr> {
 struct Parser {
     tokens: Vec<SpannedToken>,
     pos: usize,
+    source: String,
 }
 
 impl Parser {
     fn new(source: &str) -> PResult<Self> {
         let tokens = tokenize(source).map_err(|e| ParseError::syntax(e.span, e.message))?;
-        Ok(Parser { tokens, pos: 0 })
+        Ok(Parser {
+            tokens,
+            pos: 0,
+            source: source.to_string(),
+        })
     }
 
     // -- token navigation -------------------------------------------------
@@ -200,6 +205,29 @@ impl Parser {
             Token::Identifier(name) | Token::QuotedIdentifier(name) => {
                 self.advance();
                 Ok(name)
+            }
+            _ => Err(ParseError::syntax(
+                self.span_here(),
+                format!("expected {what}, found {:?}", self.peek()),
+            )),
+        }
+    }
+
+    /// Parse a **key** name — like [`Self::parse_name`], but also accepts a
+    /// reserved keyword used as a property/map key (e.g. `{order: 1, limit: 3}`),
+    /// which standard Cypher permits. The keyword's exact source text (preserving
+    /// case) is recovered from its span.
+    fn parse_key(&mut self, what: &str) -> PResult<String> {
+        match self.peek().clone() {
+            Token::Identifier(name) | Token::QuotedIdentifier(name) => {
+                self.advance();
+                Ok(name)
+            }
+            Token::Keyword(_) => {
+                let span = self.span_here();
+                let text = self.source[span.start..span.end].to_string();
+                self.advance();
+                Ok(text)
             }
             _ => Err(ParseError::syntax(
                 self.span_here(),
@@ -418,7 +446,7 @@ impl Parser {
         if self.peek() == &Token::Dot {
             let mut target = Expr::Variable(name);
             while self.eat(&Token::Dot) {
-                let key = self.parse_name("a property key")?;
+                let key = self.parse_key("a property key")?;
                 target = Expr::property(target, key);
             }
             self.expect(&Token::Eq, "= in SET property assignment")?;
@@ -465,7 +493,7 @@ impl Parser {
         if self.peek() == &Token::Dot {
             let mut target = Expr::Variable(name);
             while self.eat(&Token::Dot) {
-                let key = self.parse_name("a property key")?;
+                let key = self.parse_key("a property key")?;
                 target = Expr::property(target, key);
             }
             return Ok(RemoveItem::Property { target });
@@ -847,6 +875,13 @@ impl Parser {
                 self.advance();
                 Ok(name)
             }
+            // A reserved keyword may be used as a map key (e.g. `{order: 1}`).
+            Token::Keyword(_) => {
+                let span = self.span_here();
+                let text = self.source[span.start..span.end].to_string();
+                self.advance();
+                Ok(text)
+            }
             _ => Err(ParseError::syntax(
                 self.span_here(),
                 format!("expected a map key, found {:?}", self.peek()),
@@ -967,7 +1002,7 @@ impl Parser {
             match self.peek() {
                 Token::Dot => {
                     self.advance();
-                    let key = self.parse_name("a property key")?;
+                    let key = self.parse_key("a property key")?;
                     expr = Expr::property(expr, key);
                 }
                 Token::LBracket => {

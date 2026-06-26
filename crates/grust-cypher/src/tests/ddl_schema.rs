@@ -281,12 +281,15 @@ fn cypher_parser_polish_handles_comments_keyword_case_and_statement_splitting() 
 
 #[test]
 fn cypher_local_variables_resolve_edge_endpoints_and_deletes() {
+    // Cross-statement local variables (`a`, `b`) resolve in later statements.
+    // Unit 10a (decision B): edge DELETE by *pattern* (`DELETE (a)-[:KNOWS]->(b)`)
+    // is non-standard and now rejected (see cypher_delete_lowers_resolved_node_and_edge_patterns);
+    // node deletion via the bound variable is retained.
     let plan = sail_cypher_mutation_plan(
         "
             CREATE (a:Person {id: 'person-1', name: 'Ada'});
             MERGE (b:Person {id: 'person-2', name: 'Bob'});
             CREATE (a)-[:KNOWS]->(b);
-            DELETE (a)-[:KNOWS]->(b);
             DELETE (a);
             ",
     )
@@ -297,13 +300,12 @@ fn cypher_local_variables_resolve_edge_endpoints_and_deletes() {
         GraphMutationReport {
             creates: 2,
             merges: 1,
-            deletes: 2,
+            deletes: 1,
             changed_nodes: 3,
-            changed_edges: 2,
+            changed_edges: 1,
             node_upserts: 2,
             edge_upserts: 1,
             node_deletes: 1,
-            edge_deletes: 1,
             ..GraphMutationReport::default()
         }
     );
@@ -327,11 +329,6 @@ fn cypher_local_variables_resolve_edge_endpoints_and_deletes() {
                 ]),
             )),
             GraphMutation::UpsertEdge(Edge::new("KNOWS", "person-1", "person-2", Props::new(),)),
-            GraphMutation::DeleteEdge {
-                from: NodeId::new("person-1"),
-                label: Label::new("KNOWS"),
-                to: NodeId::new("person-2"),
-            },
             GraphMutation::DeleteNode(NodeId::new("person-1")),
         ]
     );
@@ -369,7 +366,11 @@ fn cypher_errors_are_structured_for_callers() {
     let error = sail_cypher_mutation_plan("RETURN 1").expect_err("unsupported syntax");
     assert!(matches!(error, GrustError::CypherSyntax(_)));
 
-    let error = sail_cypher_mutation_plan("DELETE (:Person {name: 'Ada'})")
+    // A node write without a resolvable `id` is an unresolved-identity error.
+    // (Previously `DELETE (:Person {name: 'Ada'})`; DELETE-by-pattern is now a
+    // syntax error under the Unit 10a accept-set gate, so a CREATE is used to
+    // exercise the unresolved-identity path specifically.)
+    let error = sail_cypher_mutation_plan("CREATE (:Person {name: 'Ada'})")
         .expect_err("unresolved identity");
     assert!(matches!(error, GrustError::CypherUnresolvedIdentity(_)));
 

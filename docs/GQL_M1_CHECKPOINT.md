@@ -3,7 +3,36 @@
 Branch: `cypher-gql-full` (pushed to origin). Goal contract: `docs/GQL_GOAL.md`.
 Plan: `docs/GrustCypherFull.md`.
 
-## ⚠️ Unit 10a (write-path cutover) — BLOCKED on a parser accept-set fork
+## Unit 10a (write-path cutover) — DONE via decision B
+
+The parser accept-set fork (below) was resolved by the human as **B: migrate the
+non-standard test statements to standard Cypher and narrow the public accept-set.**
+Implemented (all green, pushed):
+
+- **Accept-set gate** (`planner::gate_writable_statement`): the writable-Cypher
+  entrypoints (`cypher_mutation_plan*`) now route *acceptance of the mutation
+  grammar* through the new standards-conformant parser. Each mutation statement
+  (with the trailing `RETURN` split off) must parse on the new parser, so the
+  non-standard `DELETE (:pattern)` / `DELETE (:a)-[:R]->(:b)` forms are rejected.
+- **Byte-identical plans preserved**: plan *building* still runs through the
+  legacy planner (untouched), guarded by `tests/golden/write_golden.json`. The
+  gate is **parse-only** (no semantic pass) so the legacy cross-statement
+  local-variable bindings and the richer legacy `RETURN` projection are
+  unaffected.
+- **Parser robustness**: `parse_key`/`parse_map_key` now accept reserved keywords
+  as property/map keys (e.g. `{order: 1, limit: 3}`), recovering exact source text
+  via the token span — prevents an unintended accept-set regression.
+- **Tests migrated** to standard Cypher (`DELETE (pattern)` → `MATCH … DELETE`),
+  with rejection of the non-standard forms asserted explicitly. 521 lib (was 517).
+
+Follow-on (not blocking, sequenced for 10b/later): migrate plan *construction*
+itself onto the AST (today it re-parses via the legacy planner after the gate);
+extend the new read/return projection to the full legacy returning surface so the
+gate can eventually cover `RETURN` too.
+
+<details><summary>Original fork write-up (resolved by B)</summary>
+
+### ⚠️ Unit 10a (write-path cutover) — BLOCKED on a parser accept-set fork
 
 Investigated 2026-06-25. The write corpus was scraped from the strict-write
 tests into `crates/grust-cypher/tests/golden/write_corpus.json` (181 distinct
@@ -44,6 +73,8 @@ Per the guardrails ("STOP and surface on a genuine new fork"), 10a is paused at
 this decision. Unit 10b (write widening) is fork-adjacent and also paused. The
 autonomous loop continues on **independent, pre-authorized** units (Unit T
 duration/decimal; Unit 13 transactions) while this awaits the human call.
+
+</details>
 
 ---
 

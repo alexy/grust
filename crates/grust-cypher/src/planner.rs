@@ -2,6 +2,40 @@
 
 use crate::*;
 
+/// Accept-set gate for one writable Cypher **mutation** statement (Unit 10a,
+/// decision B).
+///
+/// The write entrypoints route **acceptance of the mutation grammar** through the
+/// new standards-conformant lexer/parser/semantics pipeline: a mutation statement
+/// the new pipeline rejects (e.g. the non-standard `DELETE (:pattern)` /
+/// `DELETE (:a)-[:R]->(:b)` forms the legacy string planner used to accept) is
+/// rejected here, narrowing the public accept-set to standard GQL/Cypher.
+///
+/// Only the mutation **grammar** is gated (parse-level), and only the trailing
+/// `RETURN` projection is split off before this runs:
+///
+/// - The new parser is the grammar authority, so non-standard mutation syntax
+///   (`DELETE (:pattern)`) is rejected — the B narrowing.
+/// - Semantic analysis is deliberately **not** run here: the legacy write path
+///   resolves cross-statement local-variable bindings (e.g. `DELETE a` where `a`
+///   was bound by an earlier `;`-separated statement) that a per-statement
+///   semantic pass would wrongly reject. Binding/kind checks stay the legacy
+///   planner's job.
+/// - The legacy returning surface (richer than the new read projection today) is
+///   untouched because `RETURN` is split off upstream.
+///
+/// Plan **building** still runs through the legacy planner, so plan shapes stay
+/// byte-identical (guarded by `tests/golden/write_golden.json`); migrating
+/// construction onto the AST is sequenced as follow-on work.
+fn gate_writable_statement(statement: &str) -> Result<()> {
+    let statement = statement.trim();
+    if statement.is_empty() {
+        return Ok(());
+    }
+    crate::parser::parse_query(statement).map_err(|e| e.into_grust(statement))?;
+    Ok(())
+}
+
 pub fn cypher_mutation_plan_with_options(
     cypher: &str,
     options: CypherMutationOptions,
@@ -21,6 +55,7 @@ pub fn cypher_mutation_plan_with_options(
     };
     let mut plan = GraphMutationPlan::default();
     for statement in statements {
+        gate_writable_statement(statement)?;
         for operation in planner.plan_statement(statement)?.operations {
             plan.push(operation);
         }
@@ -84,10 +119,12 @@ pub fn cypher_mutation_plan_with_return_options(
     };
     let mut plan = GraphMutationPlan::default();
     for statement in statements {
+        gate_writable_statement(statement)?;
         for operation in planner.plan_statement(statement)?.operations {
             plan.push(operation);
         }
     }
+    gate_writable_statement(final_mutation)?;
     for operation in planner.plan_statement(final_mutation)?.operations {
         plan.push(operation);
     }

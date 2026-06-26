@@ -175,7 +175,8 @@ fn cypher_edge_detection_ignores_arrow_inside_string_literals() {
         ))]
     );
 
-    let delete = sail_cypher_mutation_plan("DELETE (:Server {id: 'prod->primary'})").unwrap();
+    let delete =
+        sail_cypher_mutation_plan("MATCH (n:Server {id: 'prod->primary'}) DELETE n").unwrap();
     assert_eq!(
         delete.into_mutations(),
         vec![GraphMutation::DeleteNode(NodeId::new("prod->primary"))]
@@ -384,22 +385,21 @@ fn cypher_merge_edge_requires_resolved_endpoint_ids() {
 
 #[test]
 fn cypher_delete_lowers_resolved_node_and_edge_patterns() {
-    let node_delete = sail_cypher_mutation_plan("DELETE (:Person {id: 'person-1'})").unwrap();
+    // Standard `MATCH ... DELETE` lowering for a resolved node id.
+    let node_delete =
+        sail_cypher_mutation_plan("MATCH (n:Person {id: 'person-1'}) DELETE n").unwrap();
     assert_eq!(
         node_delete.into_mutations(),
         vec![GraphMutation::DeleteNode(NodeId::new("person-1"))]
     );
 
-    let edge_delete = sail_cypher_mutation_plan(
-        "DELETE (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'})",
+    // Unit 10a (decision B): DELETE by node/edge *pattern* is non-standard Cypher
+    // and is now rejected by the accept-set gate (the new standards-conformant
+    // parser). Callers use `MATCH ... DELETE <var>` instead; the edge form lowers
+    // to DeleteMatchingEdges (covered by the golden snapshot + edge-delete tests).
+    assert!(sail_cypher_mutation_plan("DELETE (:Person {id: 'person-1'})").is_err());
+    assert!(sail_cypher_mutation_plan(
+        "DELETE (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'})"
     )
-    .unwrap();
-    assert_eq!(
-        edge_delete.into_mutations(),
-        vec![GraphMutation::DeleteEdge {
-            from: NodeId::new("person-1"),
-            label: Label::new("KNOWS"),
-            to: NodeId::new("person-2"),
-        }]
-    );
+    .is_err());
 }

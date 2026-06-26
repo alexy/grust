@@ -408,7 +408,7 @@ fn cypher_multi_statement_batch_preserves_order_and_aggregates_report() {
             CREATE (:Person {id: 'person-1', name: 'Ada; still one literal'});
             MERGE (:Person {id: 'person-2', name: 'Bob'});
             CREATE (:Person {id: 'person-1'})-[:KNOWS {since: 2026}]->(:Person {id: 'person-2'});
-            DELETE (:Person {id: 'person-2'});
+            MATCH (n:Person {id: 'person-2'}) DELETE n;
             ",
     )
     .unwrap();
