@@ -8,7 +8,24 @@ use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use async_trait::async_trait;
 use grust_core::prelude::*;
-pub use grust_cypher::*;
+// Internal access to the full shared Cypher language layer (parser, planner,
+// returning evaluator, errors, and the gql/lexer/parser/ast/semantics modules).
+use grust_cypher::*;
+// Explicit public re-export of the portable Cypher API that Sail executes, so
+// `grust_sail::cypher_*` stays available without re-exporting the entire crate.
+pub use grust_cypher::{
+    CypherConstraintRegistry, CypherCreateMode, CypherDdlApplicationReport, CypherDdlStatement,
+    CypherGeneratedNodeId, CypherMutationOptions, CypherMutationReport, CypherMutationResult,
+    CypherMutationTableResult, CypherNodeIdPolicy, CypherNullAssignment, CypherParameters,
+    CypherRelationshipIdPolicy, CypherResultTable, CypherSchemaApplication, CypherSchemaManager,
+    CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity, NamedGraphConstraint,
+    apply_cypher_ddl_to_schema, apply_cypher_native_constraints, cypher_constraints, cypher_ddl,
+    cypher_mutation_plan, cypher_mutation_plan_with_options,
+    cypher_mutation_plan_with_return_options,
+    execute_cypher_mutation_returning_with_options_on_store, sail_cypher_constraints,
+    sail_cypher_ddl, sail_cypher_mutation_plan, sail_cypher_mutation_plan_with_options,
+    sail_cypher_mutation_plan_with_return_options,
+};
 use tonic::transport::Channel;
 
 #[allow(clippy::all, unused_imports, dead_code)]
@@ -1307,6 +1324,59 @@ impl SailGraphStore {
         Ok(Graph::new(nodes, edges))
     }
 
+    /// Execute a bounded read-only Cypher query, pushing the `MATCH`/`WHERE`
+    /// filter down into Sail/Spark SQL where possible (Unit 15 of
+    /// `docs/GQL_GOAL.md`).
+    ///
+    /// For the pushable subset — a single node pattern with property comparisons
+    /// (see [`grust_cypher::pushdown`]) — the scan and filter are lowered to SQL
+    /// over `grust_nodes`, so only the surviving rows leave Spark; the `RETURN`
+    /// projection then runs through the shared Memory reference, making the result
+    /// identical to [`grust_cypher::read::run_read_query`] by construction. Any
+    /// other shape falls back to loading the graph and running the portable
+    /// reference directly (correct, but unfiltered).
+    pub async fn run_read_query(
+        &self,
+        cypher: &str,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        // Schema type hints let Spark push numeric `ORDER BY`/arithmetic (its
+        // `GET_JSON_OBJECT` returns text, so the sort key must be cast).
+        let hints = SailTypeHints {
+            schema: self.current_schema(),
+        };
+        if let Some(plan) = grust_cypher::pushdown::plan_read(cypher, params, &hints)? {
+            let dialect = grust_cypher::pushdown::SparkDialect;
+            // `UNION`: run each arm and combine the result tables (a recursive
+            // CTE for var-length arms requires recursive-CTE engine support).
+            if let Some((arms, distinct)) = plan.union_arms() {
+                let mut tables = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    let rows = self.run_text_query(&arm.to_sql(&dialect)).await?;
+                    tables.push(arm.project_text_rows(&dialect, rows, params)?);
+                }
+                return grust_cypher::pushdown::combine_union(tables, distinct);
+            }
+            let rows = self.run_text_query(&plan.to_sql(&dialect)).await?;
+            return plan.project_text_rows(&dialect, rows, params);
+        }
+        let graph = self.read_graph().await?;
+        grust_cypher::read::run_read_query(&graph, cypher, params)
+    }
+
+    /// Execute SQL whose result columns are all strings, returning each row as a
+    /// vector of optional text cells (used by relationship-segment pushdown,
+    /// which reconstructs `(a, r, b)` bindings from the projected text columns).
+    async fn run_text_query(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>> {
+        let mut rows = Vec::new();
+        self.run_plan(self.query_request(sql, vec![])?, |data| {
+            rows.extend(parse_text_rows_from_arrow(data)?);
+            Ok(())
+        })
+        .await?;
+        Ok(rows)
+    }
+
     /// Computes out-degrees over the generic persisted Sail edge table.
     pub async fn out_degrees(&self) -> Result<Vec<SailDegreeRow>> {
         self.run_degree_query(sail_out_degrees_sql()).await
@@ -2370,6 +2440,8 @@ fn matching_nodes_sql(
             }
             Value::Null => conditions.push(format!("{json_value} IS NULL")),
             Value::DateTime(_)
+            | Value::Decimal(_)
+            | Value::Duration(_)
             | Value::StringArray(_)
             | Value::IntArray(_)
             | Value::FloatArray(_)
@@ -2445,6 +2517,8 @@ fn append_relationship_prop_conditions(
             }
             Value::Null => conditions.push(format!("{json_value} IS NULL")),
             Value::DateTime(_)
+            | Value::Decimal(_)
+            | Value::Duration(_)
             | Value::StringArray(_)
             | Value::IntArray(_)
             | Value::FloatArray(_)
@@ -2502,6 +2576,8 @@ fn append_node_match_conditions(
             }
             Value::Null => conditions.push(format!("{json_value} IS NULL")),
             Value::DateTime(_)
+            | Value::Decimal(_)
+            | Value::Duration(_)
             | Value::StringArray(_)
             | Value::IntArray(_)
             | Value::FloatArray(_)
@@ -2608,6 +2684,8 @@ fn append_property_equality_condition(
         }
         Value::Null => conditions.push(format!("{json_value} IS NULL")),
         Value::DateTime(_)
+        | Value::Decimal(_)
+        | Value::Duration(_)
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
@@ -3216,6 +3294,96 @@ fn parse_optional_single_string_from_arrow(
         }
     }
     Ok(value)
+}
+
+/// Property type hints for read pushdown, derived from the applied graph schema.
+/// Lets Spark push numeric `ORDER BY` by casting JSON sort keys to their declared
+/// type (only `Int`/`Float`/`String` are mapped; other field types stay unpushed).
+struct SailTypeHints {
+    schema: Option<GraphSchema>,
+}
+
+impl grust_cypher::pushdown::TypeHints for SailTypeHints {
+    fn node_property_kind(
+        &self,
+        label: Option<&str>,
+        key: &str,
+    ) -> Option<grust_cypher::pushdown::ScalarKind> {
+        let label = label?;
+        let node_type = self
+            .schema
+            .as_ref()?
+            .nodes
+            .iter()
+            .find(|n| n.label.as_str() == label)?;
+        let field = node_type.fields.iter().find(|f| f.name == key)?;
+        scalar_kind_of(&field.ty)
+    }
+
+    fn edge_property_kind(
+        &self,
+        edge_type: Option<&str>,
+        key: &str,
+    ) -> Option<grust_cypher::pushdown::ScalarKind> {
+        let edge_type = edge_type?;
+        let edge = self
+            .schema
+            .as_ref()?
+            .edges
+            .iter()
+            .find(|e| e.label.as_str() == edge_type)?;
+        let field = edge.fields.iter().find(|f| f.name == key)?;
+        scalar_kind_of(&field.ty)
+    }
+}
+
+/// Map a schema [`FieldType`] to the pushdown [`ScalarKind`] used for ORDER BY
+/// casts (only the cleanly-orderable scalar types map).
+fn scalar_kind_of(ty: &FieldType) -> Option<grust_cypher::pushdown::ScalarKind> {
+    use grust_cypher::pushdown::ScalarKind;
+    match ty {
+        FieldType::Int => Some(ScalarKind::Int),
+        FieldType::Float => Some(ScalarKind::Float),
+        FieldType::String => Some(ScalarKind::Str),
+        _ => None,
+    }
+}
+
+/// Parse an Arrow IPC chunk whose columns are all UTF-8 strings into rows of
+/// optional text cells, preserving column order. Used by segment pushdown.
+fn parse_text_rows_from_arrow(data: &[u8]) -> Result<Vec<Vec<Option<String>>>> {
+    let reader = StreamReader::try_new(Cursor::new(data), None)
+        .map_err(|e| GrustError::Backend(format!("Arrow IPC read failed: {e}")))?;
+    let mut out = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(|e| GrustError::Backend(format!("Arrow batch error: {e}")))?;
+        let columns: Vec<&StringArray> = (0..batch.num_columns())
+            .map(|i| {
+                batch
+                    .column(i)
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| {
+                        GrustError::Schema(format!("pushdown result column {i} is not a string"))
+                    })
+            })
+            .collect::<Result<_>>()?;
+        for row in 0..batch.num_rows() {
+            out.push(
+                columns
+                    .iter()
+                    .map(|c| {
+                        if c.is_null(row) {
+                            None
+                        } else {
+                            Some(c.value(row).to_string())
+                        }
+                    })
+                    .collect(),
+            );
+        }
+    }
+    Ok(out)
 }
 
 fn parse_nodes_from_arrow(data: &[u8]) -> Result<Vec<Node>> {

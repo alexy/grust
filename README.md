@@ -53,6 +53,7 @@ crates/
   grust-memory/   Deterministic in-memory store for tests and local use
   grust-postgres/ Generic PostgreSQL store over universal graph tables
   grust-postgres-core/ Shared PostgreSQL table and SQL lowering implementation
+  grust-postgres-pgq/ PostgreSQL 19 SQL/PGQ wrapper over the PostgreSQL store
   grust-pggraph/  pgGraph extension wrapper over the PostgreSQL store
   grust-sail/     Sail SparkConnect backend using Spark DataFrames
   grust-sql-core/ Shared SQL generation helpers for SQL table backends
@@ -119,6 +120,7 @@ scripts/integration-test.sh --backend ladybug
 scripts/integration-test.sh --backend lancedb
 scripts/integration-test.sh --backend cocoindex
 scripts/integration-test.sh --backend pggraph
+scripts/integration-test.sh --backend postgres-pgq
 ```
 
 Use `--no-start` to require an already-running service, and `--keep-running` to
@@ -372,6 +374,11 @@ mutation batches through the shared `grust-postgres-core` implementation.
 universal tables with the pgGraph extension, and can build a pgGraph projection
 for graph-index experiments.
 
+`grust-postgres-pgq` targets PostgreSQL 19's native SQL/PGQ support. It keeps
+the same universal PostgreSQL tables as the durable source of truth, creates a
+native `PROPERTY GRAPH` over those tables, and executes bounded traversal with
+`GRAPH_TABLE`.
+
 `grust-turso` uses the Turso Rust SDK directly and stores Grust graphs in
 SQLite-compatible universal node and edge tables with JSON text properties. It
 supports local in-process Turso databases by default and exposes an optional
@@ -380,17 +387,18 @@ schema-derived views, bounded traversal, and mutation batches run through
 ordinary SQL over the local Turso connection; synced callers can explicitly
 push or pull through the store's Turso sync helpers.
 
-The PostgreSQL, pgGraph, and Turso backends share backend-neutral SQL graph
-generation through `grust-sql-core`: universal table DDL, reads, traversal
-joins, mutation framing, schema views, indexes, identifier quoting, and literal
-escaping. The dialect layer stays narrow and performance-sensitive: PostgreSQL
-keeps JSONB operators, `ON CONFLICT`, `CREATE OR REPLACE VIEW`, and lateral
-joins, while Turso keeps JSON text, `json_extract`, `json_patch`, and
-SQLite-compatible view and join forms. `grust-postgres-core` remains the
-PostgreSQL-specific execution and connection layer reused by both
-`grust-postgres` and `grust-pggraph`. Sail is intentionally outside this shared
-SQL core because its lowering targets Spark Connect, Arrow IPC staging, and
-distributed Spark SQL rather than direct row-store SQL.
+The PostgreSQL, PostgreSQL PGQ, pgGraph, and Turso backends share
+backend-neutral SQL graph generation through `grust-sql-core`: universal table
+DDL, reads, traversal joins, mutation framing, schema views, indexes,
+identifier quoting, and literal escaping. The dialect layer stays narrow and
+performance-sensitive: PostgreSQL keeps JSONB operators, `ON CONFLICT`,
+`CREATE OR REPLACE VIEW`, and lateral joins, while Turso keeps JSON text,
+`json_extract`, `json_patch`, and SQLite-compatible view and join forms.
+`grust-postgres-core` remains the PostgreSQL-specific execution and connection
+layer reused by `grust-postgres`, `grust-postgres-pgq`, and `grust-pggraph`.
+Sail is intentionally outside this shared SQL core because its lowering targets
+Spark Connect, Arrow IPC staging, and distributed Spark SQL rather than direct
+row-store SQL.
 
 `grust-sail` stores graphs as Spark DataFrames through Sail's SparkConnect
 server, lowers traversal IR to Spark SQL joins, and can mirror schema-labeled

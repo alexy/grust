@@ -994,6 +994,89 @@ async fn test_put_graph_and_traverse() {
 
 #[tokio::test]
 #[ignore = "requires a live Sail server on 127.0.0.1:50051"]
+async fn test_read_pushdown_matches_reference() {
+    // Unit 15: `SailGraphStore::run_read_query` pushes the MATCH/WHERE filter
+    // into Spark SQL; the Memory reference is the row-equality oracle.
+    let store = store().await;
+
+    let person = |name: &str, age: i64, city: Option<&str>| -> Props {
+        let mut p = Props::new();
+        p.insert("name".into(), Value::from(name));
+        p.insert("age".into(), Value::Int(age));
+        p.insert("active".into(), Value::Bool(age < 50));
+        if let Some(city) = city {
+            p.insert("city".into(), Value::from(city));
+        }
+        p
+    };
+    let mut city = Props::new();
+    city.insert("name".into(), Value::from("London"));
+
+    let graph = Graph::new(
+        vec![
+            Node::new("Person", "p1", person("Ada", 36, None)),
+            Node::new("Person", "p2", person("Alan", 41, Some("London"))),
+            Node::new("Person", "p3", person("Grace", 85, Some("London"))),
+            Node::new("City", "c1", city),
+        ],
+        vec![
+            Edge::new("KNOWS", "p1", "p2", Props::new()),
+            Edge::new("KNOWS", "p2", "p3", Props::new()),
+        ],
+    );
+    store.put_graph(&graph).await.expect("put_graph");
+
+    let params = CypherParameters::new();
+    let queries = [
+        // Single-node filter pushdown.
+        "MATCH (n:Person) RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) WHERE n.age >= 40 RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person {name:'Ada'}) RETURN n.age",
+        "MATCH (n:Person) WHERE n.city IS NULL RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) WHERE n.age > 30 AND n.city = 'London' RETURN n.name ORDER BY n.name",
+        "MATCH (n) RETURN n.label AS label, count(*) AS c ORDER BY label",
+        "MATCH (n:Person) WHERE n.age IN [36, 85] RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) WHERE n.active = true RETURN n.name ORDER BY n.name",
+        // Relationship-segment join pushdown.
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b ORDER BY a, b",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age >= 40 RETURN b.name ORDER BY b.name",
+        "MATCH (a:Person {name:'Ada'})-[r:KNOWS]->(b) RETURN b.name ORDER BY b.name",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY b.name DESC",
+        // Multi-segment chained path pushdown.
+        "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.name, c.name ORDER BY c.name",
+        // UNION of pushable arms.
+        "MATCH (n:Person) RETURN n.name AS x UNION MATCH (c:City) RETURN c.name AS x",
+        // OPTIONAL MATCH (LEFT JOIN with null-padding).
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY a.name, b.name",
+        // Multi-pattern MATCH (shared-variable join).
+        "MATCH (a:Person)-[:KNOWS]->(b), (a)-[:KNOWS]->(c) RETURN a.name, b.name, c.name ORDER BY a.name, b.name, c.name",
+        // WITH horizon (leading scan pushed, horizon in Rust).
+        "MATCH (n:Person) WHERE n.age >= 40 WITH n.age AS age RETURN avg(age) AS mean",
+        // Not pushable (OPTIONAL MATCH): exercises the read_graph fallback branch.
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name ORDER BY a.name",
+    ];
+    for cypher in queries {
+        let expected = grust_cypher::read::run_read_query(&graph, cypher, &params)
+            .unwrap_or_else(|e| panic!("reference failed for `{cypher}`: {e}"));
+        let actual = store
+            .run_read_query(cypher, &params)
+            .await
+            .unwrap_or_else(|e| panic!("pushdown failed for `{cypher}`: {e}"));
+        // Compare as a row multiset (join order is backend-defined without a
+        // total ORDER BY; these queries order by the projected columns anyway).
+        let sorted = |t: &CypherResultTable| {
+            let mut r: Vec<String> = t.rows.iter().map(|row| format!("{row:?}")).collect();
+            r.sort();
+            r
+        };
+        assert_eq!(actual.columns, expected.columns, "columns for `{cypher}`");
+        assert_eq!(sorted(&actual), sorted(&expected), "rows for `{cypher}`");
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server on 127.0.0.1:50051"]
 async fn test_execute_cypher_mutations() {
     let store = store().await;
 

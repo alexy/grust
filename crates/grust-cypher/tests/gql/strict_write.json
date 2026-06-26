@@ -1,0 +1,133 @@
+{
+  "profile": "strict-write",
+  "cases": [
+    {
+      "id": "create-node-explicit-id",
+      "feature": "create-node-explicit-id",
+      "requirement": "required",
+      "statement": "CREATE (:Person {id: 'p1', name: 'Ada'})",
+      "expectation": "supported",
+      "notes": "Node write with explicit id literal."
+    },
+    {
+      "id": "merge-node-explicit-id",
+      "feature": "merge-node-explicit-id",
+      "requirement": "required",
+      "statement": "MERGE (:Person {id: 'p1'})",
+      "expectation": "supported"
+    },
+    {
+      "id": "create-edge-resolved-endpoints",
+      "feature": "create-edge-resolved-endpoints",
+      "requirement": "required",
+      "statement": "CREATE (:Person {id: 'p1'})-[:KNOWS]->(:Person {id: 'p2'})",
+      "expectation": "supported"
+    },
+    {
+      "id": "delete-resolved-node",
+      "feature": "delete-resolved-node",
+      "requirement": "required",
+      "statement": "MATCH (n:Person {id: 'p1'}) DELETE n",
+      "expectation": "supported"
+    },
+    {
+      "id": "match-delete-edge-resolved-endpoints",
+      "feature": "match-delete-edge-resolved-endpoints",
+      "requirement": "required",
+      "statement": "MATCH (:Person {id: 'p1'})-[e:KNOWS]->(:Person {id: 'p2'}) DELETE e",
+      "expectation": "supported"
+    },
+    {
+      "id": "match-create-edge-bound-endpoints",
+      "feature": "match-create-edge-bound-endpoints",
+      "requirement": "required",
+      "statement": "MATCH (a:Person {id: 'p1'}), (b:Person {id: 'p2'}) CREATE (a)-[:KNOWS]->(b)",
+      "expectation": "supported"
+    },
+    {
+      "id": "match-create-edge-row-producing",
+      "feature": "match-create-edge-row-producing",
+      "requirement": "required",
+      "statement": "MATCH (a:Person), (b:City) CREATE (a)-[:LIVES_IN]->(b)",
+      "expectation": "supported",
+      "notes": "One edge per matched endpoint-node pair; rejects trailing node creation."
+    },
+    {
+      "id": "set-node-property",
+      "feature": "set-node-property",
+      "requirement": "required",
+      "statement": "MATCH (n:Person {id: 'p1'}) SET n.active = true",
+      "expectation": "supported"
+    },
+    {
+      "id": "set-node-property-map",
+      "feature": "set-node-property-map",
+      "requirement": "required",
+      "statement": "MATCH (n:Person {id: 'p1'}) SET n += {active: true, score: 9}",
+      "expectation": "supported"
+    },
+    {
+      "id": "remove-node-property",
+      "feature": "remove-node-property",
+      "requirement": "required",
+      "statement": "MATCH (n:Person {id: 'p1'}) REMOVE n.active",
+      "expectation": "supported"
+    },
+    {
+      "id": "ordered-multi-statement-batch",
+      "feature": "ordered-multi-statement-batch",
+      "requirement": "required",
+      "statement": "CREATE (:Person {id: 'p1'}); CREATE (:Person {id: 'p2'})",
+      "expectation": "supported"
+    },
+    {
+      "id": "restricted-path-variable-return",
+      "feature": "restricted-path-variable-return",
+      "requirement": "optional",
+      "statement": "MATCH p = (a:Person {id: 'p1'})-[e:KNOWS]->(b:Person {id: 'p2'}) SET e.seen = true RETURN p",
+      "expectation": "supported"
+    },
+    {
+      "id": "create-constraint",
+      "feature": "create-constraint",
+      "requirement": "optional",
+      "statement": "CREATE CONSTRAINT FOR (n:Person) REQUIRE n.id IS UNIQUE",
+      "expectation": "supported"
+    },
+    {
+      "id": "reject-create-node-without-explicit-identity",
+      "feature": "reject-create-node-without-explicit-identity",
+      "requirement": "required",
+      "statement": "CREATE (:Person {name: 'no id'})",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature",
+      "notes": "Explicit node id required unless CypherNodeIdPolicy::GenerateForCreate is selected."
+    },
+    {
+      "id": "reject-merge-without-explicit-identity",
+      "feature": "reject-merge-without-explicit-identity",
+      "requirement": "required",
+      "statement": "MERGE (:Person {name: 'no id'})",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature"
+    },
+    {
+      "id": "reject-unresolved-edge-endpoint-write",
+      "feature": "reject-unresolved-edge-endpoint-write",
+      "requirement": "required",
+      "statement": "MATCH (a:Person {id: 'p1'}) CREATE (a)-[:KNOWS]->(b)",
+      "expectation": "rejected",
+      "errorKind": "name",
+      "notes": "Edge endpoint b does not resolve to a node identity before execution."
+    },
+    {
+      "id": "reject-non-literal-assignment-value",
+      "feature": "reject-non-literal-assignment-value",
+      "requirement": "required",
+      "statement": "MATCH (n:Person {id: 'p1'}) SET n.score = n.score + 1",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature",
+      "notes": "Strict surface accepts literal assignment values only; general expressions land in Unit 7."
+    }
+  ]
+}

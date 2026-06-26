@@ -919,6 +919,9 @@ fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> R
         GraphMutation::UpdateMatchingNodeProperty { .. } => Err(GrustError::Unsupported(
             "SurrealDB matched node expression updates are not implemented yet".to_string(),
         )),
+        GraphMutation::SetMatchingNodeFromNode { .. } => Err(GrustError::Unsupported(
+            "SurrealDB cross-variable correlated updates are not implemented yet".to_string(),
+        )),
         GraphMutation::PatchEdge { .. } => Err(GrustError::Unsupported(
             "SurrealDB edge patches are not implemented yet".to_string(),
         )),
@@ -1205,6 +1208,8 @@ fn surreal_value(value: &Value) -> Result<String> {
         Value::Float(value) => Ok(value.to_string()),
         Value::String(value) => Ok(surreal_string(value)),
         Value::DateTime(value) => Ok(surreal_string(value.as_str())),
+        Value::Decimal(value) => Ok(surreal_string(&value.to_canonical_string())),
+        Value::Duration(value) => Ok(surreal_string(&value.to_iso_string())),
         Value::IntArray(values) => {
             serde_json::to_string(values).map_err(|err| GrustError::Serialization(err.to_string()))
         }

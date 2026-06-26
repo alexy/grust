@@ -848,6 +848,103 @@ impl CypherMutationExecutor for MemoryGraphStore {
                 GraphMutationPlanOp::UpsertEdge { edge, .. } => {
                     classify_edge_upsert(self.put_edge(edge).await?, &mut report);
                 }
+                GraphMutationPlanOp::SetMatchingNodeFromNode {
+                    target_label,
+                    target_props,
+                    target_predicates,
+                    target_key,
+                    source_label,
+                    source_props,
+                    source_predicates,
+                    source_key,
+                    op,
+                    operand,
+                    correlation,
+                    ..
+                } => {
+                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut target_ids =
+                        Self::matching_node_ids(&inner, target_label.as_ref(), target_props, target_predicates);
+                    let mut source_ids =
+                        Self::matching_node_ids(&inner, source_label.as_ref(), source_props, source_predicates);
+                    target_ids.sort();
+                    source_ids.sort();
+                    let target_set: std::collections::BTreeSet<NodeId> =
+                        target_ids.iter().cloned().collect();
+                    let source_set: std::collections::BTreeSet<NodeId> =
+                        source_ids.iter().cloned().collect();
+                    // Build (target, source) pairs deterministically per correlation.
+                    let pairs: Vec<(NodeId, NodeId)> = match correlation {
+                        GraphWriteCorrelation::Cartesian => {
+                            let mut pairs = Vec::new();
+                            for t in &target_ids {
+                                for s in &source_ids {
+                                    pairs.push((t.clone(), s.clone()));
+                                }
+                            }
+                            pairs
+                        }
+                        GraphWriteCorrelation::OutgoingRelationship { label } => {
+                            let mut pairs: Vec<(NodeId, NodeId)> = inner
+                                .edges
+                                .values()
+                                .filter(|e| {
+                                    &e.label == label
+                                        && target_set.contains(&e.from)
+                                        && source_set.contains(&e.to)
+                                })
+                                .map(|e| (e.from.clone(), e.to.clone()))
+                                .collect();
+                            pairs.sort();
+                            pairs
+                        }
+                        GraphWriteCorrelation::IncomingRelationship { label } => {
+                            let mut pairs: Vec<(NodeId, NodeId)> = inner
+                                .edges
+                                .values()
+                                .filter(|e| {
+                                    &e.label == label
+                                        && source_set.contains(&e.from)
+                                        && target_set.contains(&e.to)
+                                })
+                                .map(|e| (e.to.clone(), e.from.clone()))
+                                .collect();
+                            pairs.sort();
+                            pairs
+                        }
+                    };
+                    // Apply target[target_key] = source[source_key] [op operand];
+                    // for cartesian fan-out the last source (by id order) wins.
+                    let mut changed: std::collections::BTreeSet<NodeId> = Default::default();
+                    for (t, s) in pairs {
+                        let value = {
+                            let Some(source_node) = inner.nodes.get(&s) else {
+                                continue;
+                            };
+                            let current = source_node.props.get(source_key).ok_or_else(|| {
+                                GrustError::CypherExecution(format!(
+                                    "cross-variable update source property '{source_key}' is missing"
+                                ))
+                            })?;
+                            match op {
+                                Some(op) => evaluate_numeric_update(current, *op, operand)?,
+                                None => current.clone(),
+                            }
+                        };
+                        if let Some(node) = inner.nodes.get(&t) {
+                            let mut node = node.clone();
+                            node.props.insert(target_key.clone(), value);
+                            if let Some(schema) = &inner.schema {
+                                schema.validate_node(&node)?;
+                            }
+                            inner.nodes.insert(node.id.clone(), node);
+                            changed.insert(t);
+                        }
+                    }
+                    report.matched_rows += changed.len();
+                    report.node_patches += changed.len();
+                    report.changed_nodes += changed.len();
+                }
                 _ => {
                     let mutation = GraphMutation::from(operation.clone());
                     self.apply_mutations(std::slice::from_ref(&mutation))

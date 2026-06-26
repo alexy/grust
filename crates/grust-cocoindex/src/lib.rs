@@ -219,6 +219,8 @@ fn value_to_json(value: &Value) -> Result<JsonValue> {
             })?,
         Value::String(value) => JsonValue::String(value.clone()),
         Value::DateTime(value) => JsonValue::String(value.as_str().to_string()),
+        Value::Decimal(value) => JsonValue::String(value.to_canonical_string()),
+        Value::Duration(value) => JsonValue::String(value.to_iso_string()),
         Value::IntArray(values) => JsonValue::Array(
             values
                 .iter()

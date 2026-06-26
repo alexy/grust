@@ -379,6 +379,8 @@ fn helix_property_json(value: &Value) -> Result<serde_json::Value> {
             })?;
             Ok(json!({"DateTime": datetime.millis()}))
         }
+        Value::Decimal(value) => Ok(json!({"String": value.to_canonical_string()})),
+        Value::Duration(value) => Ok(json!({"String": value.to_iso_string()})),
         Value::StringArray(values) => Ok(json!({"StringArray": values})),
         Value::IntArray(values) => Ok(json!({"I64Array": values})),
         Value::FloatArray(values) => Ok(json!({"F64Array": values})),
@@ -516,6 +518,8 @@ fn helix_property_input(value: &Value) -> Result<PropertyInput> {
             })?;
             PropertyValue::DateTime(datetime.millis())
         }
+        Value::Decimal(value) => PropertyValue::String(value.to_canonical_string()),
+        Value::Duration(value) => PropertyValue::String(value.to_iso_string()),
         Value::StringArray(values) => PropertyValue::StringArray(values.clone()),
         Value::IntArray(values) => PropertyValue::I64Array(values.clone()),
         Value::FloatArray(values) => PropertyValue::F64Array(values.clone()),

@@ -6,6 +6,97 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **Profile statement (Unit 16):** added `docs/GQL_PROFILE_STATEMENT.md` — the precise, backed statement of the realized GQL/Cypher profile (58 of 74 catalogued features `Supported`) with every not-yet-supported feature explicitly enumerated and given a rationale, so the candidate `Full39075` claim is never silently unbacked. A new `full_profile_claim_is_backed` test pins the scoped-out set (8 future + 3 planned + 5 intentional rejections) to the manifest, so flipping any feature status forces the doc to be updated in lockstep.
+
+- **Write widening (Unit 10b, W1/W2/W3):** a `MATCH … CREATE/MERGE` clause may now carry **multiple comma-separated relationship patterns** in one statement (`… CREATE (a)-[:R]->(b), (b)-[:S]->(c)`), each planned in order (W1); **incoming `<-[:T]-` edge writes** are accepted, normalized to the arrow's source→destination (W2); and **cross-variable correlated `SET`** (`MATCH (a)-[:R]->(b) SET a.x = b.y + 1`, and the cartesian `MATCH (a),(b) …` form) is supported via a new `GraphMutationPlanOp::SetMatchingNodeFromNode` executed by the Memory reference backend (other backends reject explicitly) (W3). Single-pattern / outgoing / single-target writes stay byte-identical (golden-guarded). Generated-id-by-default (W4) was intentionally **not** changed — generated ids remain opt-in via `CypherNodeIdPolicy`. See `docs/GQL_U10b_WRITE_WIDENING_AUDIT.md`.
+
+- **Write-path cutover (Unit 10a, decision B):** the writable-Cypher entrypoints now route *acceptance of the mutation grammar* through the new standards-conformant parser as a gate, narrowing the public accept-set to standard GQL/Cypher. The non-standard **DELETE-by-pattern** forms the legacy string planner accepted (`DELETE (:Person {id})`, `DELETE (:a)-[:R]->(:b)`) are now rejected — use `MATCH … DELETE <var>` instead. Plan *building* still runs through the legacy planner, so plan shapes stay byte-identical (guarded by `tests/golden/write_golden.json`); only the `RETURN` projection and cross-statement local-variable bindings are intentionally left to the legacy path (the gate is parse-only over each mutation statement, RETURN split off). The new parser also now accepts reserved keywords as property/map keys (e.g. `{order: 1, limit: 3}`), preventing an unintended accept-set regression. Strict-write tests using the non-standard forms were migrated to standard Cypher.
+
+- Added the **transaction-control language surface + capability reporting** (Unit 13). `grust_cypher::transaction` recognizes standalone `START TRANSACTION [READ ONLY|READ WRITE]` / `BEGIN` / `COMMIT` / `ROLLBACK` commands (`TransactionCommand::parse`, returning `Ok(None)` for non-transaction input so query parsing still applies — the keywords are *not* reserved in the lexer, so `start`/`commit`/… remain usable as identifiers). Per-backend atomicity is reported honestly via `GqlBackend::transactional()` / the new `GqlBackendDescriptor::transactional` flag (Turso/Postgres/Postgres-PGQ report `Transactional`; Memory/Sail do not) and `transactional_backends()`. `TransactionControl` is now `Supported`; atomic *execution* (wrapping a batch through the backend store) is delegated and wired after the write-path cutover. `SessionControl` is `Planned`.
+
+- Added first-class **decimal** and **duration** value types (Unit T). `grust_core` gains dependency-free `Decimal` (fixed-point `mantissa(i128) × 10^−scale`, mirroring SQL DECIMAL(38,s); lossless within 38 digits, value-normalized) and `Duration` (ISO 8601 month/day/second/nanos model), each with parse/canonical-display, serde (as canonical string), ordering, and checked arithmetic. `Value` gains `Decimal`/`Duration` variants with `Value::decimal`/`Value::duration` constructors and `as_decimal`/`as_duration`; every backend's value serialization handles them (canonical/ISO strings). The Cypher read executor adds `decimal(...)`/`duration(...)` constructor functions, lossless `+`/`-`/`*` decimal arithmetic (ints coerce exactly; floats route to the f64 path), duration `+`/`-`, and exact decimal/duration comparison & ordering in `WHERE`/`ORDER BY`. `TemporalValues`/`DurationValues`/`DecimalValues` are now `Supported`.
+
+- Added read-only **catalog procedures** via `CALL [YIELD]` (Unit 14): `db.labels()`, `db.relationshipTypes()`, and `db.propertyKeys()` parse in the new pipeline and execute in the Memory read reference over a `Graph` snapshot, returning deterministically sorted, distinct values. Supports standalone `CALL db.labels()` (the YIELD shape becomes the result table) and `CALL … YIELD col [AS alias] [WHERE …]` feeding downstream `WHERE`/`RETURN`/aggregation. `ProcedureCall` is now `Supported` in the feature manifest; procedure *arguments* remain feature-tagged unsupported.
+
+- Expanded the read-path scalar function registry (Unit 14) with unary math functions `sqrt`, `exp`, `ln`/`log`, `log10`, `sin`, `cos`, `tan` (numeric → Float, null-propagating), usable in `WHERE` and `RETURN`.
+
+- Added a strict-write **golden-snapshot** regression harness (`grust-cypher/tests/write_golden.rs` + `tests/golden/write_golden.json`, Unit 10a): pins the current planner output (plan or rejection) for a 20-statement write corpus so any future write-path change is caught byte-for-byte.
+
+- Added graph-type validation (`grust_cypher::graph_type`, Unit 11): the open-vs-closed graph-type distinction (`GraphTypeMode`) and write-time type-violation checks `validate_node`/`validate_edge`/`validate_graph` over a `GraphSchema` — closed graph types reject undeclared labels/properties; both modes type-check declared properties and enforce required fields/constraints. Backend-neutral and additive (a `ValidateBeforeWrite` hook; changes no backend).
+
+- Temporal values (`Value::DateTime`) now order chronologically (lexicographic over the RFC 3339 form) in both the read executor's comparison/`ORDER BY` and the RETURN projection ordering; previously any two datetimes compared equal. (Unit T, temporal.)
+
+- Added a per-backend GQL/Cypher conformance model (`grust_cypher::gql`): `GqlBackend` + `GqlBackendDescriptor` + `GqlBackendRole`, with `backend_manifest()` and `cypher_conformance_backends()`. Honest capability flags (verified against the code): the executing Cypher-conformance set is Memory/Sail/Turso; only Sail has read pushdown; Postgres/pgGraph-PGQ are SQL/PGQ stores with no portable Cypher executor yet; helix/ladybug are internal (`publish=false`, out of facade); cocoindex is a sync target.
+
+- Added backend-neutral read-query **pushdown** (`grust_cypher::pushdown`): a
+  bounded `MATCH … RETURN` query's `MATCH`/`WHERE` filter is lowered into SQL via
+  a `SqlDialect` (Spark and SQLite provided), while the `RETURN` projection runs
+  through the shared Memory reference so pushdown results are identical to
+  `grust_cypher::read::run_read_query` by construction. `SailGraphStore` gains a
+  public `run_read_query` that pushes the filter into Spark SQL for the pushable
+  subset (single node pattern with property comparisons) and falls back to the
+  portable reference otherwise (additive public API). An embedded-SQLite
+  differential oracle (`grust-turso`) verifies reference-vs-pushdown row equality
+  without a server. The pushable subset now also covers a single **directed
+  relationship segment** (`(a)-[:T]->(b)` / `<-[:T]-`, multiple rel types, inline
+  endpoint/edge properties, and `WHERE` over `a`/`r`/`b`), lowered to a
+  `grust_edges`/`grust_nodes` join; the backend returns the matched columns as
+  text and `grust_cypher` reconstructs the bindings before projecting. A unified
+  `plan_read` returns a `ReadPushdown` (single-query leaf or a `UNION`/`UNION ALL`
+  of leaves, combined by `combine_union`). **`OPTIONAL MATCH`** (a mandatory node
+  + one optional directed segment) lowers to a `LEFT JOIN` against a subquery for
+  the optional segment, with null-padding (`r`/`b` → `null`) matching the
+  reference. **Multi-pattern `MATCH`** (`(a)-[]->(b), (a)-[]->(c)` and bare cross
+  products) lowers to a comma-join with shared variables reusing an alias. A
+  **`WITH` horizon** (`MATCH … WITH … RETURN`) pushes the leading node scan/filter
+  and runs the horizon (incl. aggregation) through the shared reference pipeline.
+  This now
+  covers **multi-segment paths** (`(a)-[]->(b)-[]->(c)`, chained joins) and
+  **undirected** segments (`(a)-[]-(b)`, matched in either orientation), in any
+  per-segment direction. **Variable-length** segments (`(a)-[:T*m..n]->(b)`, with
+  an anonymous relationship) lower to a recursive CTE enumerating simple paths
+  (no repeated nodes, like the reference); this is row-equality-verified against
+  real SQLite and depends on recursive-CTE support in the target engine.
+  `WHERE … IN [literals]` (and `NOT … IN`) is also pushed, on both the node and
+  segment paths, for non-empty homogeneous int/float/string lists. `STARTS WITH`
+  / `ENDS WITH` / `CONTAINS` with a non-empty string needle are pushed too
+  (Spark `STARTSWITH`/`ENDSWITH`/`CONTAINS`, SQLite `instr`/`substr`), matching
+  the reference for string-typed properties (a non-string value errors in the
+  reference but filters under pushdown). Boolean equality (`prop = true|false`,
+  `<>`) is pushed too (SQLite compares the `json_extract` integer `1`/`0`, Spark
+  the `GET_JSON_OBJECT` text `'true'`/`'false'`). Arithmetic comparisons over
+  typed numeric properties (`n.age + 1 > 40`) are pushed on the node and segment
+  paths for the `+`/`-`/`*` subset (each property cast to its hinted type);
+  `/` renders as floating-point division (reference `/` is f64); `%`/`^` and unknown-typed properties fall back (dialect-divergent). `ORDER BY` /
+  `SKIP` / `LIMIT` are pushed into SQL on the single-node path for dialects whose
+  JSON extraction is natively typed (SQLite/libSQL `json_extract`, not Spark
+  `GET_JSON_OBJECT`), gated on no aggregate/`DISTINCT` and scan-var sort keys,
+  with `NULLS LAST`/`FIRST` matching the reference; otherwise ordering stays in
+  the reference projection. A `TypeHints` trait (built from the graph schema by
+  the backend; `SailGraphStore` derives it from the applied `GraphSchema`) lets
+  an untyped-JSON dialect like Spark push numeric `ORDER BY` too, by casting each
+  sort key to its declared type. `ORDER BY`/`SKIP`/`LIMIT` pushdown also applies
+  to the relationship-segment path (sort keys over `a`/`r`/`b`, including
+  edge-property keys when the relationship has a single type the schema describes).
+- Refactored `grust-cypher` from a single ~16k-line `lib.rs` and ~17k-line
+  `tests.rs` into cohesive modules (`ddl`, `parse`, `primitives`, `planner`,
+  `eval_rows`, `restricted_values`, `projection`, `where_clause`, `returning`,
+  plus the new `gql`, `lexer`, `ast`, `parser`, `semantics`) and a per-area
+  `tests/` directory. The public API is unchanged; crate internals are now
+  `pub(crate)`.
+- Tightened the `grust-sail` and `grust-graph` Cypher re-export surface
+  (public-API change). `grust-sail` no longer re-exports all of `grust-cypher`
+  via a glob — it now explicitly re-exports the portable Cypher API it executes.
+  The `grust-graph` `sail` feature now enables `cypher`, and the facade
+  re-exports the Cypher language surface once (from the `cypher` block) while the
+  `sail` block re-exports only Sail-native items; this also fixes building the
+  facade with `cypher` and `sail` enabled together. Removed dead
+  `helix`/`ladybug` facade re-export blocks left over from those backends being
+  dropped from the facade.
+- Added `grust-postgres-pgq`, a PostgreSQL 19 SQL/PGQ backend that reuses the
+  shared PostgreSQL universal-table store, creates a native `PROPERTY GRAPH`,
+  executes bounded traversal through `GRAPH_TABLE`, and is exposed through the
+  `grust-graph` facade feature `postgres-pgq`.
 - Added Turso-backed matched-node patch execution for the Grust Cypher mutation
   executor. `TursoGraphStore` can now run the reusable Cypher
   `MATCH ... SET ... RETURN ...` path for bounded node patches while keeping
