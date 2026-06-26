@@ -25,6 +25,10 @@ mod projection;
 pub use projection::*;
 mod primitives;
 pub use primitives::*;
+pub mod graph_type;
+pub use graph_type::{
+    validate_edge, validate_graph, validate_node, value_matches_field_type, GraphTypeMode,
+};
 pub mod pushdown;
 pub mod read;
 pub mod semantics;

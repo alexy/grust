@@ -6,6 +6,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added graph-type validation (`grust_cypher::graph_type`, Unit 11): the open-vs-closed graph-type distinction (`GraphTypeMode`) and write-time type-violation checks `validate_node`/`validate_edge`/`validate_graph` over a `GraphSchema` — closed graph types reject undeclared labels/properties; both modes type-check declared properties and enforce required fields/constraints. Backend-neutral and additive (a `ValidateBeforeWrite` hook; changes no backend).
+
 - Temporal values (`Value::DateTime`) now order chronologically (lexicographic over the RFC 3339 form) in both the read executor's comparison/`ORDER BY` and the RETURN projection ordering; previously any two datetimes compared equal. (Unit T, temporal.)
 
 - Added a per-backend GQL/Cypher conformance model (`grust_cypher::gql`): `GqlBackend` + `GqlBackendDescriptor` + `GqlBackendRole`, with `backend_manifest()` and `cypher_conformance_backends()`. Honest capability flags (verified against the code): the executing Cypher-conformance set is Memory/Sail/Turso; only Sail has read pushdown; Postgres/pgGraph-PGQ are SQL/PGQ stores with no portable Cypher executor yet; helix/ladybug are internal (`publish=false`, out of facade); cocoindex is a sync target.
