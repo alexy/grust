@@ -211,6 +211,16 @@ fn analyze_clause(clause: &Clause, scope: &mut Scope, report: &mut SemanticRepor
             }
             *scope = new_scope;
         }
+        Clause::Call(c) => {
+            report.note(GqlFeature::ProcedureCall, c.span);
+            // YIELD columns (aliased or not) become value-kind bindings.
+            for (col, alias) in &c.yields {
+                bind_var(scope, alias.as_deref().unwrap_or(col), ElementKind::Value)?;
+            }
+            if let Some(where_clause) = &c.where_clause {
+                check_expr_bound(where_clause, scope)?;
+            }
+        }
         Clause::Return(r) => {
             // RETURN does not need aliases for non-variable expressions.
             let _ = project_scope_for_return(&r.projection, scope, report)?;

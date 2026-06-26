@@ -61,7 +61,20 @@ pub enum Clause {
     Remove(RemoveClause),
     With(WithClause),
     Unwind(UnwindClause),
+    Call(CallClause),
     Return(ReturnClause),
+}
+
+/// `CALL <name>() [YIELD col [AS alias], …]` — a read-only catalog procedure.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CallClause {
+    /// Dotted procedure name, e.g. `db.labels`.
+    pub name: String,
+    /// `YIELD` columns with optional aliases; empty means no explicit `YIELD`.
+    pub yields: Vec<(String, Option<String>)>,
+    /// Optional `WHERE` filter following `YIELD`.
+    pub where_clause: Option<Expr>,
+    pub span: Span,
 }
 
 impl Clause {
@@ -75,13 +88,17 @@ impl Clause {
             Clause::Remove(c) => c.span,
             Clause::With(c) => c.span,
             Clause::Unwind(c) => c.span,
+            Clause::Call(c) => c.span,
             Clause::Return(c) => c.span,
         }
     }
 
-    /// True for read clauses (`MATCH`, `UNWIND`); false for updating clauses.
+    /// True for read clauses (`MATCH`, `UNWIND`, `CALL`); false for updating clauses.
     pub fn is_reading(&self) -> bool {
-        matches!(self, Clause::Match(_) | Clause::Unwind(_))
+        matches!(
+            self,
+            Clause::Match(_) | Clause::Unwind(_) | Clause::Call(_)
+        )
     }
 
     /// True for the updating clauses (`CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`).

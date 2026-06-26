@@ -190,7 +190,7 @@ This blocks Unit 10b and Unit 13 (which depend on it) and Unit 16's completeness
 
 ---
 
-## Unit 14 — functions/procedures/escapes (functions done; procedures deferred)
+## Unit 14 — functions/procedures/escapes (done)
 
 **Functions (done):** read-path scalar registry expanded with sqrt/exp/ln/log/
 log10/sin/cos/tan (numeric→Float, null-propagating), via `unary_float_fn`;
@@ -199,11 +199,16 @@ usable in WHERE/RETURN; conformance-tested.
 **Escapes (done earlier):** backtick-quoted identifiers are handled by the M1
 lexer.
 
-**Procedures/CALL (deferred — needs design):** `CALL`/`YIELD` is a larger
-feature requiring a decision on the procedure set (e.g. db.labels,
-db.relationshipTypes) and execution/YIELD model. Not built unsupervised. Binary
-string functions (substring/replace/split/left/right) are an easy additive
-follow-up when the loop resumes.
+**Procedures/CALL (done):** read-only catalog procedures `db.labels()`,
+`db.relationshipTypes()`, `db.propertyKeys()` parse via `parse_call` (new
+`ast::CallClause`, `Clause::Call`) and execute in the read reference
+(`read::call_procedure`) over a `Graph` snapshot — distinct, deterministically
+sorted values. Two forms: standalone `CALL db.labels()` (the YIELD shape is the
+result table) and `CALL … YIELD col [AS alias] [WHERE …]` feeding downstream
+`WHERE`/`RETURN`/aggregation. `ProcedureCall` feature is now `Supported`;
+procedure *arguments* and non-catalog procedures stay feature-tagged
+unsupported. Binary string functions (substring/replace/split/left/right) remain
+an easy additive follow-up.
 
 ---
 

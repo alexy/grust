@@ -279,14 +279,8 @@ impl Parser {
                     clauses.push(Clause::Return(self.parse_return()?));
                     break; // RETURN ends a single query
                 }
-                // Recognized but deliberately out of scope: fail with a
-                // feature-tagged error rather than a generic parse failure.
                 Token::Keyword(Keyword::Call) => {
-                    return Err(ParseError::unsupported(
-                        self.span_here(),
-                        GqlFeature::ProcedureCall,
-                        "CALL procedures are not supported yet (Unit 14)",
-                    ));
+                    clauses.push(Clause::Call(self.parse_call()?))
                 }
                 _ => break,
             }
@@ -517,6 +511,55 @@ impl Parser {
         Ok(UnwindClause {
             expr,
             alias,
+            span: start.to(self.prev_span()),
+        })
+    }
+
+    /// `CALL <dotted.name>() [YIELD col [AS alias], …]`
+    ///
+    /// Only nullary read-only catalog procedures are accepted (Unit 14); a
+    /// non-empty argument list is feature-tagged as unsupported.
+    fn parse_call(&mut self) -> PResult<CallClause> {
+        let start = self.span_here();
+        self.expect(&Token::Keyword(Keyword::Call), "CALL")?;
+        let mut name = self.parse_name("a procedure name")?;
+        while self.eat(&Token::Dot) {
+            name.push('.');
+            name.push_str(&self.parse_name("a procedure name segment")?);
+        }
+        self.expect(&Token::LParen, "( after procedure name")?;
+        if self.peek() != &Token::RParen {
+            return Err(ParseError::unsupported(
+                self.span_here(),
+                GqlFeature::ProcedureCall,
+                "procedure arguments are not supported yet (Unit 14)",
+            ));
+        }
+        self.expect(&Token::RParen, ") after procedure arguments")?;
+        let mut yields = Vec::new();
+        let mut where_clause = None;
+        if self.eat_keyword(Keyword::Yield) {
+            loop {
+                let col = self.parse_name("a YIELD column")?;
+                let alias = if self.eat_keyword(Keyword::As) {
+                    Some(self.parse_name("a YIELD alias")?)
+                } else {
+                    None
+                };
+                yields.push((col, alias));
+                if !self.eat(&Token::Comma) {
+                    break;
+                }
+            }
+            // `YIELD … WHERE <expr>` filters the procedure rows.
+            if self.eat_keyword(Keyword::Where) {
+                where_clause = Some(self.parse_expr()?);
+            }
+        }
+        Ok(CallClause {
+            name,
+            yields,
+            where_clause,
             span: start.to(self.prev_span()),
         })
     }
@@ -1452,15 +1495,41 @@ mod tests {
 
     #[test]
     fn recognized_unsupported_construct_is_feature_tagged() {
-        let err = parse_query("CALL db.labels()").unwrap_err();
+        // Nullary catalog procedures now parse (Unit 14); procedure *arguments*
+        // remain the recognized-but-unsupported construct.
+        let err = parse_query("CALL db.foo(1)").unwrap_err();
         assert_eq!(
             err.kind,
             ParseErrorKind::Unsupported(GqlFeature::ProcedureCall)
         );
         // and it converts into the structured unsupported-feature transport
-        let grust = err.into_grust("CALL db.labels()");
+        let grust = err.into_grust("CALL db.foo(1)");
         assert!(matches!(grust, GrustError::Unsupported(_)));
         assert!(grust.to_string().contains("feature=procedure-call"));
+    }
+
+    #[test]
+    fn parse_standalone_call() {
+        let q = &parse_query("CALL db.labels()").unwrap();
+        match &q.parts[0].query.clauses[0] {
+            Clause::Call(c) => {
+                assert_eq!(c.name, "db.labels");
+                assert!(c.yields.is_empty());
+            }
+            other => panic!("expected CALL clause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_call_yield_with_alias() {
+        let q = &parse_query("CALL db.labels() YIELD label AS l RETURN l").unwrap();
+        match &q.parts[0].query.clauses[0] {
+            Clause::Call(c) => {
+                assert_eq!(c.name, "db.labels");
+                assert_eq!(c.yields, vec![("label".to_string(), Some("l".to_string()))]);
+            }
+            other => panic!("expected CALL clause, got {other:?}"),
+        }
     }
 
     #[test]

@@ -108,6 +108,9 @@ fn execute_single(
 ) -> Result<CypherResultTable> {
     let index = NodeIndex::build(graph);
     let mut rows: Vec<Row> = vec![Row::new()];
+    // Columns produced by a trailing CALL with no RETURN (standalone `CALL …`),
+    // so the procedure's YIELD shape becomes the result table.
+    let mut call_output: Option<Vec<String>> = None;
 
     // A clause pipeline: each clause transforms the binding-row stream; RETURN is
     // terminal and produces the result table.
@@ -155,6 +158,24 @@ fn execute_single(
             Clause::Unwind(u) => {
                 rows = unwind_rows(rows, u, params)?;
             }
+            Clause::Call(c) => {
+                let (out_cols, out_rows) = call_procedure(graph, c)?;
+                let mut next = Vec::new();
+                for row in &rows {
+                    for vals in &out_rows {
+                        let mut nr = row.clone();
+                        for (col, val) in out_cols.iter().zip(vals.iter()) {
+                            nr.insert(col.clone(), Bound::Value(val.clone()));
+                        }
+                        next.push(nr);
+                    }
+                }
+                rows = next;
+                if let Some(where_expr) = &c.where_clause {
+                    rows = filter_rows(rows, where_expr, params)?;
+                }
+                call_output = Some(out_cols);
+            }
             Clause::Return(r) => {
                 // Terminal: project the current bindings to the result table.
                 return project(graph, &rows, &r.projection, params);
@@ -171,7 +192,96 @@ fn execute_single(
         }
     }
 
+    // A standalone `CALL …` (no RETURN) returns the procedure's YIELD columns.
+    if let Some(columns) = call_output {
+        let mut out_rows = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let mut vals = Vec::with_capacity(columns.len());
+            for col in &columns {
+                match row.get(col) {
+                    Some(Bound::Value(v)) => vals.push(v.clone()),
+                    _ => vals.push(Value::Null),
+                }
+            }
+            out_rows.push(vals);
+        }
+        return Ok(CypherResultTable {
+            columns,
+            rows: out_rows,
+        });
+    }
+
     Err(gql_execution("read query has no RETURN clause"))
+}
+
+/// Execute a read-only catalog procedure against the graph snapshot.
+///
+/// Returns the procedure's full output columns and rows (deterministically
+/// sorted). `YIELD` projection/aliasing is applied by the caller.
+fn call_procedure(graph: &Graph, call: &CallClause) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
+    let (column, values): (&str, std::collections::BTreeSet<String>) =
+        match call.name.to_ascii_lowercase().as_str() {
+            "db.labels" => (
+                "label",
+                graph
+                    .nodes
+                    .iter()
+                    .map(|n| n.label.as_str().to_string())
+                    .collect(),
+            ),
+            "db.relationshiptypes" => (
+                "relationshipType",
+                graph
+                    .edges
+                    .iter()
+                    .map(|e| e.label.as_str().to_string())
+                    .collect(),
+            ),
+            "db.propertykeys" => {
+                let mut keys = std::collections::BTreeSet::new();
+                for n in &graph.nodes {
+                    keys.extend(n.props.keys().cloned());
+                }
+                for e in &graph.edges {
+                    keys.extend(e.props.keys().cloned());
+                }
+                ("propertyKey", keys)
+            }
+            other => {
+                return Err(unsupported_gql_feature(
+                    GqlFeature::ProcedureCall,
+                    GqlConformanceProfile::PortableGql,
+                    format!(
+                        "procedure `{other}` is not supported (known: db.labels, db.relationshipTypes, db.propertyKeys)"
+                    ),
+                ))
+            }
+        };
+
+    let full_cols = vec![column.to_string()];
+    let full_rows: Vec<Vec<Value>> = values.into_iter().map(|s| vec![Value::from(s)]).collect();
+
+    // Apply YIELD: validate each yielded column exists, then project/alias.
+    if call.yields.is_empty() {
+        return Ok((full_cols, full_rows));
+    }
+    let mut out_cols = Vec::with_capacity(call.yields.len());
+    let mut indices = Vec::with_capacity(call.yields.len());
+    for (col, alias) in &call.yields {
+        let idx = full_cols.iter().position(|c| c == col).ok_or_else(|| {
+            gql_name(format!(
+                "procedure `{}` does not yield a column named `{col}`",
+                call.name
+            ))
+        })?;
+        out_cols.push(alias.clone().unwrap_or_else(|| col.clone()));
+        indices.push(idx);
+    }
+    let out_rows = full_rows
+        .iter()
+        .map(|r| indices.iter().map(|&i| r[i].clone()).collect())
+        .collect();
+    Ok((out_cols, out_rows))
 }
 
 /// Keep rows whose `where_expr` evaluates to TRUE (NULL/FALSE drop), surfacing

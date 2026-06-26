@@ -6,6 +6,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added read-only **catalog procedures** via `CALL [YIELD]` (Unit 14): `db.labels()`, `db.relationshipTypes()`, and `db.propertyKeys()` parse in the new pipeline and execute in the Memory read reference over a `Graph` snapshot, returning deterministically sorted, distinct values. Supports standalone `CALL db.labels()` (the YIELD shape becomes the result table) and `CALL … YIELD col [AS alias] [WHERE …]` feeding downstream `WHERE`/`RETURN`/aggregation. `ProcedureCall` is now `Supported` in the feature manifest; procedure *arguments* remain feature-tagged unsupported.
+
 - Expanded the read-path scalar function registry (Unit 14) with unary math functions `sqrt`, `exp`, `ln`/`log`, `log10`, `sin`, `cos`, `tan` (numeric → Float, null-propagating), usable in `WHERE` and `RETURN`.
 
 - Added a strict-write **golden-snapshot** regression harness (`grust-cypher/tests/write_golden.rs` + `tests/golden/write_golden.json`, Unit 10a): pins the current planner output (plan or rejection) for a 20-statement write corpus so any future write-path change is caught byte-for-byte.

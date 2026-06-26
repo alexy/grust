@@ -846,9 +846,9 @@ impl GqlFeature {
             GqlFeature::ProcedureCall => d!(
                 "procedure-call",
                 ProceduresAndFunctions,
-                Future,
-                Full39075,
-                "Procedure call AST, resolution, and execution protocol (Unit 14)"
+                Supported,
+                PortableGql,
+                "Read-only catalog procedures via CALL [YIELD]: db.labels, db.relationshipTypes, db.propertyKeys (Unit 14)"
             ),
             GqlFeature::TableValuedFunction => d!(
                 "table-valued-function",

@@ -194,6 +194,39 @@ fn datetime_ordering() {
 }
 
 #[test]
+fn catalog_procedures() {
+    // db.labels(): distinct node labels, sorted (standalone CALL → result table).
+    assert_eq!(
+        col0("CALL db.labels()"),
+        vec![Value::from("City"), Value::from("Person")]
+    );
+    // db.relationshipTypes(): distinct edge labels.
+    assert_eq!(
+        col0("CALL db.relationshipTypes()"),
+        vec![Value::from("KNOWS"), Value::from("LIVES_IN")]
+    );
+    // db.propertyKeys(): distinct property keys across nodes and edges.
+    assert_eq!(
+        col0("CALL db.propertyKeys()"),
+        vec![Value::from("age"), Value::from("id"), Value::from("name")]
+    );
+}
+
+#[test]
+fn call_yield_into_pipeline() {
+    // YIELD binds the column for downstream clauses; alias + WHERE + RETURN.
+    assert_eq!(
+        col0("CALL db.labels() YIELD label AS l WHERE l <> 'City' RETURN l ORDER BY l"),
+        vec![Value::from("Person")]
+    );
+    // Count via aggregation over the yielded rows.
+    assert_eq!(
+        rows("CALL db.relationshipTypes() YIELD relationshipType AS t RETURN count(*) AS n"),
+        vec![vec![Value::Int(2)]]
+    );
+}
+
+#[test]
 fn unsupported_read_shapes_error() {
     // Writes are rejected by the read executor.
     assert!(run_read_query(
