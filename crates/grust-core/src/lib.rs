@@ -2832,6 +2832,21 @@ pub enum GraphMutation {
         delete_edges: bool,
         endpoint_nodes: Vec<GraphRelationshipEndpoint>,
     },
+    /// Cross-variable correlated node property update (Unit 10b/W3).
+    SetMatchingNodeFromNode {
+        target_label: Option<Label>,
+        target_props: Props,
+        target_predicates: Vec<GraphPropertyPredicate>,
+        target_key: String,
+        source_label: Option<Label>,
+        source_props: Props,
+        source_predicates: Vec<GraphPropertyPredicate>,
+        source_key: String,
+        op: Option<GraphNumericOp>,
+        operand: Value,
+        correlation: GraphWriteCorrelation,
+        cardinality: GraphMutationCardinality,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3251,6 +3266,36 @@ pub enum GraphMutationPlanOp {
         target_count: usize,
         cardinality: GraphMutationCardinality,
     },
+    /// Cross-variable correlated node property update (Unit 10b/W3): for each
+    /// matched `(target, source)` node pair, set
+    /// `target[target_key] = source[source_key]` optionally combined with
+    /// `op`/`operand`. `correlation` selects how the pairs are formed.
+    SetMatchingNodeFromNode {
+        target_label: Option<Label>,
+        target_props: Props,
+        target_predicates: Vec<GraphPropertyPredicate>,
+        target_key: String,
+        source_label: Option<Label>,
+        source_props: Props,
+        source_predicates: Vec<GraphPropertyPredicate>,
+        source_key: String,
+        op: Option<GraphNumericOp>,
+        operand: Value,
+        correlation: GraphWriteCorrelation,
+        cardinality: GraphMutationCardinality,
+    },
+}
+
+/// How a cross-variable write correlates its target and source node matches
+/// (Unit 10b/W3).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GraphWriteCorrelation {
+    /// Cartesian product of the target and source matches.
+    Cartesian,
+    /// Pairs linked by `(target)-[:label]->(source)`.
+    OutgoingRelationship { label: Label },
+    /// Pairs linked by `(target)<-[:label]-(source)`.
+    IncomingRelationship { label: Label },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -3360,6 +3405,9 @@ impl GraphMutationReport {
                 self.patches += 1;
             }
             GraphMutationPlanOp::UpdateMatchingNodeProperty { .. } => {
+                self.patches += 1;
+            }
+            GraphMutationPlanOp::SetMatchingNodeFromNode { .. } => {
                 self.patches += 1;
             }
             GraphMutationPlanOp::PatchEdge { .. } => {
@@ -3555,6 +3603,33 @@ impl From<GraphMutationPlanOp> for GraphMutation {
                 delete_edges,
                 endpoint_nodes,
             },
+            GraphMutationPlanOp::SetMatchingNodeFromNode {
+                target_label,
+                target_props,
+                target_predicates,
+                target_key,
+                source_label,
+                source_props,
+                source_predicates,
+                source_key,
+                op,
+                operand,
+                correlation,
+                cardinality,
+            } => Self::SetMatchingNodeFromNode {
+                target_label,
+                target_props,
+                target_predicates,
+                target_key,
+                source_label,
+                source_props,
+                source_predicates,
+                source_key,
+                op,
+                operand,
+                correlation,
+                cardinality,
+            },
         }
     }
 }
@@ -3709,6 +3784,12 @@ pub trait GraphMutationStore: GraphStore {
                             .to_string(),
                     ));
                 }
+                GraphMutation::SetMatchingNodeFromNode { .. } => {
+                    return Err(GrustError::Unsupported(
+                        "cross-variable correlated updates require backend-specific query support"
+                            .to_string(),
+                    ));
+                }
                 GraphMutation::PatchEdge {
                     from,
                     label,
@@ -3851,6 +3932,7 @@ pub mod prelude {
         GraphNativeConstraintReport, GraphNativeConstraintRequest, GraphNodeMatch, GraphNumericOp,
         GraphPredicateOp, GraphPropertyPredicate, GraphRelationshipEndpoint,
         GraphRelationshipMatch, GraphRowEdgeIdPolicy, GraphSchema, GraphSchemaBuilder, GraphStore,
+        GraphWriteCorrelation,
         GrustError, Label, LoadReport, Node, NodeId, NodeType, Props, PutOutcome, Result, RfcDate,
         Start, Step, Traversal, Value, classify_edge_upsert, classify_node_upsert, edge_key,
         evaluate_numeric_update, generated_row_edge_id, relationship_type, schema_identifier,

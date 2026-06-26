@@ -188,6 +188,9 @@ pub fn mutation_sql(
         GraphMutation::UpdateMatchingNodeProperty { .. } => {
             return unsupported_mutation(dialect.name(), "matched node expression updates");
         }
+        GraphMutation::SetMatchingNodeFromNode { .. } => {
+            return unsupported_mutation(dialect.name(), "cross-variable correlated updates");
+        }
         GraphMutation::PatchEdge { .. } => {
             return unsupported_mutation(dialect.name(), "edge patches");
         }
