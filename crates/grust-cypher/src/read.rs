@@ -471,7 +471,13 @@ pub(crate) fn project_bindings(
     projection: &Projection,
     params: &CypherParameters,
 ) -> Result<CypherResultTable> {
-    let rows: Vec<Row> = binding_rows
+    let rows = binding_rows_to_rows(binding_rows);
+    let empty = Graph::default();
+    project(&empty, &rows, projection, params)
+}
+
+fn binding_rows_to_rows(binding_rows: Vec<Vec<(String, PushedBinding)>>) -> Vec<Row> {
+    binding_rows
         .into_iter()
         .map(|bindings| {
             let mut row = Row::new();
@@ -485,9 +491,42 @@ pub(crate) fn project_bindings(
             }
             row
         })
-        .collect();
-    let empty = Graph::default();
-    project(&empty, &rows, projection, params)
+        .collect()
+}
+
+/// Run a `WITH`/`UNWIND`/`RETURN` tail pipeline over pre-matched binding rows —
+/// the shared tail for backend pushdown of `MATCH … WITH … RETURN` (the leading
+/// pattern's filter is pushed; the horizon runs here). Errors on a clause that
+/// needs graph access (a further `MATCH`), which the planner excludes.
+pub(crate) fn project_binding_pipeline(
+    binding_rows: Vec<Vec<(String, PushedBinding)>>,
+    tail: &[Clause],
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
+    let mut rows = binding_rows_to_rows(binding_rows);
+    for clause in tail {
+        match clause {
+            Clause::With(w) => {
+                rows = project_to_bindings(&w.projection, rows, params)?;
+                if let Some(where_expr) = &w.where_clause {
+                    rows = filter_rows(rows, where_expr, params)?;
+                }
+            }
+            Clause::Unwind(u) => {
+                rows = unwind_rows(rows, u, params)?;
+            }
+            Clause::Return(r) => {
+                let empty = Graph::default();
+                return project(&empty, &rows, &r.projection, params);
+            }
+            _ => {
+                return Err(gql_execution(
+                    "pushdown pipeline runs only WITH/UNWIND/RETURN tails",
+                ))
+            }
+        }
+    }
+    Err(gql_execution("pushdown pipeline has no RETURN"))
 }
 
 // ---------------------------------------------------------------------------

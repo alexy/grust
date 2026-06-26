@@ -1051,6 +1051,8 @@ async fn test_read_pushdown_matches_reference() {
         "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY a.name, b.name",
         // Multi-pattern MATCH (shared-variable join).
         "MATCH (a:Person)-[:KNOWS]->(b), (a)-[:KNOWS]->(c) RETURN a.name, b.name, c.name ORDER BY a.name, b.name, c.name",
+        // WITH horizon (leading scan pushed, horizon in Rust).
+        "MATCH (n:Person) WHERE n.age >= 40 WITH n.age AS age RETURN avg(age) AS mean",
         // Not pushable (OPTIONAL MATCH): exercises the read_graph fallback branch.
         "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name ORDER BY a.name",
     ];

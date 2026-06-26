@@ -25,7 +25,10 @@ reconstructed from Git history, release commits, and the shipped docs.
   + one optional directed segment) lowers to a `LEFT JOIN` against a subquery for
   the optional segment, with null-padding (`r`/`b` → `null`) matching the
   reference. **Multi-pattern `MATCH`** (`(a)-[]->(b), (a)-[]->(c)` and bare cross
-  products) lowers to a comma-join with shared variables reusing an alias. This now
+  products) lowers to a comma-join with shared variables reusing an alias. A
+  **`WITH` horizon** (`MATCH … WITH … RETURN`) pushes the leading node scan/filter
+  and runs the horizon (incl. aggregation) through the shared reference pipeline.
+  This now
   covers **multi-segment paths** (`(a)-[]->(b)-[]->(c)`, chained joins) and
   **undirected** segments (`(a)-[]-(b)`, matched in either orientation), in any
   per-segment direction. **Variable-length** segments (`(a)-[:T*m..n]->(b)`, with

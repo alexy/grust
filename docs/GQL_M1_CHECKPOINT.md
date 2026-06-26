@@ -74,6 +74,13 @@ answer).
   alias (joined), patterns without a shared variable cross-join. Directed
   segments only. Tried after the single-path planner, so it also handles a single
   pattern that reuses a variable.
+- **`WITH` horizon:** `MATCH (n[:L][{..}]) [WHERE] WITH … [WHERE] [UNWIND …]
+  RETURN …` pushes the **leading single-node scan + filter** into SQL, then runs
+  the `WITH`/`UNWIND`/`RETURN` horizon over the fetched nodes through the shared
+  reference pipeline (`read::project_binding_pipeline`) — identical to the
+  reference by construction. The tail must not contain a further `MATCH` (graph
+  access); only the leading scan is pushed (the horizon, incl. aggregation, runs
+  in Rust).
 - **`WHERE`** (node and segment paths): comparisons (`=,<>,<,<=,>,>=`),
   `IS [NOT] NULL`, `IN`/`NOT IN`, `STARTS/ENDS/CONTAINS`, boolean `= true/false`,
   `+`/`-`/`*` arithmetic over typed numeric properties, and `AND`/`OR`/`NOT`.
@@ -111,10 +118,10 @@ answer).
    Niche; anonymous-relationship var-length already pushes.
 3. **Path variables** (`MATCH p = …`) — needs path-value reconstruction; niche.
 4. **Multi-clause shapes** — `UNION`/`UNION ALL`, `OPTIONAL MATCH` (single
-   optional segment), and multi-pattern `MATCH` are **done** (see above).
-   Remaining: `WITH` horizon (sub-plan composition / CTE — the post-`WITH` clause
-   depends on `WITH` output, so it needs a derived-table/aggregation pipeline);
-   chained/multiple `OPTIONAL MATCH` and optional multi-segment. Lower value.
+   optional segment), multi-pattern `MATCH`, and the `WITH` horizon are **done**
+   (see above). Remaining (all niche): chained/multiple `OPTIONAL MATCH` and
+   optional multi-segment; pushing a post-`WITH` `MATCH` (correlated, needs the
+   graph); `WITH` after a non-node leading pattern (segment/var-length).
 
 Other backends: only Sail wires pushdown into its read entrypoint today. Turso
 is used as the oracle but its own `run_read_query` is not wired (and its tagged

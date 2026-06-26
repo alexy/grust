@@ -505,9 +505,26 @@ fn lower_node_single(
         [Clause::Match(m), Clause::Return(r)] if !m.optional => (m, r),
         _ => return None,
     };
+    let (var, label, filter) = lower_node_scan(match_clause, params, hints)?;
+    let projection = return_clause.projection.clone();
+    let ordering = compute_pushed_ordering(&projection, &var, label.as_deref(), params, hints);
+    Some(NodeReadPushdown {
+        var,
+        label,
+        filter,
+        ordering,
+        projection,
+    })
+}
 
-    // Exactly one node-only pattern with a bound variable, at most one label,
-    // and no path variable.
+/// Lower a single-node `MATCH` clause to its scan target — `(var, label, filter)`
+/// — or `None` if it is not a pushable single bound node pattern. Shared by the
+/// node leaf and the `WITH`-pipeline leaf.
+fn lower_node_scan(
+    match_clause: &MatchClause,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<(String, Option<String>, Option<Predicate>)> {
     if match_clause.patterns.len() != 1 {
         return None;
     }
@@ -522,7 +539,6 @@ fn lower_node_single(
     }
     let label = node.labels.first().cloned();
 
-    // Inline property equalities, then the WHERE predicate, all anchored on `var`.
     let mut filter: Option<Predicate> = None;
     if let Some(map) = &node.properties {
         for (key, value_expr) in &map.entries {
@@ -541,16 +557,7 @@ fn lower_node_single(
         let predicate = lower_predicate(where_expr, &var, label.as_deref(), params, hints)?;
         filter = Some(conjoin(filter, predicate));
     }
-
-    let projection = return_clause.projection.clone();
-    let ordering = compute_pushed_ordering(&projection, &var, label.as_deref(), params, hints);
-    Some(NodeReadPushdown {
-        var,
-        label,
-        filter,
-        ordering,
-        projection,
-    })
+    Some((var, label, filter))
 }
 
 /// Resolve `ORDER BY`/`SKIP`/`LIMIT` for SQL pushdown over a single scan var, or
@@ -2988,6 +2995,97 @@ impl MultiPatternReadPushdown {
     }
 }
 
+// ===========================================================================
+// WITH-horizon pushdown (push the leading node scan; run the tail in Rust)
+// ===========================================================================
+//
+// `MATCH (n[:L] [{..}]) [WHERE p] WITH … [WHERE] [UNWIND …] RETURN …` pushes the
+// leading single-node scan + filter into SQL, then runs the `WITH`/`UNWIND`/
+// `RETURN` horizon over the fetched nodes through the shared reference pipeline
+// (`read::project_binding_pipeline`) — identical to the reference by construction.
+// The tail must not contain a further `MATCH` (that needs graph access).
+
+/// A lowered `MATCH (single node) … WITH … RETURN` with a `WITH`/`UNWIND` horizon.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PipelineReadPushdown {
+    var: String,
+    label: Option<String>,
+    filter: Option<Predicate>,
+    /// Clauses after the leading `MATCH` (a `WITH`/`UNWIND` horizon ending in
+    /// `RETURN`), run through the reference pipeline.
+    tail: Vec<Clause>,
+}
+
+fn lower_pipeline_single(
+    single: &SingleQuery,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<PipelineReadPushdown> {
+    let clauses = &single.clauses;
+    // Leading non-optional MATCH, a horizon, then RETURN — at least one clause
+    // between MATCH and RETURN (else the plain node leaf handles it).
+    let match_clause = match clauses.first() {
+        Some(Clause::Match(m)) if !m.optional => m,
+        _ => return None,
+    };
+    if clauses.len() < 3 || !matches!(clauses.last(), Some(Clause::Return(_))) {
+        return None;
+    }
+    let tail = &clauses[1..];
+    // The horizon may only re-shape rows (no further graph access / writes).
+    if !tail
+        .iter()
+        .all(|c| matches!(c, Clause::With(_) | Clause::Unwind(_) | Clause::Return(_)))
+    {
+        return None;
+    }
+    let (var, label, filter) = lower_node_scan(match_clause, params, hints)?;
+    Some(PipelineReadPushdown {
+        var,
+        label,
+        filter,
+        tail: tail.to_vec(),
+    })
+}
+
+impl PipelineReadPushdown {
+    pub fn column_count(&self) -> usize {
+        3
+    }
+
+    pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
+        let table = dialect.quote_ident(dialect.nodes_table());
+        let mut sql = format!("SELECT id, label, props FROM {table}");
+        let mut conditions: Vec<String> = Vec::new();
+        if let Some(label) = &self.label {
+            conditions.push(format!("label = {}", dialect.string_literal(label)));
+        }
+        if let Some(filter) = &self.filter {
+            conditions.push(render_predicate(filter, dialect));
+        }
+        if !conditions.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conditions.join(" AND "));
+        }
+        sql
+    }
+
+    pub fn project_text_rows(
+        &self,
+        _dialect: &dyn SqlDialect,
+        rows: Vec<Vec<Option<String>>>,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        let selected = [SelectedBinding::Node {
+            var: self.var.clone(),
+            node: 0,
+            optional: false,
+        }];
+        let binding_rows = reconstruct_bindings(&selected, rows)?;
+        crate::read::project_binding_pipeline(binding_rows, &self.tail, params)
+    }
+}
+
 /// Parse a JSON `props` text cell (untagged) into [`Props`]. NULL/empty → empty.
 fn parse_props(text: Option<&str>) -> Result<Props> {
     match text {
@@ -3021,6 +3119,7 @@ pub enum ReadPushdown {
     VarLength(VarLengthReadPushdown),
     Optional(OptionalReadPushdown),
     MultiPattern(MultiPatternReadPushdown),
+    Pipeline(PipelineReadPushdown),
     /// `UNION` / `UNION ALL` of pushable arms; `distinct` is true when any
     /// boundary is a (deduplicating) `UNION`.
     Union {
@@ -3052,6 +3151,7 @@ impl ReadPushdown {
             ReadPushdown::VarLength(p) => p.to_sql(dialect),
             ReadPushdown::Optional(p) => p.to_sql(dialect),
             ReadPushdown::MultiPattern(p) => p.to_sql(dialect),
+            ReadPushdown::Pipeline(p) => p.to_sql(dialect),
             ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
         }
     }
@@ -3064,6 +3164,7 @@ impl ReadPushdown {
             ReadPushdown::VarLength(p) => p.column_count(),
             ReadPushdown::Optional(p) => p.column_count(),
             ReadPushdown::MultiPattern(p) => p.column_count(),
+            ReadPushdown::Pipeline(p) => p.column_count(),
             ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
         }
     }
@@ -3081,6 +3182,7 @@ impl ReadPushdown {
             ReadPushdown::VarLength(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Optional(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::MultiPattern(p) => p.project_text_rows(dialect, rows, params),
+            ReadPushdown::Pipeline(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
         }
     }
@@ -3134,7 +3236,10 @@ fn lower_single(
     if let Some(p) = lower_optional_single(single, params, hints) {
         return Some(ReadPushdown::Optional(p));
     }
-    lower_multi_pattern_single(single, params, hints).map(ReadPushdown::MultiPattern)
+    if let Some(p) = lower_multi_pattern_single(single, params, hints) {
+        return Some(ReadPushdown::MultiPattern(p));
+    }
+    lower_pipeline_single(single, params, hints).map(ReadPushdown::Pipeline)
 }
 
 /// Combine `UNION` arm result tables, mirroring [`crate::read::run_read_query`]:
@@ -3860,6 +3965,34 @@ mod tests {
         // A non-pushable arm makes the whole UNION fall back.
         assert!(plan_read(
             "MATCH (n:Person) RETURN n.name AS x UNION UNWIND [1] AS x RETURN x",
+            &params(),
+            &NoTypeHints,
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    // ---- WITH horizon -----------------------------------------------------
+
+    #[test]
+    fn with_horizon_pipeline() {
+        let plan = plan_read(
+            "MATCH (n:Person) WHERE n.age >= 40 WITH n.age AS age RETURN avg(age) AS mean",
+            &params(),
+            &NoTypeHints,
+        )
+        .unwrap()
+        .expect("pushable");
+        assert!(matches!(plan, ReadPushdown::Pipeline(_)));
+        // Only the leading MATCH scan + filter is pushed; the horizon runs in Rust.
+        assert_eq!(
+            plan.to_sql(&SqliteDialect),
+            "SELECT id, label, props FROM \"grust_nodes\" \
+             WHERE label = 'Person' AND CAST(json_extract(props, '$.age') AS INTEGER) >= 40"
+        );
+        // A tail containing a further MATCH (needs graph access) falls back.
+        assert!(plan_read(
+            "MATCH (n:Person) WITH n MATCH (n)-[:KNOWS]->(b) RETURN b.name",
             &params(),
             &NoTypeHints,
         )
