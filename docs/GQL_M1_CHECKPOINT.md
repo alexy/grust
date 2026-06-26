@@ -156,6 +156,20 @@ full-39075 completeness claim. The loop continues on unblocked units meanwhile.
 
 ---
 
+## Unit 11 — schema / graph types (core done)
+
+`grust_cypher::graph_type`: `GraphTypeMode` (Open/Closed) + `validate_node` /
+`validate_edge` / `validate_graph` over a `GraphSchema`. Closed graph types reject
+undeclared labels/properties; both modes type-check declared properties
+(`value_matches_field_type`) and enforce required fields/constraints. A
+backend-neutral `ValidateBeforeWrite` hook (changes no backend). Existing
+`CypherConstraintRegistry`/`CypherSchemaManager`/DDL remain the named-constraint +
+schema-application layer. Catalog/session metadata + per-backend graph-type
+enforcement reporting fold into Unit 13/16 (today enforcement is caller-applied
+via validate_*).
+
+---
+
 ### Implementation history (chronological)
 
 `src/pushdown.rs` is the backend-neutral lowering. `plan_node_read(cypher,
