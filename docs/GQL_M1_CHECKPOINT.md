@@ -68,6 +68,12 @@ answer).
   null-padded (`PushedBinding::Null`), matching the reference. `wa` references
   only `a`; `wb`/inline props reference only `r`/`b` (else fall back). Undirected
   optional segments fall back.
+- **Multi-pattern `MATCH`** (`(a)-[]->(b), (a)-[]->(c)` and bare cross products
+  `(a), (b)`): lowers to a comma-join of every node/edge alias with all
+  connectivity + filters in `WHERE`; a variable shared across patterns reuses its
+  alias (joined), patterns without a shared variable cross-join. Directed
+  segments only. Tried after the single-path planner, so it also handles a single
+  pattern that reuses a variable.
 - **`WHERE`** (node and segment paths): comparisons (`=,<>,<,<=,>,>=`),
   `IS [NOT] NULL`, `IN`/`NOT IN`, `STARTS/ENDS/CONTAINS`, boolean `= true/false`,
   `+`/`-`/`*` arithmetic over typed numeric properties, and `AND`/`OR`/`NOT`.
@@ -104,11 +110,11 @@ answer).
    array and reconstruct `r` as a `Value::Json` list matching the reference.
    Niche; anonymous-relationship var-length already pushes.
 3. **Path variables** (`MATCH p = …`) — needs path-value reconstruction; niche.
-4. **Multi-clause shapes** — `UNION`/`UNION ALL` and `OPTIONAL MATCH` (single
-   optional segment) are **done** (see above). Remaining: multi-pattern `MATCH`
-   (comma patterns → cross/natural join over a global alias set); `WITH` horizon
-   (sub-plan composition / CTE); chained/multiple `OPTIONAL MATCH` and optional
-   multi-segment. These need a general pattern-join planner; substantial.
+4. **Multi-clause shapes** — `UNION`/`UNION ALL`, `OPTIONAL MATCH` (single
+   optional segment), and multi-pattern `MATCH` are **done** (see above).
+   Remaining: `WITH` horizon (sub-plan composition / CTE — the post-`WITH` clause
+   depends on `WITH` output, so it needs a derived-table/aggregation pipeline);
+   chained/multiple `OPTIONAL MATCH` and optional multi-segment. Lower value.
 
 Other backends: only Sail wires pushdown into its read entrypoint today. Turso
 is used as the oracle but its own `run_read_query` is not wired (and its tagged

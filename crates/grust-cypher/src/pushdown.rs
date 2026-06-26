@@ -2707,6 +2707,287 @@ impl OptionalReadPushdown {
     }
 }
 
+// ===========================================================================
+// Multi-pattern MATCH pushdown (comma patterns → cross / shared-variable joins)
+// ===========================================================================
+//
+// `MATCH (a)-[:T]->(b), (a)-[:U]->(c) [WHERE …] RETURN …` (and bare cross
+// products like `MATCH (a), (b)`) lower to a comma-join of every node/edge alias
+// with all connectivity + filters in `WHERE`. A variable shared across patterns
+// reuses its alias, so the join unifies it; patterns with no shared variable
+// cross-join. Directed segments only (undirected falls back). Tried after the
+// single-path segment planner, so it handles ≥2 patterns and single patterns
+// that reuse a variable.
+
+/// One global edge: the node indices its stored `src_id`/`dst_id` join to.
+#[derive(Clone, Debug, PartialEq)]
+struct GlobalEdge {
+    src_node: usize,
+    dst_node: usize,
+    rel_types: Vec<String>,
+}
+
+/// A lowered multi-pattern (or shared-variable) `MATCH`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultiPatternReadPushdown {
+    node_count: usize,
+    node_labels: Vec<Option<String>>,
+    edges: Vec<GlobalEdge>,
+    filter: Option<SegPredicate>,
+    selected: Vec<SelectedBinding>,
+    projection: Projection,
+}
+
+fn lower_multi_pattern_single(
+    single: &SingleQuery,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<MultiPatternReadPushdown> {
+    let (match_clause, return_clause) = match single.clauses.as_slice() {
+        [Clause::Match(m), Clause::Return(r)] if !m.optional => (m, r),
+        _ => return None,
+    };
+    if match_clause.patterns.is_empty() {
+        return None;
+    }
+
+    let mut node_labels: Vec<Option<String>> = Vec::new();
+    let mut var_node: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut roles: RoleMap = std::collections::HashMap::new();
+    let mut edges: Vec<GlobalEdge> = Vec::new();
+    let mut selected: Vec<SelectedBinding> = Vec::new();
+    let mut filter: Option<SegPredicate> = None;
+
+    // Resolve a node occurrence to a global index, recording labels/inline props
+    // for fresh nodes; a re-referenced variable must be a bare back-reference.
+    let mut resolve_node = |np: &NodePattern,
+                            node_labels: &mut Vec<Option<String>>,
+                            roles: &mut RoleMap,
+                            selected: &mut Vec<SelectedBinding>,
+                            filter: &mut Option<SegPredicate>|
+     -> Option<usize> {
+        if let Some(v) = &np.variable {
+            if let Some(&idx) = var_node.get(v) {
+                if !np.labels.is_empty() || np.properties.is_some() {
+                    return None; // re-reference must be bare
+                }
+                return Some(idx);
+            }
+        }
+        if np.labels.len() > 1 {
+            return None;
+        }
+        let idx = node_labels.len();
+        node_labels.push(np.labels.first().cloned());
+        if let Some(v) = &np.variable {
+            var_node.insert(v.clone(), idx);
+            roles.insert(v.clone(), Role::Node(idx));
+            selected.push(SelectedBinding::Node {
+                var: v.clone(),
+                node: idx,
+                optional: false,
+            });
+        }
+        if let Some(map) = &np.properties {
+            for (key, value) in &map.entries {
+                let scalar = lower_scalar(value, params)?;
+                let operand = if key == "label" {
+                    SegOperand::NodeLabel(idx)
+                } else {
+                    SegOperand::NodeProp(idx, lower_seg_key(key)?)
+                };
+                *filter = Some(seg_conjoin(
+                    filter.take(),
+                    SegPredicate::Compare {
+                        operand,
+                        op: CmpOp::Eq,
+                        value: scalar,
+                    },
+                ));
+            }
+        }
+        Some(idx)
+    };
+
+    for pattern in &match_clause.patterns {
+        if pattern.variable.is_some() {
+            return None; // no path variable
+        }
+        let mut prev = resolve_node(
+            &pattern.start,
+            &mut node_labels,
+            &mut roles,
+            &mut selected,
+            &mut filter,
+        )?;
+        for seg in &pattern.segments {
+            let rel = &seg.relationship;
+            if rel.length.is_some() {
+                return None;
+            }
+            let node_idx = resolve_node(
+                &seg.node,
+                &mut node_labels,
+                &mut roles,
+                &mut selected,
+                &mut filter,
+            )?;
+            let (src_node, dst_node) = match rel.direction {
+                Direction::Outgoing => (prev, node_idx),
+                Direction::Incoming => (node_idx, prev),
+                Direction::Undirected => return None,
+            };
+            let edge_idx = edges.len();
+            if let Some(v) = &rel.variable {
+                if roles.insert(v.clone(), Role::Edge(edge_idx)).is_some() {
+                    return None;
+                }
+                selected.push(SelectedBinding::Edge {
+                    var: v.clone(),
+                    edge: edge_idx,
+                    optional: false,
+                });
+            }
+            if let Some(map) = &rel.properties {
+                for (key, value) in &map.entries {
+                    let scalar = lower_scalar(value, params)?;
+                    filter = Some(seg_conjoin(
+                        filter,
+                        SegPredicate::Compare {
+                            operand: SegOperand::EdgeProp(edge_idx, lower_seg_key(key)?),
+                            op: CmpOp::Eq,
+                            value: scalar,
+                        },
+                    ));
+                }
+            }
+            edges.push(GlobalEdge {
+                src_node,
+                dst_node,
+                rel_types: rel.types.clone(),
+            });
+            prev = node_idx;
+        }
+    }
+
+    if let Some(where_expr) = &match_clause.where_clause {
+        let segs: Vec<SegSpec> = edges
+            .iter()
+            .map(|e| SegSpec {
+                direction: SegDirection::Outgoing,
+                rel_types: e.rel_types.clone(),
+            })
+            .collect();
+        let ctx = SegCtx {
+            roles: &roles,
+            node_labels: &node_labels,
+            segments: &segs,
+            hints,
+        };
+        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &ctx, params)?));
+    }
+
+    Some(MultiPatternReadPushdown {
+        node_count: node_labels.len(),
+        node_labels,
+        edges,
+        filter,
+        selected,
+        projection: return_clause.projection.clone(),
+    })
+}
+
+impl MultiPatternReadPushdown {
+    pub fn column_count(&self) -> usize {
+        self.selected
+            .iter()
+            .map(|b| match b {
+                SelectedBinding::Node { .. } => 3,
+                SelectedBinding::Edge { .. } => 5,
+            })
+            .sum()
+    }
+
+    pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
+        let nodes = dialect.quote_ident(dialect.nodes_table());
+        let edges_tbl = dialect.quote_ident(dialect.edges_table());
+
+        let mut cols: Vec<String> = Vec::new();
+        for binding in &self.selected {
+            match binding {
+                SelectedBinding::Node { node, .. } => cols.extend([
+                    format!("n{node}.id"),
+                    format!("n{node}.label"),
+                    format!("n{node}.props"),
+                ]),
+                SelectedBinding::Edge { edge, .. } => cols.extend([
+                    format!("e{edge}.id"),
+                    format!("e{edge}.src_id"),
+                    format!("e{edge}.dst_id"),
+                    format!("e{edge}.edge_type"),
+                    format!("e{edge}.props"),
+                ]),
+            }
+        }
+        let select_list = if cols.is_empty() {
+            "1".to_string()
+        } else {
+            cols.join(", ")
+        };
+
+        // Comma-join every node and edge alias; connectivity + filters in WHERE.
+        let mut from: Vec<String> = (0..self.node_count)
+            .map(|i| format!("{nodes} n{i}"))
+            .collect();
+        for j in 0..self.edges.len() {
+            from.push(format!("{edges_tbl} e{j}"));
+        }
+
+        let mut conds: Vec<String> = Vec::new();
+        for (j, e) in self.edges.iter().enumerate() {
+            conds.push(format!("e{j}.src_id = n{}.id", e.src_node));
+            conds.push(format!("e{j}.dst_id = n{}.id", e.dst_node));
+            match e.rel_types.as_slice() {
+                [] => {}
+                [one] => conds.push(format!("e{j}.edge_type = {}", dialect.string_literal(one))),
+                many => {
+                    let list = many
+                        .iter()
+                        .map(|t| dialect.string_literal(t))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    conds.push(format!("e{j}.edge_type IN ({list})"));
+                }
+            }
+        }
+        for (i, label) in self.node_labels.iter().enumerate() {
+            if let Some(label) = label {
+                conds.push(format!("n{i}.label = {}", dialect.string_literal(label)));
+            }
+        }
+        if let Some(filter) = &self.filter {
+            conds.push(render_seg_predicate(filter, dialect));
+        }
+
+        let mut sql = format!("SELECT {select_list} FROM {}", from.join(", "));
+        if !conds.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&conds.join(" AND "));
+        }
+        sql
+    }
+
+    pub fn project_text_rows(
+        &self,
+        _dialect: &dyn SqlDialect,
+        rows: Vec<Vec<Option<String>>>,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        let binding_rows = reconstruct_bindings(&self.selected, rows)?;
+        crate::read::project_bindings(binding_rows, &self.projection, params)
+    }
+}
+
 /// Parse a JSON `props` text cell (untagged) into [`Props`]. NULL/empty → empty.
 fn parse_props(text: Option<&str>) -> Result<Props> {
     match text {
@@ -2739,6 +3020,7 @@ pub enum ReadPushdown {
     Segment(SegmentReadPushdown),
     VarLength(VarLengthReadPushdown),
     Optional(OptionalReadPushdown),
+    MultiPattern(MultiPatternReadPushdown),
     /// `UNION` / `UNION ALL` of pushable arms; `distinct` is true when any
     /// boundary is a (deduplicating) `UNION`.
     Union {
@@ -2769,6 +3051,7 @@ impl ReadPushdown {
             ReadPushdown::Segment(p) => p.to_sql(dialect),
             ReadPushdown::VarLength(p) => p.to_sql(dialect),
             ReadPushdown::Optional(p) => p.to_sql(dialect),
+            ReadPushdown::MultiPattern(p) => p.to_sql(dialect),
             ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
         }
     }
@@ -2780,6 +3063,7 @@ impl ReadPushdown {
             ReadPushdown::Segment(p) => p.column_count(),
             ReadPushdown::VarLength(p) => p.column_count(),
             ReadPushdown::Optional(p) => p.column_count(),
+            ReadPushdown::MultiPattern(p) => p.column_count(),
             ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
         }
     }
@@ -2796,6 +3080,7 @@ impl ReadPushdown {
             ReadPushdown::Segment(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::VarLength(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Optional(p) => p.project_text_rows(dialect, rows, params),
+            ReadPushdown::MultiPattern(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
         }
     }
@@ -2846,7 +3131,10 @@ fn lower_single(
     if let Some(p) = lower_var_length_single(single, params, hints) {
         return Some(ReadPushdown::VarLength(p));
     }
-    lower_optional_single(single, params, hints).map(ReadPushdown::Optional)
+    if let Some(p) = lower_optional_single(single, params, hints) {
+        return Some(ReadPushdown::Optional(p));
+    }
+    lower_multi_pattern_single(single, params, hints).map(ReadPushdown::MultiPattern)
 }
 
 /// Combine `UNION` arm result tables, mirroring [`crate::read::run_read_query`]:
@@ -3572,6 +3860,58 @@ mod tests {
         // A non-pushable arm makes the whole UNION fall back.
         assert!(plan_read(
             "MATCH (n:Person) RETURN n.name AS x UNION UNWIND [1] AS x RETURN x",
+            &params(),
+            &NoTypeHints,
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    // ---- multi-pattern MATCH ----------------------------------------------
+
+    #[test]
+    fn multi_pattern_shared_var_and_cross() {
+        // Shared variable `a` across two patterns → one alias, joined.
+        let plan = plan_read(
+            "MATCH (a:Person)-[:KNOWS]->(b), (a)-[:RATED]->(c) RETURN a.name, b.name, c.name",
+            &params(),
+            &NoTypeHints,
+        )
+        .unwrap()
+        .expect("pushable");
+        assert!(matches!(plan, ReadPushdown::MultiPattern(_)));
+        let sql = plan.to_sql(&SqliteDialect);
+        assert!(
+            sql.contains(
+                "FROM \"grust_nodes\" n0, \"grust_nodes\" n1, \"grust_nodes\" n2, \
+                 \"grust_edges\" e0, \"grust_edges\" e1"
+            ),
+            "{sql}"
+        );
+        assert!(sql.contains("e0.src_id = n0.id AND e0.dst_id = n1.id"), "{sql}");
+        assert!(sql.contains("e1.src_id = n0.id AND e1.dst_id = n2.id"), "{sql}");
+        assert!(
+            sql.contains("e0.edge_type = 'KNOWS'") && sql.contains("e1.edge_type = 'RATED'"),
+            "{sql}"
+        );
+
+        // Cross product (no shared variable).
+        let cross =
+            plan_read("MATCH (a:Person), (c:City) RETURN a.name, c.name", &params(), &NoTypeHints)
+                .unwrap()
+                .expect("pushable")
+                .to_sql(&SqliteDialect);
+        assert!(
+            cross.contains(
+                "FROM \"grust_nodes\" n0, \"grust_nodes\" n1 \
+                 WHERE n0.label = 'Person' AND n1.label = 'City'"
+            ),
+            "{cross}"
+        );
+
+        // Undirected segment in a multi-pattern falls back.
+        assert!(plan_read(
+            "MATCH (a)-[:KNOWS]->(b), (a)-[:KNOWS]-(c) RETURN a",
             &params(),
             &NoTypeHints,
         )

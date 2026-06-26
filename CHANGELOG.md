@@ -24,7 +24,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   of leaves, combined by `combine_union`). **`OPTIONAL MATCH`** (a mandatory node
   + one optional directed segment) lowers to a `LEFT JOIN` against a subquery for
   the optional segment, with null-padding (`r`/`b` → `null`) matching the
-  reference. This now
+  reference. **Multi-pattern `MATCH`** (`(a)-[]->(b), (a)-[]->(c)` and bare cross
+  products) lowers to a comma-join with shared variables reusing an alias. This now
   covers **multi-segment paths** (`(a)-[]->(b)-[]->(c)`, chained joins) and
   **undirected** segments (`(a)-[]-(b)`, matched in either orientation), in any
   per-segment direction. **Variable-length** segments (`(a)-[:T*m..n]->(b)`, with

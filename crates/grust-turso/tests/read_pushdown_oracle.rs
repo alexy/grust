@@ -559,6 +559,25 @@ async fn segment_pushdown(
 }
 
 #[tokio::test]
+async fn multi_pattern_pushdown_matches_reference() {
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in [
+        "MATCH (a:Person)-[:KNOWS]->(b), (a)-[:RATED]->(c) RETURN a.name, b.name, c.name",
+        "MATCH (a:Person), (c:City) RETURN a.name, c.name",
+        "MATCH (a:Person)-[:KNOWS]->(b:Person), (b)-[:KNOWS]->(c:Person) RETURN a.name, c.name",
+    ] {
+        let plan = plan_read(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"));
+        let actual = run_pushdown(&conn, &plan, &params).await;
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}
+
+#[tokio::test]
 async fn optional_match_pushdown_matches_reference() {
     let graph = fixture();
     let conn = embed(&graph).await;
