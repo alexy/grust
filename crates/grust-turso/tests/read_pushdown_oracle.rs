@@ -307,6 +307,8 @@ async fn arithmetic_pushdown_matches_reference() {
         "MATCH (n:Person) WHERE n.age - 6 = 30 RETURN n.name ORDER BY n.name",
         "MATCH (n:Person) WHERE n.score * 2 > 15.0 RETURN n.name ORDER BY n.name",
         "MATCH (n:Person) WHERE n.age * 2 >= 100 RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) WHERE n.age / 2 > 20 RETURN n.name ORDER BY n.name",
+        "MATCH (n:Person) WHERE n.score / 2 >= 4.0 RETURN n.name ORDER BY n.name",
     ] {
         let plan = plan_node_read_with_hints(cypher, &params, &OracleHints)
             .unwrap()

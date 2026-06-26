@@ -143,6 +143,11 @@ enum ArithOp {
     Add,
     Sub,
     Mul,
+    /// Division — the reference always computes in f64, so it is rendered as
+    /// floating-point division (both operands cast to the dialect float type),
+    /// making it dialect-equal. (`/0` errors in the reference but yields
+    /// NULL→dropped under pushdown; documented caveat.)
+    Div,
 }
 
 impl ArithOp {
@@ -151,6 +156,7 @@ impl ArithOp {
             ArithOp::Add => "+",
             ArithOp::Sub => "-",
             ArithOp::Mul => "*",
+            ArithOp::Div => "/",
         }
     }
 }
@@ -778,14 +784,15 @@ fn lower_arith(
             Some(ArithExpr::Prop(PropRef::Key(lower_seg_key(key)?), kind))
         }
         Expr::Binary {
-            op: op @ (BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply),
+            op: op @ (BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide),
             lhs,
             rhs,
         } => {
             let op = match op {
                 BinaryOp::Add => ArithOp::Add,
                 BinaryOp::Subtract => ArithOp::Sub,
-                _ => ArithOp::Mul,
+                BinaryOp::Multiply => ArithOp::Mul,
+                _ => ArithOp::Div,
             };
             Some(ArithExpr::Bin(
                 op,
@@ -1123,6 +1130,14 @@ fn render_arith(expr: &ArithExpr, dialect: &dyn SqlDialect) -> String {
         ArithExpr::Prop(prop, _) => dialect.cast_float(&render_prop(prop, dialect)),
         ArithExpr::Int(n) => n.to_string(),
         ArithExpr::Float(f) => render_float(*f),
+        ArithExpr::Bin(ArithOp::Div, l, r) => {
+            // Force floating-point division (the reference's `/` is always f64).
+            format!(
+                "({} / {})",
+                dialect.cast_float(&render_arith(l, dialect)),
+                dialect.cast_float(&render_arith(r, dialect))
+            )
+        }
         ArithExpr::Bin(op, l, r) => {
             format!("({} {} {})", render_arith(l, dialect), op.sql(), render_arith(r, dialect))
         }
@@ -1713,14 +1728,15 @@ fn lower_seg_arith(expr: &Expr, ctx: &SegCtx, params: &CypherParameters) -> Opti
             }
         }
         Expr::Binary {
-            op: op @ (BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply),
+            op: op @ (BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply | BinaryOp::Divide),
             lhs,
             rhs,
         } => {
             let op = match op {
                 BinaryOp::Add => ArithOp::Add,
                 BinaryOp::Subtract => ArithOp::Sub,
-                _ => ArithOp::Mul,
+                BinaryOp::Multiply => ArithOp::Mul,
+                _ => ArithOp::Div,
             };
             Some(SegArithExpr::Bin(
                 op,
@@ -1969,6 +1985,11 @@ fn render_seg_arith(expr: &SegArithExpr, dialect: &dyn SqlDialect) -> String {
         }
         SegArithExpr::Int(n) => n.to_string(),
         SegArithExpr::Float(f) => render_float(*f),
+        SegArithExpr::Bin(ArithOp::Div, l, r) => format!(
+            "({} / {})",
+            dialect.cast_float(&render_seg_arith(l, dialect)),
+            dialect.cast_float(&render_seg_arith(r, dialect))
+        ),
         SegArithExpr::Bin(op, l, r) => format!(
             "({} {} {})",
             render_seg_arith(l, dialect),
@@ -3415,9 +3436,24 @@ mod tests {
         assert!(plan_node_read("MATCH (n:Person) WHERE n.age + 1 > 40 RETURN n", &params())
             .unwrap()
             .is_none());
-        // Division is dialect-divergent → not pushable.
+        // Division renders as floating-point division (reference `/` is f64).
+        let d = plan_node_read_with_hints(
+            "MATCH (n:Person) WHERE n.age / 2 > 20 RETURN n.name",
+            &params(),
+            &TestHints,
+        )
+        .unwrap()
+        .expect("pushable")
+        .to_sql(&SqliteDialect);
+        assert!(
+            d.contains(
+                "(CAST(CAST(json_extract(props, '$.age') AS INTEGER) AS REAL) / CAST(2 AS REAL)) > 20"
+            ),
+            "{d}"
+        );
+        // Modulo / power remain dialect-divergent → not pushable.
         assert!(plan_node_read_with_hints(
-            "MATCH (n:Person) WHERE n.age / 2 > 20 RETURN n",
+            "MATCH (n:Person) WHERE n.age % 2 = 0 RETURN n",
             &params(),
             &TestHints,
         )

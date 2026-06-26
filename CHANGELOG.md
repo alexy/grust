@@ -45,7 +45,7 @@ reconstructed from Git history, release commits, and the shipped docs.
   the `GET_JSON_OBJECT` text `'true'`/`'false'`). Arithmetic comparisons over
   typed numeric properties (`n.age + 1 > 40`) are pushed on the node and segment
   paths for the `+`/`-`/`*` subset (each property cast to its hinted type);
-  `/`/`%`/`^` and unknown-typed properties fall back (dialect-divergent). `ORDER BY` /
+  `/` renders as floating-point division (reference `/` is f64); `%`/`^` and unknown-typed properties fall back (dialect-divergent). `ORDER BY` /
   `SKIP` / `LIMIT` are pushed into SQL on the single-node path for dialects whose
   JSON extraction is natively typed (SQLite/libSQL `json_extract`, not Spark
   `GET_JSON_OBJECT`), gated on no aggregate/`DISTINCT` and scan-var sort keys,
