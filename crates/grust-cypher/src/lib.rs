@@ -32,6 +32,8 @@ pub use graph_type::{
 pub mod pushdown;
 pub mod read;
 pub mod semantics;
+pub mod transaction;
+pub use transaction::{TransactionAccessMode, TransactionCommand, transactional_backends};
 pub use gql::{
     GqlBackend, GqlBackendDescriptor, GqlBackendRole, GqlConformanceProfile, GqlError,
     GqlErrorKind, GqlExpectation, GqlFeature, GqlFeatureDescriptor, GqlFeatureFamily,

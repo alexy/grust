@@ -811,14 +811,14 @@ impl GqlFeature {
             GqlFeature::TransactionControl => d!(
                 "transaction-control",
                 Transactions,
-                Future,
-                Full39075,
-                "Transaction statements with atomicity/rollback capability reporting (Unit 13)"
+                Supported,
+                PortableGql,
+                "START TRANSACTION/BEGIN/COMMIT/ROLLBACK parsed + modeled; per-backend atomicity capability reporting via GqlBackend::transactional (Unit 13). Atomic execution delegated to the backend store, wired post write-path cutover."
             ),
             GqlFeature::SessionControl => d!(
                 "session-control",
                 Transactions,
-                Future,
+                Planned,
                 Full39075,
                 "Session statements and session capability reporting (Unit 13)"
             ),
@@ -1129,6 +1129,10 @@ pub struct GqlBackendDescriptor {
     pub portable_reads: bool,
     /// Has SQL read **pushdown** wired into a `run_read_query` entrypoint.
     pub read_pushdown: bool,
+    /// The backend's mutation store reports `GraphMutationAtomicity::Transactional`
+    /// (i.e. a statement batch can commit/rollback atomically). Verified against
+    /// each backend's `mutation_atomicity()` in the working tree (Unit 13).
+    pub transactional: bool,
     pub summary: &'static str,
 }
 
@@ -1181,8 +1185,18 @@ impl GqlBackend {
             cypher_writes: writes,
             portable_reads: reads,
             read_pushdown: pushdown,
+            transactional: self.transactional(),
             summary,
         }
+    }
+
+    /// Whether this backend's mutation store reports `Transactional` atomicity
+    /// (verified against each backend's `mutation_atomicity()` override).
+    pub const fn transactional(self) -> bool {
+        matches!(
+            self,
+            GqlBackend::Turso | GqlBackend::Postgres | GqlBackend::PostgresPgq
+        )
     }
 
     /// All catalogued backends, narrowest concern first.
@@ -1552,7 +1566,7 @@ mod tests {
             );
         }
         // A future feature is not supported yet, even at the widest profile.
-        assert!(!GqlFeature::TransactionControl.is_supported_in(GqlConformanceProfile::Full39075));
+        assert!(!GqlFeature::GraphValues.is_supported_in(GqlConformanceProfile::Full39075));
     }
 
     #[test]

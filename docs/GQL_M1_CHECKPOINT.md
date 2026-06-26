@@ -234,6 +234,33 @@ This blocks Unit 10b and Unit 13 (which depend on it) and Unit 16's completeness
 
 ---
 
+## Unit 13 — transactions / sessions / control (language + capability done)
+
+Fork-independent slice landed (all green, pushed). The executable substance
+(atomic begin/commit/rollback) is a storage-layer concern delegated to each
+backend's `GraphMutationAtomicity`; only the language surface + capability
+reporting is independent of the write-path cutover fork, so that is what's built:
+
+- **`grust_cypher::transaction`** — `TransactionCommand::{Start(Option<AccessMode>),
+  Commit, Rollback}` with `TransactionCommand::parse(src) -> Result<Option<_>>`:
+  recognizes `START TRANSACTION [READ ONLY|READ WRITE]` / `BEGIN` / `COMMIT` /
+  `ROLLBACK`, returns `Ok(None)` for non-transaction sources (query parsing still
+  applies), `Err` for malformed ones. Keywords are intentionally **not reserved**
+  in the lexer (recognized at statement level), so `start`/`commit`/`read`/… stay
+  usable as identifiers/property names — no regression to existing queries.
+- **Capability reporting** — `GqlBackend::transactional()` + new
+  `GqlBackendDescriptor::transactional` (verified against each backend's
+  `mutation_atomicity()`: Turso/Postgres/Postgres-PGQ = `Transactional`;
+  Memory/Sail/Helix/Ladybug/CocoIndex = not) + `transactional_backends()`.
+- Manifest: `TransactionControl` → `Supported` (parse + capability); `SessionControl`
+  → `Planned`. Tests: +4 lib (521 total).
+
+**Deferred (write-path-coupled / cross-cutting):** executing a `BEGIN … COMMIT`
+batch atomically (needs uniform store begin/commit/rollback + the write path);
+session commands (`SET`/`RESET`/`USE`). Sequenced after the Unit 10 cutover fork.
+
+---
+
 ## Unit T — temporal / duration / decimal type system (core done)
 
 Decision (a): first-class `grust_core::Value` variants. Landed (all green, pushed):
