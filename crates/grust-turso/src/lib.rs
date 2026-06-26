@@ -197,6 +197,52 @@ impl TursoGraphStore {
             .map_err(|err| GrustError::Backend(format!("Turso command failed: {err}: {sql}")))
     }
 
+    /// Execute a single data-write statement. In WAL mode this is a plain
+    /// auto-commit statement (unchanged); in MVCC mode it runs inside a
+    /// `BEGIN CONCURRENT` transaction with conflict retry.
+    async fn execute_data(&self, sql: &str) -> Result<()> {
+        match self.config.journal_mode {
+            TursoJournalMode::Wal => self.execute(sql).await,
+            TursoJournalMode::Mvcc => {
+                self.execute_concurrent(std::slice::from_ref(&sql.to_string()))
+                    .await
+            }
+        }
+    }
+
+    /// Run `statements` as one MVCC `BEGIN CONCURRENT … COMMIT` transaction,
+    /// retrying the whole transaction on a write-write / busy conflict (bounded).
+    /// Only used when `journal_mode == Mvcc`.
+    async fn execute_concurrent(&self, statements: &[String]) -> Result<()> {
+        const MAX_ATTEMPTS: usize = 8;
+        let body = statements
+            .iter()
+            .map(|s| s.trim().trim_end_matches(';'))
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(";\n");
+        if body.is_empty() {
+            return Ok(());
+        }
+        let txn = format!("BEGIN CONCURRENT;\n{body};\nCOMMIT;");
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.execute(&txn).await {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    // A conflict aborts the transaction; clear any residual state
+                    // (best-effort) before retrying or surfacing the error.
+                    let _ = self.execute("ROLLBACK").await;
+                    if is_mvcc_conflict(&err) && attempt < MAX_ATTEMPTS {
+                        continue;
+                    }
+                    return Err(err);
+                }
+            }
+        }
+    }
+
     async fn query_nodes(&self, sql: &str) -> Result<Vec<Node>> {
         let mut rows =
             self.conn.query(sql, ()).await.map_err(|err| {
@@ -248,7 +294,7 @@ impl GraphStore for TursoGraphStore {
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
-        self.execute(&upsert_nodes_sql(
+        self.execute_data(&upsert_nodes_sql(
             &self.nodes_table(),
             std::slice::from_ref(node),
         )?)
@@ -257,7 +303,7 @@ impl GraphStore for TursoGraphStore {
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
-        self.execute(&upsert_edges_sql(
+        self.execute_data(&upsert_edges_sql(
             &self.edges_table(),
             std::slice::from_ref(edge),
         )?)
@@ -269,12 +315,12 @@ impl GraphStore for TursoGraphStore {
         let batch_size = self.config.batch_size.max(1);
         let mut report = LoadReport::default();
         for chunk in graph.nodes.chunks(batch_size) {
-            self.execute(&upsert_nodes_sql(&self.nodes_table(), chunk)?)
+            self.execute_data(&upsert_nodes_sql(&self.nodes_table(), chunk)?)
                 .await?;
             report.nodes += chunk.len();
         }
         for chunk in graph.edges.chunks(batch_size) {
-            self.execute(&upsert_edges_sql(&self.edges_table(), chunk)?)
+            self.execute_data(&upsert_edges_sql(&self.edges_table(), chunk)?)
                 .await?;
             report.edges += chunk.len();
         }
@@ -334,12 +380,12 @@ impl GraphMutationStore for TursoGraphStore {
     }
 
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
-        self.execute(&delete_node_sql(&self.nodes_table(), id))
+        self.execute_data(&delete_node_sql(&self.nodes_table(), id))
             .await
     }
 
     async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
-        self.execute(&delete_edge_sql(&self.edges_table(), from, label, to))
+        self.execute_data(&delete_edge_sql(&self.edges_table(), from, label, to))
             .await
     }
 
@@ -347,12 +393,25 @@ impl GraphMutationStore for TursoGraphStore {
         if mutations.is_empty() {
             return Ok(());
         }
-        self.execute(&apply_mutations_sql(
-            &self.nodes_table(),
-            &self.edges_table(),
-            mutations,
-        )?)
-        .await
+        match self.config.journal_mode {
+            TursoJournalMode::Wal => {
+                self.execute(&apply_mutations_sql(
+                    &self.nodes_table(),
+                    &self.edges_table(),
+                    mutations,
+                )?)
+                .await
+            }
+            TursoJournalMode::Mvcc => {
+                let nodes = self.nodes_table();
+                let edges = self.edges_table();
+                let statements = mutations
+                    .iter()
+                    .map(|m| grust_sql_core::mutation_sql(&TursoDialect, &nodes, &edges, m, sql_str))
+                    .collect::<Result<Vec<_>>>()?;
+                self.execute_concurrent(&statements).await
+            }
+        }
     }
 }
 
@@ -646,6 +705,14 @@ fn row_optional_text(row: &turso::Row, idx: usize, name: &str) -> Result<Option<
             "Turso {name} column had unexpected value {other:?}"
         ))),
     }
+}
+
+/// Whether a backend error is a retryable MVCC conflict (write-write conflict,
+/// busy / busy-snapshot, or a generic conflict) — the engine aborts the
+/// `BEGIN CONCURRENT` transaction in these cases and the write can be retried.
+fn is_mvcc_conflict(err: &GrustError) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("conflict") || msg.contains("busy") || msg.contains("snapshot")
 }
 
 fn quote_ident(value: &str) -> String {
