@@ -173,7 +173,7 @@ via validate_*).
 ## Unit 10a — write-path rewiring (BLOCKED; golden harness done)
 
 **Done:** a strict-write golden-snapshot harness (`tests/write_golden.rs` +
-`tests/gql/write_golden.json`) pins the planner's plan/rejection output for a
+`tests/golden/write_golden.json`) pins the planner's plan/rejection output for a
 20-statement corpus.
 
 **Blocked (decision needed):** routing the legacy `cypher_*` write entrypoints

@@ -149,6 +149,19 @@ fn path_variable_and_functions() {
 }
 
 #[test]
+fn numeric_scalar_functions() {
+    // Unary f64 math functions (null-propagating, numeric operands).
+    assert_eq!(col0("UNWIND [16.0] AS x RETURN sqrt(x)"), vec![Value::Float(4.0)]);
+    assert_eq!(col0("UNWIND [0.0] AS x RETURN cos(x)"), vec![Value::Float(1.0)]);
+    assert_eq!(col0("UNWIND [0.0] AS x RETURN sin(x)"), vec![Value::Float(0.0)]);
+    assert_eq!(col0("UNWIND [1.0] AS x RETURN ln(x)"), vec![Value::Float(0.0)]);
+    assert_eq!(col0("UNWIND [0.0] AS x RETURN exp(x)"), vec![Value::Float(1.0)]);
+    // Integer operand widens; null propagates.
+    assert_eq!(col0("UNWIND [9] AS x RETURN sqrt(x)"), vec![Value::Float(3.0)]);
+    assert_eq!(col0("UNWIND [null] AS x RETURN sqrt(x)"), vec![Value::Null]);
+}
+
+#[test]
 fn datetime_ordering() {
     // Temporal values order chronologically (RFC 3339 form), not as equal.
     let nodes = vec![

@@ -3,7 +3,7 @@
 //! Before the legacy `cypher_*` write entrypoints are rewired onto the new
 //! lexer/parser/semantics pipeline, this pins the *current* behavior: for a
 //! corpus of write statements, the serialized `GraphMutationPlan` (or the error)
-//! is captured in `tests/gql/write_golden.json`. The compare test then guards
+//! is captured in `tests/golden/write_golden.json`. The compare test then guards
 //! that the planner's output stays byte-identical across the rewiring — any
 //! drift fails here and the rewiring must be aborted/fixed.
 //!
@@ -58,7 +58,7 @@ fn current() -> serde_json::Value {
     serde_json::Value::Array(CORPUS.iter().map(|c| snapshot(c)).collect())
 }
 
-const GOLDEN_PATH: &str = "tests/gql/write_golden.json";
+const GOLDEN_PATH: &str = "tests/golden/write_golden.json";
 
 #[test]
 fn write_planner_matches_golden() {

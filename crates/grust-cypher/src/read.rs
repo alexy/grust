@@ -1581,6 +1581,13 @@ fn eval_scalar_function(
             Value::Float(f) => Ok(Value::Float(f.round())),
             other => Err(gql_type(format!("round() expects a number, got {other:?}"))),
         },
+        "sqrt" => unary_float_fn(value, "sqrt", f64::sqrt),
+        "exp" => unary_float_fn(value, "exp", f64::exp),
+        "log" | "ln" => unary_float_fn(value, &lower, f64::ln),
+        "log10" => unary_float_fn(value, "log10", f64::log10),
+        "sin" => unary_float_fn(value, "sin", f64::sin),
+        "cos" => unary_float_fn(value, "cos", f64::cos),
+        "tan" => unary_float_fn(value, "tan", f64::tan),
         "size" => restricted_size_value(value),
         // `length` is the path hop count for a path value; otherwise falls back
         // to collection size.
@@ -1600,6 +1607,16 @@ fn eval_scalar_function(
             GqlConformanceProfile::PortableGql,
             format!("scalar function `{name}` is not supported by the read reference executor yet"),
         )),
+    }
+}
+
+/// Apply a unary `f64 -> f64` math function (`sqrt`, `ln`, `sin`, …) to a
+/// numeric value, returning a `Float`. Non-numeric operands are a type error;
+/// `Null` is handled by the caller (null-propagating).
+fn unary_float_fn(value: Value, name: &str, f: fn(f64) -> f64) -> Result<Value> {
+    match numeric(&value) {
+        Some(x) => Ok(Value::Float(f(x))),
+        None => Err(gql_type(format!("{name}() expects a number, got {value:?}"))),
     }
 }
 
@@ -2374,7 +2391,7 @@ mod tests {
     fn unknown_scalar_function_is_feature_tagged() {
         let err = run_read_query(
             &graph(),
-            "MATCH (n:Person) RETURN sqrt(n.age)",
+            "MATCH (n:Person) RETURN notafunction(n.age)",
             &CypherParameters::new(),
         )
         .unwrap_err();
