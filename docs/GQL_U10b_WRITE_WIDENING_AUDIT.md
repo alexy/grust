@@ -51,22 +51,46 @@ These are genuine accept-set expansions. Each changes the public write surface
 and most introduce new plan shapes, so they are **product decisions** for the
 human (the Unit 16 review), not safe to relax unsupervised:
 
-| # | Rejection | Proposed widening | Risk / decision |
+| # | Rejection | Proposed widening | Status |
 |---|---|---|---|
-| W1 | `MATCH {kw} currently supports one relationship pattern only` | allow multiple relationship segments / comma-separated patterns in a single write | New cardinality/plan composition; **medium-high** risk; needs a semantics call on multi-segment write fan-out. |
-| W2 | `edge mutation requires outgoing '->' direction` | accept incoming `<-[:T]-` by normalizing to the reverse `->` | Additive, low risk, but expands accept-set (decision: do we want `<-` writes? Plan is identical after endpoint swap). |
-| W3 | `MATCH [edge] SET numeric expressions cannot reference another variable` | allow `SET a.x = b.y + 1` (cross-variable numeric) | Cross-variable row semantics; **medium** risk; was deliberately rejected (`cypher_unsupported_cardinality`). |
-| W4 | explicit-id requirement for `CREATE` | allow generated ids by default (already supported via `CypherNodeIdPolicy::GenerateForCreate`, off by default) | Policy default flip — product decision, not code work. |
+| **W1** | `MATCH {kw} currently supports one relationship pattern only` | allow multiple comma-separated relationship patterns in one write | ✅ **DONE** — `parse_match_edge_upsert` splits on top-level commas + `plan_match_edge_segment`; single pattern byte-identical. |
+| **W2** | `edge mutation requires outgoing '->' direction` | accept incoming `<-[:T]-` by normalizing to the reverse `->` | ✅ **DONE** — `is_cypher_edge_pattern` + `parse_directed_edge_pattern` (endpoint swap), incoming == outgoing plan. |
+| **W3** | `MATCH [edge] SET numeric expressions cannot reference another variable` | allow `SET a.x = b.y + 1` (cross-variable numeric) | ⛔ **NOT a widening — needs a new feature + design decision** (see below). |
+| **W4** | explicit-id requirement for `CREATE` | generated ids by default | ⛔ **Conflicts with hard guardrails** (see below). |
 
-## Recommendation
+## W3 — deferred: requires a new correlated-update op (design fork)
 
-U10b's core objective (multi-row pattern writes) is **already satisfied** by the
-legacy planner; the new Unit 10a accept-set gate now fronts it with the
-standards-conformant parser. The remaining items (W1–W4) are accept-set
-expansions that each warrant an explicit keep/relax call. W2 is the only
-clearly-safe, plan-preserving candidate; W1/W3 carry plan-shape and semantics
-risk and should be decided at the Unit 16 review.
+`SET a.x = b.y + 1` reads a property from a *different* bound node (`b`) than the
+one being written (`a`). The current plan op `GraphMutationPlanOp::UpdateMatchingNodeProperty`
+(and `evaluate_numeric_update`) read the source value from the **same** matched
+node + a plan-time literal operand — there is no representation for "read key from
+another variable's node". Relaxing W3 therefore requires, end to end:
 
-**Status:** audit complete; no speculative relaxations applied (guardrail: do not
-drift plans / expand the public accept-set without an explicit decision). Awaiting
-human direction on W1–W4 (fold into the Unit 16 review).
+1. a **new plan op** that carries the source *variable* (correlated update);
+2. **executor support** in every Cypher-executing backend (Memory reference, Sail
+   SQL, Turso) to resolve the source node and read its property at execution time;
+3. a **correlation-semantics decision**: path-correlated only
+   (`MATCH (a)-[r]->(b) SET a.x = b.y`, unambiguous) vs. also cartesian
+   (`MATCH (a),(b) SET a.x = b.y`, a full cross-product — dangerous).
+
+This is a feature with cross-backend impact and a real semantics question, not a
+parser/planner accept-set tweak. **Surfaced for a human decision** (scope to
+path-correlated + new op + Memory executor first, defer SQL pushdown? or keep
+rejected?).
+
+## W4 — kept rejected: conflicts with the hard guardrails
+
+Flipping `CypherNodeIdPolicy::default()` to `GenerateForCreate` would (a) break
+the strict-write tests across 7 files that assert missing-id → `CypherUnresolvedIdentity`
+(violating the 327-floor "never break to pass" guardrail), and (b) inject
+`uuid::Uuid::new_v4()` non-determinism into the **default** path, breaking the
+`write_golden.json` byte-identity net. The capability already exists opt-in
+(`CypherNodeIdPolicy::GenerateForCreate`). **Recommend keep explicit-id as the
+default** (generated ids stay opt-in) unless the strict-write identity contract is
+deliberately changed (which means migrating those tests + accepting non-determinism).
+
+## Status
+
+W1 + W2 implemented (plans byte-identical where they overlap; golden green).
+W3 + W4 surfaced as decisions (not safe to apply unsupervised). U10b's core
+objective (multi-row pattern writes) was already satisfied by the legacy planner.
