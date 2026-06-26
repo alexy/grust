@@ -141,6 +141,21 @@ out of facade); cocoindex = sync target. A consistency test pins these facts.
 
 ---
 
+## Unit T — type system (partial; DECISION NEEDED for duration/decimal)
+
+**Temporal (done):** `Value::DateTime` now orders chronologically (RFC 3339
+lexicographic; chronological for a consistent offset) in both `read::value_order`
+and `projection::compare_return_values`. Previously two datetimes compared equal.
+
+**Duration / decimal (parked — fork for the user):** making these first-class
+requires either (a) new `grust_core::Value` variants — workspace-wide, touches all
+8 backends' `Value` matches + serialization, conflicts with additive discipline →
+NOT done unsupervised; or (b) a cypher-layer typed representation (Json/String-
+tagged) — additive but not first-class. Must be resolved before Unit 16's
+full-39075 completeness claim. The loop continues on unblocked units meanwhile.
+
+---
+
 ### Implementation history (chronological)
 
 `src/pushdown.rs` is the backend-neutral lowering. `plan_node_read(cypher,
