@@ -998,6 +998,7 @@ let store = TursoGraphStore::connect(TursoConfig {
     path: "data/grust.db".to_string(),
     table_prefix: "grust".to_string(),
     batch_size: 500,
+    journal_mode: TursoJournalMode::Wal,
 })
 .await?;
 # Ok(())
@@ -1016,6 +1017,12 @@ grust_edges(id text, from_id text not null, to_id text not null,
 Reads and traversal use ordinary SQL over the local Turso connection. Schema
 application creates label-specific SQL views and expression indexes using
 `json_extract`. Mutation batches are wrapped in a Turso transaction.
+
+The `journal_mode` option selects the concurrency model. The default `Wal` is
+Turso's single-writer write-ahead log. Selecting `Mvcc` enables Turso's
+multi-version concurrency control (`PRAGMA journal_mode = mvcc`, a database-header
+mode applied to a fresh database); data writes then run inside `BEGIN CONCURRENT`
+transactions with bounded conflict retry, so concurrent writers make progress.
 
 With the `turso-sync` facade feature, callers can construct a synced store
 from a local path, remote URL, and optional auth token. The `GraphStore` API
@@ -1463,7 +1470,57 @@ Docker Compose where a service is available. The repository-level
 `docs/INTEGRATION.md` guide covers profiles, modes, Docker image pins,
 source-checkout configuration, and CI strategy.
 
-# 9. Example: A Conference Graph
+# 9. Cypher and GQL
+
+The property graph model so far is a Rust API: builders, traversals, and the
+store contract. `grust-cypher` adds a query and mutation *language* on top of it
+— a backend-neutral GQL/Cypher layer — without changing that core.
+
+The language is built as a real pipeline, not ad-hoc string handling: a
+span-bearing lexer, a recursive-descent parser into a typed AST, and a semantic
+analysis pass that resolves bindings and kinds. A conformance spine — a
+`GqlFeature` taxonomy with structured errors — records exactly which constructs
+are supported, planned, or out of profile, so the surface is auditable rather
+than aspirational.
+
+## A portable read core
+
+Reads run through a Memory *reference executor* over a graph snapshot: `MATCH`
+and `OPTIONAL MATCH` (with null padding), multi-hop and variable-length paths,
+a three-valued `WHERE` expression engine, and `RETURN` with aliases, `DISTINCT`,
+`ORDER BY`/`SKIP`/`LIMIT`, aggregates with implicit `GROUP BY`, `WITH`, `UNWIND`,
+and `UNION`. The reference is the definition of correct results.
+
+Backends that can materialize SQL push the bounded read subset down: a query's
+`MATCH`/`WHERE` filter lowers into backend SQL (Spark and SQLite dialects), while
+the `RETURN` projection still runs through the shared reference. Pushed results
+are therefore identical to the reference *by construction*, and an embedded-SQLite
+differential oracle checks reference-vs-pushdown row equality on every change.
+
+## Values, procedures, transactions, writes
+
+The value model gains first-class lossless `Decimal` (SQL `DECIMAL`-style) and
+ISO 8601 `Duration` types alongside the temporal `DateTime`, with parsing,
+ordering, and checked arithmetic wired through every backend. Read-only catalog
+procedures (`CALL db.labels()`, `db.relationshipTypes()`, `db.propertyKeys()`)
+expose schema metadata, and a `START TRANSACTION`/`BEGIN`/`COMMIT`/`ROLLBACK`
+command surface pairs with honest per-backend atomicity capability reporting.
+
+The writable subset routes acceptance through the same standards-conformant
+parser, keeping the mutation plans byte-identical to the established write planner
+while narrowing the public surface to standard Cypher. Pattern-driven writes
+widen to multiple relationship patterns per statement, incoming `<-[:T]-` edges,
+and cross-variable correlated `SET`.
+
+## A backed profile
+
+What the layer claims to support is stated precisely in
+`docs/GQL_PROFILE_STATEMENT.md`: the realized profile is the set of `Supported`
+features, and every not-yet-supported feature is enumerated with a rationale, so
+the candidate full-39075 claim is never unbacked. A test pins that scoped-out set
+to the feature manifest, so the documentation and the code cannot drift apart.
+
+# 10. Example: A Conference Graph
 
 Here is a complete graph-building example:
 
