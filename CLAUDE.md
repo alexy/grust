@@ -58,12 +58,11 @@ We are executing the GQL completion goal. **Everything below is on branch
 
 ### NEXT — decision point (pick a track when resuming)
 The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
-1. **Finish Unit 15 pushdown tails** — `UNION`/`UNION ALL` and `OPTIONAL MATCH`
-   (single optional segment) are **done**. Remaining: multi-pattern `MATCH` (comma
-   patterns → cross/natural join); `WITH` horizon (sub-plan composition);
-   chained/multi-segment `OPTIONAL`; `/`·`%`·`^` arithmetic (dialect-divergent);
-   named-rel-edge-list var-length; path variables. See checkpoint Unit 15 —
-   these are lower-value / need a general pattern-join planner.
+1. **Unit 15 pushdown tails** — `UNION`/`UNION ALL`, `OPTIONAL MATCH`,
+   multi-pattern `MATCH`, and the `WITH` horizon are all **done**. Remaining are
+   niche/low-value: chained/multi-segment `OPTIONAL`; post-`WITH` `MATCH`
+   (correlated); `/`·`%`·`^` arithmetic (dialect-divergent); named-rel-edge-list
+   var-length; path variables. See checkpoint Unit 15.
 2. **Write-path rewiring (Unit 10)** — make the legacy `cypher_*` write
    entrypoints run through the new pipeline. **Review-flagged as highest-risk**
    (behavior could drift across the 327 strict-write tests); GQL_GOAL.md mandates
@@ -79,7 +78,7 @@ The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
    "Unreleased" into a dated entry. `AGENTS.md`'s auto-publish rule is
    **suspended** for this goal. CHANGELOG "Unreleased" notes are fine.
 2. **Test floor:** `cargo test -p grust-cypher --lib` must stay green and the
-   count must only grow (509 right now; 327 of those are the original strict-write
+   count must only grow (511 right now; 327 of those are the original strict-write
    suite — never delete/`#[ignore]` to pass). 
 3. **Additive discipline:** the legacy strict-write planner and the stable
    Memory/Sail behavior are not to be changed destructively. New work lands as
@@ -91,11 +90,11 @@ The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
 ## VERIFY (the gate — run between steps)
 ```sh
 cd ~/src/grust
-cargo test  -p grust-cypher                         # 509 lib + 3 + 11 integration, 0 failed
+cargo test  -p grust-cypher                         # 511 lib + 3 + 11 integration, 0 failed
 cargo build -p grust-cypher --lib 2>&1 | grep -c warning:   # expect 0
 cargo check -p grust-graph --features cypher,memory         # facade
 cargo check -p grust-sail                                   # surface-touching units
-cargo test  -p grust-turso                                  # 7 lib + 12 pushdown oracle (Unit 15)
+cargo test  -p grust-turso                                  # 7 lib + 14 pushdown oracle (Unit 15)
 git  diff --check                                           # whitespace clean
 ```
 No external services needed for the cypher work (Memory reference + unit tests).
