@@ -1593,6 +1593,47 @@ mod tests {
         assert_eq!(support_counts().total(), GqlFeature::ALL.len());
     }
 
+    /// Unit 16 hardening: the `Full39075` candidate profile is exactly the set of
+    /// `Supported` features. Everything not yet supported MUST be enumerated here
+    /// (and given a rationale in `docs/GQL_PROFILE_STATEMENT.md`), so the "full
+    /// 39075" claim is never silently unbacked. Flipping a feature's status
+    /// requires updating both this list and the profile statement.
+    #[test]
+    fn full_profile_claim_is_backed() {
+        let scoped_out: std::collections::BTreeSet<&str> = feature_manifest()
+            .iter()
+            .filter(|d| d.status != GqlFeatureStatus::Supported)
+            .map(|d| d.id)
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = [
+            // Future — deferred to a later full-39075 pass (rationale in the doc).
+            "shortest-path",
+            "subquery",
+            "path-values",
+            "graph-values",
+            "graph-type-definition",
+            "catalog-metadata",
+            "named-graph-selection",
+            "table-valued-function",
+            // Planned — near-term, partially scaffolded.
+            "index-definition",
+            "session-control",
+            "native-cypher-passthrough",
+            // Rejected — intentional conformance guards, not gaps.
+            "reject-create-node-without-explicit-identity",
+            "reject-merge-without-explicit-identity",
+            "reject-unresolved-edge-endpoint-write",
+            "reject-non-literal-assignment-value",
+            "reject-trailing-node-creation-after-row-producing-edge",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            scoped_out, expected,
+            "Full39075 scoped-out set drifted; update docs/GQL_PROFILE_STATEMENT.md to match the manifest"
+        );
+    }
+
     #[test]
     fn feature_serde_uses_stable_id() {
         let json = serde_json::to_string(&GqlFeature::CreateNodeExplicitId).unwrap();

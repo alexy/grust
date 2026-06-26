@@ -265,6 +265,22 @@ This blocks Unit 10b and Unit 13 (which depend on it) and Unit 16's completeness
 
 ---
 
+## Unit 16 — full-profile candidate hardening (DONE)
+
+Terminal milestone. `docs/GQL_PROFILE_STATEMENT.md` is the precise, backed profile
+statement: realized profile = the 58 `Supported` features; the candidate
+`Full39075` claim is backed feature-by-feature against the `GqlFeature` manifest,
+with all 16 not-yet-supported items (8 future + 3 planned) enumerated + rationaled
+and 5 intentional rejections documented as conformance guards. The
+`full_profile_claim_is_backed` test pins the scoped-out set to the manifest so the
+doc cannot silently drift. Final state: cypher 525 lib / 3 / 17, core 46, memory
+21, turso 7+14, 0 warnings, golden byte-identical, all pushed.
+
+The W1/W2/W3 widenings (below) and the 10a cutover all landed under decision B +
+the W-series decisions; W4 kept explicit-id default.
+
+---
+
 ## Unit 10b — pattern-driven write widening (audit done; widenings = review decisions)
 
 Full audit in `docs/GQL_U10b_WRITE_WIDENING_AUDIT.md`. Key finding: U10b's core

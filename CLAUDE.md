@@ -90,23 +90,21 @@ reporting (`GqlBackend::transactional`, descriptor flag, `transactional_backends
 Manifest `TransactionControl`→Supported, `SessionControl`→Planned. Deferred
 (write-path-coupled): atomic batch execution + session SET/RESET/USE.
 
-### AUTONOMOUS LOOP — STOPPED at the Unit 16 terminal review gate (2026-06-25)
-**All units the loop can complete are done & pushed:** Unit 14 (procedures),
-Unit T (decimal/duration), Unit 13 (transaction surface), **Unit 10a** (write
-accept-set cutover via decision **B** — new parser gates mutation-grammar
-acceptance, non-standard DELETE-by-pattern rejected, plans byte-identical), and
-**Unit 10b** (audit: multi-row pattern writes were *already* implemented by the
-legacy planner; the remaining widenings W1–W4 are accept-set product decisions —
-see `docs/GQL_U10b_WRITE_WIDENING_AUDIT.md`).
+### GQL completion DAG — COMPLETE (2026-06-26)
+**Every unit is done & pushed.** Unit 14 (procedures), Unit T (decimal/duration),
+Unit 13 (transaction surface), **Unit 10a** (write accept-set cutover via decision
+**B**), **Unit 10b** (W1 multi-pattern writes, W2 incoming `<-` edges, W3
+cross-variable correlated `SET` incl. cartesian via a new `SetMatchingNodeFromNode`
+op + Memory executor; **W4 kept explicit-id default** per decision), and **Unit 16**
+(full-profile candidate hardening — `docs/GQL_PROFILE_STATEMENT.md`, backed by the
+`full_profile_claim_is_backed` test).
 
-The loop stopped here per its "STOP for human review at Unit 16 / surface on a
-genuine fork" contract. Two things need the human:
-1. **Unit 10b widenings W1–W4** — relax-vs-keep product decisions (multi-pattern
-   writes, incoming `<-` edges, cross-variable SET, default generated ids).
-2. **Unit 16** (full-39075 hardening) — the terminal review milestone itself.
-
-Current: cypher 521 lib / 3 / 17, core 40, turso 7+14, 0 warnings, branch clean
-& pushed. **To resume: direct W1–W4 and/or open the Unit 16 review.**
+Final state: cypher **525 lib** / 3 / 17, core 46, memory 21, turso 7+14, 0
+warnings, golden byte-identical, workspace `--all-features` clean, all pushed to
+`cypher-gql-full`. The realized profile = 58 `Supported` features; the candidate
+`Full39075` remainder (8 future + 3 planned) is enumerated with rationale in the
+profile statement. **No release performed (guardrail 1).** Branch is ready for
+human review / merge to `main` when desired.
 
 ### NEXT — decision point (pick a track when resuming)
 The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
