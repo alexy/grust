@@ -1660,3 +1660,69 @@ fn undirected_edge_type_accepts_reversed_endpoints_and_unordered_uniqueness() {
         .validate_graph(&builder.build())
         .expect("opposite directed edges are distinct");
 }
+
+#[test]
+fn decimal_parse_normalize_and_display() {
+    assert_eq!(Decimal::parse("1.50").unwrap(), Decimal::parse("1.5").unwrap());
+    assert_eq!(Decimal::parse("3.14").unwrap().to_canonical_string(), "3.14");
+    assert_eq!(Decimal::parse("-0.001").unwrap().to_canonical_string(), "-0.001");
+    assert_eq!(Decimal::parse("42").unwrap().to_canonical_string(), "42");
+    assert_eq!(Decimal::parse("0.0").unwrap().to_canonical_string(), "0");
+    assert_eq!(Decimal::parse("+5").unwrap().to_canonical_string(), "5");
+    assert!(Decimal::parse("").is_err());
+    assert!(Decimal::parse("1.2.3").is_err());
+    assert!(Decimal::parse("abc").is_err());
+}
+
+#[test]
+fn decimal_ordering_and_arithmetic() {
+    let a = Decimal::parse("1.5").unwrap();
+    let b = Decimal::parse("1.25").unwrap();
+    assert!(a > b);
+    assert_eq!(a.checked_add(&b).unwrap().to_canonical_string(), "2.75");
+    assert_eq!(a.checked_sub(&b).unwrap().to_canonical_string(), "0.25");
+    assert_eq!(
+        Decimal::parse("0.1").unwrap().checked_mul(&Decimal::parse("0.2").unwrap()).unwrap().to_canonical_string(),
+        "0.02"
+    );
+    // lossless where f64 would drift
+    assert_eq!(
+        Decimal::parse("0.1").unwrap().checked_add(&Decimal::parse("0.2").unwrap()).unwrap().to_canonical_string(),
+        "0.3"
+    );
+}
+
+#[test]
+fn decimal_serde_roundtrip() {
+    let d = Decimal::parse("123.456").unwrap();
+    let json = serde_json::to_string(&d).unwrap();
+    assert_eq!(json, "\"123.456\"");
+    assert_eq!(serde_json::from_str::<Decimal>(&json).unwrap(), d);
+}
+
+#[test]
+fn duration_parse_and_display() {
+    let d = Duration::parse("P1Y2M10DT2H30M").unwrap();
+    assert_eq!(d.months, 14);
+    assert_eq!(d.days, 10);
+    assert_eq!(d.seconds, 2 * 3600 + 30 * 60);
+    assert_eq!(Duration::parse("PT0S").unwrap().to_iso_string(), "PT0S");
+    assert_eq!(Duration::parse("P1W").unwrap().days, 7);
+    assert_eq!(Duration::parse("PT1.5S").unwrap().nanos, 500_000_000);
+    assert_eq!(Duration::parse("PT1.5S").unwrap().to_iso_string(), "PT1.5S");
+    assert!(Duration::parse("1Y").is_err());
+    assert!(Duration::parse("P").is_err());
+}
+
+#[test]
+fn duration_arithmetic_and_serde() {
+    let a = Duration::parse("P1MT30M").unwrap();
+    let b = Duration::parse("P2DT30M").unwrap();
+    let sum = a.checked_add(&b).unwrap();
+    assert_eq!(sum.months, 1);
+    assert_eq!(sum.days, 2);
+    assert_eq!(sum.seconds, 3600);
+    assert_eq!(a.negated().months, -1);
+    let json = serde_json::to_string(&a).unwrap();
+    assert_eq!(serde_json::from_str::<Duration>(&json).unwrap(), a);
+}

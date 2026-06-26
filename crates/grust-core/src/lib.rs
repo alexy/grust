@@ -146,6 +146,359 @@ impl<'de> Deserialize<'de> for RfcDate {
     }
 }
 
+/// Fixed-point decimal: the value is `mantissa × 10^(−scale)`. This mirrors SQL
+/// `DECIMAL(38, scale)` (Postgres/Spark cap precision at 38 digits, which is what
+/// an `i128` mantissa holds), and is lossless within that range — unlike `Float`.
+///
+/// Values are normalized on construction: trailing fractional zeros are dropped
+/// (`1.50` and `1.5` are equal), and `0` always has scale `0`. Equality and
+/// ordering are therefore by numeric value.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct Decimal {
+    mantissa: i128,
+    scale: u32,
+}
+
+impl Decimal {
+    /// Parses a decimal numeral such as `3.14`, `-0.001`, or `42`. Rejects empty
+    /// input, malformed numerals, and values exceeding 38 significant digits.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+        let raw = value.as_ref().trim();
+        let bad = || GrustError::Schema(format!("'{raw}' is not a decimal numeral"));
+        if raw.is_empty() {
+            return Err(bad());
+        }
+        let (neg, body) = match raw.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, raw.strip_prefix('+').unwrap_or(raw)),
+        };
+        let (int_part, frac_part) = match body.split_once('.') {
+            Some((i, f)) => (i, f),
+            None => (body, ""),
+        };
+        if int_part.is_empty() && frac_part.is_empty() {
+            return Err(bad());
+        }
+        if !int_part.bytes().all(|b| b.is_ascii_digit())
+            || !frac_part.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(bad());
+        }
+        let digits: String = int_part.chars().chain(frac_part.chars()).collect();
+        let mantissa: i128 = if digits.is_empty() {
+            0
+        } else {
+            digits.parse().map_err(|_| {
+                GrustError::Schema(format!("decimal '{raw}' exceeds 38 significant digits"))
+            })?
+        };
+        let mantissa = if neg { -mantissa } else { mantissa };
+        Ok(Self::normalize(mantissa, frac_part.len() as u32))
+    }
+
+    /// Builds a decimal from a raw mantissa and scale (`mantissa × 10^−scale`).
+    pub fn from_parts(mantissa: i128, scale: u32) -> Self {
+        Self::normalize(mantissa, scale)
+    }
+
+    fn normalize(mut mantissa: i128, mut scale: u32) -> Self {
+        while scale > 0 && mantissa % 10 == 0 {
+            mantissa /= 10;
+            scale -= 1;
+        }
+        if mantissa == 0 {
+            scale = 0;
+        }
+        Self { mantissa, scale }
+    }
+
+    pub fn mantissa(&self) -> i128 {
+        self.mantissa
+    }
+
+    pub fn scale(&self) -> u32 {
+        self.scale
+    }
+
+    /// Canonical string form (no superfluous trailing zeros).
+    pub fn to_canonical_string(&self) -> String {
+        if self.scale == 0 {
+            return self.mantissa.to_string();
+        }
+        let neg = self.mantissa < 0;
+        let digits = self.mantissa.unsigned_abs().to_string();
+        let scale = self.scale as usize;
+        let s = if digits.len() <= scale {
+            format!("0.{:0>width$}", digits, width = scale)
+        } else {
+            let point = digits.len() - scale;
+            format!("{}.{}", &digits[..point], &digits[point..])
+        };
+        if neg {
+            format!("-{s}")
+        } else {
+            s
+        }
+    }
+
+    /// Aligns two decimals to a common scale, returning their scaled mantissas.
+    /// Returns `None` on `i128` overflow (operands beyond the 38-digit range).
+    fn aligned(&self, other: &Self) -> Option<(i128, i128, u32)> {
+        let scale = self.scale.max(other.scale);
+        let lift = |m: i128, s: u32| 10i128.checked_pow(scale - s).and_then(|f| m.checked_mul(f));
+        Some((lift(self.mantissa, self.scale)?, lift(other.mantissa, other.scale)?, scale))
+    }
+
+    pub fn checked_add(&self, other: &Self) -> Option<Self> {
+        let (a, b, scale) = self.aligned(other)?;
+        Some(Self::normalize(a.checked_add(b)?, scale))
+    }
+
+    pub fn checked_sub(&self, other: &Self) -> Option<Self> {
+        let (a, b, scale) = self.aligned(other)?;
+        Some(Self::normalize(a.checked_sub(b)?, scale))
+    }
+
+    pub fn checked_mul(&self, other: &Self) -> Option<Self> {
+        let mantissa = self.mantissa.checked_mul(other.mantissa)?;
+        Some(Self::normalize(mantissa, self.scale + other.scale))
+    }
+
+    /// Lossy conversion to `f64` (for coercion into float arithmetic).
+    pub fn to_f64(&self) -> f64 {
+        self.mantissa as f64 / 10f64.powi(self.scale as i32)
+    }
+}
+
+impl Ord for Decimal {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.aligned(other) {
+            Some((a, b, _)) => a.cmp(&b),
+            // Overflow on alignment: fall back to comparing the f64 magnitudes,
+            // which is monotone enough to separate out-of-range operands.
+            None => self
+                .to_f64()
+                .partial_cmp(&other.to_f64())
+                .unwrap_or(std::cmp::Ordering::Equal),
+        }
+    }
+}
+
+impl PartialOrd for Decimal {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl fmt::Display for Decimal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_canonical_string())
+    }
+}
+
+impl Serialize for Decimal {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_canonical_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Decimal {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
+    }
+}
+
+/// Calendar/clock duration with month, day, second, and nanosecond components —
+/// the model GQL/ISO 8601 uses (months and days are not fixed-length, so they are
+/// kept distinct from seconds rather than collapsed). Construct from an ISO 8601
+/// duration string such as `P1Y2M10DT2H30M` via [`Duration::parse`].
+///
+/// Ordering is structural (months, then days, then seconds, then nanos): a
+/// deterministic total order for sorting, not a calendar-normalized comparison.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct Duration {
+    pub months: i64,
+    pub days: i64,
+    pub seconds: i64,
+    pub nanos: i32,
+}
+
+impl Duration {
+    /// Parses an ISO 8601 duration: `P[nY][nM][nW][nD][T[nH][nM][nS]]`. Years map
+    /// to 12 months and weeks to 7 days; the seconds field may be fractional
+    /// (down to nanosecond precision). At least one component is required.
+    pub fn parse(value: impl AsRef<str>) -> Result<Self> {
+        let raw = value.as_ref().trim();
+        let bad = || GrustError::Schema(format!("'{raw}' is not an ISO 8601 duration"));
+        let body = raw.strip_prefix('P').ok_or_else(bad)?;
+        let (date_part, time_part) = match body.split_once('T') {
+            Some((d, t)) => (d, Some(t)),
+            None => (body, None),
+        };
+        let mut dur = Duration::default();
+        let mut any = false;
+        // Date components: Y, M, W, D (integer only).
+        let mut num = String::new();
+        for ch in date_part.chars() {
+            if ch.is_ascii_digit() || ch == '-' {
+                num.push(ch);
+            } else {
+                let n: i64 = num.parse().map_err(|_| bad())?;
+                num.clear();
+                any = true;
+                match ch {
+                    'Y' => dur.months += n * 12,
+                    'M' => dur.months += n,
+                    'W' => dur.days += n * 7,
+                    'D' => dur.days += n,
+                    _ => return Err(bad()),
+                }
+            }
+        }
+        if !num.is_empty() {
+            return Err(bad());
+        }
+        // Time components: H, M, S (S may be fractional).
+        if let Some(time_part) = time_part {
+            let mut tok = String::new();
+            for ch in time_part.chars() {
+                if ch.is_ascii_digit() || ch == '-' || ch == '.' {
+                    tok.push(ch);
+                } else {
+                    any = true;
+                    match ch {
+                        'H' => dur.seconds += tok.parse::<i64>().map_err(|_| bad())? * 3600,
+                        'M' => dur.seconds += tok.parse::<i64>().map_err(|_| bad())? * 60,
+                        'S' => {
+                            let (secs, nanos) = parse_fractional_seconds(&tok).ok_or_else(bad)?;
+                            dur.seconds += secs;
+                            dur.nanos += nanos;
+                        }
+                        _ => return Err(bad()),
+                    }
+                    tok.clear();
+                }
+            }
+            if !tok.is_empty() {
+                return Err(bad());
+            }
+        }
+        if !any {
+            return Err(bad());
+        }
+        Ok(dur.carry_nanos())
+    }
+
+    fn carry_nanos(mut self) -> Self {
+        if self.nanos.abs() >= 1_000_000_000 {
+            self.seconds += (self.nanos / 1_000_000_000) as i64;
+            self.nanos %= 1_000_000_000;
+        }
+        self
+    }
+
+    /// Canonical ISO 8601 string (`PT0S` for the zero duration).
+    pub fn to_iso_string(&self) -> String {
+        let mut out = String::from("P");
+        if self.months != 0 {
+            out.push_str(&format!("{}M", self.months));
+        }
+        if self.days != 0 {
+            out.push_str(&format!("{}D", self.days));
+        }
+        if self.seconds != 0 || self.nanos != 0 {
+            out.push('T');
+            if self.nanos != 0 {
+                let frac = format!("{:09}", self.nanos.unsigned_abs());
+                let frac = frac.trim_end_matches('0');
+                out.push_str(&format!("{}.{}S", self.seconds, frac));
+            } else {
+                out.push_str(&format!("{}S", self.seconds));
+            }
+        }
+        if out == "P" {
+            out.push_str("T0S");
+        }
+        out
+    }
+
+    pub fn checked_add(&self, other: &Self) -> Option<Self> {
+        Some(
+            Self {
+                months: self.months.checked_add(other.months)?,
+                days: self.days.checked_add(other.days)?,
+                seconds: self.seconds.checked_add(other.seconds)?,
+                nanos: self.nanos.checked_add(other.nanos)?,
+            }
+            .carry_nanos(),
+        )
+    }
+
+    pub fn negated(&self) -> Self {
+        Self {
+            months: -self.months,
+            days: -self.days,
+            seconds: -self.seconds,
+            nanos: -self.nanos,
+        }
+    }
+}
+
+/// Parses a possibly-fractional seconds token into whole seconds + nanoseconds.
+fn parse_fractional_seconds(tok: &str) -> Option<(i64, i32)> {
+    match tok.split_once('.') {
+        None => Some((tok.parse().ok()?, 0)),
+        Some((whole, frac)) => {
+            if frac.is_empty() || !frac.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            let secs: i64 = if whole.is_empty() || whole == "-" {
+                0
+            } else {
+                whole.parse().ok()?
+            };
+            let frac9: String = frac.chars().chain(std::iter::repeat('0')).take(9).collect();
+            let mut nanos: i32 = frac9.parse().ok()?;
+            if whole.starts_with('-') {
+                nanos = -nanos;
+            }
+            Some((secs, nanos))
+        }
+    }
+}
+
+impl fmt::Display for Duration {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.to_iso_string())
+    }
+}
+
+impl Serialize for Duration {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_iso_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for Duration {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(de::Error::custom)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Value {
@@ -157,6 +510,11 @@ pub enum Value {
     /// An RFC 3339 date-time, e.g. `2026-06-12T09:30:00Z`. Construct with
     /// [`Value::datetime`] to get format validation.
     DateTime(RfcDate),
+    /// A lossless fixed-point decimal (SQL DECIMAL-style). Construct with
+    /// [`Value::decimal`].
+    Decimal(Decimal),
+    /// An ISO 8601 calendar/clock duration. Construct with [`Value::duration`].
+    Duration(Duration),
     StringArray(Vec<String>),
     IntArray(Vec<i64>),
     FloatArray(Vec<f64>),
@@ -169,6 +527,30 @@ impl Value {
     /// `2026-06-12T09:30:00.123+02:00`.
     pub fn datetime(value: impl Into<String>) -> Result<Self> {
         RfcDate::parse(value).map(Self::DateTime)
+    }
+
+    /// Creates a `Value::Decimal`, validating the decimal numeral (e.g. `3.14`).
+    pub fn decimal(value: impl AsRef<str>) -> Result<Self> {
+        Decimal::parse(value).map(Self::Decimal)
+    }
+
+    /// Creates a `Value::Duration` from an ISO 8601 duration (e.g. `P1Y2MT3H`).
+    pub fn duration(value: impl AsRef<str>) -> Result<Self> {
+        Duration::parse(value).map(Self::Duration)
+    }
+
+    pub fn as_decimal(&self) -> Option<&Decimal> {
+        match self {
+            Self::Decimal(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_duration(&self) -> Option<&Duration> {
+        match self {
+            Self::Duration(value) => Some(value),
+            _ => None,
+        }
     }
 
     pub fn as_str(&self) -> Option<&str> {
@@ -216,6 +598,8 @@ impl Value {
             Self::Float(value) => serde_json::Value::from(*value),
             Self::String(value) => serde_json::Value::String(value.clone()),
             Self::DateTime(value) => serde_json::Value::String(value.as_str().to_string()),
+            Self::Decimal(value) => serde_json::Value::String(value.to_canonical_string()),
+            Self::Duration(value) => serde_json::Value::String(value.to_iso_string()),
             Self::StringArray(values) => serde_json::Value::from(values.clone()),
             Self::IntArray(values) => serde_json::Value::from(values.clone()),
             Self::FloatArray(values) => serde_json::Value::from(values.clone()),

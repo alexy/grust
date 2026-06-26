@@ -254,6 +254,8 @@ pub(crate) fn validate_cypher_in_item(value: &Value) -> Result<()> {
         Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::String(_) => Ok(()),
         Value::Null
         | Value::DateTime(_)
+        | Value::Decimal(_)
+        | Value::Duration(_)
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)

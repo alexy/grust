@@ -1445,6 +1445,8 @@ pub(crate) fn compare_return_values(a: &Value, b: &Value) -> std::cmp::Ordering 
         // chronological for a consistent offset (the normalized `Z` form the
         // reference produces). Without this, two datetimes compared equal.
         (Value::DateTime(x), Value::DateTime(y)) => x.as_str().cmp(y.as_str()),
+        (Value::Decimal(x), Value::Decimal(y)) => x.cmp(y),
+        (Value::Duration(x), Value::Duration(y)) => x.cmp(y),
         _ => value_kind_rank(a).cmp(&value_kind_rank(b)),
     }
 }
@@ -1453,11 +1455,13 @@ pub(crate) fn value_kind_rank(value: &Value) -> u8 {
     match value {
         Value::Bool(_) => 0,
         Value::Int(_) | Value::Float(_) => 1,
-        Value::String(_) => 2,
-        Value::DateTime(_) => 3,
-        Value::StringArray(_) | Value::IntArray(_) | Value::FloatArray(_) => 4,
-        Value::Json(_) => 5,
-        Value::Null => 6,
+        Value::Decimal(_) => 2,
+        Value::String(_) => 3,
+        Value::DateTime(_) => 4,
+        Value::Duration(_) => 5,
+        Value::StringArray(_) | Value::IntArray(_) | Value::FloatArray(_) => 6,
+        Value::Json(_) => 7,
+        Value::Null => 8,
     }
 }
 

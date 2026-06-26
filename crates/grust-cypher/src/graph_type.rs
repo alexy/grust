@@ -49,6 +49,8 @@ fn value_kind(value: &Value) -> &'static str {
         Value::Float(_) => "float",
         Value::String(_) => "string",
         Value::DateTime(_) => "datetime",
+        Value::Decimal(_) => "decimal",
+        Value::Duration(_) => "duration",
         Value::StringArray(_) => "string-array",
         Value::IntArray(_) => "int-array",
         Value::FloatArray(_) => "float-array",

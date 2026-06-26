@@ -2440,6 +2440,8 @@ fn matching_nodes_sql(
             }
             Value::Null => conditions.push(format!("{json_value} IS NULL")),
             Value::DateTime(_)
+            | Value::Decimal(_)
+            | Value::Duration(_)
             | Value::StringArray(_)
             | Value::IntArray(_)
             | Value::FloatArray(_)
@@ -2515,6 +2517,8 @@ fn append_relationship_prop_conditions(
             }
             Value::Null => conditions.push(format!("{json_value} IS NULL")),
             Value::DateTime(_)
+            | Value::Decimal(_)
+            | Value::Duration(_)
             | Value::StringArray(_)
             | Value::IntArray(_)
             | Value::FloatArray(_)
@@ -2572,6 +2576,8 @@ fn append_node_match_conditions(
             }
             Value::Null => conditions.push(format!("{json_value} IS NULL")),
             Value::DateTime(_)
+            | Value::Decimal(_)
+            | Value::Duration(_)
             | Value::StringArray(_)
             | Value::IntArray(_)
             | Value::FloatArray(_)
@@ -2678,6 +2684,8 @@ fn append_property_equality_condition(
         }
         Value::Null => conditions.push(format!("{json_value} IS NULL")),
         Value::DateTime(_)
+        | Value::Decimal(_)
+        | Value::Duration(_)
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
