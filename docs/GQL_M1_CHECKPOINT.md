@@ -234,6 +234,32 @@ This blocks Unit 10b and Unit 13 (which depend on it) and Unit 16's completeness
 
 ---
 
+## Unit T — temporal / duration / decimal type system (core done)
+
+Decision (a): first-class `grust_core::Value` variants. Landed (all green, pushed):
+- **`grust_core::Decimal`** — dependency-free fixed-point `mantissa(i128) × 10^−scale`
+  (SQL DECIMAL(38,s)); lossless within 38 digits, value-normalized (`1.50==1.5`),
+  parse/canonical-display, serde-as-string, value Ord/Eq, checked `+`/`-`/`*`, `to_f64`.
+- **`grust_core::Duration`** — ISO 8601 month/day/second/nanos model (`P1Y2M10DT2H30M`);
+  years→12mo, weeks→7d, fractional seconds→nanos; structural total Ord, `checked_add`,
+  `negated`, parse/iso-display, serde-as-string.
+- **`Value::Decimal`/`Value::Duration`** variants + `Value::decimal`/`duration`
+  constructors + `as_decimal`/`as_duration`; **every** workspace exhaustive `Value`
+  match fixed behavior-preservingly (legacy strict-write paths treat them as
+  unsupported; all backends serialize them as canonical/ISO strings).
+- **Read executor**: `decimal(...)`/`duration(...)` functions; lossless decimal
+  `+`/`-`/`*` (ints coerce exactly, floats → f64 path); duration `+`/`-`; exact
+  decimal/duration equality + ordering in `WHERE`/`ORDER BY`.
+- Manifest: `TemporalValues`/`DurationValues`/`DecimalValues` → `Supported`.
+- Tests: grust-core 40 (+5 type tests); read_conformance 17 (+2).
+
+**Deferred tail (niche, dialect-divergent):** decimal/duration **pushdown** into
+SQL (DECIMAL / INTERVAL casting) and its differential oracle — analogous to the
+Unit 15 pushdown tails. The portable reference handles them; backends fall back to
+the reference for these types until the dialect lowering is added.
+
+---
+
 ## Unit 14 — functions/procedures/escapes (done)
 
 **Functions (done):** read-path scalar registry expanded with sqrt/exp/ln/log/

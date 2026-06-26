@@ -75,9 +75,16 @@ human product call: **(A)** extend the new parser with the legacy quirks;
 **(C)** keep the legacy write entrypoint. See the checkpoint's top "Unit 10a …
 BLOCKED" section + `tests/golden/write_corpus.json` (181-statement parity corpus).
 
-10a + 10b (fork-adjacent) are paused. The loop continues on independent,
-pre-authorized units — **Unit T duration/decimal** (decision 2a), then Unit 13
-transactions — and STOPs for human review at Unit 16. Answer A/B/C to resume 10a.
+**Unit T DONE (core)** — first-class `grust_core::Decimal` + `Duration` types and
+`Value::Decimal`/`Value::Duration` variants wired workspace-wide (every exhaustive
+`Value` match fixed behavior-preservingly; all backends serialize as canonical/ISO
+strings). Read executor: `decimal()`/`duration()` constructors, lossless decimal
+`+`/`-`/`*`, duration `+`/`-`, exact comparison/ordering. `TemporalValues`/
+`DurationValues`/`DecimalValues` → `Supported`. Deferred niche tail: decimal/
+duration SQL pushdown + oracle (dialect-divergent; reference handles them today).
+
+10a + 10b (fork-adjacent) remain paused on the A/B/C fork. The loop continues on
+**Unit 13 transactions/sessions** next, then STOPs for human review at Unit 16.
 
 ### NEXT — decision point (pick a track when resuming)
 The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
