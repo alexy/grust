@@ -190,6 +190,23 @@ This blocks Unit 10b and Unit 13 (which depend on it) and Unit 16's completeness
 
 ---
 
+## Unit 14 — functions/procedures/escapes (functions done; procedures deferred)
+
+**Functions (done):** read-path scalar registry expanded with sqrt/exp/ln/log/
+log10/sin/cos/tan (numeric→Float, null-propagating), via `unary_float_fn`;
+usable in WHERE/RETURN; conformance-tested.
+
+**Escapes (done earlier):** backtick-quoted identifiers are handled by the M1
+lexer.
+
+**Procedures/CALL (deferred — needs design):** `CALL`/`YIELD` is a larger
+feature requiring a decision on the procedure set (e.g. db.labels,
+db.relationshipTypes) and execution/YIELD model. Not built unsupervised. Binary
+string functions (substring/replace/split/left/right) are an easy additive
+follow-up when the loop resumes.
+
+---
+
 ### Implementation history (chronological)
 
 `src/pushdown.rs` is the backend-neutral lowering. `plan_node_read(cypher,
