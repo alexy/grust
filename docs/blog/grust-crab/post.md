@@ -22,16 +22,21 @@ The project is here:
 - Repository: [github.com/querygraph/grust](https://github.com/querygraph/grust)
 - Public facade crate: [grust-graph](https://crates.io/crates/grust-graph)
 - Core crate: [grust-core](https://crates.io/crates/grust-core)
-- Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-ladybug](https://crates.io/crates/grust-ladybug), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-helix](https://crates.io/crates/grust-helix), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
+- Language layer: [grust-cypher](https://crates.io/crates/grust-cypher)
+- Backend and integration crates: [grust-memory](https://crates.io/crates/grust-memory), [grust-lancedb](https://crates.io/crates/grust-lancedb), [grust-pggraph](https://crates.io/crates/grust-pggraph), [grust-sail](https://crates.io/crates/grust-sail), [grust-turso](https://crates.io/crates/grust-turso), [grust-falkor](https://crates.io/crates/grust-falkor), [grust-surreal](https://crates.io/crates/grust-surreal), and [grust-cocoindex](https://crates.io/crates/grust-cocoindex)
 
-The `0.10.0` line is the first point where I think the full idea is visible in
-code. The workspace has the core graph model, document fixtures, typed
-ingestion, schema-backed writes, traversal lowering, shared graph-index
-construction, backend-specific typed storage, LadybugDB and Sail Arrow IPC
-surfaces, GrustFrames-oriented Sail table and triplet helpers, mutation
-planning, a strict writable-Cypher subset for Sail, and live integration checks
-for the main backend family. Some pieces are intentionally small, but the
-architecture is no longer only a sketch.
+`0.11.0` — **"Crab"**, the first *named* release — is the point where the full
+idea is visible in code. The workspace has the core graph model, document
+fixtures, typed ingestion, schema-backed writes, traversal lowering, shared
+graph-index construction, backend-specific typed storage, Arrow IPC surfaces,
+GrustFrames-oriented Sail table and triplet helpers, mutation planning, live
+integration checks for the main backend family — and, new in Crab, a portable
+**GQL/Cypher language layer** that reads and writes the graph across backends.
+Crab adds that query/mutation language on top of the same small core: a
+standards-conformant pipeline, a portable read engine with backend SQL pushdown,
+first-class decimal and duration values, catalog procedures, a transaction
+surface, and MVCC concurrent writes for Turso. None of it changes the property
+graph model — it sits on top of it.
 
 For the longer treatment, read the Grust book in the repository, especially
 **The Shape of Grust**, **The Core Property Graph**, **Building Graphs**,
@@ -393,7 +398,7 @@ reading path. Then jump to the backend-specific headings in that chapter:
 **Memory**, **LanceDB**, **pgGraph**, **Sail**, **FalkorDB, HelixDB, and
 SurrealDB**, and **CocoIndex**.
 
-## Arrow, GrustFrames, and Sail Cypher
+## Arrow, GrustFrames, and a Portable Cypher/GQL Layer
 
 The newer pieces of Grust are easiest to understand as consequences of the same
 design choice: the portable graph model stays small, while heavier backend
@@ -415,72 +420,39 @@ fixtures for GrustFrames-style lowerings: triplet filters, motif expansion, and
 aggregate-message passes can target the same physical layout that ordinary
 Grust writes produce.
 
-Writable Cypher follows the same rule. Cypher write text is not a separate
-persistence path: `grust-cypher` parses and plans it, while
-`sail_cypher_mutation_plan` remains a compatibility wrapper over the shared
-planner. The strict v1 subset accepts ordered mutation batches, local
-explicit-ID node variables,
-ID-resolved `MATCH ... DELETE`, edge `MATCH ... CREATE` / `MATCH ... MERGE`,
-broad node
-`MATCH ... DELETE`, ID-resolved or broad node map patches, broad node literal
-property assignment/removal, ID-resolved edge map patches, literal property
-assignment, explicit property removal for resolved identities, row-producing
-edge `MATCH ... CREATE` / `MATCH ... MERGE`, and broad relationship delete,
-patch, assignment, and removal over endpoint predicates,
-then lowers them into `GraphMutationPlan`; `SailGraphStore` executes that plan through
-`GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`, typed-table
-mirror writes, and the same delete paths as ordinary Grust mutations.
-Generated node IDs are opt-in through Sail writable-Cypher options and are
-returned in a result shape separate from the count-oriented report, while
-written node and edge identities can be collected through the same result path
-when callers opt in. Node payloads cover explicit and generated node writes;
-edge payloads cover resolved and row-producing edge writes. These payloads
-describe accepted writes, not exact insert-versus-update outcomes on upsert
-backends. Strict `CREATE` mode performs read-before-write conflict checks and
-also rejects duplicate concrete create identities inside one planned batch
-before any writes run. `MERGE` and edge endpoint writes keep requiring resolved
-IDs.
-The first `RETURN` support for writes stays similarly narrow: a final element
-or property projection over node variables and concrete relationship variables
-already resolved by the write plan, including concrete edge upserts and edge
-patches, returns a `CypherMutationTableResult`. Sail and the backend-neutral
-Memory/Sail helper can also return one row per relationship variable produced
-by restricted row-producing `MATCH ... CREATE/MERGE` edge writes, plus
-portable broad node and relationship rows for restricted `MATCH ... SET/REMOVE`
-forms. Physical `id` and `label` fields are supported alongside stored
-properties, and whole elements are returned as `Value::Json` in the Grust
-`Node` / `Edge` serde shape, keeping the count-oriented mutation report separate from the table rows
-while rejecting aggregation, paths, ordering, limiting, arbitrary read-query
-features, unrestricted broad row materialization, and path-style row
-projections.
-Parameters are option-driven too: callers can bind Grust `Value`s to `$name`
-placeholders in literal positions such as IDs, property maps, and literal
-property assignments. The first expression form is deliberately narrow:
-same-variable node property arithmetic such as
-`SET n.count = n.count + $delta` lowers to an explicit read-modify-write
-mutation plan for Sail and Memory while broader computed expressions remain
-out of scope.
-Relationship matches can also filter on relationship properties beyond `id`,
-with Sail and Memory using the same matched-edge predicate semantics.
-Mutating `MATCH` filters now have a small `WHERE` grammar too: property
-comparisons against literals or parameters joined by `AND`, with missing
-properties treated as non-matches and ordered comparisons limited to numbers
-or strings.
-Null assignment is option-driven as well: the default stores `Value::Null`,
-while `CypherNullAssignment::RemoveProperty` makes explicit
-`SET x.key = null` lower to the same mutation operations as `REMOVE`.
-Plan execution is no longer Sail-only: `CypherMutationExecutor` lets the
-resolved `GraphMutationPlan` run on Sail or Memory, which keeps parser growth
-separate from backend mutation semantics.
-The parser boundary is intentionally modest for now: Sail classifies top-level
-mutation statements before lowering, and a shared parser crate waits until
-there is another Cypher text parser consumer.
-Mutation atomicity is explicit too: `GraphMutationAtomicity` distinguishes the
-default ordered/non-atomic mutation path from backends that can prove
-transactional batch execution.
-Structured Cypher errors separate syntax, unresolved identity, unsupported
-cardinality, and execution failures without making every backend expose a
-Cypher execution API.
+The newest layer is a **portable Cypher/GQL language** over the same graph.
+`grust-cypher` is built as a real pipeline — a span-bearing lexer, a
+recursive-descent parser into a typed AST, and a semantic pass — with a
+conformance spine (`GqlFeature` taxonomy, structured errors) that records exactly
+what is supported rather than what is hoped for.
+
+Reads run through a Memory *reference executor*: `MATCH` / `OPTIONAL MATCH`,
+multi-hop and variable-length paths, a three-valued `WHERE` engine, and `RETURN`
+with aliases, `DISTINCT`, `ORDER BY` / `SKIP` / `LIMIT`, aggregates with implicit
+`GROUP BY`, `WITH`, `UNWIND`, and `UNION`. Backends that can materialize SQL push
+the bounded read filter down (Spark and SQLite dialects) while the `RETURN`
+projection still runs through the shared reference, so pushed results are
+identical to the reference *by construction* — an embedded-SQLite differential
+oracle checks reference-vs-pushdown row equality on every change.
+
+Writes go through the same parser: the writable entry points route acceptance
+through the standards-conformant pipeline (narrowing the public surface to
+standard Cypher) while keeping the mutation plans byte-identical to the
+established planner, guarded by golden snapshots. `SailGraphStore` executes those
+plans through `GraphMutationStore`, staged Arrow values, Delta `MERGE INTO`, and
+typed-table mirror writes; `CypherMutationExecutor` lets the same resolved
+`GraphMutationPlan` run on Sail or Memory. Pattern-driven writes cover multiple
+relationship patterns per statement, incoming `<-[:T]-` edges, and cross-variable
+correlated `SET`.
+
+The value model gained first-class lossless `Decimal` and ISO 8601 `Duration`
+types alongside temporal `DateTime`, with ordering and checked arithmetic wired
+through every backend. Read-only catalog procedures (`CALL db.labels()`,
+`db.relationshipTypes()`, `db.propertyKeys()`) expose schema metadata, and a
+`START TRANSACTION` / `COMMIT` / `ROLLBACK` surface pairs with honest per-backend
+atomicity reporting. What the layer supports is stated precisely in
+`docs/GQL_PROFILE_STATEMENT.md`, with every gap enumerated, so the conformance
+claim stays backed by a test rather than by prose.
 
 ## Traversal as IR
 
@@ -598,11 +570,13 @@ Grust is still early, but its direction is already clear:
 - Keep traversal backend-neutral.
 - Let backend-specific capabilities live as extension traits when they appear.
 
-The next natural work is broader backend coverage for mutation planning,
-richer import/export helpers, more traversal result shapes, and deeper
-backend-native query lowering. HelixDB, LadybugDB, and SurrealDB now satisfy
-the portable read and traversal surface; Sail can already lower a strict
-writable-Cypher subset into Grust mutation plans. Those steps have stable
+The next natural work is broader backend coverage for read pushdown and
+mutation planning, richer import/export helpers, more traversal result shapes,
+and widening the remaining enumerated profile gaps (shortest paths, subqueries,
+graph-type DDL, session control). HelixDB, LadybugDB, and SurrealDB satisfy the
+portable read and traversal surface; the Crab GQL/Cypher layer now reads and
+writes the graph across Memory, Sail, and Turso, with SQL pushdown verified
+against the reference. Those steps have stable
 places to attach: typed ingestion for trusted Rust values and untrusted JSON,
 `GraphSchema` for backend-facing structure, `GraphMutationStore` for deltas and
 deletes where a backend supports them, `GraphMutationPlan` for resolved query
@@ -635,6 +609,7 @@ Start with the repo, skim the README, then read the book by heading:
 
 - [Grust repository](https://github.com/querygraph/grust)
 - [Book source in the repository](https://github.com/querygraph/grust/tree/main/docs/book)
+- [Conformance profile statement](https://github.com/querygraph/grust/blob/main/docs/GQL_PROFILE_STATEMENT.md)
 - **The Shape of Grust**
 - **The Core Property Graph**
 - **Building Graphs**
@@ -643,6 +618,7 @@ Start with the repo, skim the README, then read the book by heading:
 - **Traversal as an Intermediate Representation**
 - **The Store Contract**
 - **Backend Architecture**
+- **Cypher and GQL**
 - **Schema and Validation Direction**
 - **Design Tradeoffs**
 - **Where Grust Can Grow**
