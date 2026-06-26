@@ -56,22 +56,28 @@ We are executing the GQL completion goal. **Everything below is on branch
   for recursive CTEs). **See the checkpoint's Unit 15 section for the full
   future-work list.**
 
-### AUTONOMOUS LOOP — PAUSED awaiting 3 decisions (2026-06-25)
-A self-paced `/loop` drove the DAG and landed (all green, pushed): Unit 15-tail
-`/` division pushdown; Unit 12 backend conformance profiles; Unit T **temporal**
-ordering; Unit 11 **graph-type validation** (`graph_type.rs`); Unit 10a **golden
-harness** (`tests/golden/write_golden.json` + `tests/write_golden.rs`); Unit 14
-**function** expansion (sqrt/exp/ln/log/log10/sin/cos/tan). It then **paused** —
-the rest of the DAG is blocked on decisions only the human can make:
-1. **Unit 10a write cutover** — byte-identical rewiring is impossible (new
-   pipeline's structured errors + broader accept-set vs the 327 pinned tests).
-   Pick: (a) relax to same-accept/reject+same-plan, new error msgs, and update
-   the strict-write tests' error expectations [touches the 327 suite];
-   (b) keep the legacy planner for writes; (c) hybrid. Blocks 10b, 13, 16.
-2. **Unit T duration/decimal** — core `grust_core::Value` variants (workspace-wide)
-   vs cypher-layer representation. Blocks Unit 16's full-39075 claim.
-3. **Unit 14 procedures/CALL** — needs a procedure-set + YIELD/execution design.
-Answer these to unblock; the loop resumes from there.
+### AUTONOMOUS LOOP — running; Unit 10a forked (2026-06-25)
+The 3 earlier decisions were answered (1a / 2a / 3-procedures) and the self-paced
+`/loop` resumed. Landed since (all green, pushed):
+- **Unit 14 DONE** — read-only catalog procedures `CALL [YIELD]` (`db.labels`,
+  `db.relationshipTypes`, `db.propertyKeys`): `ast::CallClause`/`Clause::Call`,
+  `parser::parse_call`, `read::call_procedure`; `ProcedureCall` now `Supported`.
+  (Earlier: function expansion sqrt/exp/ln/log/log10/sin/cos/tan.)
+
+**Unit 10a write cutover is BLOCKED on a NEW fork** (not the one decision (a)
+answered). Decision (a) assumed the new pipeline is a *superset* needing its
+rejections re-imposed; empirically it's the reverse in places — the legacy
+planner **accepts non-standard Cypher the new standards-conformant parser
+rejects** (`DELETE (:Person {id})` / `DELETE (:a)-[:R]->(:b)`: DELETE by
+*pattern*, pinned by the 327 tests). "Byte-identical + same accept-set" needs a
+human product call: **(A)** extend the new parser with the legacy quirks;
+**(B)** migrate those tests to standard Cypher and narrow the public accept-set;
+**(C)** keep the legacy write entrypoint. See the checkpoint's top "Unit 10a …
+BLOCKED" section + `tests/golden/write_corpus.json` (181-statement parity corpus).
+
+10a + 10b (fork-adjacent) are paused. The loop continues on independent,
+pre-authorized units — **Unit T duration/decimal** (decision 2a), then Unit 13
+transactions — and STOPs for human review at Unit 16. Answer A/B/C to resume 10a.
 
 ### NEXT — decision point (pick a track when resuming)
 The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
@@ -95,7 +101,7 @@ The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
    "Unreleased" into a dated entry. `AGENTS.md`'s auto-publish rule is
    **suspended** for this goal. CHANGELOG "Unreleased" notes are fine.
 2. **Test floor:** `cargo test -p grust-cypher --lib` must stay green and the
-   count must only grow (511 right now; 327 of those are the original strict-write
+   count must only grow (517 right now; 327 of those are the original strict-write
    suite — never delete/`#[ignore]` to pass). 
 3. **Additive discipline:** the legacy strict-write planner and the stable
    Memory/Sail behavior are not to be changed destructively. New work lands as
