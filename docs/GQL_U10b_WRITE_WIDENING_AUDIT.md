@@ -55,10 +55,23 @@ human (the Unit 16 review), not safe to relax unsupervised:
 |---|---|---|---|
 | **W1** | `MATCH {kw} currently supports one relationship pattern only` | allow multiple comma-separated relationship patterns in one write | ✅ **DONE** — `parse_match_edge_upsert` splits on top-level commas + `plan_match_edge_segment`; single pattern byte-identical. |
 | **W2** | `edge mutation requires outgoing '->' direction` | accept incoming `<-[:T]-` by normalizing to the reverse `->` | ✅ **DONE** — `is_cypher_edge_pattern` + `parse_directed_edge_pattern` (endpoint swap), incoming == outgoing plan. |
-| **W3** | `MATCH [edge] SET numeric expressions cannot reference another variable` | allow `SET a.x = b.y + 1` (cross-variable numeric) | ⛔ **NOT a widening — needs a new feature + design decision** (see below). |
-| **W4** | explicit-id requirement for `CREATE` | generated ids by default | ⛔ **Conflicts with hard guardrails** (see below). |
+| **W3** | `MATCH [edge] SET numeric expressions cannot reference another variable` | allow `SET a.x = b.y + 1` (cross-variable numeric) | ✅ **DONE** (decision: full incl. cartesian) — new `SetMatchingNodeFromNode` op + Memory executor; planner handles cartesian + path-correlated node targets. Sail/Turso/SQL/Surreal reject. Edge-variable targets stay unsupported. |
+| **W4** | explicit-id requirement for `CREATE` | generated ids by default | ✅ **RESOLVED — keep explicit-id default** (decision): generated ids stay opt-in via `CypherNodeIdPolicy::GenerateForCreate`. No guardrail violation; no code change. |
 
-## W3 — deferred: requires a new correlated-update op (design fork)
+## W3 — implemented (decision: full incl. cartesian)
+
+Implemented via a new `GraphMutationPlanOp::SetMatchingNodeFromNode` +
+`GraphWriteCorrelation { Cartesian, OutgoingRelationship, IncomingRelationship }`.
+The **Memory reference executor** runs it (matches target/source node sets, forms
+pairs per correlation in deterministic id order — cartesian fan-out = last source
+wins — and applies `target[k] = source[k] <op> N`, schema-validated). The legacy
+planner detects a cross-variable `NumericExpression` SET and builds the op for both
+`MATCH (a),(b)` (cartesian) and `MATCH (a)-[:R]->(b)` (path-correlated) node
+targets. Sail / Turso / SQL-core / Surreal **reject** it explicitly (no silent
+skip). Edge-variable targets and direct (non-arithmetic) `SET a.x = b.y` remain
+unsupported follow-ons. Original design note (kept for context):
+
+### Original deferral note (now implemented)
 
 `SET a.x = b.y + 1` reads a property from a *different* bound node (`b`) than the
 one being written (`a`). The current plan op `GraphMutationPlanOp::UpdateMatchingNodeProperty`
