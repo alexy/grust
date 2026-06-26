@@ -515,6 +515,46 @@ fn cypher_plan_executes_on_memory_facade() {
 }
 
 #[test]
+fn cypher_cross_variable_set_executes_on_memory_facade() {
+    // Unit 10b / W3: cross-variable correlated SET.
+    let store = MemoryGraphStore::new();
+    let seed = sail_cypher_mutation_plan(
+        "CREATE (:Person {id: 'p1', score: 10}); \
+         CREATE (:Person {id: 'p2', score: 20}); \
+         MATCH (a:Person {id: 'p1'}), (b:Person {id: 'p2'}) CREATE (a)-[:KNOWS]->(b)",
+    )
+    .unwrap();
+    futures_executor::block_on(store.execute_cypher_mutation_plan(&seed)).unwrap();
+
+    // Path-correlated: for the p1-[:KNOWS]->p2 pair, set a.score = b.score + 1.
+    let plan = sail_cypher_mutation_plan(
+        "MATCH (a:Person)-[:KNOWS]->(b:Person) SET a.score = b.score + 1",
+    )
+    .unwrap();
+    futures_executor::block_on(store.execute_cypher_mutation_plan(&plan)).unwrap();
+    let p1 = futures_executor::block_on(store.get_node(&NodeId::new("p1")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(p1.props.get("score"), Some(&Value::Int(21)));
+    // p2 is only a source here, not a correlated target — unchanged.
+    let p2 = futures_executor::block_on(store.get_node(&NodeId::new("p2")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(p2.props.get("score"), Some(&Value::Int(20)));
+
+    // Cartesian: single (a,b) pair, a.score = b.score + 100 => p1.score = 120.
+    let cartesian = sail_cypher_mutation_plan(
+        "MATCH (a:Person {id: 'p1'}), (b:Person {id: 'p2'}) SET a.score = b.score + 100",
+    )
+    .unwrap();
+    futures_executor::block_on(store.execute_cypher_mutation_plan(&cartesian)).unwrap();
+    let p1 = futures_executor::block_on(store.get_node(&NodeId::new("p1")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(p1.props.get("score"), Some(&Value::Int(120)));
+}
+
+#[test]
 fn cypher_multi_target_delete_executes_on_memory_facade() {
     let store = MemoryGraphStore::new();
     futures_executor::block_on(store.put_graph(&Graph::new(

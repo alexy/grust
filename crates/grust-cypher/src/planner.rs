@@ -836,6 +836,15 @@ impl CypherMutationPlanner {
         let (pattern, where_predicates) = split_match_where(pattern, &self.parameters)?;
         let (path_variable, pattern) = parse_path_binding(pattern, "MATCH SET")?;
 
+        // Unit 10b/W3: cross-variable correlated SET — `SET a.x = b.y <op> N` where
+        // the numeric expression reads a *different* bound variable. Handled before
+        // the single-target paths (which assume source == target).
+        if let PatchAssignmentKind::NumericExpression { source_target, .. } = &assignment.kind
+            && source_target != &assignment.target
+        {
+            return self.lower_cross_variable_set(pattern, path_variable, where_predicates, assignment);
+        }
+
         if is_cypher_edge_pattern(pattern) {
             let mut parsed = self.parse_edge_match_pattern(pattern)?;
             apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge SET")?;
@@ -1154,6 +1163,122 @@ impl CypherMutationPlanner {
                 op,
                 operand,
                 cardinality: GraphMutationCardinality::SingleIdentity,
+            },
+        ]))
+    }
+
+    /// Lower a cross-variable correlated `SET a.x = b.y <op> N` (Unit 10b/W3).
+    /// Supports both cartesian (`MATCH (a:..),(b:..)`) and path-correlated
+    /// (`MATCH (a)-[:R]->(b)`) two-variable matches over node targets.
+    fn lower_cross_variable_set(
+        &mut self,
+        pattern: &str,
+        path_variable: Option<String>,
+        where_predicates: Vec<ParsedWherePredicate>,
+        assignment: PatchAssignment,
+    ) -> Result<GraphMutationPlan> {
+        if path_variable.is_some() {
+            return Err(cypher_syntax(
+                "MATCH SET cross-variable updates do not support path variables",
+            ));
+        }
+        let target_var = assignment.target;
+        let PatchAssignmentKind::NumericExpression {
+            key: target_key,
+            source_target,
+            source_key,
+            op,
+            operand,
+        } = assignment.kind
+        else {
+            unreachable!("caller guarantees a cross-variable NumericExpression");
+        };
+
+        let (target_node, source_node, correlation) = if is_cypher_edge_pattern(pattern) {
+            let parsed = self.parse_edge_match_pattern(pattern)?;
+            if !parsed.relationship.props.is_empty() || !parsed.relationship.predicates.is_empty() {
+                return Err(cypher_syntax(
+                    "MATCH SET cross-variable correlation does not accept relationship properties",
+                ));
+            }
+            let label = parsed.relationship.label.clone();
+            let from_var = parsed.from.variable.clone();
+            let to_var = parsed.to.variable.clone();
+            if from_var.as_deref() == Some(target_var.as_str())
+                && to_var.as_deref() == Some(source_target.as_str())
+            {
+                (
+                    parsed.from,
+                    parsed.to,
+                    GraphWriteCorrelation::OutgoingRelationship { label },
+                )
+            } else if to_var.as_deref() == Some(target_var.as_str())
+                && from_var.as_deref() == Some(source_target.as_str())
+            {
+                (
+                    parsed.to,
+                    parsed.from,
+                    GraphWriteCorrelation::IncomingRelationship { label },
+                )
+            } else {
+                // Edge-variable targets (or non-endpoint vars) need a different op;
+                // keep the historical unsupported-cardinality classification.
+                return Err(cypher_unsupported_cardinality(
+                    "MATCH SET cross-variable target and source must be the matched relationship endpoints",
+                ));
+            }
+        } else {
+            let mut by_var: BTreeMap<String, ParsedCypherNode> = BTreeMap::new();
+            for segment in split_top_level_patterns(pattern)? {
+                let (node, rest) = parse_cypher_node_pattern(segment, &self.parameters)?;
+                if !rest.trim().is_empty() {
+                    return Err(cypher_syntax(format!(
+                        "unsupported writable Cypher MATCH SET pattern suffix: {}",
+                        rest.trim()
+                    )));
+                }
+                let Some(variable) = node.variable.clone() else {
+                    return Err(cypher_syntax(
+                        "MATCH SET requires each matched node pattern to bind a variable",
+                    ));
+                };
+                by_var.insert(variable, node);
+            }
+            let Some(target_node) = by_var.remove(&target_var) else {
+                return Err(cypher_unresolved_identity(format!(
+                    "MATCH SET target variable '{target_var}' is not bound"
+                )));
+            };
+            let Some(source_node) = by_var.remove(&source_target) else {
+                return Err(cypher_unresolved_identity(format!(
+                    "MATCH SET source variable '{source_target}' is not bound"
+                )));
+            };
+            (target_node, source_node, GraphWriteCorrelation::Cartesian)
+        };
+
+        // Distribute WHERE predicates to the target / source matches by variable.
+        let mut nodes_by_var: BTreeMap<String, ParsedCypherNode> = BTreeMap::new();
+        nodes_by_var.insert(target_var.clone(), target_node);
+        nodes_by_var.insert(source_target.clone(), source_node);
+        apply_match_where_predicates(&mut nodes_by_var, where_predicates, "MATCH SET")?;
+        let target_node = nodes_by_var.remove(&target_var).expect("target inserted above");
+        let source_node = nodes_by_var.remove(&source_target).expect("source inserted above");
+
+        Ok(GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::SetMatchingNodeFromNode {
+                target_label: target_node.label,
+                target_props: target_node.props,
+                target_predicates: target_node.predicates,
+                target_key,
+                source_label: source_node.label,
+                source_props: source_node.props,
+                source_predicates: source_node.predicates,
+                source_key,
+                op: Some(op),
+                operand,
+                correlation,
+                cardinality: GraphMutationCardinality::BoundedMany,
             },
         ]))
     }
