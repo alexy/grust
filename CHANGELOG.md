@@ -6,6 +6,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added a strict-write **golden-snapshot** regression harness (`grust-cypher/tests/write_golden.rs` + `tests/gql/write_golden.json`, Unit 10a): pins the current planner output (plan or rejection) for a 20-statement write corpus so any future write-path change is caught byte-for-byte.
+
 - Added graph-type validation (`grust_cypher::graph_type`, Unit 11): the open-vs-closed graph-type distinction (`GraphTypeMode`) and write-time type-violation checks `validate_node`/`validate_edge`/`validate_graph` over a `GraphSchema` — closed graph types reject undeclared labels/properties; both modes type-check declared properties and enforce required fields/constraints. Backend-neutral and additive (a `ValidateBeforeWrite` hook; changes no backend).
 
 - Temporal values (`Value::DateTime`) now order chronologically (lexicographic over the RFC 3339 form) in both the read executor's comparison/`ORDER BY` and the RETURN projection ordering; previously any two datetimes compared equal. (Unit T, temporal.)

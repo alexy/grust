@@ -1,0 +1,361 @@
+[
+  {
+    "cypher": "CREATE (n:Person {id: 'p1', name: 'Ada', age: 36})",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "UpsertNode": {
+            "kind": "Create",
+            "node": {
+              "id": "p1",
+              "label": "Person",
+              "props": {
+                "age": {
+                  "type": "int",
+                  "value": 36
+                },
+                "id": {
+                  "type": "string",
+                  "value": "p1"
+                },
+                "name": {
+                  "type": "string",
+                  "value": "Ada"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "CREATE (n:Person {id: 'p1'})",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "UpsertNode": {
+            "kind": "Create",
+            "node": {
+              "id": "p1",
+              "label": "Person",
+              "props": {
+                "id": {
+                  "type": "string",
+                  "value": "p1"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MERGE (n:Person {id: 'p1'})",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "UpsertNode": {
+            "kind": "Merge",
+            "node": {
+              "id": "p1",
+              "label": "Person",
+              "props": {
+                "id": {
+                  "type": "string",
+                  "value": "p1"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MERGE (n:Person {id: 'p1', name: 'Ada'})",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "UpsertNode": {
+            "kind": "Merge",
+            "node": {
+              "id": "p1",
+              "label": "Person",
+              "props": {
+                "id": {
+                  "type": "string",
+                  "value": "p1"
+                },
+                "name": {
+                  "type": "string",
+                  "value": "Ada"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) SET n.age = 37",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "PatchNode": {
+            "id": "p1",
+            "props": {
+              "age": {
+                "type": "int",
+                "value": 37
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) SET n.age = 37, n.name = 'Ada2'",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "PatchNode": {
+            "id": "p1",
+            "props": {
+              "age": {
+                "type": "int",
+                "value": 37
+              }
+            }
+          }
+        },
+        {
+          "PatchNode": {
+            "id": "p1",
+            "props": {
+              "name": {
+                "type": "string",
+                "value": "Ada2"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) SET n += {city: 'London'}",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "PatchNode": {
+            "id": "p1",
+            "props": {
+              "city": {
+                "type": "string",
+                "value": "London"
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) SET n = {id: 'p1', name: 'Ada'}",
+    "err": "Cypher syntax error: MATCH SET target requires property syntax target.key",
+    "ok": null
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) REMOVE n.age",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "RemoveNodeProps": {
+            "id": "p1",
+            "keys": [
+              "age"
+            ]
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) DELETE n",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "DeleteNode": "p1"
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) DETACH DELETE n",
+    "err": "Cypher syntax error: unsupported writable Cypher MATCH DELETE pattern suffix: DETACH",
+    "ok": null
+  },
+  {
+    "cypher": "MATCH (a:Person {id: 'p1'}), (b:Person {id: 'p2'}) CREATE (a)-[:KNOWS]->(b)",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "UpsertEdge": {
+            "edge": {
+              "from": "p1",
+              "id": null,
+              "label": "KNOWS",
+              "props": {},
+              "to": "p2"
+            },
+            "kind": "Create"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MATCH (a:Person {id: 'p1'}), (b:Person {id: 'p2'}) MERGE (a)-[:KNOWS]->(b)",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "UpsertEdge": {
+            "edge": {
+              "from": "p1",
+              "id": null,
+              "label": "KNOWS",
+              "props": {},
+              "to": "p2"
+            },
+            "kind": "Merge"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "CREATE (a:Person {id: 'p1'})-[:KNOWS {since: 2020}]->(b:Person {id: 'p2'})",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "UpsertEdge": {
+            "edge": {
+              "from": "p1",
+              "id": null,
+              "label": "KNOWS",
+              "props": {
+                "since": {
+                  "type": "int",
+                  "value": 2020
+                }
+              },
+              "to": "p2"
+            },
+            "kind": "Create"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MATCH (a:Person {id: 'p1'})-[r:KNOWS]->(b) DELETE r",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "DeleteMatchingEdges": {
+            "cardinality": "BoundedMany",
+            "relationship": {
+              "from": {
+                "label": "Person",
+                "predicates": [],
+                "props": {
+                  "id": {
+                    "type": "string",
+                    "value": "p1"
+                  }
+                }
+              },
+              "id": null,
+              "label": "KNOWS",
+              "predicates": [],
+              "props": {},
+              "to": {
+                "label": null,
+                "predicates": [],
+                "props": {}
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) SET n.age = 37 RETURN n.age",
+    "err": "unsupported graph feature: unsupported Cypher literal value: 37 RETURN n.age",
+    "ok": null
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) RETURN n.name",
+    "err": "Cypher syntax error: only ID-resolved MATCH ... DELETE, MATCH ... CREATE/MERGE edge, MATCH ... SET, and MATCH ... REMOVE forms are supported in writable Cypher",
+    "ok": null
+  },
+  {
+    "cypher": "MATCH (n:Person) WHERE n.age > 30 SET n.adult = true",
+    "err": null,
+    "ok": {
+      "operations": [
+        {
+          "PatchMatchingNodes": {
+            "cardinality": "BoundedMany",
+            "label": "Person",
+            "patch": {
+              "adult": {
+                "type": "bool",
+                "value": true
+              }
+            },
+            "predicates": [
+              {
+                "key": "age",
+                "op": "GreaterThan",
+                "value": {
+                  "type": "int",
+                  "value": 30
+                }
+              }
+            ],
+            "props": {}
+          }
+        }
+      ]
+    }
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) REMOVE n:Person",
+    "err": "Cypher syntax error: MATCH REMOVE target requires property syntax target.key",
+    "ok": null
+  },
+  {
+    "cypher": "MATCH (n:Person {id: 'p1'}) SET n:Admin",
+    "err": "Cypher syntax error: MATCH SET only supports map patch or literal property assignment",
+    "ok": null
+  }
+]
