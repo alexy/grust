@@ -3,6 +3,50 @@
 Branch: `cypher-gql-full` (pushed to origin). Goal contract: `docs/GQL_GOAL.md`.
 Plan: `docs/GrustCypherFull.md`.
 
+## ⚠️ Unit 10a (write-path cutover) — BLOCKED on a parser accept-set fork
+
+Investigated 2026-06-25. The write corpus was scraped from the strict-write
+tests into `crates/grust-cypher/tests/golden/write_corpus.json` (181 distinct
+planner-argument statements, full write surface) as the parity foundation, on
+top of the existing `tests/golden/write_golden.json` plan-snapshot harness.
+
+**The blocker (empirically confirmed, not a guess):** decision (a) assumed the
+new lexer/parser/semantics pipeline is a *superset* of the legacy string planner
+that just needs its rejections re-imposed. The reality is the reverse in places:
+the **legacy planner accepts non-standard Cypher that the new standards-conformant
+parser correctly rejects.** Concretely, the new parser errors on forms the 327
+strict-write tests pin as accepted:
+
+- `DELETE (:Person {id: 'p1'})` — DELETE by **node pattern** (standard Cypher
+  DELETE takes a bound variable/expression, not a pattern).
+- `DELETE (:Person {id})-[:KNOWS]->(:Person {id})` — DELETE by **edge pattern**.
+
+(Standalone `CREATE (a)-[:R]->(b)`, `MATCH … SET n.x = n.x + 1`, multi-pattern
+`MATCH …, … CREATE (a)-[:R]->(b)`, and `SET n += {…}` all *do* parse on the new
+pipeline — the divergence is specifically the pattern-as-DELETE-target forms.)
+
+To keep "byte-identical plans + same accept/reject set" (decision (a)'s hard
+constraint) one of these must be chosen — and it is a **product/architecture
+decision for the human**, not covered by decision (a):
+
+- **(A) Extend the new parser** to accept Grust's non-standard write forms
+  (`DELETE (pattern)`) purely for legacy bug-compat. Preserves byte-identity and
+  the public accept-set, but pollutes the clean GQL-conformant grammar — undercuts
+  the new pipeline's reason for existing.
+- **(B) Migrate the non-standard test statements** to standard Cypher
+  (`MATCH (n:Person {id:'p1'}) DELETE n`) and narrow the public accept-set. Changes
+  test *inputs* (not just error messages) and is a behavior change for any
+  downstream relying on `DELETE (pattern)` — beyond what decision (a) authorized.
+- **(C) Keep the legacy planner as the write entrypoint** (no cutover); use the
+  new pipeline for reads only. Defers the "one parser" goal for writes.
+
+Per the guardrails ("STOP and surface on a genuine new fork"), 10a is paused at
+this decision. Unit 10b (write widening) is fork-adjacent and also paused. The
+autonomous loop continues on **independent, pre-authorized** units (Unit T
+duration/decimal; Unit 13 transactions) while this awaits the human call.
+
+---
+
 The M1 (Foundation) record is below. Since then, **M2 (Portable Query Core) read
 side** landed on the new pipeline — see the next section.
 
