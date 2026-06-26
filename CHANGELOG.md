@@ -21,7 +21,10 @@ reconstructed from Git history, release commits, and the shipped docs.
   `grust_edges`/`grust_nodes` join; the backend returns the matched columns as
   text and `grust_cypher` reconstructs the bindings before projecting. A unified
   `plan_read` returns a `ReadPushdown` (single-query leaf or a `UNION`/`UNION ALL`
-  of leaves, combined by `combine_union`). This now
+  of leaves, combined by `combine_union`). **`OPTIONAL MATCH`** (a mandatory node
+  + one optional directed segment) lowers to a `LEFT JOIN` against a subquery for
+  the optional segment, with null-padding (`r`/`b` → `null`) matching the
+  reference. This now
   covers **multi-segment paths** (`(a)-[]->(b)-[]->(c)`, chained joins) and
   **undirected** segments (`(a)-[]-(b)`, matched in either orientation), in any
   per-segment direction. **Variable-length** segments (`(a)-[:T*m..n]->(b)`, with

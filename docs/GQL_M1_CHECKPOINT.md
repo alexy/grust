@@ -60,6 +60,14 @@ answer).
   each arm and `combine_union`s the result tables (concat + dedup-if-distinct,
   mirroring the reference). Leaves share a uniform text-rows execution contract
   (`to_sql` / `column_count` / `project_text_rows`).
+- **`OPTIONAL MATCH`** (mandatory node + one optional directed segment):
+  `MATCH (a[:L][{..}]) [WHERE wa] OPTIONAL MATCH (a)-[r?:T [{..}]]->(b[:L][{..}])
+  [WHERE wb] RETURN …` lowers to a `LEFT JOIN` of `a` (`n0`) against a **subquery**
+  that is the whole optional segment (`e0 ⋈ n1` with all optional conditions), so
+  the optional match is atomic — no match → every optional column NULL → `r`/`b`
+  null-padded (`PushedBinding::Null`), matching the reference. `wa` references
+  only `a`; `wb`/inline props reference only `r`/`b` (else fall back). Undirected
+  optional segments fall back.
 - **`WHERE`** (node and segment paths): comparisons (`=,<>,<,<=,>,>=`),
   `IS [NOT] NULL`, `IN`/`NOT IN`, `STARTS/ENDS/CONTAINS`, boolean `= true/false`,
   `+`/`-`/`*` arithmetic over typed numeric properties, and `AND`/`OR`/`NOT`.
@@ -96,12 +104,11 @@ answer).
    array and reconstruct `r` as a `Value::Json` list matching the reference.
    Niche; anonymous-relationship var-length already pushes.
 3. **Path variables** (`MATCH p = …`) — needs path-value reconstruction; niche.
-4. **Multi-clause shapes** — `UNION`/`UNION ALL` is **done** (see above).
-   Remaining: `OPTIONAL MATCH` (= `LEFT JOIN` with null-padding — needs a null
-   binding in reconstruction to match the reference's unbound-var semantics);
-   multi-pattern `MATCH` (comma patterns → cross/natural join over a global alias
-   set); `WITH` horizon (sub-plan composition / CTE). These need a general
-   pattern-join planner; substantial.
+4. **Multi-clause shapes** — `UNION`/`UNION ALL` and `OPTIONAL MATCH` (single
+   optional segment) are **done** (see above). Remaining: multi-pattern `MATCH`
+   (comma patterns → cross/natural join over a global alias set); `WITH` horizon
+   (sub-plan composition / CTE); chained/multiple `OPTIONAL MATCH` and optional
+   multi-segment. These need a general pattern-join planner; substantial.
 
 Other backends: only Sail wires pushdown into its read entrypoint today. Turso
 is used as the oracle but its own `run_read_query` is not wired (and its tagged

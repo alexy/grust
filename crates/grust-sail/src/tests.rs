@@ -1047,6 +1047,8 @@ async fn test_read_pushdown_matches_reference() {
         "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.name, c.name ORDER BY c.name",
         // UNION of pushable arms.
         "MATCH (n:Person) RETURN n.name AS x UNION MATCH (c:City) RETURN c.name AS x",
+        // OPTIONAL MATCH (LEFT JOIN with null-padding).
+        "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a.name, b.name ORDER BY a.name, b.name",
         // Not pushable (OPTIONAL MATCH): exercises the read_graph fallback branch.
         "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name ORDER BY a.name",
     ];

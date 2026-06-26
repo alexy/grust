@@ -996,6 +996,7 @@ impl NodeReadPushdown {
         let selected = [SelectedBinding::Node {
             var: self.var.clone(),
             node: 0,
+            optional: false,
         }];
         let binding_rows = reconstruct_bindings(&selected, rows)?;
         if self.pushes_ordering(dialect) {
@@ -1243,12 +1244,23 @@ enum SegArithExpr {
 }
 
 /// One binding the path query selects and reconstructs, in SELECT-column order.
+/// `optional` bindings come from an `OPTIONAL MATCH` (a `LEFT JOIN`): when their
+/// presence column is NULL the binding is reconstructed as `null` (the
+/// reference's null-padding) rather than a graph element.
 #[derive(Clone, Debug, PartialEq)]
 enum SelectedBinding {
     /// Node at position `node` bound to `var` (3 columns: id, label, props).
-    Node { var: String, node: usize },
+    Node {
+        var: String,
+        node: usize,
+        optional: bool,
+    },
     /// Edge at segment `edge` bound to `var` (5 columns: id, src, dst, type, props).
-    Edge { var: String, edge: usize },
+    Edge {
+        var: String,
+        edge: usize,
+        optional: bool,
+    },
 }
 
 /// One segment of the path: its direction and relationship types.
@@ -1448,6 +1460,7 @@ fn lower_segment_single(
         selected.push(SelectedBinding::Node {
             var: var.clone(),
             node: 0,
+            optional: false,
         });
     }
     for (j, seg) in pattern.segments.iter().enumerate() {
@@ -1455,12 +1468,14 @@ fn lower_segment_single(
             selected.push(SelectedBinding::Edge {
                 var: var.clone(),
                 edge: j,
+                optional: false,
             });
         }
         if let Some(var) = &node_patterns[j + 1].variable {
             selected.push(SelectedBinding::Node {
                 var: var.clone(),
                 node: j + 1,
+                optional: false,
             });
         }
     }
@@ -2034,25 +2049,39 @@ fn reconstruct_bindings(
         let mut bindings = Vec::with_capacity(selected.len());
         for binding in selected {
             match binding {
-                SelectedBinding::Node { var, .. } => {
-                    let node = Node {
-                        id: NodeId::new(cell(idx).unwrap_or_default()),
-                        label: Label::new(cell(idx + 1).unwrap_or_default()),
-                        props: parse_props(cell(idx + 2))?,
-                    };
+                SelectedBinding::Node { var, optional, .. } => {
+                    // Presence column for a node is its (non-null) id; an optional
+                    // node with no LEFT JOIN match → null-padded binding.
+                    if *optional && cell(idx).is_none() {
+                        bindings.push((var.clone(), PushedBinding::Null));
+                    } else {
+                        bindings.push((
+                            var.clone(),
+                            PushedBinding::Node(Node {
+                                id: NodeId::new(cell(idx).unwrap_or_default()),
+                                label: Label::new(cell(idx + 1).unwrap_or_default()),
+                                props: parse_props(cell(idx + 2))?,
+                            }),
+                        ));
+                    }
                     idx += 3;
-                    bindings.push((var.clone(), PushedBinding::Node(node)));
                 }
-                SelectedBinding::Edge { var, .. } => {
-                    let mut edge = Edge::new(
-                        cell(idx + 3).unwrap_or_default(),
-                        cell(idx + 1).unwrap_or_default(),
-                        cell(idx + 2).unwrap_or_default(),
-                        parse_props(cell(idx + 4))?,
-                    );
-                    edge.id = cell(idx).map(EdgeId::new);
+                SelectedBinding::Edge { var, optional, .. } => {
+                    // An edge's id may legitimately be NULL, so use src_id as the
+                    // presence column for an optional (LEFT JOIN) edge.
+                    if *optional && cell(idx + 1).is_none() {
+                        bindings.push((var.clone(), PushedBinding::Null));
+                    } else {
+                        let mut edge = Edge::new(
+                            cell(idx + 3).unwrap_or_default(),
+                            cell(idx + 1).unwrap_or_default(),
+                            cell(idx + 2).unwrap_or_default(),
+                            parse_props(cell(idx + 4))?,
+                        );
+                        edge.id = cell(idx).map(EdgeId::new);
+                        bindings.push((var.clone(), PushedBinding::Edge(edge)));
+                    }
                     idx += 5;
-                    bindings.push((var.clone(), PushedBinding::Edge(edge)));
                 }
             }
         }
@@ -2208,12 +2237,14 @@ fn lower_var_length_single(
         selected.push(SelectedBinding::Node {
             var: var.clone(),
             node: 0,
+            optional: false,
         });
     }
     if let Some(var) = &b_var {
         selected.push(SelectedBinding::Node {
             var: var.clone(),
             node: 1,
+            optional: false,
         });
     }
 
@@ -2357,6 +2388,325 @@ impl VarLengthReadPushdown {
     }
 }
 
+// ===========================================================================
+// OPTIONAL MATCH pushdown (mandatory node + one optional directed segment)
+// ===========================================================================
+//
+// `MATCH (a[:LA] [{..}]) [WHERE wa] OPTIONAL MATCH (a)-[r?:T [{..}]]->(b[:LB]
+// [{..}]) [WHERE wb] RETURN …` lowers to a LEFT JOIN of the mandatory node `a`
+// (`n0`) against a subquery that is the *whole* optional segment (edge `e0` ⋈ end
+// node `n1`, with all optional conditions). The subquery makes the optional match
+// atomic — when nothing matches, every optional column is NULL and `r`/`b` are
+// null-padded, exactly like the reference. `wa` references only `a`; `wb`/inline
+// props reference only `r`/`b` (else the query falls back).
+
+/// A lowered `OPTIONAL MATCH` (mandatory node + one optional directed segment).
+#[derive(Clone, Debug, PartialEq)]
+pub struct OptionalReadPushdown {
+    a_label: Option<String>,
+    /// Filter over the mandatory node `a` (`n0`) — outer `WHERE`.
+    a_filter: Option<SegPredicate>,
+    /// Outgoing/Incoming only (undirected falls back).
+    direction: SegDirection,
+    rel_types: Vec<String>,
+    b_label: Option<String>,
+    /// Filter over the optional `r`/`b` (`e0`/`n1`) — inside the subquery.
+    opt_filter: Option<SegPredicate>,
+    /// `a` (mandatory), then optional `r`/`b` (in SELECT order).
+    selected: Vec<SelectedBinding>,
+    projection: Projection,
+}
+
+fn lower_optional_single(
+    single: &SingleQuery,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<OptionalReadPushdown> {
+    // Exactly `MATCH (a …) [WHERE] OPTIONAL MATCH (a)-[r?]->(b …) [WHERE] RETURN`.
+    let (m, o, return_clause) = match single.clauses.as_slice() {
+        [Clause::Match(m), Clause::Match(o), Clause::Return(r)] if !m.optional && o.optional => {
+            (m, o, r)
+        }
+        _ => return None,
+    };
+    // Mandatory part: a single bound node pattern, ≤1 label.
+    if m.patterns.len() != 1 {
+        return None;
+    }
+    let a_pat = &m.patterns[0];
+    if a_pat.variable.is_some() || !a_pat.segments.is_empty() || a_pat.start.labels.len() > 1 {
+        return None;
+    }
+    let a_node = &a_pat.start;
+    let a_var = a_node.variable.clone()?;
+
+    // Optional part: a single segment continuing from `a`.
+    if o.patterns.len() != 1 {
+        return None;
+    }
+    let o_pat = &o.patterns[0];
+    if o_pat.variable.is_some() || o_pat.segments.len() != 1 {
+        return None;
+    }
+    // The optional start must be a bare back-reference to `a`.
+    if o_pat.start.variable.as_deref() != Some(a_var.as_str())
+        || !o_pat.start.labels.is_empty()
+        || o_pat.start.properties.is_some()
+    {
+        return None;
+    }
+    let seg = &o_pat.segments[0];
+    let rel = &seg.relationship;
+    let b_node = &seg.node;
+    if rel.length.is_some() || b_node.labels.len() > 1 {
+        return None;
+    }
+    let direction = match rel.direction {
+        Direction::Outgoing => SegDirection::Outgoing,
+        Direction::Incoming => SegDirection::Incoming,
+        Direction::Undirected => return None,
+    };
+    let b_var = b_node.variable.clone();
+    let r_var = rel.variable.clone();
+    // Variables must be distinct from `a` and each other.
+    for v in [b_var.as_ref(), r_var.as_ref()].into_iter().flatten() {
+        if v == &a_var {
+            return None;
+        }
+    }
+    if let (Some(rv), Some(bv)) = (&r_var, &b_var) {
+        if rv == bv {
+            return None;
+        }
+    }
+
+    let a_label = a_node.labels.first().cloned();
+    let b_label = b_node.labels.first().cloned();
+    let node_labels = [a_label.clone(), b_label.clone()];
+    let segments = [SegSpec {
+        direction,
+        rel_types: rel.types.clone(),
+    }];
+
+    // Mandatory filter over `a` (node 0): inline props + WHERE; must not touch r/b.
+    let a_roles: RoleMap = std::iter::once((a_var.clone(), Role::Node(0))).collect();
+    let mut a_filter = None;
+    if let Some(map) = &a_node.properties {
+        for (key, value) in &map.entries {
+            let scalar = lower_scalar(value, params)?;
+            let operand = if key == "label" {
+                SegOperand::NodeLabel(0)
+            } else {
+                SegOperand::NodeProp(0, lower_seg_key(key)?)
+            };
+            a_filter = Some(seg_conjoin(
+                a_filter,
+                SegPredicate::Compare {
+                    operand,
+                    op: CmpOp::Eq,
+                    value: scalar,
+                },
+            ));
+        }
+    }
+    if let Some(where_expr) = &m.where_clause {
+        let ctx = SegCtx {
+            roles: &a_roles,
+            node_labels: &node_labels,
+            segments: &segments,
+            hints,
+        };
+        a_filter = Some(seg_conjoin(a_filter, lower_seg_predicate(where_expr, &ctx, params)?));
+    }
+
+    // Optional filter over `r` (edge 0) and `b` (node 1): inline props + WHERE;
+    // must not reference `a` (the subquery cannot see the outer node).
+    let opt_roles: RoleMap = {
+        let mut m = std::collections::HashMap::new();
+        if let Some(v) = &r_var {
+            m.insert(v.clone(), Role::Edge(0));
+        }
+        if let Some(v) = &b_var {
+            m.insert(v.clone(), Role::Node(1));
+        }
+        m
+    };
+    let mut opt_filter = None;
+    if let Some(map) = &rel.properties {
+        for (key, value) in &map.entries {
+            let scalar = lower_scalar(value, params)?;
+            opt_filter = Some(seg_conjoin(
+                opt_filter,
+                SegPredicate::Compare {
+                    operand: SegOperand::EdgeProp(0, lower_seg_key(key)?),
+                    op: CmpOp::Eq,
+                    value: scalar,
+                },
+            ));
+        }
+    }
+    if let Some(map) = &b_node.properties {
+        for (key, value) in &map.entries {
+            let scalar = lower_scalar(value, params)?;
+            let operand = if key == "label" {
+                SegOperand::NodeLabel(1)
+            } else {
+                SegOperand::NodeProp(1, lower_seg_key(key)?)
+            };
+            opt_filter = Some(seg_conjoin(
+                opt_filter,
+                SegPredicate::Compare {
+                    operand,
+                    op: CmpOp::Eq,
+                    value: scalar,
+                },
+            ));
+        }
+    }
+    if let Some(where_expr) = &o.where_clause {
+        let ctx = SegCtx {
+            roles: &opt_roles,
+            node_labels: &node_labels,
+            segments: &segments,
+            hints,
+        };
+        opt_filter = Some(seg_conjoin(opt_filter, lower_seg_predicate(where_expr, &ctx, params)?));
+    }
+
+    let mut selected = vec![SelectedBinding::Node {
+        var: a_var,
+        node: 0,
+        optional: false,
+    }];
+    if let Some(var) = r_var {
+        selected.push(SelectedBinding::Edge {
+            var,
+            edge: 0,
+            optional: true,
+        });
+    }
+    if let Some(var) = b_var {
+        selected.push(SelectedBinding::Node {
+            var,
+            node: 1,
+            optional: true,
+        });
+    }
+
+    Some(OptionalReadPushdown {
+        a_label,
+        a_filter,
+        direction,
+        rel_types: rel.types.clone(),
+        b_label,
+        opt_filter,
+        selected,
+        projection: return_clause.projection.clone(),
+    })
+}
+
+impl OptionalReadPushdown {
+    pub fn column_count(&self) -> usize {
+        self.selected
+            .iter()
+            .map(|b| match b {
+                SelectedBinding::Node { .. } => 3,
+                SelectedBinding::Edge { .. } => 5,
+            })
+            .sum()
+    }
+
+    pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
+        let nodes = dialect.quote_ident(dialect.nodes_table());
+        let edges = dialect.quote_ident(dialect.edges_table());
+        // Subquery = the whole optional segment (edge e0 ⋈ end node n1), keyed by
+        // the anchor endpoint that joins to the outer node n0.
+        let (anchor, b_join) = match self.direction {
+            SegDirection::Outgoing => ("e0.src_id", "n1.id = e0.dst_id"),
+            // Undirected is rejected at lowering.
+            _ => ("e0.dst_id", "n1.id = e0.src_id"),
+        };
+        let mut sub_conds: Vec<String> = Vec::new();
+        match self.rel_types.as_slice() {
+            [] => {}
+            [one] => sub_conds.push(format!("e0.edge_type = {}", dialect.string_literal(one))),
+            many => {
+                let list = many
+                    .iter()
+                    .map(|t| dialect.string_literal(t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                sub_conds.push(format!("e0.edge_type IN ({list})"));
+            }
+        }
+        if let Some(label) = &self.b_label {
+            sub_conds.push(format!("n1.label = {}", dialect.string_literal(label)));
+        }
+        if let Some(filter) = &self.opt_filter {
+            sub_conds.push(render_seg_predicate(filter, dialect));
+        }
+        let sub_where = if sub_conds.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", sub_conds.join(" AND "))
+        };
+        let subquery = format!(
+            "SELECT {anchor} AS anchor, \
+             e0.id AS r_id, e0.src_id AS r_src, e0.dst_id AS r_dst, e0.edge_type AS r_type, \
+             e0.props AS r_props, n1.id AS b_id, n1.label AS b_label, n1.props AS b_props \
+             FROM {edges} e0 JOIN {nodes} n1 ON {b_join}{sub_where}"
+        );
+
+        // Outer SELECT: n0 columns, then opt.* per selected optional binding.
+        let mut cols: Vec<String> = Vec::new();
+        for binding in &self.selected {
+            match binding {
+                SelectedBinding::Node { optional: false, .. } => {
+                    cols.extend(["n0.id".into(), "n0.label".into(), "n0.props".into()]);
+                }
+                SelectedBinding::Edge { .. } => cols.extend([
+                    "opt.r_id".into(),
+                    "opt.r_src".into(),
+                    "opt.r_dst".into(),
+                    "opt.r_type".into(),
+                    "opt.r_props".into(),
+                ]),
+                SelectedBinding::Node { optional: true, .. } => {
+                    cols.extend(["opt.b_id".into(), "opt.b_label".into(), "opt.b_props".into()]);
+                }
+            }
+        }
+        let mut sql = format!(
+            "SELECT {} FROM {nodes} n0 LEFT JOIN ({subquery}) opt ON opt.anchor = n0.id",
+            cols.join(", ")
+        );
+        let mut outer: Vec<String> = Vec::new();
+        if let Some(label) = &self.a_label {
+            outer.push(format!("n0.label = {}", dialect.string_literal(label)));
+        }
+        if let Some(filter) = &self.a_filter {
+            outer.push(render_seg_predicate(filter, dialect));
+        }
+        if !outer.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&outer.join(" AND "));
+        }
+        sql
+    }
+
+    pub fn project_text_rows(
+        &self,
+        _dialect: &dyn SqlDialect,
+        rows: Vec<Vec<Option<String>>>,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        let binding_rows = reconstruct_bindings(&self.selected, rows)?;
+        // Ordering/limit are not pushed for OPTIONAL; the reference projection
+        // applies them over the null-padded rows.
+        crate::read::project_bindings(binding_rows, &self.projection, params)
+    }
+}
+
 /// Parse a JSON `props` text cell (untagged) into [`Props`]. NULL/empty → empty.
 fn parse_props(text: Option<&str>) -> Result<Props> {
     match text {
@@ -2388,6 +2738,7 @@ pub enum ReadPushdown {
     Node(NodeReadPushdown),
     Segment(SegmentReadPushdown),
     VarLength(VarLengthReadPushdown),
+    Optional(OptionalReadPushdown),
     /// `UNION` / `UNION ALL` of pushable arms; `distinct` is true when any
     /// boundary is a (deduplicating) `UNION`.
     Union {
@@ -2417,6 +2768,7 @@ impl ReadPushdown {
             ReadPushdown::Node(p) => p.to_sql(dialect),
             ReadPushdown::Segment(p) => p.to_sql(dialect),
             ReadPushdown::VarLength(p) => p.to_sql(dialect),
+            ReadPushdown::Optional(p) => p.to_sql(dialect),
             ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
         }
     }
@@ -2427,6 +2779,7 @@ impl ReadPushdown {
             ReadPushdown::Node(p) => p.column_count(),
             ReadPushdown::Segment(p) => p.column_count(),
             ReadPushdown::VarLength(p) => p.column_count(),
+            ReadPushdown::Optional(p) => p.column_count(),
             ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
         }
     }
@@ -2442,6 +2795,7 @@ impl ReadPushdown {
             ReadPushdown::Node(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Segment(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::VarLength(p) => p.project_text_rows(dialect, rows, params),
+            ReadPushdown::Optional(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
         }
     }
@@ -2489,7 +2843,10 @@ fn lower_single(
     if let Some(p) = lower_segment_single(single, params, hints) {
         return Some(ReadPushdown::Segment(p));
     }
-    lower_var_length_single(single, params, hints).map(ReadPushdown::VarLength)
+    if let Some(p) = lower_var_length_single(single, params, hints) {
+        return Some(ReadPushdown::VarLength(p));
+    }
+    lower_optional_single(single, params, hints).map(ReadPushdown::Optional)
 }
 
 /// Combine `UNION` arm result tables, mirroring [`crate::read::run_read_query`]:
@@ -3215,6 +3572,38 @@ mod tests {
         // A non-pushable arm makes the whole UNION fall back.
         assert!(plan_read(
             "MATCH (n:Person) RETURN n.name AS x UNION UNWIND [1] AS x RETURN x",
+            &params(),
+            &NoTypeHints,
+        )
+        .unwrap()
+        .is_none());
+    }
+
+    // ---- OPTIONAL MATCH ---------------------------------------------------
+
+    #[test]
+    fn optional_match_left_join() {
+        let plan = plan_read(
+            "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b:Person) RETURN a.name, b.name",
+            &params(),
+            &NoTypeHints,
+        )
+        .unwrap()
+        .expect("pushable");
+        assert!(matches!(plan, ReadPushdown::Optional(_)));
+        let sql = plan.to_sql(&SqliteDialect);
+        assert!(sql.starts_with("SELECT n0.id, n0.label, n0.props, opt.b_id, opt.b_label, opt.b_props \
+             FROM \"grust_nodes\" n0 LEFT JOIN ("), "{sql}");
+        assert!(
+            sql.contains("FROM \"grust_edges\" e0 JOIN \"grust_nodes\" n1 ON n1.id = e0.dst_id"),
+            "{sql}"
+        );
+        assert!(sql.contains("WHERE e0.edge_type = 'KNOWS' AND n1.label = 'Person'"), "{sql}");
+        assert!(sql.ends_with(") opt ON opt.anchor = n0.id WHERE n0.label = 'Person'"), "{sql}");
+
+        // OPTIONAL WHERE referencing the mandatory node `a` is not pushable.
+        assert!(plan_read(
+            "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) WHERE b.age > a.age RETURN a.name",
             &params(),
             &NoTypeHints,
         )

@@ -417,6 +417,9 @@ fn bound_value(bound: &Bound) -> Result<Value> {
 pub enum PushedBinding {
     Node(Node),
     Edge(Edge),
+    /// An `OPTIONAL MATCH` variable with no match — bound to `null`, matching the
+    /// reference's null-padding (`b.key` then evaluates to `null`).
+    Null,
 }
 
 /// Deduplicate result rows by value identity, preserving first-seen order — the
@@ -476,6 +479,7 @@ pub(crate) fn project_bindings(
                 let bound = match binding {
                     PushedBinding::Node(node) => Bound::Node(node),
                     PushedBinding::Edge(edge) => Bound::Edge(edge),
+                    PushedBinding::Null => Bound::Value(Value::Null),
                 };
                 row.insert(var, bound);
             }
