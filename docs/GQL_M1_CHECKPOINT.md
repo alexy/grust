@@ -170,6 +170,26 @@ via validate_*).
 
 ---
 
+## Unit 10a — write-path rewiring (BLOCKED; golden harness done)
+
+**Done:** a strict-write golden-snapshot harness (`tests/write_golden.rs` +
+`tests/gql/write_golden.json`) pins the planner's plan/rejection output for a
+20-statement corpus.
+
+**Blocked (decision needed):** routing the legacy `cypher_*` write entrypoints
+through the new lexer/parser/semantics pipeline CANNOT be byte-identical — the
+new pipeline emits span-bearing structured errors and accepts a broader grammar,
+whereas the 327 strict-write tests + the golden pin the legacy planner's exact
+error strings and narrow accept-set. Per the abort-on-drift mandate, the cutover
+is not done. Options for the human: (a) relax 'byte-identical' to 'same
+accept/reject + same plan shape, new structured error messages' and update the
+strict-write tests' error expectations (needs explicit OK — touches the 327
+suite); (b) keep the legacy planner for writes (two parsers; reads on the new
+pipeline); (c) hybrid (new lowering for valid plans, legacy validation/errors).
+This blocks Unit 10b and Unit 13 (which depend on it) and Unit 16's completeness.
+
+---
+
 ### Implementation history (chronological)
 
 `src/pushdown.rs` is the backend-neutral lowering. `plan_node_read(cypher,
