@@ -90,17 +90,23 @@ reporting (`GqlBackend::transactional`, descriptor flag, `transactional_backends
 Manifest `TransactionControl`→Supported, `SessionControl`→Planned. Deferred
 (write-path-coupled): atomic batch execution + session SET/RESET/USE.
 
-### AUTONOMOUS LOOP — STOPPED at the terminal review gate (2026-06-25)
-Every unit doable without the human fork decision is **done & pushed**:
-Unit 14 (procedures), Unit T (decimal/duration), Unit 13 (transaction surface).
-Remaining work all requires the human:
-- **Unit 10a/10b** — BLOCKED on the A/B/C parser-accept-set fork (see top section).
-- **Unit 16** (full-39075 hardening) — terminal review milestone; also gated on
-  10a/10b (can't claim the full write profile while the cutover is forked).
+### AUTONOMOUS LOOP — STOPPED at the Unit 16 terminal review gate (2026-06-25)
+**All units the loop can complete are done & pushed:** Unit 14 (procedures),
+Unit T (decimal/duration), Unit 13 (transaction surface), **Unit 10a** (write
+accept-set cutover via decision **B** — new parser gates mutation-grammar
+acceptance, non-standard DELETE-by-pattern rejected, plans byte-identical), and
+**Unit 10b** (audit: multi-row pattern writes were *already* implemented by the
+legacy planner; the remaining widenings W1–W4 are accept-set product decisions —
+see `docs/GQL_U10b_WRITE_WIDENING_AUDIT.md`).
 
 The loop stopped here per its "STOP for human review at Unit 16 / surface on a
-genuine fork" contract. **To resume: answer A/B/C for Unit 10a**, then 10a→10b→16.
-Current: cypher 521 lib / 3 / 17, core 40, turso 7+14, 0 warnings, branch clean & pushed.
+genuine fork" contract. Two things need the human:
+1. **Unit 10b widenings W1–W4** — relax-vs-keep product decisions (multi-pattern
+   writes, incoming `<-` edges, cross-variable SET, default generated ids).
+2. **Unit 16** (full-39075 hardening) — the terminal review milestone itself.
+
+Current: cypher 521 lib / 3 / 17, core 40, turso 7+14, 0 warnings, branch clean
+& pushed. **To resume: direct W1–W4 and/or open the Unit 16 review.**
 
 ### NEXT — decision point (pick a track when resuming)
 The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:

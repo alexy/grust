@@ -265,6 +265,32 @@ This blocks Unit 10b and Unit 13 (which depend on it) and Unit 16's completeness
 
 ---
 
+## Unit 10b — pattern-driven write widening (audit done; widenings = review decisions)
+
+Full audit in `docs/GQL_U10b_WRITE_WIDENING_AUDIT.md`. Key finding: U10b's core
+objective — **multi-row pattern writes** — is *already implemented* by the legacy
+planner (`PatchMatchingNodes`/`UpdateMatchingNodeProperty`/`RemoveMatchingNodeProps`/
+`DeleteMatchingNodes`, the edge equivalents, `UpsertEdgesFromNodeMatches`, all with
+`BoundedMany` cardinality + predicate filters; plus cross-statement local vars).
+The Unit 10a gate now fronts it with the standards-conformant parser.
+
+What remains is **not** missing multi-row support — it's a set of accept-set
+*expansions* (W1–W4 in the audit), each a product decision with plan-shape or
+semantics implications:
+- **W1** multiple relationship patterns per write statement (medium-high risk).
+- **W2** incoming `<-[:T]-` edge writes (standard Cypher; plan-preserving by
+  endpoint swap, but the legacy string edge-detector keys on `->`, so the change
+  is more invasive than it looks).
+- **W3** cross-variable numeric `SET` (`SET a.x = b.y + 1`) — deliberately rejected.
+- **W4** default-on generated ids (already available via `CypherNodeIdPolicy`,
+  off by default) — a policy default flip.
+
+Per the guardrails (do not drift plans / expand the public accept-set without an
+explicit decision), **no speculative relaxations applied**; W1–W4 are folded into
+the Unit 16 human review. This is the loop's terminal stop.
+
+---
+
 ## Unit 13 — transactions / sessions / control (language + capability done)
 
 Fork-independent slice landed (all green, pushed). The executable substance
