@@ -56,6 +56,23 @@ We are executing the GQL completion goal. **Everything below is on branch
   for recursive CTEs). **See the checkpoint's Unit 15 section for the full
   future-work list.**
 
+### AUTONOMOUS LOOP — PAUSED awaiting 3 decisions (2026-06-25)
+A self-paced `/loop` drove the DAG and landed (all green, pushed): Unit 15-tail
+`/` division pushdown; Unit 12 backend conformance profiles; Unit T **temporal**
+ordering; Unit 11 **graph-type validation** (`graph_type.rs`); Unit 10a **golden
+harness** (`tests/golden/write_golden.json` + `tests/write_golden.rs`); Unit 14
+**function** expansion (sqrt/exp/ln/log/log10/sin/cos/tan). It then **paused** —
+the rest of the DAG is blocked on decisions only the human can make:
+1. **Unit 10a write cutover** — byte-identical rewiring is impossible (new
+   pipeline's structured errors + broader accept-set vs the 327 pinned tests).
+   Pick: (a) relax to same-accept/reject+same-plan, new error msgs, and update
+   the strict-write tests' error expectations [touches the 327 suite];
+   (b) keep the legacy planner for writes; (c) hybrid. Blocks 10b, 13, 16.
+2. **Unit T duration/decimal** — core `grust_core::Value` variants (workspace-wide)
+   vs cypher-layer representation. Blocks Unit 16's full-39075 claim.
+3. **Unit 14 procedures/CALL** — needs a procedure-set + YIELD/execution design.
+Answer these to unblock; the loop resumes from there.
+
 ### NEXT — decision point (pick a track when resuming)
 The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
 1. **Unit 15 pushdown tails** — `UNION`/`UNION ALL`, `OPTIONAL MATCH`,
@@ -90,7 +107,7 @@ The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
 ## VERIFY (the gate — run between steps)
 ```sh
 cd ~/src/grust
-cargo test  -p grust-cypher                         # 511 lib + 3 + 11 integration, 0 failed
+cargo test  -p grust-cypher                         # 515 lib + 3 + 13 integration, 0 failed
 cargo build -p grust-cypher --lib 2>&1 | grep -c warning:   # expect 0
 cargo check -p grust-graph --features cypher,memory         # facade
 cargo check -p grust-sail                                   # surface-touching units
