@@ -1712,6 +1712,20 @@ fn eval_scalar_function(
         "head" => Ok(list_elements(value).first().cloned().unwrap_or(Value::Null)),
         "last" => Ok(list_elements(value).last().cloned().unwrap_or(Value::Null)),
         "isempty" => restricted_is_empty_value(value),
+        // Temporal/decimal constructors (Unit T). `duration` takes an ISO 8601
+        // string; `decimal` accepts a numeral string or coerces an int/float.
+        "duration" => match value {
+            Value::String(s) => Value::duration(&s),
+            Value::Duration(_) => Ok(value),
+            other => Err(gql_type(format!("duration() expects an ISO 8601 string, got {other:?}"))),
+        },
+        "decimal" => match value {
+            Value::String(s) => Value::decimal(&s),
+            Value::Int(n) => Value::decimal(n.to_string()),
+            Value::Float(f) => Value::decimal(f.to_string()),
+            Value::Decimal(_) => Ok(value),
+            other => Err(gql_type(format!("decimal() expects a numeral string or number, got {other:?}"))),
+        },
         _ => Err(unsupported_gql_feature(
             GqlFeature::ScalarFunctionRegistry,
             GqlConformanceProfile::PortableGql,
@@ -1919,6 +1933,40 @@ fn arithmetic(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
             return Ok(Value::String(format!("{x}{y}")));
         }
     }
+
+    // Duration arithmetic: `+`/`-` over two durations stay a duration.
+    if let (Value::Duration(x), Value::Duration(y)) = (&a, &b) {
+        let r = match op {
+            BinaryOp::Add => x.checked_add(y),
+            BinaryOp::Subtract => x.checked_add(&y.negated()),
+            _ => return Err(gql_type("durations support only + and - arithmetic".to_string())),
+        };
+        return r
+            .map(Value::Duration)
+            .ok_or_else(|| gql_execution("duration arithmetic overflow"));
+    }
+
+    // Exact decimal arithmetic: when at least one operand is a decimal and no
+    // float is involved, `+`/`-`/`*` stay lossless decimals (ints coerce exactly).
+    // Division / modulo / power, or any float operand, fall to the f64 path below.
+    if matches!(op, BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply)
+        && (matches!(a, Value::Decimal(_)) || matches!(b, Value::Decimal(_)))
+        && !matches!(a, Value::Float(_))
+        && !matches!(b, Value::Float(_))
+    {
+        if let (Some(x), Some(y)) = (as_decimal_operand(&a), as_decimal_operand(&b)) {
+            let r = match op {
+                BinaryOp::Add => x.checked_add(&y),
+                BinaryOp::Subtract => x.checked_sub(&y),
+                BinaryOp::Multiply => x.checked_mul(&y),
+                _ => unreachable!(),
+            };
+            return r
+                .map(Value::Decimal)
+                .ok_or_else(|| gql_execution("decimal arithmetic overflow"));
+        }
+    }
+
     match (numeric(&a), numeric(&b)) {
         (Some(x), Some(y)) => {
             let both_int = matches!(a, Value::Int(_)) && matches!(b, Value::Int(_));
@@ -1955,6 +2003,19 @@ fn numeric(value: &Value) -> Option<f64> {
     match value {
         Value::Int(n) => Some(*n as f64),
         Value::Float(f) => Some(*f),
+        // Decimals coerce (lossily) into float arithmetic/comparison when mixed
+        // with a float; exact decimal paths are handled before this is reached.
+        Value::Decimal(d) => Some(d.to_f64()),
+        _ => None,
+    }
+}
+
+/// A decimal-compatible operand for exact arithmetic: decimals as-is, integers
+/// coerced exactly. Floats are excluded (they route to the lossy f64 path).
+fn as_decimal_operand(value: &Value) -> Option<grust_core::Decimal> {
+    match value {
+        Value::Decimal(d) => Some(*d),
+        Value::Int(n) => Some(grust_core::Decimal::from_parts(*n as i128, 0)),
         _ => None,
     }
 }
@@ -1963,6 +2024,12 @@ fn numeric(value: &Value) -> Option<f64> {
 fn values_equal(a: &Value, b: &Value) -> Option<bool> {
     if matches!(a, Value::Null) || matches!(b, Value::Null) {
         return None;
+    }
+    // Exact decimal/duration equality before any lossy f64 coercion.
+    match (a, b) {
+        (Value::Decimal(x), Value::Decimal(y)) => return Some(x == y),
+        (Value::Duration(x), Value::Duration(y)) => return Some(x == y),
+        _ => {}
     }
     if let (Some(x), Some(y)) = (numeric(a), numeric(b)) {
         return Some(x == y);
@@ -1978,6 +2045,12 @@ fn values_equal(a: &Value, b: &Value) -> Option<bool> {
 fn value_order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     if matches!(a, Value::Null) || matches!(b, Value::Null) {
         return None;
+    }
+    // Exact decimal/duration ordering before any lossy f64 coercion.
+    match (a, b) {
+        (Value::Decimal(x), Value::Decimal(y)) => return Some(x.cmp(y)),
+        (Value::Duration(x), Value::Duration(y)) => return Some(x.cmp(y)),
+        _ => {}
     }
     if let (Some(x), Some(y)) = (numeric(a), numeric(b)) {
         return x.partial_cmp(&y);

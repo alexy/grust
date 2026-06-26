@@ -227,6 +227,64 @@ fn call_yield_into_pipeline() {
 }
 
 #[test]
+fn decimal_values_and_arithmetic() {
+    // Constructor + lossless arithmetic (f64 would drift on 0.1 + 0.2).
+    assert_eq!(
+        col0("RETURN decimal('0.1') + decimal('0.2') AS d"),
+        vec![Value::decimal("0.3").unwrap()]
+    );
+    assert_eq!(
+        col0("RETURN decimal('1.5') * decimal('2') AS d"),
+        vec![Value::decimal("3").unwrap()]
+    );
+    // Int coerces exactly into a decimal under +/-/*.
+    assert_eq!(
+        col0("RETURN decimal('2.5') + 3 AS d"),
+        vec![Value::decimal("5.5").unwrap()]
+    );
+    // Comparison/ordering across decimals.
+    assert_eq!(
+        col0("UNWIND [decimal('1.50'), decimal('1.05'), decimal('1.5')] AS d RETURN d ORDER BY d"),
+        vec![
+            Value::decimal("1.05").unwrap(),
+            Value::decimal("1.5").unwrap(),
+            Value::decimal("1.5").unwrap(),
+        ]
+    );
+    assert_eq!(
+        col0("RETURN decimal('2.50') = decimal('2.5') AS eq"),
+        vec![Value::Bool(true)]
+    );
+}
+
+#[test]
+fn duration_values_and_arithmetic() {
+    // Constructor normalizes (P1Y2M -> 14 months); years/weeks fold in.
+    assert_eq!(
+        col0("RETURN duration('P1Y2M') AS d"),
+        vec![Value::duration("P14M").unwrap()]
+    );
+    // Component-wise addition stays a duration.
+    assert_eq!(
+        col0("RETURN duration('P1D') + duration('P2D') AS d"),
+        vec![Value::duration("P3D").unwrap()]
+    );
+    assert_eq!(
+        col0("RETURN duration('P1MT1H') - duration('PT30M') AS d"),
+        vec![Value::duration("P1MT1800S").unwrap()]
+    );
+    // Ordering is structural and deterministic.
+    assert_eq!(
+        col0("UNWIND [duration('P2D'), duration('P1D'), duration('P1M')] AS d RETURN d ORDER BY d"),
+        vec![
+            Value::duration("P1D").unwrap(),
+            Value::duration("P2D").unwrap(),
+            Value::duration("P1M").unwrap(),
+        ]
+    );
+}
+
+#[test]
 fn unsupported_read_shapes_error() {
     // Writes are rejected by the read executor.
     assert!(run_read_query(

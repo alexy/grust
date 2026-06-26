@@ -3843,7 +3843,7 @@ pub trait GraphMutationStore: GraphStore {
 
 pub mod prelude {
     pub use crate::{
-        CypherMutationExecutor, Direction, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType,
+        CypherMutationExecutor, Decimal, Direction, Duration, Edge, EdgeId, EdgePolicy, EdgeQuery, EdgeType,
         EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder, GraphConstraint,
         GraphConstraintCapability, GraphIndex, GraphMutation, GraphMutationAtomicity,
         GraphMutationCardinality, GraphMutationPlan, GraphMutationPlanKind, GraphMutationPlanOp,

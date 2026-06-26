@@ -776,23 +776,23 @@ impl GqlFeature {
             GqlFeature::TemporalValues => d!(
                 "temporal-values",
                 TypeSystem,
-                Future,
-                Full39075,
-                "Typed temporal values with comparison/ordering (Unit T)"
+                Supported,
+                PortableGql,
+                "Typed temporal values (Value::DateTime) with chronological comparison/ordering (Unit T)"
             ),
             GqlFeature::DurationValues => d!(
                 "duration-values",
                 TypeSystem,
-                Future,
-                Full39075,
-                "Typed duration values and arithmetic (Unit T)"
+                Supported,
+                PortableGql,
+                "Typed duration values (Value::Duration), ISO 8601 constructor, +/- arithmetic, ordering (Unit T)"
             ),
             GqlFeature::DecimalValues => d!(
                 "decimal-values",
                 TypeSystem,
-                Future,
-                Full39075,
-                "Typed decimal values (Unit T)"
+                Supported,
+                PortableGql,
+                "Typed lossless decimal values (Value::Decimal), constructor, exact +/-/* arithmetic, ordering (Unit T)"
             ),
             GqlFeature::PathValues => d!(
                 "path-values",
