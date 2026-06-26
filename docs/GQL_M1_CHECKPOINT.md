@@ -130,6 +130,17 @@ could reuse the same `SqlDialect` IR.
 
 ---
 
+## Unit 12 — backend conformance profiles (done)
+
+`grust_cypher::gql` now carries an honest per-backend model: `GqlBackend`,
+`GqlBackendDescriptor`, `GqlBackendRole` + `backend_manifest()` /
+`cypher_conformance_backends()`. Verified flags: executing Cypher set =
+Memory/Sail/Turso; read pushdown = Sail only; Postgres/PostgresPgq = SQL/PGQ
+stores (no portable Cypher executor yet); helix/ladybug = internal (publish=false,
+out of facade); cocoindex = sync target. A consistency test pins these facts.
+
+---
+
 ### Implementation history (chronological)
 
 `src/pushdown.rs` is the backend-neutral lowering. `plan_node_read(cypher,
