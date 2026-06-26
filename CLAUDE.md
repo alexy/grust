@@ -83,8 +83,24 @@ strings). Read executor: `decimal()`/`duration()` constructors, lossless decimal
 `DurationValues`/`DecimalValues` → `Supported`. Deferred niche tail: decimal/
 duration SQL pushdown + oracle (dialect-divergent; reference handles them today).
 
-10a + 10b (fork-adjacent) remain paused on the A/B/C fork. The loop continues on
-**Unit 13 transactions/sessions** next, then STOPs for human review at Unit 16.
+**Unit 13 DONE (fork-independent slice)** — `grust_cypher::transaction`:
+`TransactionCommand::parse` for `START TRANSACTION`/`BEGIN`/`COMMIT`/`ROLLBACK`
+(keywords intentionally NOT reserved) + honest per-backend atomicity capability
+reporting (`GqlBackend::transactional`, descriptor flag, `transactional_backends`).
+Manifest `TransactionControl`→Supported, `SessionControl`→Planned. Deferred
+(write-path-coupled): atomic batch execution + session SET/RESET/USE.
+
+### AUTONOMOUS LOOP — STOPPED at the terminal review gate (2026-06-25)
+Every unit doable without the human fork decision is **done & pushed**:
+Unit 14 (procedures), Unit T (decimal/duration), Unit 13 (transaction surface).
+Remaining work all requires the human:
+- **Unit 10a/10b** — BLOCKED on the A/B/C parser-accept-set fork (see top section).
+- **Unit 16** (full-39075 hardening) — terminal review milestone; also gated on
+  10a/10b (can't claim the full write profile while the cutover is forked).
+
+The loop stopped here per its "STOP for human review at Unit 16 / surface on a
+genuine fork" contract. **To resume: answer A/B/C for Unit 10a**, then 10a→10b→16.
+Current: cypher 521 lib / 3 / 17, core 40, turso 7+14, 0 warnings, branch clean & pushed.
 
 ### NEXT — decision point (pick a track when resuming)
 The safe additive read work (incl. Unit 15 pushdown) is done. Remaining:
