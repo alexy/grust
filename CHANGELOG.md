@@ -6,6 +6,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added a per-backend GQL/Cypher conformance model (`grust_cypher::gql`): `GqlBackend` + `GqlBackendDescriptor` + `GqlBackendRole`, with `backend_manifest()` and `cypher_conformance_backends()`. Honest capability flags (verified against the code): the executing Cypher-conformance set is Memory/Sail/Turso; only Sail has read pushdown; Postgres/pgGraph-PGQ are SQL/PGQ stores with no portable Cypher executor yet; helix/ladybug are internal (`publish=false`, out of facade); cocoindex is a sync target.
+
 - Added backend-neutral read-query **pushdown** (`grust_cypher::pushdown`): a
   bounded `MATCH … RETURN` query's `MATCH`/`WHERE` filter is lowered into SQL via
   a `SqlDialect` (Spark and SQLite provided), while the `RETURN` projection runs

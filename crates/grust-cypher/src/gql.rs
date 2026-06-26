@@ -1057,6 +1057,163 @@ pub fn support_summary() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Backend conformance profiles (Unit 12)
+// ---------------------------------------------------------------------------
+
+/// The role a backend plays in the GQL/Cypher conformance picture.
+///
+/// Only [`GqlBackendRole::CypherExecutor`] backends are part of the *executing*
+/// conformance set (they run the portable Cypher surface); the others are
+/// catalogued honestly so the matrix is not overclaimed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GqlBackendRole {
+    /// Executes portable Cypher (a `CypherMutationExecutor` and/or read path).
+    CypherExecutor,
+    /// A SQL / SQL-PGQ graph store with its own surface; no portable Cypher
+    /// executor yet (it could join the executing set later).
+    SqlGraphBackend,
+    /// An export/sync target, not a query backend.
+    SyncTarget,
+    /// Internal-only (`publish = false`); out of the facade and the executing
+    /// conformance set (conformance/cost artifacts stay test-only).
+    Internal,
+}
+
+impl GqlBackendRole {
+    pub const fn id(self) -> &'static str {
+        match self {
+            GqlBackendRole::CypherExecutor => "cypher-executor",
+            GqlBackendRole::SqlGraphBackend => "sql-graph-backend",
+            GqlBackendRole::SyncTarget => "sync-target",
+            GqlBackendRole::Internal => "internal",
+        }
+    }
+}
+
+impl fmt::Display for GqlBackendRole {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+/// The backends Grust catalogs for GQL/Cypher conformance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GqlBackend {
+    Memory,
+    Sail,
+    Turso,
+    Postgres,
+    PostgresPgq,
+    Helix,
+    Ladybug,
+    CocoIndex,
+}
+
+/// An honest per-backend capability record. Booleans reflect the *current*
+/// working tree (verified against the code), not aspirations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GqlBackendDescriptor {
+    pub backend: GqlBackend,
+    pub id: &'static str,
+    pub crate_name: &'static str,
+    pub role: GqlBackendRole,
+    /// Published to crates.io (not `publish = false`).
+    pub publishable: bool,
+    /// Exposed as a `grust-graph` facade feature.
+    pub in_facade: bool,
+    /// Implements `CypherMutationExecutor` (executes the writable Cypher subset).
+    pub cypher_writes: bool,
+    /// Executes the portable read core (as the reference, or via SQL pushdown).
+    pub portable_reads: bool,
+    /// Has SQL read **pushdown** wired into a `run_read_query` entrypoint.
+    pub read_pushdown: bool,
+    pub summary: &'static str,
+}
+
+impl GqlBackend {
+    pub const fn descriptor(self) -> GqlBackendDescriptor {
+        use GqlBackend::*;
+        use GqlBackendRole::*;
+        let (id, crate_name, role, publishable, in_facade, writes, reads, pushdown, summary) =
+            match self {
+                Memory => (
+                    "memory", "grust-memory", CypherExecutor, true, true, true, true, false,
+                    "In-memory reference executor: the portable read oracle and the strict-write reference.",
+                ),
+                Sail => (
+                    "sail", "grust-sail", CypherExecutor, true, true, true, true, true,
+                    "Sail/Spark: CypherMutationExecutor plus run_read_query SQL pushdown over grust_nodes/grust_edges.",
+                ),
+                Turso => (
+                    "turso", "grust-turso", CypherExecutor, true, true, true, false, false,
+                    "libSQL/Turso: CypherMutationExecutor (bounded matched-node patches); the embedded SQL differential oracle for read pushdown.",
+                ),
+                Postgres => (
+                    "postgres", "grust-postgres", SqlGraphBackend, true, true, false, false, false,
+                    "PostgreSQL universal-table SQL backend; no portable Cypher executor yet.",
+                ),
+                PostgresPgq => (
+                    "postgres-pgq", "grust-postgres-pgq", SqlGraphBackend, true, true, false, false, false,
+                    "PostgreSQL SQL/PGQ: native PROPERTY GRAPH + GRAPH_TABLE traversal; no portable Cypher executor yet.",
+                ),
+                Helix => (
+                    "helix", "grust-helix", Internal, false, false, false, false, false,
+                    "Internal only (publish=false): out of the facade and the executing-conformance set.",
+                ),
+                Ladybug => (
+                    "ladybug", "grust-ladybug", Internal, false, false, false, false, false,
+                    "Internal only (publish=false): out of the facade and the executing-conformance set.",
+                ),
+                CocoIndex => (
+                    "cocoindex", "grust-cocoindex", SyncTarget, true, true, false, false, false,
+                    "Sync/export target, not a query backend; out of the executing-conformance set.",
+                ),
+            };
+        GqlBackendDescriptor {
+            backend: self,
+            id,
+            crate_name,
+            role,
+            publishable,
+            in_facade,
+            cypher_writes: writes,
+            portable_reads: reads,
+            read_pushdown: pushdown,
+            summary,
+        }
+    }
+
+    /// All catalogued backends, narrowest concern first.
+    pub const ALL: [GqlBackend; 8] = [
+        GqlBackend::Memory,
+        GqlBackend::Sail,
+        GqlBackend::Turso,
+        GqlBackend::Postgres,
+        GqlBackend::PostgresPgq,
+        GqlBackend::Helix,
+        GqlBackend::Ladybug,
+        GqlBackend::CocoIndex,
+    ];
+}
+
+/// Descriptors for every catalogued backend.
+pub fn backend_manifest() -> Vec<GqlBackendDescriptor> {
+    GqlBackend::ALL.iter().map(|b| b.descriptor()).collect()
+}
+
+/// The backends in the *executing* Cypher-conformance set (role
+/// [`GqlBackendRole::CypherExecutor`]).
+pub fn cypher_conformance_backends() -> Vec<GqlBackend> {
+    GqlBackend::ALL
+        .iter()
+        .copied()
+        .filter(|b| b.descriptor().role == GqlBackendRole::CypherExecutor)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Structured, feature-tagged errors
 // ---------------------------------------------------------------------------
 
@@ -1295,6 +1452,46 @@ pub fn load_manifest_cases(json: &str) -> Result<Vec<GqlManifestCase>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn backend_manifest_is_honest_and_consistent() {
+        let m = backend_manifest();
+        assert_eq!(m.len(), GqlBackend::ALL.len());
+        // Unique ids.
+        let mut ids = std::collections::BTreeSet::new();
+        for d in &m {
+            assert!(ids.insert(d.id), "duplicate backend id {}", d.id);
+        }
+        // The executing Cypher-conformance set is exactly Memory/Sail/Turso.
+        let exec: Vec<_> = cypher_conformance_backends();
+        assert_eq!(
+            exec,
+            vec![GqlBackend::Memory, GqlBackend::Sail, GqlBackend::Turso]
+        );
+        for d in &m {
+            // Only Cypher executors execute writes / portable reads / pushdown.
+            if d.role != GqlBackendRole::CypherExecutor {
+                assert!(!d.cypher_writes, "{} should not claim cypher writes", d.id);
+                assert!(!d.portable_reads, "{} should not claim portable reads", d.id);
+                assert!(!d.read_pushdown, "{} should not claim read pushdown", d.id);
+            }
+            // Read pushdown implies portable reads.
+            if d.read_pushdown {
+                assert!(d.portable_reads, "{} pushdown without reads", d.id);
+            }
+            // Internal backends are never publishable or in the facade.
+            if d.role == GqlBackendRole::Internal {
+                assert!(!d.publishable && !d.in_facade, "{} internal but exposed", d.id);
+            }
+        }
+        // Verified specifics: only Sail has read pushdown; only Memory/Sail/Turso
+        // write Cypher; helix/ladybug are internal; cocoindex is a sync target.
+        assert!(GqlBackend::Sail.descriptor().read_pushdown);
+        assert!(!GqlBackend::Memory.descriptor().read_pushdown);
+        assert!(!GqlBackend::Postgres.descriptor().cypher_writes);
+        assert_eq!(GqlBackend::Helix.descriptor().role, GqlBackendRole::Internal);
+        assert_eq!(GqlBackend::CocoIndex.descriptor().role, GqlBackendRole::SyncTarget);
+    }
 
     #[test]
     fn every_feature_has_a_unique_id() {

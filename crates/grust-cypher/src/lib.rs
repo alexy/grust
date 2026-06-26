@@ -29,11 +29,12 @@ pub mod pushdown;
 pub mod read;
 pub mod semantics;
 pub use gql::{
-    GqlConformanceProfile, GqlError, GqlErrorKind, GqlExpectation, GqlFeature,
-    GqlFeatureDescriptor, GqlFeatureFamily, GqlFeatureStatus, GqlManifest, GqlManifestCase,
-    GqlRequirement, GqlSupportCounts, feature_manifest, gql_cardinality, gql_execution, gql_name,
-    gql_syntax, gql_type, load_manifest, load_manifest_cases, support_counts, support_summary,
-    unsupported_gql_feature,
+    GqlBackend, GqlBackendDescriptor, GqlBackendRole, GqlConformanceProfile, GqlError,
+    GqlErrorKind, GqlExpectation, GqlFeature, GqlFeatureDescriptor, GqlFeatureFamily,
+    GqlFeatureStatus, GqlManifest, GqlManifestCase, GqlRequirement, GqlSupportCounts,
+    backend_manifest, cypher_conformance_backends, feature_manifest, gql_cardinality,
+    gql_execution, gql_name, gql_syntax, gql_type, load_manifest, load_manifest_cases,
+    support_counts, support_summary, unsupported_gql_feature,
 };
 
 pub type CypherMutationReport = GraphMutationReport;
