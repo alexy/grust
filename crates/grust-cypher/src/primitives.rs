@@ -625,6 +625,14 @@ pub(crate) fn find_unquoted_sequence(value: &str, target: &str) -> Option<usize>
     scan_unquoted(value, |_, rest| rest.starts_with(target))
 }
 
+/// True if `pattern` contains a (directed) relationship arrow outside of string
+/// literals — either outgoing `->` or incoming `<-` (Unit 10b/W2). Used to route
+/// a writable pattern to edge handling rather than node handling.
+pub(crate) fn is_cypher_edge_pattern(pattern: &str) -> bool {
+    find_unquoted_sequence(pattern, "->").is_some()
+        || find_unquoted_sequence(pattern, "<-").is_some()
+}
+
 pub(crate) fn find_unquoted_keyword(value: &str, keyword: &str) -> Option<usize> {
     scan_unquoted(value, |index, rest| {
         rest.get(..keyword.len())

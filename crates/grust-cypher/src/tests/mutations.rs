@@ -2,6 +2,45 @@
 use super::*;
 
 #[test]
+fn cypher_incoming_edge_writes_normalize_to_source_destination() {
+    // Unit 10b / W2: an incoming `<-[:T]-` edge is accepted and normalized to the
+    // arrow's source -> destination, identical to the equivalent outgoing form.
+    let incoming = sail_cypher_mutation_plan(
+        "CREATE (a:Person {id: 'p1'})<-[:KNOWS]-(b:Person {id: 'p2'})",
+    )
+    .unwrap();
+    let outgoing = sail_cypher_mutation_plan(
+        "CREATE (b:Person {id: 'p2'})-[:KNOWS]->(a:Person {id: 'p1'})",
+    )
+    .unwrap();
+    assert_eq!(incoming.into_mutations(), outgoing.into_mutations());
+    let again = sail_cypher_mutation_plan(
+        "CREATE (a:Person {id: 'p1'})<-[:KNOWS]-(b:Person {id: 'p2'})",
+    )
+    .unwrap();
+    assert_eq!(
+        again.into_mutations(),
+        vec![GraphMutation::UpsertEdge(Edge::new(
+            "KNOWS",
+            "p2",
+            "p1",
+            Props::new(),
+        ))]
+    );
+
+    // Incoming edge in MATCH ... DELETE binds and deletes the same relationship.
+    let del_in = sail_cypher_mutation_plan(
+        "MATCH (a:Person {id: 'p1'})<-[r:KNOWS]-(b:Person {id: 'p2'}) DELETE r",
+    )
+    .unwrap();
+    let del_out = sail_cypher_mutation_plan(
+        "MATCH (b:Person {id: 'p2'})-[r:KNOWS]->(a:Person {id: 'p1'}) DELETE r",
+    )
+    .unwrap();
+    assert_eq!(del_in.operations, del_out.operations);
+}
+
+#[test]
 fn cypher_mutation_options_default_to_upsert_compatible_create() {
     assert_eq!(
         CypherMutationOptions::default(),

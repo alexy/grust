@@ -194,7 +194,7 @@ impl CypherMutationPlanner {
         pattern: &str,
         kind: GraphMutationPlanKind,
     ) -> Result<GraphMutationPlan> {
-        if find_unquoted_sequence(pattern, "->").is_some() {
+        if is_cypher_edge_pattern(pattern) {
             let parsed = self.parse_edge_pattern(pattern)?;
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::UpsertEdge {
@@ -243,7 +243,7 @@ impl CypherMutationPlanner {
     }
 
     fn parse_delete(&mut self, pattern: &str) -> Result<GraphMutationPlan> {
-        if find_unquoted_sequence(pattern, "->").is_some() {
+        if is_cypher_edge_pattern(pattern) {
             let parsed = self.parse_edge_pattern(pattern)?;
             return Ok(GraphMutationPlan::new(vec![
                 GraphMutationPlanOp::DeleteEdge {
@@ -294,7 +294,7 @@ impl CypherMutationPlanner {
         let (pattern, where_predicates) = split_match_where(pattern, &self.parameters)?;
         let (path_variable, pattern) = parse_path_binding(pattern, "MATCH DELETE")?;
 
-        if find_unquoted_sequence(pattern, "->").is_some() {
+        if is_cypher_edge_pattern(pattern) {
             let mut parsed = self.parse_edge_match_pattern(pattern)?;
             apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge DELETE")?;
             let Some(edge_variable) = parsed.relationship.variable.as_ref() else {
@@ -636,7 +636,7 @@ impl CypherMutationPlanner {
         )?;
 
         let (path_variable, edge_pattern) = parse_row_path_binding(edge_pattern)?;
-        if find_unquoted_sequence(edge_pattern, "->").is_none() {
+        if !is_cypher_edge_pattern(edge_pattern) {
             return Err(cypher_syntax(format!(
                 "MATCH {keyword} currently supports one relationship pattern only",
             )));
@@ -811,7 +811,7 @@ impl CypherMutationPlanner {
         let (pattern, where_predicates) = split_match_where(pattern, &self.parameters)?;
         let (path_variable, pattern) = parse_path_binding(pattern, "MATCH SET")?;
 
-        if find_unquoted_sequence(pattern, "->").is_some() {
+        if is_cypher_edge_pattern(pattern) {
             let mut parsed = self.parse_edge_match_pattern(pattern)?;
             apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge SET")?;
             let Some(edge_variable) = parsed.relationship.variable.clone() else {
@@ -1139,7 +1139,7 @@ impl CypherMutationPlanner {
         let (path_variable, pattern) = parse_path_binding(pattern, "MATCH REMOVE")?;
         let (target, key) = parse_property_ref(target, "MATCH REMOVE target")?;
 
-        if find_unquoted_sequence(pattern, "->").is_some() {
+        if is_cypher_edge_pattern(pattern) {
             let mut parsed = self.parse_edge_match_pattern(pattern)?;
             apply_edge_where_predicates(&mut parsed, where_predicates, "MATCH edge REMOVE")?;
             let Some(edge_variable) = parsed.relationship.variable.clone() else {
@@ -1247,29 +1247,59 @@ impl CypherMutationPlanner {
         ]))
     }
 
-    fn parse_edge_pattern(&mut self, pattern: &str) -> Result<ParsedCypherEdge> {
-        let (from, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
+    /// Parse `(a)-[rel]->(b)` or the incoming `(b)<-[rel]-(a)` form, normalizing
+    /// the result so `from`/`to` are always the arrow's source/destination
+    /// (Unit 10b/W2 widening for incoming edges). Returns `(from, rel, to)`.
+    fn parse_directed_edge_pattern(
+        &self,
+        pattern: &str,
+        context: &str,
+    ) -> Result<(ParsedCypherNode, String, ParsedCypherNode)> {
+        let (first, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
         let rest = rest.trim_start();
-        let rest = rest
-            .strip_prefix("-[")
-            .ok_or_else(|| cypher_syntax("edge mutation requires a directed -[...]-> pattern"))?;
+        let (incoming, rest) = if let Some(rest) = rest.strip_prefix("<-[") {
+            (true, rest)
+        } else if let Some(rest) = rest.strip_prefix("-[") {
+            (false, rest)
+        } else {
+            return Err(cypher_syntax(format!(
+                "{context} requires a directed -[...]-> or <-[...]- pattern"
+            )));
+        };
         let rel_end = find_matching(rest, '[', ']')?;
-        let rel = &rest[..rel_end];
+        let rel = rest[..rel_end].to_string();
         let rest = rest[rel_end + 1..].trim_start();
-        let rest = rest
-            .strip_prefix("->")
-            .ok_or_else(|| cypher_syntax("edge mutation requires outgoing '->' direction"))?;
-        let (to, rest) = parse_cypher_node_pattern(rest, &self.parameters)?;
+        let rest = if incoming {
+            if rest.starts_with("->") {
+                return Err(cypher_syntax(format!(
+                    "{context} has conflicting edge directions"
+                )));
+            }
+            rest.strip_prefix('-').ok_or_else(|| {
+                cypher_syntax(format!("{context} requires '<-[...]-' incoming direction"))
+            })?
+        } else {
+            rest.strip_prefix("->").ok_or_else(|| {
+                cypher_syntax(format!("{context} requires outgoing '->' direction"))
+            })?
+        };
+        let (second, rest) = parse_cypher_node_pattern(rest, &self.parameters)?;
         if !rest.trim().is_empty() {
             return Err(cypher_syntax(format!(
                 "unsupported writable Cypher edge pattern suffix: {}",
                 rest.trim()
             )));
         }
+        // Normalize to arrow source -> destination.
+        let (from, to) = if incoming { (second, first) } else { (first, second) };
+        Ok((from, rel, to))
+    }
 
+    fn parse_edge_pattern(&mut self, pattern: &str) -> Result<ParsedCypherEdge> {
+        let (from, rel, to) = self.parse_directed_edge_pattern(pattern, "edge mutation")?;
         let from_id = self.resolve_node_id(&from, "edge mutation source node")?;
         let to_id = self.resolve_node_id(&to, "edge mutation destination node")?;
-        let relationship = parse_cypher_relationship(rel, &self.parameters)?;
+        let relationship = parse_cypher_relationship(&rel, &self.parameters)?;
         let mut edge = Edge::new(
             relationship.label.clone(),
             from_id.clone(),
@@ -1301,25 +1331,8 @@ impl CypherMutationPlanner {
     }
 
     fn parse_edge_match_pattern(&self, pattern: &str) -> Result<ParsedCypherEdgeMatch> {
-        let (from, rest) = parse_cypher_node_pattern(pattern, &self.parameters)?;
-        let rest = rest.trim_start();
-        let rest = rest
-            .strip_prefix("-[")
-            .ok_or_else(|| cypher_syntax("edge mutation requires a directed -[...]-> pattern"))?;
-        let rel_end = find_matching(rest, '[', ']')?;
-        let rel = &rest[..rel_end];
-        let rest = rest[rel_end + 1..].trim_start();
-        let rest = rest
-            .strip_prefix("->")
-            .ok_or_else(|| cypher_syntax("edge mutation requires outgoing '->' direction"))?;
-        let (to, rest) = parse_cypher_node_pattern(rest, &self.parameters)?;
-        if !rest.trim().is_empty() {
-            return Err(cypher_syntax(format!(
-                "unsupported writable Cypher edge pattern suffix: {}",
-                rest.trim()
-            )));
-        }
-        let relationship = parse_cypher_relationship(rel, &self.parameters)?;
+        let (from, rel, to) = self.parse_directed_edge_pattern(pattern, "edge mutation")?;
+        let relationship = parse_cypher_relationship(&rel, &self.parameters)?;
         Ok(ParsedCypherEdgeMatch {
             from,
             relationship,
