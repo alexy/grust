@@ -635,12 +635,41 @@ impl CypherMutationPlanner {
             &format!("MATCH {keyword}"),
         )?;
 
-        let (path_variable, edge_pattern) = parse_row_path_binding(edge_pattern)?;
-        if !is_cypher_edge_pattern(edge_pattern) {
-            return Err(cypher_syntax(format!(
-                "MATCH {keyword} currently supports one relationship pattern only",
-            )));
+        // Unit 10b/W1: a `CREATE`/`MERGE` clause may carry multiple comma-separated
+        // relationship patterns; plan each segment and accumulate the ops. A single
+        // segment reduces to the prior behavior (byte-identical plan).
+        let segments = split_top_level_patterns(edge_pattern)?;
+        let multi = segments.len() > 1;
+        let mut ops = Vec::with_capacity(segments.len());
+        for segment in segments {
+            let (path_variable, segment) = parse_row_path_binding(segment)?;
+            if multi && path_variable.is_some() {
+                return Err(cypher_syntax(format!(
+                    "MATCH {keyword} does not support a path variable with multiple relationship patterns"
+                )));
+            }
+            if !is_cypher_edge_pattern(segment) {
+                return Err(cypher_syntax(format!(
+                    "MATCH {keyword} requires a relationship pattern"
+                )));
+            }
+            ops.push(self.plan_match_edge_segment(segment, path_variable, &matched_nodes, keyword, kind)?);
         }
+        Ok(GraphMutationPlan::new(ops))
+    }
+
+    /// Plan one `(a)-[rel]->(b)` segment of a `MATCH … CREATE/MERGE` edge write.
+    /// Extracted so multiple comma-separated relationship patterns can be planned
+    /// in a single statement (Unit 10b/W1); a lone segment is byte-identical to the
+    /// prior single-pattern behavior.
+    fn plan_match_edge_segment(
+        &mut self,
+        edge_pattern: &str,
+        path_variable: Option<String>,
+        matched_nodes: &BTreeMap<String, ParsedCypherNode>,
+        keyword: &str,
+        kind: GraphMutationPlanKind,
+    ) -> Result<GraphMutationPlanOp> {
         let parsed = self.parse_edge_match_pattern(edge_pattern)?;
         let Some(from_variable) = parsed.from.variable.as_ref() else {
             return Err(cypher_syntax(format!(
@@ -725,9 +754,7 @@ impl CypherMutationPlanner {
                     },
                 )?;
             }
-            return Ok(GraphMutationPlan::new(vec![
-                GraphMutationPlanOp::UpsertEdge { kind, edge },
-            ]));
+            return Ok(GraphMutationPlanOp::UpsertEdge { kind, edge });
         }
         validate_optional_edge_id_property(&parsed.relationship.props)?;
         let from = self.node_match_from_pattern(from_node, "MATCH CREATE source")?;
@@ -763,17 +790,15 @@ impl CypherMutationPlanner {
                 },
             )?;
         }
-        Ok(GraphMutationPlan::new(vec![
-            GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
-                kind,
-                from,
-                to,
-                label: parsed.relationship.label,
-                props: parsed.relationship.props,
-                edge_id_policy,
-                cardinality: GraphMutationCardinality::BoundedMany,
-            },
-        ]))
+        Ok(GraphMutationPlanOp::UpsertEdgesFromNodeMatches {
+            kind,
+            from,
+            to,
+            label: parsed.relationship.label,
+            props: parsed.relationship.props,
+            edge_id_policy,
+            cardinality: GraphMutationCardinality::BoundedMany,
+        })
     }
 
     fn row_edge_id_policy(&self, kind: GraphMutationPlanKind) -> GraphRowEdgeIdPolicy {

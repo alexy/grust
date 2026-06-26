@@ -2,6 +2,34 @@
 use super::*;
 
 #[test]
+fn cypher_multiple_relationship_patterns_per_write() {
+    // Unit 10b / W1: a CREATE clause may carry multiple comma-separated
+    // relationship patterns; each is planned and the ops accumulate in order.
+    let plan = sail_cypher_mutation_plan(
+        "MATCH (a:Person {id: 'p1'}), (b:Person {id: 'p2'}), (c:Person {id: 'p3'}) \
+         CREATE (a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c)",
+    )
+    .unwrap();
+    assert_eq!(
+        plan.into_mutations(),
+        vec![
+            GraphMutation::UpsertEdge(Edge::new("KNOWS", "p1", "p2", Props::new())),
+            GraphMutation::UpsertEdge(Edge::new("KNOWS", "p2", "p3", Props::new())),
+        ]
+    );
+
+    // A single relationship pattern is unchanged (byte-identical to before).
+    let single = sail_cypher_mutation_plan(
+        "MATCH (a:Person {id: 'p1'}), (b:Person {id: 'p2'}) CREATE (a)-[:KNOWS]->(b)",
+    )
+    .unwrap();
+    assert_eq!(
+        single.into_mutations(),
+        vec![GraphMutation::UpsertEdge(Edge::new("KNOWS", "p1", "p2", Props::new()))]
+    );
+}
+
+#[test]
 fn cypher_incoming_edge_writes_normalize_to_source_destination() {
     // Unit 10b / W2: an incoming `<-[:T]-` edge is accepted and normalized to the
     // arrow's source -> destination, identical to the equivalent outgoing form.
