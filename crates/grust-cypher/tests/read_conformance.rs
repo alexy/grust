@@ -149,6 +149,38 @@ fn path_variable_and_functions() {
 }
 
 #[test]
+fn datetime_ordering() {
+    // Temporal values order chronologically (RFC 3339 form), not as equal.
+    let nodes = vec![
+        node("Event", "e1", &[("at", Value::datetime("2026-01-03T00:00:00Z").unwrap())]),
+        node("Event", "e2", &[("at", Value::datetime("2026-01-01T00:00:00Z").unwrap())]),
+        node("Event", "e3", &[("at", Value::datetime("2026-01-02T00:00:00Z").unwrap())]),
+    ];
+    let graph = Graph::new(nodes, vec![]);
+    let table = run_read_query(
+        &graph,
+        "MATCH (n:Event) RETURN n.id AS id ORDER BY n.at",
+        &CypherParameters::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        table.rows.into_iter().map(|mut r| r.remove(0)).collect::<Vec<_>>(),
+        vec![Value::from("e2"), Value::from("e3"), Value::from("e1")]
+    );
+    // DESC reverses chronologically.
+    let desc = run_read_query(
+        &graph,
+        "MATCH (n:Event) RETURN n.id AS id ORDER BY n.at DESC",
+        &CypherParameters::new(),
+    )
+    .unwrap();
+    assert_eq!(
+        desc.rows.into_iter().map(|mut r| r.remove(0)).collect::<Vec<_>>(),
+        vec![Value::from("e1"), Value::from("e3"), Value::from("e2")]
+    );
+}
+
+#[test]
 fn unsupported_read_shapes_error() {
     // Writes are rejected by the read executor.
     assert!(run_read_query(

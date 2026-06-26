@@ -1858,6 +1858,9 @@ fn value_order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
+        // Temporal ordering: lexicographic over the RFC 3339 form (chronological
+        // for a consistent offset). `WHERE`/`ORDER BY` on datetimes use this.
+        (Value::DateTime(x), Value::DateTime(y)) => Some(x.as_str().cmp(y.as_str())),
         _ => None,
     }
 }

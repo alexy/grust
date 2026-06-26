@@ -1441,6 +1441,10 @@ pub(crate) fn compare_return_values(a: &Value, b: &Value) -> std::cmp::Ordering 
         (Value::Float(x), Value::Int(y)) => x.partial_cmp(&(*y as f64)).unwrap_or(Ordering::Equal),
         (Value::String(x), Value::String(y)) => x.cmp(y),
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        // Temporal ordering: lexicographic over the RFC 3339 form, which is
+        // chronological for a consistent offset (the normalized `Z` form the
+        // reference produces). Without this, two datetimes compared equal.
+        (Value::DateTime(x), Value::DateTime(y)) => x.as_str().cmp(y.as_str()),
         _ => value_kind_rank(a).cmp(&value_kind_rank(b)),
     }
 }
