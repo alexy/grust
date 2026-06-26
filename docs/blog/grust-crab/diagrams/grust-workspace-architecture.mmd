@@ -3,15 +3,20 @@ flowchart TB
   app["Rust application\nDomain model and loaders"] --> facade["grust facade crate\ncrate package: grust-graph"]
 
   facade --> core["grust-core\nModel, builder, schema,\ntraversal IR, store traits"]
+  facade --> cypher["grust-cypher\nGQL/Cypher: parser, semantics,\nread engine, write planner,\nSQL pushdown"]
   facade --> backends["Feature-gated GraphStore backends"]
   facade --> export["grust-cocoindex\nTarget-state export adapter"]
 
+  cypher --> core
+  cypher --> backends
+
   core --> model["Graph = nodes + edges\nNode = id + label + props\nEdge = from + to + label + props"]
-  core --> contract["GraphStore\nGraphAdminStore"]
+  core --> contract["GraphStore\nGraphAdminStore\nGraphMutationStore"]
   core --> ir["Traversal IR\nbackend-neutral steps"]
 
   backends --> local["grust-memory\nDeterministic local store"]
-  backends --> graphdb["Graph database writers\nFalkorDB, HelixDB, SurrealDB"]
+  backends --> graphdb["Graph database stores\nLadybugDB, FalkorDB,\nHelixDB, SurrealDB"]
   backends --> tables["Table and analytics stores\nLanceDB, pgGraph, Sail"]
+  backends --> arrow["Arrow IPC paths\nLadybugDB and Sail"]
 
   export --> target["Serializable node and relationship\nstate for incremental sync flows"]

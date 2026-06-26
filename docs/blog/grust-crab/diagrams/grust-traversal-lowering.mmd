@@ -7,10 +7,12 @@ flowchart TB
   ir --> lancedb["LanceDB\nrepeated table filters"]
   ir --> pggraph["pgGraph\nSQL joins over nodes and edges"]
   ir --> sail["Sail\nSpark SQL joins"]
-  ir --> future["Future backend lowerings\nCypher, SurrealQL, Helix queries"]
+  ir --> graphdb["Graph stores\nLadybugDB, HelixDB,\nSurrealDB"]
+  ir --> future["Future backend lowerings\nricher graph query forms"]
 
   memory --> result["Vec<Node>"]
   lancedb --> result
   pggraph --> result
   sail --> result
+  graphdb --> result
   future --> result

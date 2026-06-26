@@ -8,18 +8,12 @@ flowchart LR
   store --> pggraph["pgGraph\nPostgreSQL tables,\ntyped views, SQL joins"]
   store --> sail["Sail\nuniversal + typed Delta tables"]
   store --> falkor["FalkorDB\nRedis GRAPH.QUERY writes\nand property indexes"]
-  store --> helix["HelixDB\nHTTP or SDK writes\nschema-name validation"]
-  store --> surreal["SurrealDB\nHTTP or SDK writes\nschemafull tables"]
+  store --> helix["HelixDB\nHTTP or SDK\nreads + traversal"]
+  store --> surreal["SurrealDB\nHTTP or SDK\nreads + traversal"]
 
   lancedb --> universal["Universal layout\ngrust_nodes and grust_edges"]
   pggraph --> universal
   sail --> universal
-
-  lancedb --> typed["Typed backend surfaces\nfields, tables, views, indexes"]
-  pggraph --> typed
-  sail --> typed
-  falkor --> typed
-  surreal --> typed
 
   falkor --> native["Backend-native labels,\nrelationships, and query forms"]
   helix --> native

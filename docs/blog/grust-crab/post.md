@@ -47,26 +47,7 @@ Contract**, **Backend Architecture**, **Schema and Validation Direction**,
 rather than page numbers because the book is alive and will keep moving as the
 library does.
 
-```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "18px", "primaryColor": "#f7f8fb", "primaryTextColor": "#172033", "primaryBorderColor": "#4f46e5", "lineColor": "#3b4252", "secondaryColor": "#eef6f0", "tertiaryColor": "#fff6df"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 55, "rankSpacing": 60, "padding": 18}}}%%
-flowchart TB
-  app["Rust application\nDomain model and loaders"] --> facade["grust facade crate\ncrate package: grust-graph"]
-
-  facade --> core["grust-core\nModel, builder, schema,\ntraversal IR, store traits"]
-  facade --> backends["Feature-gated GraphStore backends"]
-  facade --> export["grust-cocoindex\nTarget-state export adapter"]
-
-  core --> model["Graph = nodes + edges\nNode = id + label + props\nEdge = from + to + label + props"]
-  core --> contract["GraphStore\nGraphAdminStore\nGraphMutationStore"]
-  core --> ir["Traversal IR\nbackend-neutral steps"]
-
-  backends --> local["grust-memory\nDeterministic local store"]
-  backends --> graphdb["Graph database stores\nLadybugDB, FalkorDB,\nHelixDB, SurrealDB"]
-  backends --> tables["Table and analytics stores\nLanceDB, pgGraph, Sail"]
-  backends --> arrow["Arrow IPC paths\nLadybugDB and Sail"]
-
-  export --> target["Serializable node and relationship\nstate for incremental sync flows"]
-```
+![Grust workspace architecture](diagrams/grust-workspace-architecture.png)
 
 ## The Shape of the API
 
@@ -272,20 +253,7 @@ the full treatment: garde-only construction, typed and untyped coexistence, a
 Zod overview, zod-rs plus garde examples, the error boundary between shape and
 domain validation, and how typed ingestion relates to `GraphSchema`.
 
-```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "18px", "primaryColor": "#f7f8fb", "primaryTextColor": "#172033", "primaryBorderColor": "#4f46e5", "lineColor": "#3b4252", "secondaryColor": "#eef6f0", "tertiaryColor": "#fff6df"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 50, "rankSpacing": 58, "padding": 18}}}%%
-flowchart TB
-  json["Raw JSON\nserde_json::Value"] --> zod["zod-rs schema\nshape validation"]
-  zod --> serde["serde_json\nDeserialize"]
-  serde --> typed["Rust struct\nTypedNode or TypedEdge"]
-  typed --> garde["garde::Validate\ndomain validation"]
-  garde --> lower["Lower into\nNode or Edge"]
-  lower --> graphData["Grust Graph"]
-
-  docs["YAML, JSON, XML\nGraph::from_*"] --> graphData
-  raw["GraphBuilder\nraw Node + Edge"] --> graphData
-  graphData --> store["GraphStore\nany backend"]
-```
+![Typed ingestion pipeline](diagrams/grust-typed-ingestion.png)
 
 ## The Store Contract
 
@@ -346,30 +314,7 @@ deserves. It is the piece that lets a memory store, a LanceDB table layout, a
 pgGraph projection, a Sail DataFrame backend, and graph database writers all
 present the same Rust-facing boundary.
 
-```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "18px", "primaryColor": "#f7f8fb", "primaryTextColor": "#172033", "primaryBorderColor": "#4f46e5", "lineColor": "#3b4252", "secondaryColor": "#eef6f0", "tertiaryColor": "#fff6df"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 50, "rankSpacing": 58, "padding": 18}}}%%
-flowchart LR
-  graphObj["grust::Graph"] --> store["GraphStore\nput_graph, put_typed_graph\nget_node(s), get_edges, traverse"]
-  graphObj --> coco["CocoIndex export\nnot a GraphStore"]
-
-  store --> memory["Memory\nBTreeMap scans"]
-  store --> lancedb["LanceDB\nuniversal + typed Arrow tables"]
-  store --> pggraph["pgGraph\nPostgreSQL tables,\ntyped views, SQL joins"]
-  store --> sail["Sail\nuniversal + typed Delta tables"]
-  store --> falkor["FalkorDB\nRedis GRAPH.QUERY writes\nand property indexes"]
-  store --> helix["HelixDB\nHTTP or SDK\nreads + traversal"]
-  store --> surreal["SurrealDB\nHTTP or SDK\nreads + traversal"]
-
-  lancedb --> universal["Universal layout\ngrust_nodes and grust_edges"]
-  pggraph --> universal
-  sail --> universal
-
-  falkor --> native["Backend-native labels,\nrelationships, and query forms"]
-  helix --> native
-  surreal --> native
-
-  coco --> state["Node state + relationship state\nstable keys and JSON properties"]
-```
+![The GraphStore contract across backends](diagrams/grust-backend-map.png)
 
 ## Backends Without Leaking Backend Languages
 
@@ -474,26 +419,7 @@ Sail can lower it to Spark SQL joins. HelixDB, LadybugDB, and SurrealDB can
 satisfy the same portable read and traversal surface through their own graph
 store implementations.
 
-```mermaid
-%%{init: {"theme": "base", "themeVariables": {"fontFamily": "Inter, Arial, sans-serif", "fontSize": "18px", "primaryColor": "#f7f8fb", "primaryTextColor": "#172033", "primaryBorderColor": "#4f46e5", "lineColor": "#3b4252", "secondaryColor": "#eef6f0", "tertiaryColor": "#fff6df"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 45, "rankSpacing": 56, "padding": 18}}}%%
-flowchart TB
-  app["Application code"] --> fluent["Traversal builder\nfrom node, out edge, target label"]
-  fluent --> ir["Traversal IR\nstart + ordered steps + optional limit"]
-
-  ir --> memory["Memory\nadjacency-map lookup"]
-  ir --> lancedb["LanceDB\nrepeated table filters"]
-  ir --> pggraph["pgGraph\nSQL joins over nodes and edges"]
-  ir --> sail["Sail\nSpark SQL joins"]
-  ir --> graphdb["Graph stores\nLadybugDB, HelixDB,\nSurrealDB"]
-  ir --> future["Future backend lowerings\nricher graph query forms"]
-
-  memory --> result["Vec<Node>"]
-  lancedb --> result
-  pggraph --> result
-  sail --> result
-  graphdb --> result
-  future --> result
-```
+![Traversal lowering to backend steps](diagrams/grust-traversal-lowering.png)
 
 This is the part of Grust I think is easiest to underestimate. The IR protects
 application code from backend query strings while leaving room for
