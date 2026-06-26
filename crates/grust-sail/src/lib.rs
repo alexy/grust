@@ -1340,31 +1340,23 @@ impl SailGraphStore {
         cypher: &str,
         params: &CypherParameters,
     ) -> Result<CypherResultTable> {
-        // Schema type hints let Spark push numeric `ORDER BY` (its
+        // Schema type hints let Spark push numeric `ORDER BY`/arithmetic (its
         // `GET_JSON_OBJECT` returns text, so the sort key must be cast).
         let hints = SailTypeHints {
             schema: self.current_schema(),
         };
-        if let Some(plan) =
-            grust_cypher::pushdown::plan_node_read_with_hints(cypher, params, &hints)?
-        {
+        if let Some(plan) = grust_cypher::pushdown::plan_read(cypher, params, &hints)? {
             let dialect = grust_cypher::pushdown::SparkDialect;
-            let nodes = self.run_query(&plan.to_sql(&dialect), vec![]).await?;
-            return plan.project(&dialect, nodes, params);
-        }
-        if let Some(plan) =
-            grust_cypher::pushdown::plan_segment_read_with_hints(cypher, params, &hints)?
-        {
-            let dialect = grust_cypher::pushdown::SparkDialect;
-            let rows = self.run_text_query(&plan.to_sql(&dialect)).await?;
-            return plan.project_text_rows(&dialect, rows, params);
-        }
-        // Variable-length paths lower to a recursive CTE (requires recursive-CTE
-        // support in the engine; see grust_cypher::pushdown).
-        if let Some(plan) =
-            grust_cypher::pushdown::plan_var_length_read_with_hints(cypher, params, &hints)?
-        {
-            let dialect = grust_cypher::pushdown::SparkDialect;
+            // `UNION`: run each arm and combine the result tables (a recursive
+            // CTE for var-length arms requires recursive-CTE engine support).
+            if let Some((arms, distinct)) = plan.union_arms() {
+                let mut tables = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    let rows = self.run_text_query(&arm.to_sql(&dialect)).await?;
+                    tables.push(arm.project_text_rows(&dialect, rows, params)?);
+                }
+                return grust_cypher::pushdown::combine_union(tables, distinct);
+            }
             let rows = self.run_text_query(&plan.to_sql(&dialect)).await?;
             return plan.project_text_rows(&dialect, rows, params);
         }

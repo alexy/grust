@@ -419,6 +419,23 @@ pub enum PushedBinding {
     Edge(Edge),
 }
 
+/// Deduplicate result rows by value identity, preserving first-seen order — the
+/// shared `UNION` (distinct) dedup, reused by backend pushdown's union combine.
+pub(crate) fn dedup_return_rows(
+    rows: Vec<Vec<Value>>,
+    context: &str,
+) -> Result<Vec<Vec<Value>>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut deduped = Vec::with_capacity(rows.len());
+    for values in rows {
+        let key = return_row_key(&values, context)?;
+        if seen.insert(key) {
+            deduped.push(values);
+        }
+    }
+    Ok(deduped)
+}
+
 /// Project a set of already-matched nodes through a `RETURN`/`WITH` projection.
 ///
 /// This is the shared tail used by single-node backend **read pushdown**

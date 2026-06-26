@@ -483,20 +483,23 @@ pub fn plan_node_read_with_hints(
 ) -> Result<Option<NodeReadPushdown>> {
     let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
     crate::semantics::analyze(&query)?;
-    Ok(lower_query(&query, params, hints))
+    Ok(single_query(&query).and_then(|s| lower_node_single(s, params, hints)))
 }
 
-fn lower_query(
-    query: &Query,
+/// The sole [`SingleQuery`] of a non-`UNION` query, or `None`.
+fn single_query(query: &Query) -> Option<&SingleQuery> {
+    if query.parts.len() == 1 && query.parts[0].union.is_none() {
+        Some(&query.parts[0].query)
+    } else {
+        None
+    }
+}
+
+fn lower_node_single(
+    single: &SingleQuery,
     params: &CypherParameters,
     hints: &dyn TypeHints,
 ) -> Option<NodeReadPushdown> {
-    // Milestone 1: a single, non-UNION query.
-    if query.parts.len() != 1 || query.parts[0].union.is_some() {
-        return None;
-    }
-    let single = &query.parts[0].query;
-
     // Exactly `MATCH … RETURN …`.
     let (match_clause, return_clause) = match single.clauses.as_slice() {
         [Clause::Match(m), Clause::Return(r)] if !m.optional => (m, r),
@@ -976,6 +979,32 @@ impl NodeReadPushdown {
             crate::read::project_nodes(&self.var, nodes, &self.projection, params)
         }
     }
+
+    /// The number of text columns `to_sql` emits (`id, label, props`).
+    pub fn column_count(&self) -> usize {
+        3
+    }
+
+    /// Reconstruct the scanned nodes from the backend's text rows and project —
+    /// the uniform text-rows counterpart of [`Self::project`].
+    pub fn project_text_rows(
+        &self,
+        dialect: &dyn SqlDialect,
+        rows: Vec<Vec<Option<String>>>,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        let selected = [SelectedBinding::Node {
+            var: self.var.clone(),
+            node: 0,
+        }];
+        let binding_rows = reconstruct_bindings(&selected, rows)?;
+        if self.pushes_ordering(dialect) {
+            let projection = strip_order_limit(&self.projection);
+            crate::read::project_bindings(binding_rows, &projection, params)
+        } else {
+            crate::read::project_bindings(binding_rows, &self.projection, params)
+        }
+    }
 }
 
 /// Render the trailing ` ORDER BY … [LIMIT …] [OFFSET …]` for a pushed ordering.
@@ -1293,18 +1322,14 @@ pub fn plan_segment_read_with_hints(
 ) -> Result<Option<SegmentReadPushdown>> {
     let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
     crate::semantics::analyze(&query)?;
-    Ok(lower_segment(&query, params, hints))
+    Ok(single_query(&query).and_then(|s| lower_segment_single(s, params, hints)))
 }
 
-fn lower_segment(
-    query: &Query,
+fn lower_segment_single(
+    single: &SingleQuery,
     params: &CypherParameters,
     hints: &dyn TypeHints,
 ) -> Option<SegmentReadPushdown> {
-    if query.parts.len() != 1 || query.parts[0].union.is_some() {
-        return None;
-    }
-    let single = &query.parts[0].query;
     let (match_clause, return_clause) = match single.clauses.as_slice() {
         [Clause::Match(m), Clause::Return(r)] if !m.optional => (m, r),
         _ => return None,
@@ -2084,18 +2109,14 @@ pub fn plan_var_length_read_with_hints(
 ) -> Result<Option<VarLengthReadPushdown>> {
     let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
     crate::semantics::analyze(&query)?;
-    Ok(lower_var_length(&query, params, hints))
+    Ok(single_query(&query).and_then(|s| lower_var_length_single(s, params, hints)))
 }
 
-fn lower_var_length(
-    query: &Query,
+fn lower_var_length_single(
+    single: &SingleQuery,
     params: &CypherParameters,
     hints: &dyn TypeHints,
 ) -> Option<VarLengthReadPushdown> {
-    if query.parts.len() != 1 || query.parts[0].union.is_some() {
-        return None;
-    }
-    let single = &query.parts[0].query;
     let (match_clause, return_clause) = match single.clauses.as_slice() {
         [Clause::Match(m), Clause::Return(r)] if !m.optional => (m, r),
         _ => return None,
@@ -2350,6 +2371,150 @@ fn parse_props(text: Option<&str>) -> Result<Props> {
                 .collect())
         }
     }
+}
+
+// ===========================================================================
+// Unified read pushdown (single-query leaves + UNION composition)
+// ===========================================================================
+
+/// A pushable read: one of the single-query leaves, or a `UNION` of leaves.
+///
+/// Leaves expose a uniform text-rows execution contract ([`Self::to_sql`],
+/// [`Self::column_count`], [`Self::project_text_rows`]); a backend executes the
+/// SQL and hands the text rows back to project. `Union` is executed by running
+/// each arm and combining the result tables with [`combine_union`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReadPushdown {
+    Node(NodeReadPushdown),
+    Segment(SegmentReadPushdown),
+    VarLength(VarLengthReadPushdown),
+    /// `UNION` / `UNION ALL` of pushable arms; `distinct` is true when any
+    /// boundary is a (deduplicating) `UNION`.
+    Union {
+        arms: Vec<ReadPushdown>,
+        distinct: bool,
+    },
+}
+
+impl ReadPushdown {
+    /// True for a `UNION` composition (the backend must run each arm and
+    /// [`combine_union`] the tables, not call the leaf methods).
+    pub fn is_union(&self) -> bool {
+        matches!(self, ReadPushdown::Union { .. })
+    }
+
+    /// The arms of a `UNION` (empty for a leaf) and whether it deduplicates.
+    pub fn union_arms(&self) -> Option<(&[ReadPushdown], bool)> {
+        match self {
+            ReadPushdown::Union { arms, distinct } => Some((arms, *distinct)),
+            _ => None,
+        }
+    }
+
+    /// Render the leaf's SQL (panics on `Union` — run its arms instead).
+    pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
+        match self {
+            ReadPushdown::Node(p) => p.to_sql(dialect),
+            ReadPushdown::Segment(p) => p.to_sql(dialect),
+            ReadPushdown::VarLength(p) => p.to_sql(dialect),
+            ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
+        }
+    }
+
+    /// The number of text columns the leaf's SQL emits.
+    pub fn column_count(&self) -> usize {
+        match self {
+            ReadPushdown::Node(p) => p.column_count(),
+            ReadPushdown::Segment(p) => p.column_count(),
+            ReadPushdown::VarLength(p) => p.column_count(),
+            ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
+        }
+    }
+
+    /// Reconstruct + project the leaf's text rows.
+    pub fn project_text_rows(
+        &self,
+        dialect: &dyn SqlDialect,
+        rows: Vec<Vec<Option<String>>>,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        match self {
+            ReadPushdown::Node(p) => p.project_text_rows(dialect, rows, params),
+            ReadPushdown::Segment(p) => p.project_text_rows(dialect, rows, params),
+            ReadPushdown::VarLength(p) => p.project_text_rows(dialect, rows, params),
+            ReadPushdown::Union { .. } => unreachable!("call union_arms for a UNION"),
+        }
+    }
+}
+
+/// Try to lower `cypher` into a unified [`ReadPushdown`] — a single-query leaf
+/// (node / segment / variable-length), or a `UNION` of such leaves. `Ok(None)`
+/// for any valid query outside the pushable subset (caller falls back to the
+/// reference), `Err` only for invalid syntax/semantics.
+pub fn plan_read(
+    cypher: &str,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Result<Option<ReadPushdown>> {
+    let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
+    crate::semantics::analyze(&query)?;
+
+    if query.parts.len() == 1 && query.parts[0].union.is_none() {
+        return Ok(lower_single(&query.parts[0].query, params, hints));
+    }
+    // UNION: every arm must be a pushable single-query leaf.
+    let mut arms = Vec::with_capacity(query.parts.len());
+    let mut distinct = false;
+    for part in &query.parts {
+        if part.union == Some(UnionKind::Distinct) {
+            distinct = true;
+        }
+        match lower_single(&part.query, params, hints) {
+            Some(leaf) => arms.push(leaf),
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(ReadPushdown::Union { arms, distinct }))
+}
+
+/// Lower one `SingleQuery` to a leaf, trying node → segment → variable-length.
+fn lower_single(
+    single: &SingleQuery,
+    params: &CypherParameters,
+    hints: &dyn TypeHints,
+) -> Option<ReadPushdown> {
+    if let Some(p) = lower_node_single(single, params, hints) {
+        return Some(ReadPushdown::Node(p));
+    }
+    if let Some(p) = lower_segment_single(single, params, hints) {
+        return Some(ReadPushdown::Segment(p));
+    }
+    lower_var_length_single(single, params, hints).map(ReadPushdown::VarLength)
+}
+
+/// Combine `UNION` arm result tables, mirroring [`crate::read::run_read_query`]:
+/// all arms must share column names; rows are concatenated, then deduplicated
+/// when `distinct`.
+pub fn combine_union(
+    tables: Vec<CypherResultTable>,
+    distinct: bool,
+) -> Result<CypherResultTable> {
+    let mut tables = tables.into_iter();
+    let mut combined = tables
+        .next()
+        .ok_or_else(|| crate::gql::gql_execution("UNION has no arms"))?;
+    for table in tables {
+        if table.columns != combined.columns {
+            return Err(crate::gql::gql_name(
+                "all UNION arms must return the same column names in the same order",
+            ));
+        }
+        combined.rows.extend(table.rows);
+    }
+    if distinct {
+        combined.rows = crate::read::dedup_return_rows(combined.rows, "UNION")?;
+    }
+    Ok(combined)
 }
 
 #[cfg(test)]
@@ -3008,6 +3173,53 @@ mod tests {
 
     fn some(s: &str) -> Option<String> {
         Some(s.to_string())
+    }
+
+    // ---- UNION composition ------------------------------------------------
+
+    #[test]
+    fn union_composition() {
+        let plan = plan_read(
+            "MATCH (n:Person) RETURN n.name AS x UNION MATCH (c:City) RETURN c.name AS x",
+            &params(),
+            &NoTypeHints,
+        )
+        .unwrap()
+        .expect("pushable");
+        let (arms, distinct) = plan.union_arms().expect("union");
+        assert_eq!(arms.len(), 2);
+        assert!(distinct);
+        assert_eq!(
+            arms[0].to_sql(&SqliteDialect),
+            "SELECT id, label, props FROM \"grust_nodes\" WHERE label = 'Person'"
+        );
+        // UNION ALL → not distinct; arms may be different leaf kinds.
+        let all = plan_read(
+            "MATCH (n:Person) RETURN n.name AS x \
+             UNION ALL MATCH (:Person)-[:KNOWS]->(b) RETURN b.name AS x",
+            &params(),
+            &NoTypeHints,
+        )
+        .unwrap()
+        .expect("pushable");
+        let (arms, distinct) = all.union_arms().unwrap();
+        assert_eq!(arms.len(), 2);
+        assert!(!distinct);
+        assert!(matches!(arms[0], ReadPushdown::Node(_)));
+        assert!(matches!(arms[1], ReadPushdown::Segment(_)));
+        // A single query is a leaf, not a union.
+        assert!(!plan_read("MATCH (n:Person) RETURN n.name", &params(), &NoTypeHints)
+            .unwrap()
+            .unwrap()
+            .is_union());
+        // A non-pushable arm makes the whole UNION fall back.
+        assert!(plan_read(
+            "MATCH (n:Person) RETURN n.name AS x UNION UNWIND [1] AS x RETURN x",
+            &params(),
+            &NoTypeHints,
+        )
+        .unwrap()
+        .is_none());
     }
 
     // ---- variable-length path pushdown ------------------------------------

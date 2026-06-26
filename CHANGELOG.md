@@ -19,7 +19,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   relationship segment** (`(a)-[:T]->(b)` / `<-[:T]-`, multiple rel types, inline
   endpoint/edge properties, and `WHERE` over `a`/`r`/`b`), lowered to a
   `grust_edges`/`grust_nodes` join; the backend returns the matched columns as
-  text and `grust_cypher` reconstructs the bindings before projecting. This now
+  text and `grust_cypher` reconstructs the bindings before projecting. A unified
+  `plan_read` returns a `ReadPushdown` (single-query leaf or a `UNION`/`UNION ALL`
+  of leaves, combined by `combine_union`). This now
   covers **multi-segment paths** (`(a)-[]->(b)-[]->(c)`, chained joins) and
   **undirected** segments (`(a)-[]-(b)`, matched in either orientation), in any
   per-segment direction. **Variable-length** segments (`(a)-[:T*m..n]->(b)`, with

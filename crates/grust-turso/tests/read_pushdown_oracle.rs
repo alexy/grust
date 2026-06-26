@@ -17,8 +17,9 @@
 
 use grust_core::{Edge, Graph, Label, Node, NodeId, Props, Value};
 use grust_cypher::pushdown::{
-    plan_node_read, plan_node_read_with_hints, plan_segment_read, plan_segment_read_with_hints,
-    plan_var_length_read, ScalarKind, SqlDialect, SqliteDialect, StrOp, TypeHints,
+    combine_union, plan_node_read, plan_node_read_with_hints, plan_read, plan_segment_read,
+    plan_segment_read_with_hints, plan_var_length_read, ReadPushdown, ScalarKind, SqlDialect,
+    SqliteDialect, StrOp, TypeHints,
 };
 use grust_cypher::read::run_read_query;
 use grust_cypher::{CypherParameters, CypherResultTable};
@@ -555,6 +556,63 @@ async fn segment_pushdown(
         text_rows.push((0..n).map(|i| opt_text(&row, i)).collect());
     }
     plan.project_text_rows(&SqliteDialect, text_rows, params).unwrap()
+}
+
+#[tokio::test]
+async fn union_pushdown_matches_reference() {
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in [
+        "MATCH (n:Person) RETURN n.name AS x UNION MATCH (c:City) RETURN c.name AS x",
+        "MATCH (n:Person) WHERE n.age >= 50 RETURN n.name AS x \
+         UNION ALL MATCH (c:City) RETURN c.name AS x",
+        "MATCH (n:Person {name:'Ada'}) RETURN n.name AS x \
+         UNION MATCH (:Person)-[:KNOWS]->(b) RETURN b.name AS x",
+    ] {
+        let plan = plan_read(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"));
+        let actual = run_pushdown(&conn, &plan, &params).await;
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}
+
+/// Execute a unified [`ReadPushdown`] the way a backend does: run each leaf's
+/// SQL, reconstruct + project, and combine `UNION` arms.
+async fn run_pushdown(
+    conn: &turso::Connection,
+    plan: &ReadPushdown,
+    params: &CypherParameters,
+) -> CypherResultTable {
+    if let Some((arms, distinct)) = plan.union_arms() {
+        let mut tables = Vec::with_capacity(arms.len());
+        for arm in arms {
+            tables.push(run_leaf(conn, arm, params).await);
+        }
+        return combine_union(tables, distinct).unwrap();
+    }
+    run_leaf(conn, plan, params).await
+}
+
+async fn run_leaf(
+    conn: &turso::Connection,
+    leaf: &ReadPushdown,
+    params: &CypherParameters,
+) -> CypherResultTable {
+    let sql = leaf.to_sql(&SqliteDialect);
+    let n = leaf.column_count();
+    let mut rows = conn
+        .query(&sql, ())
+        .await
+        .unwrap_or_else(|e| panic!("leaf query failed for `{sql}`: {e}"));
+    let mut text_rows = Vec::new();
+    while let Some(row) = rows.next().await.unwrap() {
+        text_rows.push((0..n).map(|i| opt_text(&row, i)).collect());
+    }
+    leaf.project_text_rows(&SqliteDialect, text_rows, params)
+        .unwrap()
 }
 
 /// Build an in-memory SQLite database with `grust_nodes(id, label, props)` and
