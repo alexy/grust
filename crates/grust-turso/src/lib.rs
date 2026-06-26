@@ -2,11 +2,36 @@ use async_trait::async_trait;
 use grust_core::prelude::*;
 use grust_sql_core::{GraphSqlDialect, UniversalTableRefs};
 
+/// Journal/concurrency mode for a local Turso database.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TursoJournalMode {
+    /// Write-ahead logging — Turso's default single-writer mode.
+    #[default]
+    Wal,
+    /// Multi-version concurrency control (`PRAGMA journal_mode = mvcc`), which
+    /// enables `BEGIN CONCURRENT` concurrent writers. MVCC is a database-*header*
+    /// mode, so it only takes effect on a **fresh** database — an existing WAL
+    /// database is not converted (`connect` errors if the mode cannot be applied).
+    Mvcc,
+}
+
+impl TursoJournalMode {
+    /// The `PRAGMA journal_mode` value the engine reports/accepts.
+    fn pragma_value(self) -> &'static str {
+        match self {
+            TursoJournalMode::Wal => "wal",
+            TursoJournalMode::Mvcc => "mvcc",
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct TursoConfig {
     pub path: String,
     pub table_prefix: String,
     pub batch_size: usize,
+    /// Journal/concurrency mode for the local database (default `Wal`).
+    pub journal_mode: TursoJournalMode,
 }
 
 impl Default for TursoConfig {
@@ -15,6 +40,7 @@ impl Default for TursoConfig {
             path: ":memory:".to_string(),
             table_prefix: "grust".to_string(),
             batch_size: 500,
+            journal_mode: TursoJournalMode::Wal,
         }
     }
 }
@@ -57,11 +83,48 @@ impl TursoGraphStore {
         let conn = db.connect().map_err(|err| {
             GrustError::Backend(format!("failed to connect to Turso database: {err}"))
         })?;
-        Ok(Self {
+        let store = Self {
             config,
             _db: TursoDatabase::Local(db),
             conn,
-        })
+        };
+        store.apply_journal_mode().await?;
+        Ok(store)
+    }
+
+    /// Apply the configured journal mode on a fresh connection. MVCC is set via
+    /// `PRAGMA journal_mode = mvcc` (a database-header mode) and verified by
+    /// reading the mode back, so a silently-unconverted existing WAL database
+    /// surfaces as an error rather than running in the wrong mode.
+    async fn apply_journal_mode(&self) -> Result<()> {
+        if self.config.journal_mode == TursoJournalMode::Wal {
+            // WAL is the engine default; nothing to enforce.
+            return Ok(());
+        }
+        let want = self.config.journal_mode.pragma_value();
+        let got = self
+            .query_scalar_text(&format!("PRAGMA journal_mode = {want}"))
+            .await?;
+        if got.as_deref() != Some(want) {
+            return Err(GrustError::Backend(format!(
+                "requested Turso journal_mode = {want} but the database reports {got:?}; \
+                 MVCC must be set on a fresh database (an existing WAL database cannot be converted)"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Run a query expected to yield a single text cell in its first row.
+    async fn query_scalar_text(&self, sql: &str) -> Result<Option<String>> {
+        let mut rows = self.conn.query(sql, ()).await.map_err(|err| {
+            GrustError::Backend(format!("Turso query failed: {err}: {sql}"))
+        })?;
+        match rows.next().await.map_err(|err| {
+            GrustError::Backend(format!("Turso row read failed: {err}: {sql}"))
+        })? {
+            Some(row) => row_optional_text(&row, 0, "pragma result"),
+            None => Ok(None),
+        }
     }
 
     pub async fn in_memory() -> Result<Self> {
@@ -90,6 +153,7 @@ impl TursoGraphStore {
                 path: config.local_path,
                 table_prefix: config.table_prefix,
                 batch_size: config.batch_size,
+                journal_mode: TursoJournalMode::Wal,
             },
             _db: TursoDatabase::Synced(db),
             conn,

@@ -233,3 +233,56 @@ async fn cypher_mutation_executor_patches_matching_nodes() {
         Some(&Value::from(true))
     );
 }
+
+#[tokio::test]
+async fn mvcc_journal_mode_enables_concurrent_writes_and_round_trips() {
+    // Unit: TursoJournalMode::Mvcc enables MVCC on a fresh database via
+    // `PRAGMA journal_mode = mvcc` and supports `BEGIN CONCURRENT` writers.
+    let path = std::env::temp_dir().join(format!("grust_turso_mvcc_{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+
+    let config = TursoConfig {
+        path: path.to_string_lossy().into_owned(),
+        journal_mode: TursoJournalMode::Mvcc,
+        ..TursoConfig::default()
+    };
+    let store = TursoGraphStore::connect(config)
+        .await
+        .expect("open MVCC Turso store");
+
+    // MVCC is actually active — the engine reports the header mode.
+    let mode = store
+        .query_scalar_text("PRAGMA journal_mode")
+        .await
+        .expect("read journal_mode");
+    assert_eq!(mode.as_deref(), Some("mvcc"));
+
+    // The MVCC concurrent-writer transaction syntax is accepted.
+    store.execute("BEGIN CONCURRENT").await.expect("begin concurrent");
+    store.execute("COMMIT").await.expect("commit concurrent");
+
+    // End-to-end write/read works under MVCC.
+    store.bootstrap().await.expect("bootstrap MVCC tables");
+    let report = store.put_graph(&sample_graph()).await.expect("write graph");
+    assert_eq!(report.nodes, 2);
+    assert_eq!(report.edges, 1);
+    let fetched = store
+        .get_node(&NodeId::new("person-1"))
+        .await
+        .expect("read node")
+        .expect("person node missing");
+    assert_eq!(fetched.label, Label::new("Person"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn default_journal_mode_is_wal() {
+    // Default config leaves the engine in its WAL default (no MVCC).
+    let store = TursoGraphStore::in_memory().await.expect("open Turso store");
+    let mode = store
+        .query_scalar_text("PRAGMA journal_mode")
+        .await
+        .expect("read journal_mode");
+    assert_eq!(mode.as_deref(), Some("wal"));
+}
