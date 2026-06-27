@@ -87,7 +87,7 @@ The second is typed ingestion. The optional `typed-garde` feature lets users def
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.10.0", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.11.0", features = ["typed-garde"] }
 ```
 
 ```rust
@@ -130,7 +130,7 @@ For raw JSON boundaries, the optional `typed-zod-rs` feature adds another stage.
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.10.0", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.11.0", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`, because the JSON boundary still lowers into validated Rust values before those values become graph data.
