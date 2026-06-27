@@ -13,6 +13,16 @@ The sister TypeSec project currently uses `docs/book/dist/` directly for its
 final artifacts and does not keep a persistent `build/` directory in the book
 tree.
 
+## Blog Posts
+
+Every blog post (`docs/blog/grust-<release>/post.md`) is **always** delivered as a
+Ulysses **TextPack** as part of publishing it. Build the `.textpack` with the
+procedure in [`TEXTPACK.md`](../../TEXTPACK.md): reflow the prose to one line per
+paragraph, render the post's `mermaid` diagrams to PNG, and bundle the text plus
+images into a single self-contained package that imports cleanly into Ulysses
+(including iOS). Generate the `.textpack` as a deliverable rather than committing
+it.
+
 ## Book Creation and Typesetting Skill
 
 Use this section as the operational skill for rebuilding the Grust book. The
