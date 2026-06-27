@@ -20,8 +20,8 @@ Ulysses **TextPack** as part of publishing it. Build the `.textpack` with the
 procedure in [`TEXTPACK.md`](../../TEXTPACK.md): reflow the prose to one line per
 paragraph, render the post's `mermaid` diagrams to PNG, and bundle the text plus
 images into a single self-contained package that imports cleanly into Ulysses
-(including iOS). Generate the `.textpack` as a deliverable rather than committing
-it.
+(including iOS). Keep the built `.textpack` committed at
+`docs/blog/grust-<release>/dist/grust-<release>.textpack`, next to the post.
 
 ## Book Creation and Typesetting Skill
 

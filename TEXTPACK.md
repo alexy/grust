@@ -98,10 +98,12 @@ rewrites `diagrams/...` to `assets/...` (next step), so the repo post keeps the
 
 ```python
 import re, os, json, zipfile, shutil
-post = open("docs/blog/grust-crab/post.md").read()
-ddir = "docs/blog/grust-crab/diagrams"
-out  = "/tmp"                                  # deliverable location
-tb   = f"{out}/grust-crab.textbundle"
+base = "docs/blog/grust-crab"
+post = open(f"{base}/post.md").read()
+ddir = f"{base}/diagrams"
+scratch = "/tmp"                               # temporary .textbundle workspace
+dist = f"{base}/dist"; os.makedirs(dist, exist_ok=True)  # committed output, next to the post
+tb   = f"{scratch}/grust-crab.textbundle"
 shutil.rmtree(tb, ignore_errors=True); os.makedirs(f"{tb}/assets", exist_ok=True)
 imgs = set(re.findall(r"!\[[^\]]*\]\(diagrams/([a-z0-9-]+\.png)\)", post))
 text = re.sub(r"\(diagrams/([a-z0-9-]+\.png)\)", r"(assets/\1)", post)  # diagrams/ -> assets/
@@ -109,13 +111,16 @@ open(f"{tb}/text.markdown", "w").write(text)
 json.dump({"version": 2, "type": "net.daringfireball.markdown", "transient": False},
           open(f"{tb}/info.json", "w"))
 for n in imgs: shutil.copy(f"{ddir}/{n}", f"{tb}/assets/{n}")
-pack = f"{out}/grust-crab.textpack"
+pack = f"{dist}/grust-crab.textpack"
 if os.path.exists(pack): os.remove(pack)
 with zipfile.ZipFile(pack, "w", zipfile.ZIP_DEFLATED) as z:
     for root, _, files in os.walk(tb):
         for fn in files:
-            p = os.path.join(root, fn); z.write(p, os.path.relpath(p, out))
+            p = os.path.join(root, fn); z.write(p, os.path.relpath(p, scratch))
 ```
+
+The `.textpack` is committed at `docs/blog/<name>/dist/<name>.textpack` next to
+the post; the `.textbundle` is a temporary workspace (build it under `/tmp`).
 
 The zip's top entry must be `<name>.textbundle/` (verify with
 `zipfile.ZipFile(pack).namelist()`).
@@ -135,9 +140,10 @@ the more reliable bundle for Ulysses.
 - **White background, 2× scale** for crisp, paste-anywhere images.
 - **iOS:** relative image paths in pasted Markdown do not resolve — only the
   bundled `.textpack` (or base64) shows images inline.
-- **Don't commit the bundles.** `.textpack` / base64 `.md` duplicate the PNGs and
-  bloat git; generate them as deliverables (e.g. under `/tmp`) and keep the repo
-  source clean (`post.md` + `diagrams/*.mmd` + `*.png`).
+- **Keep the `.textpack` in `dist/`.** Commit the built `.textpack` at
+  `docs/blog/<name>/dist/<name>.textpack` next to the post, so it ships in the open
+  alongside `post.md` + `diagrams/`. The intermediate `.textbundle` is scratch
+  (build under `/tmp`), and the base64 `.md` fallback stays an ad-hoc deliverable.
 
 ## Relation to releases
 

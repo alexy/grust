@@ -64,8 +64,9 @@ Convert the top `## Unreleased` block into a dated, named entry and leave a fres
   as `![caption](diagrams/<name>.png)`.
 
 - **TextPack** — **always** build a `.textpack` for the blog post via
-  [`TEXTPACK.md`](TEXTPACK.md) and hand it to the user. It is a deliverable, not a
-  committed file.
+  [`TEXTPACK.md`](TEXTPACK.md). Keep it committed at
+  `docs/blog/<name>/dist/<name>.textpack`, next to the post, and also hand it to
+  the user.
 
 ## 4. Validate
 
