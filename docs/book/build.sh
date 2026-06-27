@@ -127,13 +127,23 @@ pandoc --from markdown+smart \
 if [[ "grust" != "$title_stem" ]]; then
   cp build/dist/grust.epub "build/dist/$title_stem.epub"
 fi
+git_hash="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+versioned_stem="$title_stem ($version-$git_hash)"
+# Stable version-only EPUB link (Send to Kindle / metadata gate).
 find build/dist -maxdepth 1 -name "$title_stem (*).epub" -exec rm -f {} +
+find build/dist -maxdepth 1 -name "$title_stem (*).pdf" -exec rm -f {} +
 ln -s "$title_stem.epub" "build/dist/$kindle_title.epub"
+# Always maintain a version+git-hash link for BOTH EPUB and PDF.
+ln -s "grust.epub" "build/dist/$versioned_stem.epub"
+ln -s "grust.pdf" "build/dist/$versioned_stem.pdf"
 {
   printf 'kindle_name: %s\n' "$kindle_title"
   printf 'built_at: %s\n' "$pubdate"
+  printf 'git_hash: %s\n' "$git_hash"
   printf 'epub_file: %s.epub\n' "$title_stem"
   printf 'kindle_link: %s.epub\n' "$kindle_title"
+  printf 'epub_link: %s.epub\n' "$versioned_stem"
+  printf 'pdf_link: %s.pdf\n' "$versioned_stem"
 } > build/dist/VERSION.md
 "${PYTHON_CMD[@]}" check_epub_metadata.py build/dist/grust.epub
 
@@ -155,5 +165,7 @@ echo "Built:"
 echo "  docs/book/build/dist/grust.pdf"
 echo "  docs/book/build/dist/grust.epub"
 echo "  docs/book/build/dist/$kindle_title.epub -> $title_stem.epub"
+echo "  docs/book/build/dist/$versioned_stem.epub -> grust.epub"
+echo "  docs/book/build/dist/$versioned_stem.pdf -> grust.pdf"
 echo "  docs/book/build/dist/grust.mobi"
 echo "  docs/book/build/dist/VERSION.md"

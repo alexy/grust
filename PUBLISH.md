@@ -57,6 +57,24 @@ Convert the top `## Unreleased` block into a dated, named entry and leave a fres
   [`docs/book/PUBLISH.md`](docs/book/PUBLISH.md). Update `manuscript.md` for any
   new public surface before rebuilding.
 
+  `build.sh` always maintains **version+git-hash links for both EPUB and PDF** in
+  `docs/book/build/dist/` — `grust (<version>-<hash>).epub` and
+  `… .pdf` — recorded as `epub_link` / `pdf_link` in `VERSION.md`.
+
+- **iCloud delivery** — copy the versioned EPUB and PDF to `~/icloud/books`,
+  deriving the names from `VERSION.md` (copying the links dereferences them to
+  regular files):
+
+  ```sh
+  cd docs/book/build/dist
+  cp "$(awk -F': ' '/^epub_link:/{print $2}' VERSION.md)" ~/icloud/books/
+  cp "$(awk -F': ' '/^pdf_link:/{print $2}'  VERSION.md)" ~/icloud/books/
+  ```
+
+  `~/icloud/books` may not be listable (`Operation not permitted`) even when
+  exact-path copies succeed — derive filenames from `VERSION.md` and verify with
+  exact-path `cmp`, not `ls`.
+
 - **Blog post** — at `docs/blog/grust-<name>/post.md`. Lead with the generic
   backend-neutral property-graph story (the Rust graph API and the multiple
   backends); highlight the release's key innovations; link to the repo docs and
