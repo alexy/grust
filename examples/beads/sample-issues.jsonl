@@ -1,0 +1,5 @@
+{"_type":"issue","id":"bd-1","title":"Design the graph model","status":"closed","priority":1,"issue_type":"feature","labels":["design"],"dependencies":[]}
+{"_type":"issue","id":"bd-2","title":"Implement the loader","status":"in_progress","priority":2,"issue_type":"feature","dependencies":[{"issue_id":"bd-2","depends_on_id":"bd-1","type":"blocks"}]}
+{"_type":"issue","id":"bd-3","title":"Wire up Cypher queries","status":"open","priority":2,"issue_type":"task","dependencies":[{"issue_id":"bd-3","depends_on_id":"bd-2","type":"parent-child"}]}
+{"_type":"issue","id":"bd-4","title":"Investigate flaky export","status":"open","priority":3,"issue_type":"bug","dependencies":[{"issue_id":"bd-4","depends_on_id":"bd-2","type":"discovered-from"}]}
+{"_type":"comment","id":"c-1","issue_id":"bd-2","body":"non-issue records are skipped on load"}

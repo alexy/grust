@@ -3347,6 +3347,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "grust-beads"
+version = "0.1.0"
+dependencies = [
+ "grust-core",
+ "grust-cypher",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "grust-cocoindex"
 version = "0.11.0"
 dependencies = [
