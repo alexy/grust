@@ -860,9 +860,9 @@ impl GqlFeature {
             GqlFeature::NativeCypherPassthrough => d!(
                 "native-cypher-passthrough",
                 NativePassthrough,
-                Planned,
+                Supported,
                 Full39075,
-                "Backend-native Cypher/SurrealQL/Falkor passthrough, separate from portable conformance (Unit 14)"
+                "Explicit backend-native escape hatches outside portable conformance: NativeQuery + per-backend language capability flags + structured non-support; Falkor Cypher, Surreal SurrealQL, Sail/Turso/Postgres SQL (Full39075 F11)"
             ),
             GqlFeature::RejectCreateNodeWithoutExplicitIdentity => d!(
                 "reject-create-node-without-explicit-identity",
@@ -1073,6 +1073,9 @@ pub enum GqlBackendRole {
     /// A SQL / SQL-PGQ graph store with its own surface; no portable Cypher
     /// executor yet (it could join the executing set later).
     SqlGraphBackend,
+    /// A graph store driven through backend-native queries (e.g. Cypher,
+    /// SurrealQL); no portable Cypher executor yet.
+    NativeGraphBackend,
     /// An export/sync target, not a query backend.
     SyncTarget,
     /// Internal-only (`publish = false`); out of the facade and the executing
@@ -1085,6 +1088,7 @@ impl GqlBackendRole {
         match self {
             GqlBackendRole::CypherExecutor => "cypher-executor",
             GqlBackendRole::SqlGraphBackend => "sql-graph-backend",
+            GqlBackendRole::NativeGraphBackend => "native-graph-backend",
             GqlBackendRole::SyncTarget => "sync-target",
             GqlBackendRole::Internal => "internal",
         }
@@ -1106,6 +1110,8 @@ pub enum GqlBackend {
     Turso,
     Postgres,
     PostgresPgq,
+    Falkor,
+    Surreal,
     Helix,
     Ladybug,
     CocoIndex,
@@ -1145,6 +1151,13 @@ pub struct GqlBackendDescriptor {
     /// (i.e. a statement batch can commit/rollback atomically). Verified against
     /// each backend's `mutation_atomicity()` in the working tree (Unit 13).
     pub transactional: bool,
+    /// The query languages this backend's engine accepts natively through an
+    /// explicit escape hatch, outside portable conformance (Full39075 F11).
+    /// Serialized in reports; deserialization restores the empty set (the
+    /// static capability table in [`GqlBackend::native_passthrough`] is the
+    /// source of truth).
+    #[serde(skip_deserializing)]
+    pub native_passthrough: &'static [NativeQueryLanguage],
     pub summary: &'static str,
 }
 
@@ -1242,6 +1255,36 @@ impl GqlBackend {
                 true,
                 "PostgreSQL SQL/PGQ: native PROPERTY GRAPH + GRAPH_TABLE traversal; no portable Cypher executor yet.",
             ),
+            Falkor => (
+                "falkor",
+                "grust-falkor",
+                NativeGraphBackend,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                "FalkorDB (Redis graph): GraphStore writes lowered to backend-native Cypher; native Cypher passthrough via run_native_cypher; no portable executor.",
+            ),
+            Surreal => (
+                "surreal",
+                "grust-surreal",
+                NativeGraphBackend,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                "SurrealDB: GraphStore writes lowered to SurrealQL; native SurrealQL passthrough via run_native_surrealql; no portable executor.",
+            ),
             Helix => (
                 "helix",
                 "grust-helix",
@@ -1303,6 +1346,7 @@ impl GqlBackend {
             named_graph_selection,
             session_control,
             transactional: self.transactional(),
+            native_passthrough: self.native_passthrough(),
             summary,
         }
     }
@@ -1312,17 +1356,42 @@ impl GqlBackend {
     pub const fn transactional(self) -> bool {
         matches!(
             self,
-            GqlBackend::Turso | GqlBackend::Postgres | GqlBackend::PostgresPgq
+            GqlBackend::Turso
+                | GqlBackend::Postgres
+                | GqlBackend::PostgresPgq
+                | GqlBackend::Surreal
         )
     }
 
+    /// The query languages this backend's engine accepts natively, outside
+    /// the portable conformance surface (Full39075 F11). Verified against the
+    /// public escape hatches in the working tree: Sail `query_arrow_ipc`,
+    /// Turso/Postgres SQL surfaces, Falkor `run_native_cypher`, Surreal
+    /// `run_native_surrealql`.
+    pub const fn native_passthrough(self) -> &'static [NativeQueryLanguage] {
+        match self {
+            GqlBackend::Sail
+            | GqlBackend::Turso
+            | GqlBackend::Postgres
+            | GqlBackend::PostgresPgq => &[NativeQueryLanguage::Sql],
+            GqlBackend::Falkor => &[NativeQueryLanguage::Cypher],
+            GqlBackend::Surreal => &[NativeQueryLanguage::SurrealQl],
+            GqlBackend::Memory
+            | GqlBackend::Helix
+            | GqlBackend::Ladybug
+            | GqlBackend::CocoIndex => &[],
+        }
+    }
+
     /// All catalogued backends, narrowest concern first.
-    pub const ALL: [GqlBackend; 8] = [
+    pub const ALL: [GqlBackend; 10] = [
         GqlBackend::Memory,
         GqlBackend::Sail,
         GqlBackend::Turso,
         GqlBackend::Postgres,
         GqlBackend::PostgresPgq,
+        GqlBackend::Falkor,
+        GqlBackend::Surreal,
         GqlBackend::Helix,
         GqlBackend::Ladybug,
         GqlBackend::CocoIndex,
@@ -1341,6 +1410,94 @@ pub fn cypher_conformance_backends() -> Vec<GqlBackend> {
         .iter()
         .copied()
         .filter(|b| b.descriptor().role == GqlBackendRole::CypherExecutor)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Backend-native query passthrough (Full39075 F11)
+// ---------------------------------------------------------------------------
+
+/// A query language a backend engine accepts natively, outside the portable
+/// conformance surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NativeQueryLanguage {
+    /// Backend-native Cypher (e.g. FalkorDB's openCypher dialect).
+    Cypher,
+    /// Backend-native SQL (Spark SQL, SQLite/libSQL, PostgreSQL).
+    Sql,
+    /// SurrealQL.
+    SurrealQl,
+}
+
+impl NativeQueryLanguage {
+    pub const fn id(self) -> &'static str {
+        match self {
+            NativeQueryLanguage::Cypher => "cypher",
+            NativeQueryLanguage::Sql => "sql",
+            NativeQueryLanguage::SurrealQl => "surrealql",
+        }
+    }
+}
+
+impl fmt::Display for NativeQueryLanguage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+/// An explicit backend-native query. This is the deliberate escape hatch out
+/// of the portable surface: the text is handed to the backend engine verbatim
+/// and **no portable conformance claim applies to it**.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NativeQuery {
+    pub language: NativeQueryLanguage,
+    pub text: String,
+}
+
+impl NativeQuery {
+    pub fn new(language: NativeQueryLanguage, text: impl Into<String>) -> Self {
+        NativeQuery {
+            language,
+            text: text.into(),
+        }
+    }
+}
+
+/// Validate that `backend` accepts `language` natively; a structured,
+/// feature-tagged unsupported error otherwise.
+pub fn ensure_native_passthrough(backend: GqlBackend, language: NativeQueryLanguage) -> Result<()> {
+    if backend.native_passthrough().contains(&language) {
+        Ok(())
+    } else {
+        Err(unsupported_gql_feature(
+            GqlFeature::NativeCypherPassthrough,
+            GqlConformanceProfile::Full39075,
+            format!(
+                "backend `{}` does not accept native {} passthrough (accepted: {})",
+                backend.descriptor().id,
+                language,
+                if backend.native_passthrough().is_empty() {
+                    "none".to_string()
+                } else {
+                    backend
+                        .native_passthrough()
+                        .iter()
+                        .map(|l| l.id())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ),
+        ))
+    }
+}
+
+/// The backends whose engines accept `language` natively.
+pub fn native_passthrough_backends(language: NativeQueryLanguage) -> Vec<GqlBackend> {
+    GqlBackend::ALL
+        .iter()
+        .copied()
+        .filter(|b| b.native_passthrough().contains(&language))
         .collect()
 }
 
@@ -1639,6 +1796,54 @@ mod tests {
     }
 
     #[test]
+    fn native_passthrough_capabilities_are_honest() {
+        use NativeQueryLanguage::*;
+        // Per-backend language flags match the public escape hatches.
+        assert_eq!(GqlBackend::Falkor.native_passthrough(), &[Cypher]);
+        assert_eq!(GqlBackend::Surreal.native_passthrough(), &[SurrealQl]);
+        assert_eq!(GqlBackend::Sail.native_passthrough(), &[Sql]);
+        assert_eq!(GqlBackend::Turso.native_passthrough(), &[Sql]);
+        assert!(GqlBackend::Memory.native_passthrough().is_empty());
+        assert!(GqlBackend::CocoIndex.native_passthrough().is_empty());
+
+        // Reverse lookup covers exactly the flagged backends.
+        assert_eq!(
+            native_passthrough_backends(Cypher),
+            vec![GqlBackend::Falkor]
+        );
+        assert_eq!(
+            native_passthrough_backends(Sql),
+            vec![
+                GqlBackend::Sail,
+                GqlBackend::Turso,
+                GqlBackend::Postgres,
+                GqlBackend::PostgresPgq
+            ]
+        );
+
+        // Structured non-support names the feature and the accepted set.
+        assert!(ensure_native_passthrough(GqlBackend::Falkor, Cypher).is_ok());
+        let err = ensure_native_passthrough(GqlBackend::Memory, Cypher).unwrap_err();
+        assert!(matches!(err, GrustError::Unsupported(_)));
+        assert!(
+            err.to_string()
+                .contains("feature=native-cypher-passthrough")
+        );
+        let err = ensure_native_passthrough(GqlBackend::Falkor, Sql).unwrap_err();
+        assert!(err.to_string().contains("accepted: cypher"));
+
+        // The descriptor carries the same flags.
+        assert_eq!(
+            GqlBackend::Falkor.descriptor().native_passthrough,
+            &[Cypher]
+        );
+        // A NativeQuery round-trips its language and text.
+        let q = NativeQuery::new(SurrealQl, "SELECT * FROM person");
+        assert_eq!(q.language, SurrealQl);
+        assert_eq!(q.text, "SELECT * FROM person");
+    }
+
+    #[test]
     fn every_feature_has_a_unique_id() {
         let mut seen = std::collections::BTreeSet::new();
         for feature in GqlFeature::ALL.iter().copied() {
@@ -1696,9 +1901,11 @@ mod tests {
                 "{feature:?} should be supported in StrictWrite"
             );
         }
-        // A not-yet-supported feature is excluded, even at the widest profile.
+        // A rejected conformance guard is never "supported", even at the
+        // widest profile.
         assert!(
-            !GqlFeature::NativeCypherPassthrough.is_supported_in(GqlConformanceProfile::Full39075)
+            !GqlFeature::RejectMergeWithoutExplicitIdentity
+                .is_supported_in(GqlConformanceProfile::Full39075)
         );
     }
 
@@ -1739,8 +1946,6 @@ mod tests {
             .map(|d| d.id)
             .collect();
         let expected: std::collections::BTreeSet<&str> = [
-            // Planned — near-term, partially scaffolded.
-            "native-cypher-passthrough",
             // Rejected — intentional conformance guards, not gaps.
             "reject-create-node-without-explicit-identity",
             "reject-merge-without-explicit-identity",

@@ -62,7 +62,7 @@ passthrough.
 | **F8** | `subquery` | F4, F5 | Done | `CALL { … }` correlated subqueries landed: outer bindings visible (import-all), WITH-style RETURN join with binding preservation, UNION arms, per-row execution, structured collision/RETURN-required/star rejections. |
 | **F9** | `table-valued-function` | F8 | Done | `CALL name(args) [YIELD …]` generalized into TVF-style row sources with per-row correlated argument evaluation; registry: `db.*` catalog procedures + `tvf.range`, `tvf.keys`. |
 | **F10** | `shortest-path` | F6 | Done | `shortestPath(…)`/`allShortestPaths(…)` over a single relationship segment landed: minimal-length simple paths per endpoint pair via iterative lengthening, with path/relationship/endpoint variable binding and first-class path values. |
-| **F11** | `native-cypher-passthrough` | backend descriptors, F5 | Planned | Add explicit backend-native escape hatches outside portable conformance, with capability flags and structured non-support. |
+| **F11** | `native-cypher-passthrough` | backend descriptors, F5 | Done | `NativeQuery`/`NativeQueryLanguage` escape-hatch surface landed with per-backend capability flags (`GqlBackend::native_passthrough`), structured non-support, new Falkor/Surreal catalog entries, and executable hatches: `FalkorGraphStore::run_native_cypher`, Surreal `run_native_surrealql`, Sail `query_arrow_ipc` (SQL). |
 
 ## Milestones
 
@@ -146,6 +146,27 @@ Deliverables:
   catalog snapshot when one is provided. **Done.**
 - `GqlBackendDescriptor::session_control` reports capability. **Done.**
 - Manifest/profile docs flipped `session-control` to `Supported`. **Done.**
+
+## Completed Work Item: F11 Native Passthrough
+
+Goal: explicit backend-native escape hatches outside portable conformance.
+
+Deliverables:
+
+- `NativeQueryLanguage` (cypher / sql / surrealql) + `NativeQuery` types in
+  the conformance spine; `ensure_native_passthrough` produces the structured,
+  feature-tagged non-support error; `native_passthrough_backends` is the
+  reverse lookup. **Done.**
+- `GqlBackend::native_passthrough` capability table + descriptor field,
+  verified against the public escape hatches in the working tree. **Done.**
+- Catalog now includes **Falkor** and **Surreal** as `NativeGraphBackend`
+  entries (honest flags: no portable executor; Surreal reports transactional
+  atomicity). **Done.**
+- Executable hatches: `FalkorGraphStore::run_native_cypher` (openCypher via
+  GRAPH.QUERY), `SurrealHttpGraphStore`/`SurrealSdkGraphStore::
+  run_native_surrealql`, existing Sail `query_arrow_ipc` (Spark SQL). **Done.**
+- Manifest/profile docs flipped `native-cypher-passthrough` to `Supported`.
+  **Done.**
 
 ## Completed Work Item: F10 Shortest Path
 

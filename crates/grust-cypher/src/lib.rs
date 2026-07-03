@@ -42,10 +42,11 @@ pub mod transaction;
 pub use gql::{
     GqlBackend, GqlBackendDescriptor, GqlBackendRole, GqlConformanceProfile, GqlError,
     GqlErrorKind, GqlExpectation, GqlFeature, GqlFeatureDescriptor, GqlFeatureFamily,
-    GqlFeatureStatus, GqlManifest, GqlManifestCase, GqlRequirement, GqlSupportCounts,
-    backend_manifest, cypher_conformance_backends, feature_manifest, gql_cardinality,
-    gql_execution, gql_name, gql_syntax, gql_type, load_manifest, load_manifest_cases,
-    support_counts, support_summary, unsupported_gql_feature,
+    GqlFeatureStatus, GqlManifest, GqlManifestCase, GqlRequirement, GqlSupportCounts, NativeQuery,
+    NativeQueryLanguage, backend_manifest, cypher_conformance_backends, ensure_native_passthrough,
+    feature_manifest, gql_cardinality, gql_execution, gql_name, gql_syntax, gql_type,
+    load_manifest, load_manifest_cases, native_passthrough_backends, support_counts,
+    support_summary, unsupported_gql_feature,
 };
 pub use session::{
     CypherSession, SessionCommand, ensure_catalog_graph_selection, ensure_query_uses_graph,

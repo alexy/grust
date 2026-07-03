@@ -64,6 +64,15 @@ impl FalkorGraphStore {
             .query::<RedisValue>(connection)
             .map_err(|err| GrustError::Backend(format!("FalkorDB query failed: {query}: {err}")))
     }
+
+    /// Backend-native Cypher escape hatch (Full39075 F11): run `query` verbatim
+    /// against the configured FalkorDB graph. This is deliberately **outside**
+    /// Grust's portable conformance surface — the text is FalkorDB's own
+    /// openCypher dialect and no portable semantics are claimed for it.
+    pub fn run_native_cypher(&self, query: &str) -> Result<()> {
+        let mut connection = self.connection()?;
+        self.query(&mut connection, query).map(|_| ())
+    }
 }
 
 #[derive(Clone, Debug)]

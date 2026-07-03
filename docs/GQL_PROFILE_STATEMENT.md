@@ -26,7 +26,7 @@ fails if the scoped-out set below drifts from the manifest.
 
 ## Realized profile (today)
 
-**68 of 74 catalogued features are `Supported`** (implemented + tested). By family
+**69 of 74 catalogued features are `Supported`** (implemented + tested). By family
 (run `support_summary()` for the live list): parser/semantics, resolved writes,
 broad matched writes, row-producing relationship writes, returning & aggregates,
 predicates & expressions, read-only matching, path matching, query composition,
@@ -35,18 +35,12 @@ stable serialization where applicable), constraints and index metadata, graph
 type metadata, catalog metadata, named graph selection, transactions (control
 surface + capability reporting), session state commands, catalog procedures.
 
-Counts: **supported 68 · rejected 5 · planned 1 · future 0 · total 74.**
+Counts: **supported 69 · rejected 5 · planned 0 · future 0 · total 74.**
 
 ## Scoped OUT of the realized profile (with rationale)
 
 These are the only gaps between the realized profile and a full-39075 claim. Each
 is deliberate and enumerated so the claim is never silently unbacked.
-
-### Planned (1) — near-term, partially scaffolded
-
-| Feature | Rationale |
-|---|---|
-| `native-cypher-passthrough` (U14) | Backend-native Cypher/SurrealQL/Falkor passthrough, intentionally separate from portable conformance. |
 
 ## Intentional rejections (5) — conformance guards, not gaps
 

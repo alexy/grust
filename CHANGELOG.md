@@ -6,6 +6,20 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added **backend-native query passthrough** (Full39075 F11): the conformance
+  spine gains `NativeQuery` / `NativeQueryLanguage` (cypher · sql · surrealql),
+  a per-backend capability table (`GqlBackend::native_passthrough` + descriptor
+  field), `ensure_native_passthrough` with structured feature-tagged
+  non-support, and `native_passthrough_backends` reverse lookup. The backend
+  catalog now includes **Falkor** and **Surreal** as `native-graph-backend`
+  entries (Surreal honestly reports transactional atomicity). Executable
+  escape hatches: `FalkorGraphStore::run_native_cypher` and
+  `SurrealHttpGraphStore` / `SurrealSdkGraphStore::run_native_surrealql`
+  (Sail's `query_arrow_ipc` already covered native SQL). All are deliberately
+  outside portable conformance. `NativeCypherPassthrough` is now `Supported`:
+  **every non-rejected manifest feature is implemented** (69 supported + 5
+  intentional rejections).
+
 - Added **shortest-path matching** (Full39075 F10): `MATCH p =
   shortestPath((a)-[:T*]->(b))` and `allShortestPaths(…)` over a single
   relationship segment now execute on the read reference. Per (start, end)

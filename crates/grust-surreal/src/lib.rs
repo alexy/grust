@@ -137,6 +137,14 @@ impl SurrealHttpGraphStore {
         read_surreal_http_response(response, "SurrealDB read").await
     }
 
+    /// Backend-native SurrealQL escape hatch (Full39075 F11): run `query`
+    /// verbatim and return the raw JSON result rows. This is deliberately
+    /// **outside** Grust's portable conformance surface — the text is
+    /// SurrealQL and no portable semantics are claimed for it.
+    pub async fn run_native_surrealql(&self, query: &str) -> Result<Vec<serde_json::Value>> {
+        self.read(query).await
+    }
+
     async fn read_nodes(&self, query: &str) -> Result<Vec<Node>> {
         self.read(query)
             .await?
@@ -328,6 +336,14 @@ impl SurrealSdkGraphStore {
             .into_iter()
             .map(surreal_edge_from_value)
             .collect()
+    }
+
+    /// Backend-native SurrealQL escape hatch (Full39075 F11): run `query`
+    /// verbatim and return the raw JSON result rows. This is deliberately
+    /// **outside** Grust's portable conformance surface — the text is
+    /// SurrealQL and no portable semantics are claimed for it.
+    pub async fn run_native_surrealql(&self, query: &str) -> Result<Vec<serde_json::Value>> {
+        self.read(query).await
     }
 }
 
