@@ -1,9 +1,13 @@
 # Grust Full39075 Completion Goal
 
-Status: active follow-on goal. This file sequences the 11 remaining
-non-supported features from `docs/GQL_PROFILE_STATEMENT.md` into an executable
-plan for turning the current `PortableGql` implementation into the candidate
-`Full39075` profile.
+Status: **COMPLETE (2026-07-03).** All 11 tasks (F1–F11) and the FM5 claim flip
+are done: every non-rejected manifest feature is `Supported` (69 of 74; the
+other 5 are intentional strict-write rejections), and `Full39075` is the
+**realized** profile per `docs/GQL_PROFILE_STATEMENT.md`, pinned by
+`gql::tests::full_profile_claim_is_backed`. This file originally sequenced the
+11 remaining non-supported features into an executable plan for turning the
+`PortableGql` implementation into the `Full39075` profile; it is kept as the
+record of that plan and its completion.
 
 Source of truth:
 
@@ -78,6 +82,10 @@ passthrough.
   point every non-rejected manifest feature should be `Supported`, the scoped-out
   list should contain only intentional rejections, and `Full39075` can become the
   realized profile if the profile statement supports that claim.
+  **Done (2026-07-03):** the manifest reads supported 69 · rejected 5 ·
+  planned 0 · future 0; the profile statement claims `Full39075` as realized;
+  `full_profile_claim_is_backed` pins the scoped-out set to exactly the five
+  intentional rejections.
 
 ## Completed Work Item: F1 Index Definition
 

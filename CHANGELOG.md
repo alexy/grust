@@ -6,6 +6,14 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **Full39075 is now the realized GQL profile** (Full39075 FM5): with F1–F11
+  complete, every non-rejected feature in the manifest is `Supported` (69 of
+  74; the other 5 are intentional strict-write rejections — conformance
+  guards, not gaps). `docs/GQL_PROFILE_STATEMENT.md` now claims `Full39075` as
+  the realized profile, `gql::tests::full_profile_claim_is_backed` pins the
+  scoped-out set to exactly the five rejections, and the book chapter on the
+  GQL layer is updated accordingly.
+
 - Added **backend-native query passthrough** (Full39075 F11): the conformance
   spine gains `NativeQuery` / `NativeQueryLanguage` (cypher · sql · surrealql),
   a per-backend capability table (`GqlBackend::native_passthrough` + descriptor

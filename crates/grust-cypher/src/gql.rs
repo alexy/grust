@@ -39,7 +39,9 @@ pub enum GqlConformanceProfile {
     /// The portable Grust GQL profile: backend-neutral reads, expressions,
     /// composition, and pattern matching executed by the Memory reference.
     PortableGql,
-    /// The target profile: the selected mandatory ISO/IEC 39075:2024 features.
+    /// The full profile: the selected mandatory ISO/IEC 39075:2024 features.
+    /// Realized as of the Full39075 completion goal — every non-rejected
+    /// cataloged feature is `Supported` (see `docs/GQL_PROFILE_STATEMENT.md`).
     Full39075,
 }
 
@@ -1933,11 +1935,13 @@ mod tests {
         assert_eq!(support_counts().total(), GqlFeature::ALL.len());
     }
 
-    /// Unit 16 hardening: the `Full39075` candidate profile is exactly the set of
-    /// `Supported` features. Everything not yet supported MUST be enumerated here
-    /// (and given a rationale in `docs/GQL_PROFILE_STATEMENT.md`), so the "full
-    /// 39075" claim is never silently unbacked. Flipping a feature's status
-    /// requires updating both this list and the profile statement.
+    /// Profile hardening (U16 + Full39075 FM5): the `Full39075` profile is
+    /// exactly the set of `Supported` features. As of the Full39075 completion
+    /// goal the only non-`Supported` entries are the five intentional
+    /// strict-write rejections (conformance guards, not gaps), so the realized
+    /// profile is `Full39075`. Any status change MUST update both this list
+    /// and `docs/GQL_PROFILE_STATEMENT.md`, so the claim is never silently
+    /// unbacked.
     #[test]
     fn full_profile_claim_is_backed() {
         let scoped_out: std::collections::BTreeSet<&str> = feature_manifest()
