@@ -34,10 +34,11 @@ rebuilt. **No release performed (guardrail 1).** Branch `full39075` is ready
 for human review / merge to `main`.
 
 ### NEXT (if resuming)
-- Nothing outstanding in either GQL goal. Possible follow-ons: Unit 15
-  pushdown niche tails (see `docs/GQL_M1_CHECKPOINT.md`); pushing more of the
-  new read features (subqueries, shortest path) into backend pushdown; atomic
-  batch execution behind the transaction surface.
+- Nothing outstanding in either GQL goal. **Atomic batch execution is done**
+  (`CypherTransaction` + `run_cypher_transaction_script_on_store`; Turso
+  end-to-end tests) and the read corpus is executable. The planned follow-on
+  is `docs/GQL_PUSHDOWN2_GOAL.md` (pushdown of subqueries/TVFs/shortest path);
+  Unit 15 niche tails are listed in `docs/GQL_M1_CHECKPOINT.md`.
 
 ---
 

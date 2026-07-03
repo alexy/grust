@@ -6,6 +6,27 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added **atomic Cypher transaction batches**: `CypherTransaction` accumulates
+  eagerly-planned write statements between `START TRANSACTION`/`BEGIN` and
+  `COMMIT` (with `READ ONLY` enforcement), and
+  `execute_cypher_transaction_on_store` submits the whole batch in a single
+  `apply_mutations` call — atomic on stores reporting
+  `GraphMutationAtomicity::Transactional` (proven end-to-end on Turso, whose
+  store wraps the slice in one `BEGIN…COMMIT` SQL transaction), and refused
+  with a structured feature-tagged error on `OrderedNonAtomic` stores rather
+  than silently committing non-atomically.
+  `run_cypher_transaction_script_on_store` executes a full
+  `BEGIN; …; COMMIT|ROLLBACK` script (lexer-aware statement splitting;
+  `ROLLBACK` never touches the store). This closes the Unit 13 deferred tail;
+  the `transaction-control` manifest summary now reflects executable
+  atomicity.
+
+- The **portable read corpus is now executable**: every case in
+  `tests/gql/portable_read.json` (grown to 24 cases covering path/graph
+  values, subqueries, TVFs, and shortest paths, including structured
+  rejections) runs against the fixture graph and must match its expected
+  outcome and error kind.
+
 - **Full39075 is now the realized GQL profile** (Full39075 FM5): with F1–F11
   complete, every non-rejected feature in the manifest is `Supported` (69 of
   74; the other 5 are intentional strict-write rejections — conformance

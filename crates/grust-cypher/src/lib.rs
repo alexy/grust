@@ -52,7 +52,11 @@ pub use session::{
     CypherSession, SessionCommand, ensure_catalog_graph_selection, ensure_query_uses_graph,
     query_graph_selection,
 };
-pub use transaction::{TransactionAccessMode, TransactionCommand, transactional_backends};
+pub use transaction::{
+    CypherTransaction, TransactionAccessMode, TransactionCommand,
+    execute_cypher_transaction_on_store, run_cypher_transaction_script_on_store,
+    transactional_backends,
+};
 
 pub type CypherMutationReport = GraphMutationReport;
 

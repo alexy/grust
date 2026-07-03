@@ -39,7 +39,8 @@ expressions, read-only matching, path matching (incl. `shortestPath` /
 system (temporal/duration/decimal/path/graph incl. arithmetic, ordering, and
 stable serialization where applicable), constraints and index metadata, graph
 type metadata, catalog metadata, named graph selection, transactions (control
-surface + capability reporting), session state commands, catalog procedures and
+surface, capability reporting, and atomic batch execution on transactional
+stores), session state commands, catalog procedures and
 table-valued functions, backend-native passthrough.
 
 Counts: **supported 69 · rejected 5 · planned 0 · future 0 · total 74.**

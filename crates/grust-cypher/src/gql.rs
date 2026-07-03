@@ -815,7 +815,7 @@ impl GqlFeature {
                 Transactions,
                 Supported,
                 PortableGql,
-                "START TRANSACTION/BEGIN/COMMIT/ROLLBACK parsed + modeled; per-backend atomicity capability reporting via GqlBackend::transactional (Unit 13). Atomic execution delegated to the backend store, wired post write-path cutover."
+                "START TRANSACTION/BEGIN/COMMIT/ROLLBACK parsed + modeled; per-backend atomicity capability via GqlBackend::transactional; CypherTransaction batches COMMIT atomically in one apply_mutations call on Transactional stores (Turso end-to-end), with structured refusal on OrderedNonAtomic stores (Unit 13 + batch execution)."
             ),
             GqlFeature::SessionControl => d!(
                 "session-control",
