@@ -1460,7 +1460,7 @@ pub(crate) fn value_kind_rank(value: &Value) -> u8 {
         Value::DateTime(_) => 4,
         Value::Duration(_) => 5,
         Value::StringArray(_) | Value::IntArray(_) | Value::FloatArray(_) => 6,
-        Value::Json(_) | Value::Path(_) => 7,
+        Value::Json(_) | Value::Path(_) | Value::Graph(_) => 7,
         Value::Null => 8,
     }
 }

@@ -58,7 +58,7 @@ passthrough.
 | **F4** | `named-graph-selection` | F3 | Done | `USE <graph>` now parses into the AST, validates against explicit single-graph execution names or catalog snapshots, and defaults existing read execution to `USE default`. |
 | **F5** | `session-control` | F4 | Done | Standalone `USE`, `SET`, `RESET`, and `RESET ALL` session commands now parse and update portable `CypherSession` state without changing transaction control behavior. |
 | **F6** | `path-values` | current path bindings | Done | Fixed-length path bindings now return first-class `Value::Path(PathValue)` values with stable node/relationship JSON serialization. |
-| **F7** | `graph-values` | F2, F3, F6 | Future | Add first-class graph values once graph types/catalog metadata and path values are defined. Scope construction and serialization carefully. |
+| **F7** | `graph-values` | F2, F3, F6 | Done | First-class `Value::Graph(GraphValue)` landed: deduplicated node/relationship sets, `graph(nodes, relationships)` construction in the read reference, `nodes()`/`relationships()` accessors, stable JSON serialization. |
 | **F8** | `subquery` | F4, F5 | Future | Implement `CALL { ... }` scoping and execution. Depends on settled scope/session graph behavior. |
 | **F9** | `table-valued-function` | F8 | Future | Generalize the existing read-only catalog procedures into TVF-style row sources. |
 | **F10** | `shortest-path` | F6 | Future | Add shortest-path families on top of first-class path values and a dedicated traversal/cost model. |
@@ -146,6 +146,23 @@ Deliverables:
   catalog snapshot when one is provided. **Done.**
 - `GqlBackendDescriptor::session_control` reports capability. **Done.**
 - Manifest/profile docs flipped `session-control` to `Supported`. **Done.**
+
+## Completed Work Item: F7 Graph Values
+
+Goal: add first-class graph values with carefully scoped construction and
+serialization.
+
+Deliverables:
+
+- `grust_core::GraphValue` and `Value::Graph` model set-shaped graph values:
+  construction deduplicates nodes by id and relationships by
+  id-or-endpoint-triple identity, preserving first-seen order. **Done.**
+- `GraphValue::from_graph_parts` / `from_graph` build graph values from graph
+  snapshots; `Value::to_json` serializes the `{nodes, relationships}` shape and
+  the tagged serde form round-trips. **Done.**
+- Read reference: `graph(nodes, relationships)` constructor over element lists
+  (e.g. `collect(n)`), `nodes(g)`/`relationships(g)` accessors. **Done.**
+- Manifest/profile docs flipped `graph-values` to `Supported`. **Done.**
 
 ## Completed Work Item: F6 Path Values
 

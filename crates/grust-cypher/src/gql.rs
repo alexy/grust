@@ -804,9 +804,9 @@ impl GqlFeature {
             GqlFeature::GraphValues => d!(
                 "graph-values",
                 TypeSystem,
-                Future,
+                Supported,
                 Full39075,
-                "First-class graph values in the type lattice (Unit T)"
+                "First-class graph values (Value::Graph): deduplicated node/relationship sets via graph() with stable JSON serialization (Full39075 F7)"
             ),
             GqlFeature::TransactionControl => d!(
                 "transaction-control",
@@ -1697,7 +1697,7 @@ mod tests {
             );
         }
         // A future feature is not supported yet, even at the widest profile.
-        assert!(!GqlFeature::GraphValues.is_supported_in(GqlConformanceProfile::Full39075));
+        assert!(!GqlFeature::ShortestPath.is_supported_in(GqlConformanceProfile::Full39075));
     }
 
     #[test]
@@ -1740,7 +1740,6 @@ mod tests {
             // Future — deferred to a later full-39075 pass (rationale in the doc).
             "shortest-path",
             "subquery",
-            "graph-values",
             "table-valued-function",
             // Planned — near-term, partially scaffolded.
             "native-cypher-passthrough",

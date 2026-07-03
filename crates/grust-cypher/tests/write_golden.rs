@@ -65,8 +65,7 @@ fn write_planner_matches_golden() {
     let golden = std::fs::read_to_string(GOLDEN_PATH).unwrap_or_else(|e| {
         panic!("missing {GOLDEN_PATH} ({e}); regenerate with `--ignored regenerate`")
     });
-    let golden: serde_json::Value =
-        serde_json::from_str(&golden).expect("golden JSON parses");
+    let golden: serde_json::Value = serde_json::from_str(&golden).expect("golden JSON parses");
     assert_eq!(
         current(),
         golden,

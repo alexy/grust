@@ -17,8 +17,8 @@
 
 use grust_core::Result;
 
-use crate::gql::{gql_syntax, GqlBackend};
-use crate::lexer::{tokenize, Token};
+use crate::gql::{GqlBackend, gql_syntax};
+use crate::lexer::{Token, tokenize};
 
 /// Access mode characteristic of `START TRANSACTION`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,7 +79,7 @@ impl TransactionCommand {
                     _ => {
                         return Err(gql_syntax(
                             "START TRANSACTION accepts only an optional READ ONLY / READ WRITE characteristic",
-                        ))
+                        ));
                     }
                 };
                 Ok(Some(TransactionCommand::Start(mode)))
@@ -127,11 +127,15 @@ mod tests {
         );
         assert_eq!(
             parse("start transaction read only"),
-            Some(TransactionCommand::Start(Some(TransactionAccessMode::ReadOnly)))
+            Some(TransactionCommand::Start(Some(
+                TransactionAccessMode::ReadOnly
+            )))
         );
         assert_eq!(
             parse("START TRANSACTION READ WRITE"),
-            Some(TransactionCommand::Start(Some(TransactionAccessMode::ReadWrite)))
+            Some(TransactionCommand::Start(Some(
+                TransactionAccessMode::ReadWrite
+            )))
         );
     }
 

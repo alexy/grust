@@ -863,10 +863,18 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     ..
                 } => {
                     let mut inner = self.inner.write().expect("memory graph lock poisoned");
-                    let mut target_ids =
-                        Self::matching_node_ids(&inner, target_label.as_ref(), target_props, target_predicates);
-                    let mut source_ids =
-                        Self::matching_node_ids(&inner, source_label.as_ref(), source_props, source_predicates);
+                    let mut target_ids = Self::matching_node_ids(
+                        &inner,
+                        target_label.as_ref(),
+                        target_props,
+                        target_predicates,
+                    );
+                    let mut source_ids = Self::matching_node_ids(
+                        &inner,
+                        source_label.as_ref(),
+                        source_props,
+                        source_predicates,
+                    );
                     target_ids.sort();
                     source_ids.sort();
                     let target_set: std::collections::BTreeSet<NodeId> =

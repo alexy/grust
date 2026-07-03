@@ -306,7 +306,12 @@ fn lower_scalar_list(expr: &Expr, params: &CypherParameters) -> Option<Vec<Scala
 
 /// Apply the numeric cast a comparison/`IN` needs, given the operand's SQL form,
 /// whether it is a (text) label column, and the literal kind.
-fn cast_for_kind(raw: String, is_label: bool, kind: ScalarKind, dialect: &dyn SqlDialect) -> String {
+fn cast_for_kind(
+    raw: String,
+    is_label: bool,
+    kind: ScalarKind,
+    dialect: &dyn SqlDialect,
+) -> String {
     match kind {
         ScalarKind::Str => raw,
         _ if is_label => raw,
@@ -413,7 +418,11 @@ impl SqlDialect for SparkDialect {
     }
     fn bool_literal_sql(&self, value: bool) -> String {
         // GET_JSON_OBJECT returns the JSON boolean as text.
-        if value { "'true'".to_string() } else { "'false'".to_string() }
+        if value {
+            "'true'".to_string()
+        } else {
+            "'false'".to_string()
+        }
     }
 }
 
@@ -455,7 +464,11 @@ impl SqlDialect for SqliteDialect {
     }
     fn bool_literal_sql(&self, value: bool) -> String {
         // json_extract returns the JSON boolean as integer 1/0.
-        if value { "1".to_string() } else { "0".to_string() }
+        if value {
+            "1".to_string()
+        } else {
+            "0".to_string()
+        }
     }
     fn orders_json_typed(&self) -> bool {
         // SQLite / libSQL `json_extract` returns INTEGER/REAL/TEXT, so ORDER BY
@@ -473,10 +486,7 @@ impl SqlDialect for SqliteDialect {
 /// Returns `Ok(Some(_))` for the pushable subset, `Ok(None)` for a valid query
 /// outside it (the caller should fall back to the reference executor), and `Err`
 /// only for genuinely invalid syntax/semantics.
-pub fn plan_node_read(
-    cypher: &str,
-    params: &CypherParameters,
-) -> Result<Option<NodeReadPushdown>> {
+pub fn plan_node_read(cypher: &str, params: &CypherParameters) -> Result<Option<NodeReadPushdown>> {
     plan_node_read_with_hints(cypher, params, &NoTypeHints)
 }
 
@@ -581,7 +591,11 @@ fn compute_pushed_ordering(
     if projection.distinct {
         return None;
     }
-    if projection.items.iter().any(|i| crate::read::expr_has_aggregate(&i.expr)) {
+    if projection
+        .items
+        .iter()
+        .any(|i| crate::read::expr_has_aggregate(&i.expr))
+    {
         return None;
     }
     // A bare SKIP/LIMIT with no ORDER BY would select an arbitrary subset (not the
@@ -713,19 +727,33 @@ fn lower_predicate(
             let cmp = lower_cmp_op(*op)?;
             // `prop = true|false` (Eq/Ne only) — booleans render dialect-specific.
             if matches!(cmp, CmpOp::Eq | CmpOp::Ne) {
-                if let (Some(prop), Some(value)) = (lower_prop_ref(lhs, var), lower_bool(rhs, params))
+                if let (Some(prop), Some(value)) =
+                    (lower_prop_ref(lhs, var), lower_bool(rhs, params))
                 {
-                    return Some(Predicate::BoolCompare { prop, op: cmp, value });
+                    return Some(Predicate::BoolCompare {
+                        prop,
+                        op: cmp,
+                        value,
+                    });
                 }
-                if let (Some(prop), Some(value)) = (lower_prop_ref(rhs, var), lower_bool(lhs, params))
+                if let (Some(prop), Some(value)) =
+                    (lower_prop_ref(rhs, var), lower_bool(lhs, params))
                 {
-                    return Some(Predicate::BoolCompare { prop, op: cmp, value });
+                    return Some(Predicate::BoolCompare {
+                        prop,
+                        op: cmp,
+                        value,
+                    });
                 }
             }
             // `prop <op> literal` / `literal <op> prop`.
             if let Some(prop) = lower_prop_ref(lhs, var) {
                 if let Some(value) = lower_scalar(rhs, params) {
-                    return Some(Predicate::Compare { prop, op: cmp, value });
+                    return Some(Predicate::Compare {
+                        prop,
+                        op: cmp,
+                        value,
+                    });
                 }
             }
             if let Some(prop) = lower_prop_ref(rhs, var) {
@@ -741,7 +769,11 @@ fn lower_predicate(
             let l = lower_arith(lhs, var, label, params, hints)?;
             let r = lower_arith(rhs, var, label, params, hints)?;
             if arith_has_prop(&l) || arith_has_prop(&r) {
-                Some(Predicate::ArithCompare { lhs: l, op: cmp, rhs: r })
+                Some(Predicate::ArithCompare {
+                    lhs: l,
+                    op: cmp,
+                    rhs: r,
+                })
             } else {
                 None
             }
@@ -955,7 +987,10 @@ impl NodeReadPushdown {
             sql.push_str(&conditions.join(" AND "));
         }
         if self.pushes_ordering(dialect) {
-            sql.push_str(&render_order_limit(self.ordering.as_ref().unwrap(), dialect));
+            sql.push_str(&render_order_limit(
+                self.ordering.as_ref().unwrap(),
+                dialect,
+            ));
         }
         sql
     }
@@ -1139,7 +1174,12 @@ fn render_arith(expr: &ArithExpr, dialect: &dyn SqlDialect) -> String {
             )
         }
         ArithExpr::Bin(op, l, r) => {
-            format!("({} {} {})", render_arith(l, dialect), op.sql(), render_arith(r, dialect))
+            format!(
+                "({} {} {})",
+                render_arith(l, dialect),
+                op.sql(),
+                render_arith(r, dialect)
+            )
         }
     }
 }
@@ -1473,7 +1513,10 @@ fn lower_segment_single(
             segments: &segments,
             hints,
         };
-        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &ctx, params)?));
+        filter = Some(seg_conjoin(
+            filter,
+            lower_seg_predicate(where_expr, &ctx, params)?,
+        ));
     }
 
     // Selected bindings in SELECT order: n0, e0, n1, e1, …, nK (vars only).
@@ -1503,7 +1546,8 @@ fn lower_segment_single(
     }
 
     let projection = return_clause.projection.clone();
-    let ordering = compute_seg_ordering(&projection, &roles, &node_labels, &segments, params, hints);
+    let ordering =
+        compute_seg_ordering(&projection, &roles, &node_labels, &segments, params, hints);
 
     Some(SegmentReadPushdown {
         node_labels,
@@ -1530,7 +1574,11 @@ fn compute_seg_ordering(
     if projection.distinct {
         return None;
     }
-    if projection.items.iter().any(|i| crate::read::expr_has_aggregate(&i.expr)) {
+    if projection
+        .items
+        .iter()
+        .any(|i| crate::read::expr_has_aggregate(&i.expr))
+    {
         return None;
     }
     if projection.order_by.is_empty() {
@@ -1662,17 +1710,29 @@ fn lower_seg_predicate(
                 if let (Some(operand), Some(value)) =
                     (lower_seg_operand(lhs, ctx.roles), lower_bool(rhs, params))
                 {
-                    return Some(SegPredicate::BoolCompare { operand, op: cmp, value });
+                    return Some(SegPredicate::BoolCompare {
+                        operand,
+                        op: cmp,
+                        value,
+                    });
                 }
                 if let (Some(operand), Some(value)) =
                     (lower_seg_operand(rhs, ctx.roles), lower_bool(lhs, params))
                 {
-                    return Some(SegPredicate::BoolCompare { operand, op: cmp, value });
+                    return Some(SegPredicate::BoolCompare {
+                        operand,
+                        op: cmp,
+                        value,
+                    });
                 }
             }
             if let Some(operand) = lower_seg_operand(lhs, ctx.roles) {
                 if let Some(value) = lower_scalar(rhs, params) {
-                    return Some(SegPredicate::Compare { operand, op: cmp, value });
+                    return Some(SegPredicate::Compare {
+                        operand,
+                        op: cmp,
+                        value,
+                    });
                 }
             }
             if let Some(operand) = lower_seg_operand(rhs, ctx.roles) {
@@ -1688,7 +1748,11 @@ fn lower_seg_predicate(
             let l = lower_seg_arith(lhs, ctx, params)?;
             let r = lower_seg_arith(rhs, ctx, params)?;
             if seg_arith_has_operand(&l) || seg_arith_has_operand(&r) {
-                Some(SegPredicate::ArithCompare { lhs: l, op: cmp, rhs: r })
+                Some(SegPredicate::ArithCompare {
+                    lhs: l,
+                    op: cmp,
+                    rhs: r,
+                })
             } else {
                 None
             }
@@ -1711,9 +1775,9 @@ fn lower_seg_arith(expr: &Expr, ctx: &SegCtx, params: &CypherParameters) -> Opti
             let operand = lower_seg_operand(expr, ctx.roles)?;
             let kind = match &operand {
                 SegOperand::NodeLabel(_) => return None,
-                SegOperand::NodeProp(i, key) => {
-                    ctx.hints.node_property_kind(ctx.node_labels[*i].as_deref(), key)?
-                }
+                SegOperand::NodeProp(i, key) => ctx
+                    .hints
+                    .node_property_kind(ctx.node_labels[*i].as_deref(), key)?,
                 SegOperand::EdgeProp(j, key) => {
                     let edge_type = match ctx.segments[*j].rel_types.as_slice() {
                         [one] => Some(one.as_str()),
@@ -1953,9 +2017,11 @@ fn render_seg_predicate(pred: &SegPredicate, dialect: &dyn SqlDialect) -> String
             let is_label = matches!(operand, SegOperand::NodeLabel(_));
             render_in_list(raw, is_label, values, dialect)
         }
-        SegPredicate::StringPred { operand, op, needle } => {
-            dialect.string_predicate(&render_seg_operand(operand, dialect), *op, needle)
-        }
+        SegPredicate::StringPred {
+            operand,
+            op,
+            needle,
+        } => dialect.string_predicate(&render_seg_operand(operand, dialect), *op, needle),
         SegPredicate::BoolCompare { operand, op, value } => {
             format!(
                 "{} {} {}",
@@ -2017,11 +2083,19 @@ fn render_seg_compare(
     let is_label = matches!(operand, SegOperand::NodeLabel(_));
     let (lhs, rhs) = match value {
         Scalar::Int(n) => {
-            let lhs = if is_label { raw } else { dialect.cast_int(&raw) };
+            let lhs = if is_label {
+                raw
+            } else {
+                dialect.cast_int(&raw)
+            };
             (lhs, n.to_string())
         }
         Scalar::Float(f) => {
-            let lhs = if is_label { raw } else { dialect.cast_float(&raw) };
+            let lhs = if is_label {
+                raw
+            } else {
+                dialect.cast_float(&raw)
+            };
             (lhs, render_float(*f))
         }
         Scalar::Str(s) => (raw, dialect.string_literal(s)),
@@ -2257,7 +2331,10 @@ fn lower_var_length_single(
             segments: &[],
             hints,
         };
-        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &ctx, params)?));
+        filter = Some(seg_conjoin(
+            filter,
+            lower_seg_predicate(where_expr, &ctx, params)?,
+        ));
     }
 
     let mut selected = Vec::new();
@@ -2311,12 +2388,8 @@ impl VarLengthReadPushdown {
     /// predicate connecting walk row `w` to an edge `ed`, per direction.
     fn step(&self) -> (String, String) {
         match self.direction {
-            SegDirection::Outgoing => {
-                ("ed.dst_id".to_string(), "ed.src_id = w.e".to_string())
-            }
-            SegDirection::Incoming => {
-                ("ed.src_id".to_string(), "ed.dst_id = w.e".to_string())
-            }
+            SegDirection::Outgoing => ("ed.dst_id".to_string(), "ed.src_id = w.e".to_string()),
+            SegDirection::Incoming => ("ed.src_id".to_string(), "ed.dst_id = w.e".to_string()),
             SegDirection::Undirected => (
                 "CASE WHEN ed.src_id = w.e THEN ed.dst_id ELSE ed.src_id END".to_string(),
                 "(ed.src_id = w.e OR ed.dst_id = w.e)".to_string(),
@@ -2544,7 +2617,10 @@ fn lower_optional_single(
             segments: &segments,
             hints,
         };
-        a_filter = Some(seg_conjoin(a_filter, lower_seg_predicate(where_expr, &ctx, params)?));
+        a_filter = Some(seg_conjoin(
+            a_filter,
+            lower_seg_predicate(where_expr, &ctx, params)?,
+        ));
     }
 
     // Optional filter over `r` (edge 0) and `b` (node 1): inline props + WHERE;
@@ -2598,7 +2674,10 @@ fn lower_optional_single(
             segments: &segments,
             hints,
         };
-        opt_filter = Some(seg_conjoin(opt_filter, lower_seg_predicate(where_expr, &ctx, params)?));
+        opt_filter = Some(seg_conjoin(
+            opt_filter,
+            lower_seg_predicate(where_expr, &ctx, params)?,
+        ));
     }
 
     let mut selected = vec![SelectedBinding::Node {
@@ -2689,7 +2768,9 @@ impl OptionalReadPushdown {
         let mut cols: Vec<String> = Vec::new();
         for binding in &self.selected {
             match binding {
-                SelectedBinding::Node { optional: false, .. } => {
+                SelectedBinding::Node {
+                    optional: false, ..
+                } => {
                     cols.extend(["n0.id".into(), "n0.label".into(), "n0.props".into()]);
                 }
                 SelectedBinding::Edge { .. } => cols.extend([
@@ -2700,7 +2781,11 @@ impl OptionalReadPushdown {
                     "opt.r_props".into(),
                 ]),
                 SelectedBinding::Node { optional: true, .. } => {
-                    cols.extend(["opt.b_id".into(), "opt.b_label".into(), "opt.b_props".into()]);
+                    cols.extend([
+                        "opt.b_id".into(),
+                        "opt.b_label".into(),
+                        "opt.b_props".into(),
+                    ]);
                 }
             }
         }
@@ -2912,7 +2997,10 @@ fn lower_multi_pattern_single(
             segments: &segs,
             hints,
         };
-        filter = Some(seg_conjoin(filter, lower_seg_predicate(where_expr, &ctx, params)?));
+        filter = Some(seg_conjoin(
+            filter,
+            lower_seg_predicate(where_expr, &ctx, params)?,
+        ));
     }
 
     Some(MultiPatternReadPushdown {
@@ -3113,8 +3201,10 @@ fn parse_props(text: Option<&str>) -> Result<Props> {
         None => Ok(Props::new()),
         Some(s) if s.is_empty() => Ok(Props::new()),
         Some(s) => {
-            let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(s)
-                .map_err(|e| crate::gql::gql_execution(format!("pushdown props JSON parse: {e}")))?;
+            let map: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(s).map_err(|e| {
+                    crate::gql::gql_execution(format!("pushdown props JSON parse: {e}"))
+                })?;
             Ok(map
                 .into_iter()
                 .map(|(k, v)| (k, Value::from_json(v)))
@@ -3266,10 +3356,7 @@ fn lower_single(
 /// Combine `UNION` arm result tables, mirroring [`crate::read::run_read_query`]:
 /// all arms must share column names; rows are concatenated, then deduplicated
 /// when `distinct`.
-pub fn combine_union(
-    tables: Vec<CypherResultTable>,
-    distinct: bool,
-) -> Result<CypherResultTable> {
+pub fn combine_union(tables: Vec<CypherResultTable>, distinct: bool) -> Result<CypherResultTable> {
     let mut tables = tables.into_iter();
     let mut combined = tables
         .next()
@@ -3433,9 +3520,11 @@ mod tests {
             "{f}"
         );
         // Without type hints the property type is unknown → not pushable.
-        assert!(plan_node_read("MATCH (n:Person) WHERE n.age + 1 > 40 RETURN n", &params())
-            .unwrap()
-            .is_none());
+        assert!(
+            plan_node_read("MATCH (n:Person) WHERE n.age + 1 > 40 RETURN n", &params())
+                .unwrap()
+                .is_none()
+        );
         // Division renders as floating-point division (reference `/` is f64).
         let d = plan_node_read_with_hints(
             "MATCH (n:Person) WHERE n.age / 2 > 20 RETURN n.name",
@@ -3452,21 +3541,25 @@ mod tests {
             "{d}"
         );
         // Modulo / power remain dialect-divergent → not pushable.
-        assert!(plan_node_read_with_hints(
-            "MATCH (n:Person) WHERE n.age % 2 = 0 RETURN n",
-            &params(),
-            &TestHints,
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            plan_node_read_with_hints(
+                "MATCH (n:Person) WHERE n.age % 2 = 0 RETURN n",
+                &params(),
+                &TestHints,
+            )
+            .unwrap()
+            .is_none()
+        );
         // String property in arithmetic → not pushable.
-        assert!(plan_node_read_with_hints(
-            "MATCH (n:Person) WHERE n.name + 1 > 40 RETURN n",
-            &params(),
-            &TestHints,
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            plan_node_read_with_hints(
+                "MATCH (n:Person) WHERE n.name + 1 > 40 RETURN n",
+                &params(),
+                &TestHints,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]
@@ -3552,8 +3645,9 @@ mod tests {
         // UNWIND.
         assert!(plan("UNWIND [1,2] AS x RETURN x").is_none());
         // UNION.
-        assert!(plan("MATCH (n:A) RETURN n.label AS l UNION MATCH (m:B) RETURN m.label AS l")
-            .is_none());
+        assert!(
+            plan("MATCH (n:A) RETURN n.label AS l UNION MATCH (m:B) RETURN m.label AS l").is_none()
+        );
         // Empty / mixed-kind IN lists are not pushable (reference fallback).
         assert!(plan("MATCH (n:Person) WHERE n.age IN [] RETURN n").is_none());
         assert!(plan("MATCH (n:Person) WHERE n.age IN [1, 'x'] RETURN n").is_none());
@@ -3588,8 +3682,16 @@ mod tests {
     fn project_runs_the_reference_projection() {
         // The pushdown projection must equal the reference over the same nodes.
         let nodes = vec![
-            node("Person", "p2", &[("name", Value::from("Alan")), ("age", Value::Int(41))]),
-            node("Person", "p3", &[("name", Value::from("Grace")), ("age", Value::Int(85))]),
+            node(
+                "Person",
+                "p2",
+                &[("name", Value::from("Alan")), ("age", Value::Int(41))],
+            ),
+            node(
+                "Person",
+                "p3",
+                &[("name", Value::from("Grace")), ("age", Value::Int(85))],
+            ),
         ];
         let plan = plan("MATCH (n:Person) WHERE n.age >= 40 RETURN n.name ORDER BY n.name")
             .expect("pushable");
@@ -3616,7 +3718,8 @@ mod tests {
 
     #[test]
     fn order_limit_pushed_only_for_typed_dialects() {
-        let cypher = "MATCH (n:Person) WHERE n.age >= 40 RETURN n.name ORDER BY n.age DESC SKIP 1 LIMIT 2";
+        let cypher =
+            "MATCH (n:Person) WHERE n.age >= 40 RETURN n.name ORDER BY n.age DESC SKIP 1 LIMIT 2";
         let plan = plan(cypher).expect("pushable");
         // SQLite extracts typed JSON → ORDER BY/SKIP/LIMIT pushed with NULLS rules.
         assert_eq!(
@@ -3683,7 +3786,10 @@ mod tests {
         let sql = plan("MATCH (n:Person) RETURN n.age AS a ORDER BY a")
             .expect("pushable")
             .to_sql(&SqliteDialect);
-        assert!(sql.ends_with("ORDER BY json_extract(props, '$.age') ASC NULLS LAST"), "{sql}");
+        assert!(
+            sql.ends_with("ORDER BY json_extract(props, '$.age') ASC NULLS LAST"),
+            "{sql}"
+        );
         // ORDER BY label uses the column directly.
         let sql = plan("MATCH (n) RETURN n.label ORDER BY n.label")
             .expect("pushable")
@@ -3701,7 +3807,10 @@ mod tests {
             "MATCH (n:Person) RETURN n.name LIMIT 3",
         ] {
             let p = plan(cypher).expect("node-pushable");
-            assert!(!p.pushes_ordering(&SqliteDialect), "should not push: {cypher}");
+            assert!(
+                !p.pushes_ordering(&SqliteDialect),
+                "should not push: {cypher}"
+            );
         }
     }
 
@@ -3800,7 +3909,9 @@ mod tests {
     #[test]
     fn segment_in_predicate() {
         assert_eq!(
-            seg_spark("MATCH (:Person)-[:KNOWS]->(b) WHERE b.name IN ['Alan', 'Grace'] RETURN b.name"),
+            seg_spark(
+                "MATCH (:Person)-[:KNOWS]->(b) WHERE b.name IN ['Alan', 'Grace'] RETURN b.name"
+            ),
             "SELECT n1.id, n1.label, n1.props \
              FROM `grust_nodes` n0 \
              JOIN `grust_edges` e0 ON e0.src_id = n0.id \
@@ -3817,9 +3928,10 @@ mod tests {
         )
         .expect("pushable");
         assert!(plan.pushes_ordering(&SqliteDialect));
-        assert!(plan
-            .to_sql(&SqliteDialect)
-            .ends_with("ORDER BY json_extract(n1.props, '$.age') DESC NULLS FIRST LIMIT 3"));
+        assert!(
+            plan.to_sql(&SqliteDialect)
+                .ends_with("ORDER BY json_extract(n1.props, '$.age') DESC NULLS FIRST LIMIT 3")
+        );
         // Spark without hints can't type the JSON sort key → not pushed.
         assert!(!plan.pushes_ordering(&SparkDialect));
     }
@@ -3854,9 +3966,10 @@ mod tests {
             "ORDER BY CAST(GET_JSON_OBJECT(e0.props, '$.stars') AS BIGINT) DESC NULLS FIRST"
         ));
         // Typed-JSON dialects order the edge property directly (no hints needed).
-        assert!(plan
-            .to_sql(&SqliteDialect)
-            .ends_with("ORDER BY json_extract(e0.props, '$.stars') DESC NULLS FIRST"));
+        assert!(
+            plan.to_sql(&SqliteDialect)
+                .ends_with("ORDER BY json_extract(e0.props, '$.stars') DESC NULLS FIRST")
+        );
     }
 
     #[test]
@@ -3901,12 +4014,14 @@ mod tests {
             "{e}"
         );
         // No hints → unknown types → not pushable.
-        assert!(plan_segment_read(
-            "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age + 1 > 40 RETURN b.name",
-            &params(),
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            plan_segment_read(
+                "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age + 1 > 40 RETURN b.name",
+                &params(),
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     #[test]
@@ -3949,11 +4064,19 @@ mod tests {
             .unwrap();
         assert_eq!(
             table.columns,
-            vec!["a.name".to_string(), "r.since".to_string(), "b.name".to_string()]
+            vec![
+                "a.name".to_string(),
+                "r.since".to_string(),
+                "b.name".to_string()
+            ]
         );
         assert_eq!(
             table.rows,
-            vec![vec![Value::from("Ada"), Value::Int(2020), Value::from("Alan")]]
+            vec![vec![
+                Value::from("Ada"),
+                Value::Int(2020),
+                Value::from("Alan")
+            ]]
         );
     }
 
@@ -3994,18 +4117,22 @@ mod tests {
         assert!(matches!(arms[0], ReadPushdown::Node(_)));
         assert!(matches!(arms[1], ReadPushdown::Segment(_)));
         // A single query is a leaf, not a union.
-        assert!(!plan_read("MATCH (n:Person) RETURN n.name", &params(), &NoTypeHints)
-            .unwrap()
-            .unwrap()
-            .is_union());
+        assert!(
+            !plan_read("MATCH (n:Person) RETURN n.name", &params(), &NoTypeHints)
+                .unwrap()
+                .unwrap()
+                .is_union()
+        );
         // A non-pushable arm makes the whole UNION fall back.
-        assert!(plan_read(
-            "MATCH (n:Person) RETURN n.name AS x UNION UNWIND [1] AS x RETURN x",
-            &params(),
-            &NoTypeHints,
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            plan_read(
+                "MATCH (n:Person) RETURN n.name AS x UNION UNWIND [1] AS x RETURN x",
+                &params(),
+                &NoTypeHints,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     // ---- WITH horizon -----------------------------------------------------
@@ -4027,13 +4154,15 @@ mod tests {
              WHERE label = 'Person' AND CAST(json_extract(props, '$.age') AS INTEGER) >= 40"
         );
         // A tail containing a further MATCH (needs graph access) falls back.
-        assert!(plan_read(
-            "MATCH (n:Person) WITH n MATCH (n)-[:KNOWS]->(b) RETURN b.name",
-            &params(),
-            &NoTypeHints,
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            plan_read(
+                "MATCH (n:Person) WITH n MATCH (n)-[:KNOWS]->(b) RETURN b.name",
+                &params(),
+                &NoTypeHints,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     // ---- multi-pattern MATCH ----------------------------------------------
@@ -4057,19 +4186,28 @@ mod tests {
             ),
             "{sql}"
         );
-        assert!(sql.contains("e0.src_id = n0.id AND e0.dst_id = n1.id"), "{sql}");
-        assert!(sql.contains("e1.src_id = n0.id AND e1.dst_id = n2.id"), "{sql}");
+        assert!(
+            sql.contains("e0.src_id = n0.id AND e0.dst_id = n1.id"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("e1.src_id = n0.id AND e1.dst_id = n2.id"),
+            "{sql}"
+        );
         assert!(
             sql.contains("e0.edge_type = 'KNOWS'") && sql.contains("e1.edge_type = 'RATED'"),
             "{sql}"
         );
 
         // Cross product (no shared variable).
-        let cross =
-            plan_read("MATCH (a:Person), (c:City) RETURN a.name, c.name", &params(), &NoTypeHints)
-                .unwrap()
-                .expect("pushable")
-                .to_sql(&SqliteDialect);
+        let cross = plan_read(
+            "MATCH (a:Person), (c:City) RETURN a.name, c.name",
+            &params(),
+            &NoTypeHints,
+        )
+        .unwrap()
+        .expect("pushable")
+        .to_sql(&SqliteDialect);
         assert!(
             cross.contains(
                 "FROM \"grust_nodes\" n0, \"grust_nodes\" n1 \
@@ -4079,13 +4217,15 @@ mod tests {
         );
 
         // Undirected segment in a multi-pattern falls back.
-        assert!(plan_read(
-            "MATCH (a)-[:KNOWS]->(b), (a)-[:KNOWS]-(c) RETURN a",
-            &params(),
-            &NoTypeHints,
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            plan_read(
+                "MATCH (a)-[:KNOWS]->(b), (a)-[:KNOWS]-(c) RETURN a",
+                &params(),
+                &NoTypeHints,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 
     // ---- OPTIONAL MATCH ---------------------------------------------------
@@ -4101,14 +4241,25 @@ mod tests {
         .expect("pushable");
         assert!(matches!(plan, ReadPushdown::Optional(_)));
         let sql = plan.to_sql(&SqliteDialect);
-        assert!(sql.starts_with("SELECT n0.id, n0.label, n0.props, opt.b_id, opt.b_label, opt.b_props \
-             FROM \"grust_nodes\" n0 LEFT JOIN ("), "{sql}");
+        assert!(
+            sql.starts_with(
+                "SELECT n0.id, n0.label, n0.props, opt.b_id, opt.b_label, opt.b_props \
+             FROM \"grust_nodes\" n0 LEFT JOIN ("
+            ),
+            "{sql}"
+        );
         assert!(
             sql.contains("FROM \"grust_edges\" e0 JOIN \"grust_nodes\" n1 ON n1.id = e0.dst_id"),
             "{sql}"
         );
-        assert!(sql.contains("WHERE e0.edge_type = 'KNOWS' AND n1.label = 'Person'"), "{sql}");
-        assert!(sql.ends_with(") opt ON opt.anchor = n0.id WHERE n0.label = 'Person'"), "{sql}");
+        assert!(
+            sql.contains("WHERE e0.edge_type = 'KNOWS' AND n1.label = 'Person'"),
+            "{sql}"
+        );
+        assert!(
+            sql.ends_with(") opt ON opt.anchor = n0.id WHERE n0.label = 'Person'"),
+            "{sql}"
+        );
 
         // OPTIONAL WHERE referencing the mandatory node `a` is not pushable.
         assert!(plan_read(
@@ -4136,19 +4287,28 @@ mod tests {
             "{sql}"
         );
         // Outgoing step + simple-path (no-repeat) membership via instr.
-        assert!(sql.contains("JOIN \"grust_edges\" ed ON ed.src_id = w.e"), "{sql}");
+        assert!(
+            sql.contains("JOIN \"grust_edges\" ed ON ed.src_id = w.e"),
+            "{sql}"
+        );
         assert!(sql.contains("WHERE instr(w.visited,"), "{sql}");
         assert!(sql.contains("AND ed.edge_type = 'KNOWS'"), "{sql}");
         assert!(sql.contains("AND w.depth + 1 <= 2"), "{sql}");
         assert!(sql.contains(" WHERE w.depth >= 1"), "{sql}");
-        assert!(sql.contains("json_extract(n0.props, '$.name') = 'Ada'"), "{sql}");
+        assert!(
+            sql.contains("json_extract(n0.props, '$.name') = 'Ada'"),
+            "{sql}"
+        );
         assert!(sql.contains("n0.label = 'Person'"), "{sql}");
 
         // Incoming and undirected step expressions.
         let inc = varlen("MATCH (a)<-[:KNOWS*1..3]-(b) RETURN b.name")
             .expect("pushable")
             .to_sql(&SqliteDialect);
-        assert!(inc.contains("JOIN \"grust_edges\" ed ON ed.dst_id = w.e"), "{inc}");
+        assert!(
+            inc.contains("JOIN \"grust_edges\" ed ON ed.dst_id = w.e"),
+            "{inc}"
+        );
         assert!(inc.contains("AND w.depth + 1 <= 3"), "{inc}");
         let und = varlen("MATCH (a)-[:KNOWS*2..3]-(b) RETURN b.name")
             .expect("pushable")
@@ -4163,7 +4323,10 @@ mod tests {
         let spark = varlen("MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name")
             .expect("pushable")
             .to_sql(&SparkDialect);
-        assert!(spark.contains("GET_JSON_OBJECT(n0.props, '$.name') = 'Ada'"), "{spark}");
+        assert!(
+            spark.contains("GET_JSON_OBJECT(n0.props, '$.name') = 'Ada'"),
+            "{spark}"
+        );
     }
 
     #[test]

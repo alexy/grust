@@ -246,6 +246,7 @@ fn value_to_json(value: &Value) -> Result<JsonValue> {
                 .map(|value| JsonValue::String(value.clone()))
                 .collect(),
         ),
+        Value::Path(_) | Value::Graph(_) => value.to_json(),
         Value::Json(value) => value.clone(),
     })
 }

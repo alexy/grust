@@ -320,7 +320,9 @@ fn cypher_map(props: &Props, config: &FalkorConfig) -> String {
             Value::Float(value) => format!("{key}:{value}"),
             Value::String(value) => format!("{key}:{}", cypher_string(value)),
             Value::DateTime(value) => format!("{key}:{}", cypher_string(value.as_str())),
-            Value::Decimal(value) => format!("{key}:{}", cypher_string(&value.to_canonical_string())),
+            Value::Decimal(value) => {
+                format!("{key}:{}", cypher_string(&value.to_canonical_string()))
+            }
             Value::Duration(value) => format!("{key}:{}", cypher_string(&value.to_iso_string())),
             Value::IntArray(values) => format!(
                 "{key}:[{}]",
@@ -346,6 +348,9 @@ fn cypher_map(props: &Props, config: &FalkorConfig) -> String {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            Value::Path(_) | Value::Graph(_) => {
+                format!("{key}:{}", cypher_string(&value.to_json().to_string()))
+            }
             Value::Json(value) => format!("{key}:{}", cypher_string(&value.to_string())),
         })
         .collect::<Vec<_>>()

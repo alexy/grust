@@ -524,6 +524,74 @@ impl PathValue {
     }
 }
 
+/// A first-class graph value (Full39075 F7): a *set* of nodes and
+/// relationships. Unlike [`PathValue`] (an ordered traversal), construction
+/// deduplicates nodes by id and relationships by identity, preserving
+/// first-seen order so serialization stays deterministic.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GraphValue {
+    pub nodes: Vec<serde_json::Value>,
+    pub relationships: Vec<serde_json::Value>,
+}
+
+impl GraphValue {
+    pub fn new(
+        nodes: impl Into<Vec<serde_json::Value>>,
+        relationships: impl Into<Vec<serde_json::Value>>,
+    ) -> Self {
+        Self {
+            nodes: dedup_graph_elements(nodes.into(), graph_node_key),
+            relationships: dedup_graph_elements(relationships.into(), graph_relationship_key),
+        }
+    }
+
+    pub fn from_graph_parts(nodes: &[Node], relationships: &[Edge]) -> Self {
+        Self::new(
+            nodes.iter().map(node_to_json).collect::<Vec<_>>(),
+            relationships.iter().map(edge_to_json).collect::<Vec<_>>(),
+        )
+    }
+
+    pub fn from_graph(graph: &Graph) -> Self {
+        Self::from_graph_parts(&graph.nodes, &graph.edges)
+    }
+}
+
+/// Node identity within a graph value: the `id` field, falling back to the
+/// whole serialized element for id-less shapes.
+fn graph_node_key(node: &serde_json::Value) -> String {
+    node.get("id")
+        .and_then(|id| id.as_str())
+        .map(|id| format!("id:{id}"))
+        .unwrap_or_else(|| node.to_string())
+}
+
+/// Relationship identity within a graph value: the `id` field when present,
+/// otherwise the `(from, label, to)` endpoint triple.
+fn graph_relationship_key(edge: &serde_json::Value) -> String {
+    if let Some(id) = edge.get("id").and_then(|id| id.as_str()) {
+        return format!("id:{id}");
+    }
+    let field = |key: &str| {
+        edge.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    format!("{}|{}|{}", field("from"), field("label"), field("to"))
+}
+
+fn dedup_graph_elements(
+    elements: Vec<serde_json::Value>,
+    key: fn(&serde_json::Value) -> String,
+) -> Vec<serde_json::Value> {
+    let mut seen = std::collections::HashSet::new();
+    elements
+        .into_iter()
+        .filter(|element| seen.insert(key(element)))
+        .collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Value {
@@ -544,6 +612,8 @@ pub enum Value {
     IntArray(Vec<i64>),
     FloatArray(Vec<f64>),
     Path(PathValue),
+    /// A first-class graph value (a deduplicated node/relationship set).
+    Graph(GraphValue),
     Json(serde_json::Value),
 }
 
@@ -632,6 +702,10 @@ impl Value {
             Self::Path(path) => serde_json::json!({
                 "nodes": path.nodes.clone(),
                 "relationships": path.relationships.clone(),
+            }),
+            Self::Graph(graph) => serde_json::json!({
+                "nodes": graph.nodes.clone(),
+                "relationships": graph.relationships.clone(),
             }),
             Self::Json(value) => value.clone(),
         }
@@ -4006,10 +4080,10 @@ pub mod prelude {
         GraphNativeConstraintCapability, GraphNativeConstraintReport, GraphNativeConstraintRequest,
         GraphNodeMatch, GraphNumericOp, GraphPredicateOp, GraphPropertyPredicate,
         GraphRelationshipEndpoint, GraphRelationshipMatch, GraphRowEdgeIdPolicy, GraphSchema,
-        GraphSchemaBuilder, GraphStore, GraphWriteCorrelation, GrustError, Label, LoadReport, Node,
-        NodeId, NodeType, PathValue, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal,
-        Value, classify_edge_upsert, classify_node_upsert, edge_key, evaluate_numeric_update,
-        generated_row_edge_id, relationship_type, schema_identifier,
+        GraphSchemaBuilder, GraphStore, GraphValue, GraphWriteCorrelation, GrustError, Label,
+        LoadReport, Node, NodeId, NodeType, PathValue, Props, PutOutcome, Result, RfcDate, Start,
+        Step, Traversal, Value, classify_edge_upsert, classify_node_upsert, edge_key,
+        evaluate_numeric_update, generated_row_edge_id, relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

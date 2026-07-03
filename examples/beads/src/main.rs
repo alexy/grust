@@ -40,12 +40,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // grust is the graph: query the issue graph with Cypher.
     let params = CypherParameters::new();
-    let by_status = "MATCH (n:Issue) RETURN n.status AS status, count(*) AS count ORDER BY count DESC";
+    let by_status =
+        "MATCH (n:Issue) RETURN n.status AS status, count(*) AS count ORDER BY count DESC";
     match run_read_query(&graph, by_status, &params) {
         Ok(table) => {
             println!("  issues by status (grust Cypher):");
             for row in &table.rows {
-                println!("    {}", row.iter().map(value_str).collect::<Vec<_>>().join("\t"));
+                println!(
+                    "    {}",
+                    row.iter().map(value_str).collect::<Vec<_>>().join("\t")
+                );
             }
         }
         Err(e) => eprintln!("  status query failed: {e}"),
@@ -56,7 +60,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if !table.rows.is_empty() {
             println!("  blocking dependencies (grust Cypher):");
             for row in &table.rows {
-                println!("    {}", row.iter().map(value_str).collect::<Vec<_>>().join(" -> "));
+                println!(
+                    "    {}",
+                    row.iter().map(value_str).collect::<Vec<_>>().join(" -> ")
+                );
             }
         }
     }

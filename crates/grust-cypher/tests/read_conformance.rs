@@ -7,8 +7,8 @@
 //! documentation of what the portable read profile executes today.
 
 use grust_core::{Edge, Graph, Node, Props, Value};
-use grust_cypher::read::run_read_query;
 use grust_cypher::CypherParameters;
+use grust_cypher::read::run_read_query;
 
 fn node(label: &str, id: &str, props: &[(&str, Value)]) -> Node {
     let mut p = Props::new();
@@ -21,9 +21,21 @@ fn node(label: &str, id: &str, props: &[(&str, Value)]) -> Node {
 /// A small social/geo graph: Ada -KNOWS-> Alan -KNOWS-> Grace; Ada -LIVES_IN-> London.
 fn fixture() -> Graph {
     let nodes = vec![
-        node("Person", "p1", &[("name", Value::from("Ada")), ("age", Value::Int(36))]),
-        node("Person", "p2", &[("name", Value::from("Alan")), ("age", Value::Int(41))]),
-        node("Person", "p3", &[("name", Value::from("Grace")), ("age", Value::Int(85))]),
+        node(
+            "Person",
+            "p1",
+            &[("name", Value::from("Ada")), ("age", Value::Int(36))],
+        ),
+        node(
+            "Person",
+            "p2",
+            &[("name", Value::from("Alan")), ("age", Value::Int(41))],
+        ),
+        node(
+            "Person",
+            "p3",
+            &[("name", Value::from("Grace")), ("age", Value::Int(85))],
+        ),
         node("City", "c1", &[("name", Value::from("London"))]),
     ];
     let edges = vec![
@@ -67,7 +79,9 @@ fn relationship_and_var_length() {
 #[test]
 fn optional_match_null_pads() {
     assert_eq!(
-        rows("MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name ORDER BY a.name"),
+        rows(
+            "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name ORDER BY a.name"
+        ),
         vec![
             vec![Value::from("Ada"), Value::from("Alan")],
             vec![Value::from("Alan"), Value::from("Grace")],
@@ -110,7 +124,9 @@ fn unwind_and_scalar_functions() {
 #[test]
 fn union_distinct() {
     assert_eq!(
-        col0("MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION MATCH (m:Person {name:'Alan'}) RETURN m.label AS l"),
+        col0(
+            "MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION MATCH (m:Person {name:'Alan'}) RETURN m.label AS l"
+        ),
         vec![Value::from("Person")]
     );
 }
@@ -118,8 +134,14 @@ fn union_distinct() {
 #[test]
 fn case_expression() {
     assert_eq!(
-        col0("MATCH (n:Person) RETURN CASE WHEN n.age >= 80 THEN 'senior' ELSE 'other' END AS bucket ORDER BY n.name"),
-        vec![Value::from("other"), Value::from("other"), Value::from("senior")]
+        col0(
+            "MATCH (n:Person) RETURN CASE WHEN n.age >= 80 THEN 'senior' ELSE 'other' END AS bucket ORDER BY n.name"
+        ),
+        vec![
+            Value::from("other"),
+            Value::from("other"),
+            Value::from("senior")
+        ]
     );
 }
 
@@ -134,7 +156,11 @@ fn parameters() {
     )
     .unwrap();
     assert_eq!(
-        table.rows.into_iter().map(|mut r| r.remove(0)).collect::<Vec<_>>(),
+        table
+            .rows
+            .into_iter()
+            .map(|mut r| r.remove(0))
+            .collect::<Vec<_>>(),
         vec![Value::from("Alan"), Value::from("Grace")]
     );
 }
@@ -151,13 +177,31 @@ fn path_variable_and_functions() {
 #[test]
 fn numeric_scalar_functions() {
     // Unary f64 math functions (null-propagating, numeric operands).
-    assert_eq!(col0("UNWIND [16.0] AS x RETURN sqrt(x)"), vec![Value::Float(4.0)]);
-    assert_eq!(col0("UNWIND [0.0] AS x RETURN cos(x)"), vec![Value::Float(1.0)]);
-    assert_eq!(col0("UNWIND [0.0] AS x RETURN sin(x)"), vec![Value::Float(0.0)]);
-    assert_eq!(col0("UNWIND [1.0] AS x RETURN ln(x)"), vec![Value::Float(0.0)]);
-    assert_eq!(col0("UNWIND [0.0] AS x RETURN exp(x)"), vec![Value::Float(1.0)]);
+    assert_eq!(
+        col0("UNWIND [16.0] AS x RETURN sqrt(x)"),
+        vec![Value::Float(4.0)]
+    );
+    assert_eq!(
+        col0("UNWIND [0.0] AS x RETURN cos(x)"),
+        vec![Value::Float(1.0)]
+    );
+    assert_eq!(
+        col0("UNWIND [0.0] AS x RETURN sin(x)"),
+        vec![Value::Float(0.0)]
+    );
+    assert_eq!(
+        col0("UNWIND [1.0] AS x RETURN ln(x)"),
+        vec![Value::Float(0.0)]
+    );
+    assert_eq!(
+        col0("UNWIND [0.0] AS x RETURN exp(x)"),
+        vec![Value::Float(1.0)]
+    );
     // Integer operand widens; null propagates.
-    assert_eq!(col0("UNWIND [9] AS x RETURN sqrt(x)"), vec![Value::Float(3.0)]);
+    assert_eq!(
+        col0("UNWIND [9] AS x RETURN sqrt(x)"),
+        vec![Value::Float(3.0)]
+    );
     assert_eq!(col0("UNWIND [null] AS x RETURN sqrt(x)"), vec![Value::Null]);
 }
 
@@ -165,9 +209,21 @@ fn numeric_scalar_functions() {
 fn datetime_ordering() {
     // Temporal values order chronologically (RFC 3339 form), not as equal.
     let nodes = vec![
-        node("Event", "e1", &[("at", Value::datetime("2026-01-03T00:00:00Z").unwrap())]),
-        node("Event", "e2", &[("at", Value::datetime("2026-01-01T00:00:00Z").unwrap())]),
-        node("Event", "e3", &[("at", Value::datetime("2026-01-02T00:00:00Z").unwrap())]),
+        node(
+            "Event",
+            "e1",
+            &[("at", Value::datetime("2026-01-03T00:00:00Z").unwrap())],
+        ),
+        node(
+            "Event",
+            "e2",
+            &[("at", Value::datetime("2026-01-01T00:00:00Z").unwrap())],
+        ),
+        node(
+            "Event",
+            "e3",
+            &[("at", Value::datetime("2026-01-02T00:00:00Z").unwrap())],
+        ),
     ];
     let graph = Graph::new(nodes, vec![]);
     let table = run_read_query(
@@ -177,7 +233,11 @@ fn datetime_ordering() {
     )
     .unwrap();
     assert_eq!(
-        table.rows.into_iter().map(|mut r| r.remove(0)).collect::<Vec<_>>(),
+        table
+            .rows
+            .into_iter()
+            .map(|mut r| r.remove(0))
+            .collect::<Vec<_>>(),
         vec![Value::from("e2"), Value::from("e3"), Value::from("e1")]
     );
     // DESC reverses chronologically.
@@ -188,7 +248,10 @@ fn datetime_ordering() {
     )
     .unwrap();
     assert_eq!(
-        desc.rows.into_iter().map(|mut r| r.remove(0)).collect::<Vec<_>>(),
+        desc.rows
+            .into_iter()
+            .map(|mut r| r.remove(0))
+            .collect::<Vec<_>>(),
         vec![Value::from("e1"), Value::from("e3"), Value::from("e2")]
     );
 }
@@ -287,17 +350,21 @@ fn duration_values_and_arithmetic() {
 #[test]
 fn unsupported_read_shapes_error() {
     // Writes are rejected by the read executor.
-    assert!(run_read_query(
-        &fixture(),
-        "CREATE (:Person {id:'x'})",
-        &CypherParameters::new()
-    )
-    .is_err());
+    assert!(
+        run_read_query(
+            &fixture(),
+            "CREATE (:Person {id:'x'})",
+            &CypherParameters::new()
+        )
+        .is_err()
+    );
     // Path variables over variable-length relationships are not supported yet.
-    assert!(run_read_query(
-        &fixture(),
-        "MATCH p = (:Person)-[:KNOWS*1..2]->(:Person) RETURN p",
-        &CypherParameters::new()
-    )
-    .is_err());
+    assert!(
+        run_read_query(
+            &fixture(),
+            "MATCH p = (:Person)-[:KNOWS*1..2]->(:Person) RETURN p",
+            &CypherParameters::new()
+        )
+        .is_err()
+    );
 }

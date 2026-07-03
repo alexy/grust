@@ -1638,7 +1638,7 @@ fn eval_element_function(
     }
 }
 
-/// Extract the `nodes`/`relationships` array from a path value.
+/// Extract the `nodes`/`relationships` array from a path or graph value.
 fn path_component(value: Value, key: &str) -> Result<Value> {
     match value {
         Value::Path(path) => match key {
@@ -1646,12 +1646,41 @@ fn path_component(value: Value, key: &str) -> Result<Value> {
             "relationships" => Ok(Value::Json(serde_json::Value::Array(path.relationships))),
             _ => Ok(Value::Null),
         },
+        Value::Graph(graph) => match key {
+            "nodes" => Ok(Value::Json(serde_json::Value::Array(graph.nodes))),
+            "relationships" => Ok(Value::Json(serde_json::Value::Array(graph.relationships))),
+            _ => Ok(Value::Null),
+        },
         Value::Json(serde_json::Value::Object(mut m)) => {
             Ok(m.remove(key).map(Value::Json).unwrap_or(Value::Null))
         }
         Value::Null => Ok(Value::Null),
         other => Err(gql_type(format!(
-            "{key}() expects a path value, got {other:?}"
+            "{key}() expects a path or graph value, got {other:?}"
+        ))),
+    }
+}
+
+/// `graph(nodes, relationships)` -> a first-class graph value (Full39075 F7).
+/// Each argument is a (possibly empty or NULL) list of node/relationship
+/// elements, e.g. from `collect(n)`; construction deduplicates by identity.
+fn eval_graph_constructor(args: &[Expr], row: &Row, params: &CypherParameters) -> Result<Value> {
+    let [nodes_expr, rels_expr] = args else {
+        return Err(gql_type(
+            "graph() expects exactly two arguments: (nodes, relationships)".to_string(),
+        ));
+    };
+    let nodes = graph_element_list(eval(nodes_expr, row, params)?, "nodes")?;
+    let relationships = graph_element_list(eval(rels_expr, row, params)?, "relationships")?;
+    Ok(Value::Graph(GraphValue::new(nodes, relationships)))
+}
+
+fn graph_element_list(value: Value, what: &str) -> Result<Vec<serde_json::Value>> {
+    match value {
+        Value::Null => Ok(Vec::new()),
+        Value::Json(serde_json::Value::Array(elements)) => Ok(elements),
+        other => Err(gql_type(format!(
+            "graph() expects a list of {what} elements, got {other:?}"
         ))),
     }
 }
@@ -1719,6 +1748,11 @@ fn eval_scalar_function(
     // `range(a, b[, step])` builds an inclusive integer list.
     if lower == "range" {
         return eval_range(args, row, params);
+    }
+
+    // `graph(nodes, relationships)` constructs a first-class graph value.
+    if lower == "graph" {
+        return eval_graph_constructor(args, row, params);
     }
 
     // Element-introspection functions need the binding (or the element's JSON).
@@ -2725,6 +2759,56 @@ mod tests {
     fn scalar_in_where_filters() {
         let t = run("MATCH (n:Person) WHERE toUpper(n.name) = 'ADA' RETURN n.name");
         assert_eq!(t.rows, vec![vec![Value::from("Ada")]]);
+    }
+
+    #[test]
+    fn graph_constructor_builds_first_class_graph_value() {
+        let t = run(
+            "MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH collect(a) AS ns, collect(r) AS rs RETURN graph(ns, rs) AS g",
+        );
+        let Value::Graph(g) = &t.rows[0][0] else {
+            panic!("expected Value::Graph, got {:?}", t.rows[0][0]);
+        };
+        // Two KNOWS edges (p1->p2, p2->p3); start nodes p1, p2 deduplicate.
+        assert_eq!(g.nodes.len(), 2);
+        assert_eq!(g.relationships.len(), 2);
+
+        let json = t.rows[0][0].to_json();
+        assert!(json.get("nodes").is_some());
+        assert!(json.get("relationships").is_some());
+    }
+
+    #[test]
+    fn graph_value_deduplicates_repeated_elements() {
+        // Every KNOWS edge contributes its start node; collecting the same node
+        // twice still yields a set-shaped graph value.
+        let t = run(
+            "MATCH (a:Person {name:'Ada'})-[r:KNOWS]->(b) WITH collect(a) AS ns RETURN graph(ns, null) AS g",
+        );
+        let Value::Graph(g) = &t.rows[0][0] else {
+            panic!("expected Value::Graph");
+        };
+        assert_eq!(g.nodes.len(), 1);
+        assert!(g.relationships.is_empty());
+    }
+
+    #[test]
+    fn graph_value_nodes_and_relationships_accessors() {
+        let t = run(
+            "MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH collect(a) AS ns, collect(r) AS rs WITH graph(ns, rs) AS g RETURN size(nodes(g)) AS n, size(relationships(g)) AS r",
+        );
+        assert_eq!(t.rows, vec![vec![Value::Int(2), Value::Int(2)]]);
+    }
+
+    #[test]
+    fn graph_constructor_rejects_non_list_arguments() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH (n:Person {name:'Ada'}) RETURN graph(n.age, null)",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("gql:type"));
     }
 
     #[test]

@@ -116,12 +116,16 @@ impl TursoGraphStore {
 
     /// Run a query expected to yield a single text cell in its first row.
     async fn query_scalar_text(&self, sql: &str) -> Result<Option<String>> {
-        let mut rows = self.conn.query(sql, ()).await.map_err(|err| {
-            GrustError::Backend(format!("Turso query failed: {err}: {sql}"))
-        })?;
-        match rows.next().await.map_err(|err| {
-            GrustError::Backend(format!("Turso row read failed: {err}: {sql}"))
-        })? {
+        let mut rows = self
+            .conn
+            .query(sql, ())
+            .await
+            .map_err(|err| GrustError::Backend(format!("Turso query failed: {err}: {sql}")))?;
+        match rows
+            .next()
+            .await
+            .map_err(|err| GrustError::Backend(format!("Turso row read failed: {err}: {sql}")))?
+        {
             Some(row) => row_optional_text(&row, 0, "pragma result"),
             None => Ok(None),
         }
@@ -407,7 +411,9 @@ impl GraphMutationStore for TursoGraphStore {
                 let edges = self.edges_table();
                 let statements = mutations
                     .iter()
-                    .map(|m| grust_sql_core::mutation_sql(&TursoDialect, &nodes, &edges, m, sql_str))
+                    .map(|m| {
+                        grust_sql_core::mutation_sql(&TursoDialect, &nodes, &edges, m, sql_str)
+                    })
                     .collect::<Result<Vec<_>>>()?;
                 self.execute_concurrent(&statements).await
             }

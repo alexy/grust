@@ -6,6 +6,17 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added **first-class graph values** (Full39075 F7): `grust_core::GraphValue`
+  and `Value::Graph` model set-shaped graph values — construction deduplicates
+  nodes by id and relationships by id-or-endpoint identity, preserving
+  first-seen order for deterministic serialization. `GraphValue::from_graph` /
+  `from_graph_parts` build graph values from snapshots, `Value::to_json` keeps
+  the `{nodes, relationships}` shape, and the read reference executor gains a
+  `graph(nodes, relationships)` constructor (e.g. over `collect(...)` lists)
+  plus `nodes(g)` / `relationships(g)` accessors. `GraphValues` is now
+  `Supported`; the candidate `Full39075` remainder drops to 3 future + 1
+  planned features + 5 intentional rejections.
+
 - Added the **Full39075 follow-on goal** (`docs/GQL_FULL39075_GOAL.md`) and
   landed F1 index-definition support: `cypher_ddl` / `sail_cypher_ddl` now parse
   portable single-property `CREATE INDEX name [IF NOT EXISTS] FOR ... ON (...)`

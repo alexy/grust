@@ -1219,6 +1219,8 @@ fn surreal_value(value: &Value) -> Result<String> {
         Value::StringArray(values) => {
             serde_json::to_string(values).map_err(|err| GrustError::Serialization(err.to_string()))
         }
+        Value::Path(_) | Value::Graph(_) => serde_json::to_string(&value.to_json())
+            .map_err(|err| GrustError::Serialization(err.to_string())),
         Value::Json(value) => {
             serde_json::to_string(value).map_err(|err| GrustError::Serialization(err.to_string()))
         }

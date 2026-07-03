@@ -2449,6 +2449,7 @@ fn matching_nodes_sql(
             | Value::IntArray(_)
             | Value::FloatArray(_)
             | Value::Path(_)
+            | Value::Graph(_)
             | Value::Json(_) => {
                 let json = serde_json::to_string(&value.to_json())
                     .map_err(|err| GrustError::Serialization(err.to_string()))?;
@@ -2527,6 +2528,7 @@ fn append_relationship_prop_conditions(
             | Value::IntArray(_)
             | Value::FloatArray(_)
             | Value::Path(_)
+            | Value::Graph(_)
             | Value::Json(_) => {
                 let json = serde_json::to_string(&value.to_json())
                     .map_err(|err| GrustError::Serialization(err.to_string()))?;
@@ -2587,6 +2589,7 @@ fn append_node_match_conditions(
             | Value::IntArray(_)
             | Value::FloatArray(_)
             | Value::Path(_)
+            | Value::Graph(_)
             | Value::Json(_) => {
                 let json = serde_json::to_string(&value.to_json())
                     .map_err(|err| GrustError::Serialization(err.to_string()))?;
@@ -2696,6 +2699,7 @@ fn append_property_equality_condition(
         | Value::IntArray(_)
         | Value::FloatArray(_)
         | Value::Path(_)
+        | Value::Graph(_)
         | Value::Json(_) => {
             let json = serde_json::to_string(&value.to_json())
                 .map_err(|err| GrustError::Serialization(err.to_string()))?;

@@ -55,6 +55,7 @@ fn value_kind(value: &Value) -> &'static str {
         Value::IntArray(_) => "int-array",
         Value::FloatArray(_) => "float-array",
         Value::Path(_) => "path",
+        Value::Graph(_) => "graph",
         Value::Json(_) => "json",
     }
 }
