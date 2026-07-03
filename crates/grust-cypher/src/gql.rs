@@ -853,9 +853,9 @@ impl GqlFeature {
             GqlFeature::TableValuedFunction => d!(
                 "table-valued-function",
                 ProceduresAndFunctions,
-                Future,
+                Supported,
                 Full39075,
-                "Table-valued functions (Unit 14)"
+                "TVF-style row sources via CALL name(args) [YIELD …] with per-row correlated argument evaluation: db.* catalog procedures plus tvf.range, tvf.keys (Full39075 F9)"
             ),
             GqlFeature::NativeCypherPassthrough => d!(
                 "native-cypher-passthrough",
@@ -1739,7 +1739,6 @@ mod tests {
         let expected: std::collections::BTreeSet<&str> = [
             // Future — deferred to a later full-39075 pass (rationale in the doc).
             "shortest-path",
-            "table-valued-function",
             // Planned — near-term, partially scaffolded.
             "native-cypher-passthrough",
             // Rejected — intentional conformance guards, not gaps.

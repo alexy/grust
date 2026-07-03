@@ -231,6 +231,13 @@ fn analyze_clause(clause: &Clause, scope: &mut Scope, report: &mut SemanticRepor
         }
         Clause::Call(c) => {
             report.note(GqlFeature::ProcedureCall, c.span);
+            if !c.args.is_empty() {
+                report.note(GqlFeature::TableValuedFunction, c.span);
+            }
+            // Arguments are evaluated against the incoming rows (correlated).
+            for arg in &c.args {
+                check_expr_bound(arg, scope)?;
+            }
             // YIELD columns (aliased or not) become value-kind bindings.
             for (col, alias) in &c.yields {
                 bind_var(scope, alias.as_deref().unwrap_or(col), ElementKind::Value)?;

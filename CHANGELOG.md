@@ -6,6 +6,16 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added **table-valued functions** (Full39075 F9): `CALL name(args) [YIELD …]`
+  now accepts argument expressions, evaluated against each incoming row
+  (correlated TVFs), with the procedure's rows cross-joined onto the row
+  stream. The registry keeps the nullary `db.*` catalog procedures (which now
+  reject arguments with a structured error) and adds
+  `tvf.range(start, end[, step]) YIELD value` and
+  `tvf.keys(element_or_map) YIELD key`. `TableValuedFunction` is now
+  `Supported`; the candidate `Full39075` remainder drops to 1 future + 1
+  planned feature + 5 intentional rejections.
+
 - Added **`CALL { … }` subqueries** (Full39075 F8) to the read reference
   executor: correlated import-all scoping (the subquery sees the outer row's
   bindings), WITH-style `RETURN` that preserves node/edge bindings for later

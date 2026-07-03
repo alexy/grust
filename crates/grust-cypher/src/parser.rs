@@ -43,6 +43,10 @@ impl ParseError {
         }
     }
 
+    /// Kept for future recognized-but-unsupported constructs; every current
+    /// parse-level construct is supported (the last user was F9 procedure
+    /// arguments), so non-test builds see no callers.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn unsupported(span: Span, feature: GqlFeature, message: impl Into<String>) -> Self {
         ParseError {
             kind: ParseErrorKind::Unsupported(feature),
@@ -562,10 +566,7 @@ impl Parser {
     }
 
     /// `CALL { <query> }` (inline subquery) or
-    /// `CALL <dotted.name>() [YIELD col [AS alias], …]` (procedure).
-    ///
-    /// Only nullary read-only catalog procedures are accepted (Unit 14); a
-    /// non-empty argument list is feature-tagged as unsupported.
+    /// `CALL <dotted.name>(args) [YIELD col [AS alias], …]` (procedure / TVF).
     fn parse_call(&mut self) -> PResult<Clause> {
         let start = self.span_here();
         self.expect(&Token::Keyword(Keyword::Call), "CALL")?;
@@ -583,12 +584,12 @@ impl Parser {
             name.push_str(&self.parse_name("a procedure name segment")?);
         }
         self.expect(&Token::LParen, "( after procedure name")?;
+        let mut args = Vec::new();
         if self.peek() != &Token::RParen {
-            return Err(ParseError::unsupported(
-                self.span_here(),
-                GqlFeature::ProcedureCall,
-                "procedure arguments are not supported yet (Unit 14)",
-            ));
+            args.push(self.parse_expr()?);
+            while self.eat(&Token::Comma) {
+                args.push(self.parse_expr()?);
+            }
         }
         self.expect(&Token::RParen, ") after procedure arguments")?;
         let mut yields = Vec::new();
@@ -613,6 +614,7 @@ impl Parser {
         }
         Ok(Clause::Call(CallClause {
             name,
+            args,
             yields,
             where_clause,
             span: start.to(self.prev_span()),
@@ -1557,14 +1559,26 @@ mod tests {
 
     #[test]
     fn recognized_unsupported_construct_is_feature_tagged() {
-        // Nullary catalog procedures now parse (Unit 14); procedure *arguments*
-        // remain the recognized-but-unsupported construct.
-        let err = parse_query("CALL db.foo(1)").unwrap_err();
+        // Procedure arguments now parse (Full39075 F9): unknown procedures are
+        // feature-tagged at execution, not at parse. The parser's unsupported
+        // machinery still converts into the structured transport.
+        let q = parse_query("CALL db.foo(1)").unwrap();
+        match &q.parts[0].query.clauses[0] {
+            Clause::Call(c) => {
+                assert_eq!(c.name, "db.foo");
+                assert_eq!(c.args, vec![Expr::Integer(1)]);
+            }
+            other => panic!("expected CALL, got {other:?}"),
+        }
+        let err = ParseError::unsupported(
+            Span::new(0, 4),
+            GqlFeature::ProcedureCall,
+            "synthetic unsupported construct",
+        );
         assert_eq!(
             err.kind,
             ParseErrorKind::Unsupported(GqlFeature::ProcedureCall)
         );
-        // and it converts into the structured unsupported-feature transport
         let grust = err.into_grust("CALL db.foo(1)");
         assert!(matches!(grust, GrustError::Unsupported(_)));
         assert!(grust.to_string().contains("feature=procedure-call"));

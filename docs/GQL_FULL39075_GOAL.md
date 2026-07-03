@@ -60,7 +60,7 @@ passthrough.
 | **F6** | `path-values` | current path bindings | Done | Fixed-length path bindings now return first-class `Value::Path(PathValue)` values with stable node/relationship JSON serialization. |
 | **F7** | `graph-values` | F2, F3, F6 | Done | First-class `Value::Graph(GraphValue)` landed: deduplicated node/relationship sets, `graph(nodes, relationships)` construction in the read reference, `nodes()`/`relationships()` accessors, stable JSON serialization. |
 | **F8** | `subquery` | F4, F5 | Done | `CALL { … }` correlated subqueries landed: outer bindings visible (import-all), WITH-style RETURN join with binding preservation, UNION arms, per-row execution, structured collision/RETURN-required/star rejections. |
-| **F9** | `table-valued-function` | F8 | Future | Generalize the existing read-only catalog procedures into TVF-style row sources. |
+| **F9** | `table-valued-function` | F8 | Done | `CALL name(args) [YIELD …]` generalized into TVF-style row sources with per-row correlated argument evaluation; registry: `db.*` catalog procedures + `tvf.range`, `tvf.keys`. |
 | **F10** | `shortest-path` | F6 | Future | Add shortest-path families on top of first-class path values and a dedicated traversal/cost model. |
 | **F11** | `native-cypher-passthrough` | backend descriptors, F5 | Planned | Add explicit backend-native escape hatches outside portable conformance, with capability flags and structured non-support. |
 
@@ -146,6 +146,24 @@ Deliverables:
   catalog snapshot when one is provided. **Done.**
 - `GqlBackendDescriptor::session_control` reports capability. **Done.**
 - Manifest/profile docs flipped `session-control` to `Supported`. **Done.**
+
+## Completed Work Item: F9 Table-Valued Functions
+
+Goal: generalize the read-only catalog procedures into TVF-style row sources.
+
+Deliverables:
+
+- `CallClause` carries argument expressions; the parser accepts
+  `CALL name(arg, …)`. **Done.**
+- Arguments are evaluated against each incoming row (correlated TVFs); the
+  procedure's rows cross-join onto the row stream exactly like the nullary
+  catalog procedures. **Done.**
+- Registry: `db.labels`, `db.relationshipTypes`, `db.propertyKeys` (nullary,
+  reject arguments) plus `tvf.range(start, end[, step]) YIELD value` and
+  `tvf.keys(element_or_map) YIELD key`. **Done.**
+- `YIELD` projection/aliasing/`WHERE` semantics unchanged; standalone `CALL`
+  still shapes the result table. **Done.**
+- Manifest/profile docs flipped `table-valued-function` to `Supported`. **Done.**
 
 ## Completed Work Item: F8 Subquery
 

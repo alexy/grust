@@ -220,13 +220,25 @@ fn advance_rows(
         }
         Clause::Unwind(u) => Ok((unwind_rows(rows, u, params)?, None)),
         Clause::Call(c) => {
-            let (out_cols, out_rows) = call_procedure(graph, c)?;
+            let name_lower = c.name.to_ascii_lowercase();
+            let full_cols = procedure_signature(&name_lower).ok_or_else(|| {
+                unsupported_gql_feature(
+                    GqlFeature::ProcedureCall,
+                    GqlConformanceProfile::PortableGql,
+                    format!(
+                        "procedure `{}` is not supported (known: db.labels, db.relationshipTypes, db.propertyKeys, tvf.range, tvf.keys)",
+                        c.name
+                    ),
+                )
+            })?;
+            let (out_cols, indices) = yield_projection(&c.name, &full_cols, &c.yields)?;
             let mut next = Vec::new();
             for row in &rows {
-                for vals in &out_rows {
+                // Arguments are evaluated per incoming row (correlated TVF).
+                for vals in procedure_rows(graph, &name_lower, &c.args, row, params)? {
                     let mut nr = row.clone();
-                    for (col, val) in out_cols.iter().zip(vals.iter()) {
-                        nr.insert(col.clone(), Bound::Value(val.clone()));
+                    for (col, &i) in out_cols.iter().zip(indices.iter()) {
+                        nr.insert(col.clone(), Bound::Value(vals[i].clone()));
                     }
                     next.push(nr);
                 }
@@ -397,77 +409,142 @@ fn project_subquery_return(
     Ok((columns, out))
 }
 
-/// Execute a read-only catalog procedure against the graph snapshot.
-///
-/// Returns the procedure's full output columns and rows (deterministically
-/// sorted). `YIELD` projection/aliasing is applied by the caller.
-fn call_procedure(graph: &Graph, call: &CallClause) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-    let (column, values): (&str, std::collections::BTreeSet<String>) = match call
-        .name
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "db.labels" => (
-            "label",
-            graph
-                .nodes
-                .iter()
-                .map(|n| n.label.as_str().to_string())
-                .collect(),
-        ),
-        "db.relationshiptypes" => (
-            "relationshipType",
-            graph
-                .edges
-                .iter()
-                .map(|e| e.label.as_str().to_string())
-                .collect(),
-        ),
-        "db.propertykeys" => {
-            let mut keys = std::collections::BTreeSet::new();
-            for n in &graph.nodes {
-                keys.extend(n.props.keys().cloned());
-            }
-            for e in &graph.edges {
-                keys.extend(e.props.keys().cloned());
-            }
-            ("propertyKey", keys)
-        }
-        other => {
-            return Err(unsupported_gql_feature(
-                GqlFeature::ProcedureCall,
-                GqlConformanceProfile::PortableGql,
-                format!(
-                    "procedure `{other}` is not supported (known: db.labels, db.relationshipTypes, db.propertyKeys)"
-                ),
-            ));
-        }
+/// The full output columns of a registered procedure / table-valued function,
+/// or `None` for an unknown name.
+fn procedure_signature(name_lower: &str) -> Option<Vec<String>> {
+    let cols: &[&str] = match name_lower {
+        "db.labels" => &["label"],
+        "db.relationshiptypes" => &["relationshipType"],
+        "db.propertykeys" => &["propertyKey"],
+        "tvf.range" => &["value"],
+        "tvf.keys" => &["key"],
+        _ => return None,
     };
+    Some(cols.iter().map(|c| c.to_string()).collect())
+}
 
-    let full_cols = vec![column.to_string()];
-    let full_rows: Vec<Vec<Value>> = values.into_iter().map(|s| vec![Value::from(s)]).collect();
-
-    // Apply YIELD: validate each yielded column exists, then project/alias.
-    if call.yields.is_empty() {
-        return Ok((full_cols, full_rows));
+/// Resolve a `YIELD` list against the procedure's full columns: the projected
+/// output names plus, for each, the index into the full row.
+fn yield_projection(
+    name: &str,
+    full_cols: &[String],
+    yields: &[(String, Option<String>)],
+) -> Result<(Vec<String>, Vec<usize>)> {
+    if yields.is_empty() {
+        return Ok((full_cols.to_vec(), (0..full_cols.len()).collect()));
     }
-    let mut out_cols = Vec::with_capacity(call.yields.len());
-    let mut indices = Vec::with_capacity(call.yields.len());
-    for (col, alias) in &call.yields {
+    let mut out_cols = Vec::with_capacity(yields.len());
+    let mut indices = Vec::with_capacity(yields.len());
+    for (col, alias) in yields {
         let idx = full_cols.iter().position(|c| c == col).ok_or_else(|| {
             gql_name(format!(
-                "procedure `{}` does not yield a column named `{col}`",
-                call.name
+                "procedure `{name}` does not yield a column named `{col}`"
             ))
         })?;
         out_cols.push(alias.clone().unwrap_or_else(|| col.clone()));
         indices.push(idx);
     }
-    let out_rows = full_rows
-        .iter()
-        .map(|r| indices.iter().map(|&i| r[i].clone()).collect())
-        .collect();
-    Ok((out_cols, out_rows))
+    Ok((out_cols, indices))
+}
+
+/// Produce the full (pre-`YIELD`) rows of a procedure / table-valued function
+/// invocation for one incoming row. Catalog procedures are nullary and
+/// row-independent; TVFs evaluate their arguments against the row.
+fn procedure_rows(
+    graph: &Graph,
+    name_lower: &str,
+    args: &[Expr],
+    row: &Row,
+    params: &CypherParameters,
+) -> Result<Vec<Vec<Value>>> {
+    let string_rows = |values: std::collections::BTreeSet<String>| {
+        values
+            .into_iter()
+            .map(|s| vec![Value::from(s)])
+            .collect::<Vec<Vec<Value>>>()
+    };
+    match name_lower {
+        "db.labels" | "db.relationshiptypes" | "db.propertykeys" => {
+            if !args.is_empty() {
+                return Err(gql_type(format!(
+                    "procedure `{name_lower}` expects no arguments"
+                )));
+            }
+            Ok(match name_lower {
+                "db.labels" => string_rows(
+                    graph
+                        .nodes
+                        .iter()
+                        .map(|n| n.label.as_str().to_string())
+                        .collect(),
+                ),
+                "db.relationshiptypes" => string_rows(
+                    graph
+                        .edges
+                        .iter()
+                        .map(|e| e.label.as_str().to_string())
+                        .collect(),
+                ),
+                _ => {
+                    let mut keys = std::collections::BTreeSet::new();
+                    for n in &graph.nodes {
+                        keys.extend(n.props.keys().cloned());
+                    }
+                    for e in &graph.edges {
+                        keys.extend(e.props.keys().cloned());
+                    }
+                    string_rows(keys)
+                }
+            })
+        }
+        // `tvf.range(start, end[, step]) YIELD value` — one row per integer.
+        "tvf.range" => match eval_range(args, row, params)? {
+            Value::IntArray(values) => {
+                Ok(values.into_iter().map(|n| vec![Value::Int(n)]).collect())
+            }
+            other => Err(gql_type(format!(
+                "tvf.range() produced a non-integer list: {other:?}"
+            ))),
+        },
+        // `tvf.keys(element_or_map) YIELD key` — sorted property/map keys.
+        "tvf.keys" => {
+            let [arg] = args else {
+                return Err(gql_type(
+                    "tvf.keys(element_or_map) expects exactly one argument".to_string(),
+                ));
+            };
+            // A variable bound to a node/edge yields its property keys.
+            if let Expr::Variable(v) = arg {
+                match row.get(v) {
+                    Some(Bound::Node(n)) => {
+                        return Ok(string_rows(n.props.keys().cloned().collect()));
+                    }
+                    Some(Bound::Edge(e)) => {
+                        return Ok(string_rows(e.props.keys().cloned().collect()));
+                    }
+                    _ => {}
+                }
+            }
+            let keys: std::collections::BTreeSet<String> = match eval(arg, row, params)? {
+                Value::Null => return Ok(Vec::new()),
+                Value::Json(serde_json::Value::Object(map)) => {
+                    // A serialized node/edge element exposes its `props`; a
+                    // plain map its own keys.
+                    match map.get("props") {
+                        Some(serde_json::Value::Object(props)) => props.keys().cloned().collect(),
+                        _ => map.keys().cloned().collect(),
+                    }
+                }
+                other => {
+                    return Err(gql_type(format!(
+                        "tvf.keys() expects a node, relationship, or map, got {other:?}"
+                    )));
+                }
+            };
+            Ok(string_rows(keys))
+        }
+        _ => unreachable!("procedure_signature gates the registry"),
+    }
 }
 
 /// Keep rows whose `where_expr` evaluates to TRUE (NULL/FALSE drop), surfacing
@@ -2975,6 +3052,61 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("gql:type"));
+    }
+
+    #[test]
+    fn tvf_range_yields_rows() {
+        let t = run("CALL tvf.range(1, 3) YIELD value RETURN value");
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::Int(1)],
+                vec![Value::Int(2)],
+                vec![Value::Int(3)]
+            ]
+        );
+    }
+
+    #[test]
+    fn tvf_range_standalone_call_shapes_result() {
+        let t = run("CALL tvf.range(1, 2) YIELD value AS v");
+        assert_eq!(t.columns, vec!["v".to_string()]);
+        assert_eq!(t.rows.len(), 2);
+    }
+
+    #[test]
+    fn tvf_keys_is_correlated_per_row() {
+        // `id` is a real property key: Node::new mirrors the id into props.
+        let t =
+            run("MATCH (n:Person {name:'Ada'}) CALL tvf.keys(n) YIELD key RETURN key ORDER BY key");
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::from("age")],
+                vec![Value::from("id")],
+                vec![Value::from("name")]
+            ]
+        );
+    }
+
+    #[test]
+    fn tvf_range_with_correlated_argument() {
+        // end = n.age - 34 -> Ada (36) yields 1..2.
+        let t = run(
+            "MATCH (n:Person {name:'Ada'}) CALL tvf.range(1, n.age - 34) YIELD value RETURN value",
+        );
+        assert_eq!(t.rows, vec![vec![Value::Int(1)], vec![Value::Int(2)]]);
+    }
+
+    #[test]
+    fn catalog_procedure_rejects_arguments() {
+        let err = run_read_query(
+            &graph(),
+            "CALL db.labels('x') YIELD label RETURN label",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expects no arguments"));
     }
 
     #[test]

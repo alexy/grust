@@ -76,11 +76,14 @@ pub struct SubqueryClause {
     pub span: Span,
 }
 
-/// `CALL <name>() [YIELD col [AS alias], …]` — a read-only catalog procedure.
+/// `CALL <name>(args) [YIELD col [AS alias], …]` — a read-only catalog
+/// procedure or table-valued function invocation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallClause {
-    /// Dotted procedure name, e.g. `db.labels`.
+    /// Dotted procedure name, e.g. `db.labels` or `tvf.range`.
     pub name: String,
+    /// Argument expressions, evaluated against each incoming row (correlated).
+    pub args: Vec<Expr>,
     /// `YIELD` columns with optional aliases; empty means no explicit `YIELD`.
     pub yields: Vec<(String, Option<String>)>,
     /// Optional `WHERE` filter following `YIELD`.
