@@ -74,13 +74,116 @@
       "notes": "Fixed-length path variables are supported; over variable-length they are not yet."
     },
     {
-      "id": "subquery-future",
+      "id": "path-value-first-class",
+      "feature": "path-values",
+      "requirement": "required",
+      "statement": "MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(b) RETURN p",
+      "expectation": "supported",
+      "notes": "Path variables project as first-class Value::Path (Full39075 F6)."
+    },
+    {
+      "id": "graph-value-constructor",
+      "feature": "graph-values",
+      "requirement": "required",
+      "statement": "MATCH (a:Person)-[r:KNOWS]->(b) WITH collect(a) AS ns, collect(r) AS rs RETURN graph(ns, rs) AS g",
+      "expectation": "supported",
+      "notes": "graph(nodes, relationships) builds a deduplicated Value::Graph (Full39075 F7)."
+    },
+    {
+      "id": "graph-value-accessors",
+      "feature": "graph-values",
+      "requirement": "optional",
+      "statement": "MATCH (a:Person)-[r:KNOWS]->(b) WITH collect(a) AS ns, collect(r) AS rs WITH graph(ns, rs) AS g RETURN size(nodes(g)) AS n, size(relationships(g)) AS r",
+      "expectation": "supported"
+    },
+    {
+      "id": "subquery-correlated",
       "feature": "subquery",
-      "requirement": "future",
+      "requirement": "required",
+      "statement": "MATCH (a:Person) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS friend } RETURN a.name, friend",
+      "expectation": "supported",
+      "notes": "CALL { … } sees the outer row's bindings (correlated import-all scoping, Full39075 F8)."
+    },
+    {
+      "id": "subquery-uncorrelated",
+      "feature": "subquery",
+      "requirement": "required",
       "statement": "MATCH (n:Person) CALL { RETURN 1 AS one } RETURN n.name, one",
+      "expectation": "supported",
+      "notes": "Was the corpus's rejected `subquery-future` case before Full39075 F8 landed."
+    },
+    {
+      "id": "subquery-union-arms",
+      "feature": "subquery",
+      "requirement": "optional",
+      "statement": "CALL { MATCH (p:Person {name:'Ada'}) RETURN p.name AS n UNION MATCH (c:City) RETURN c.name AS n } RETURN n ORDER BY n",
+      "expectation": "supported"
+    },
+    {
+      "id": "subquery-return-star-rejected",
+      "feature": "subquery",
+      "requirement": "required",
+      "statement": "MATCH (a:Person) CALL { MATCH (c:City) RETURN * } RETURN a.name",
       "expectation": "rejected",
       "errorKind": "unsupported-feature",
-      "notes": "CALL subqueries are not supported yet (Unit 8/14)."
+      "notes": "RETURN * inside CALL { … } would re-project the imported outer scope."
+    },
+    {
+      "id": "tvf-range",
+      "feature": "table-valued-function",
+      "requirement": "required",
+      "statement": "CALL tvf.range(1, 3) YIELD value RETURN value",
+      "expectation": "supported",
+      "notes": "TVF-style row source with argument expressions (Full39075 F9)."
+    },
+    {
+      "id": "tvf-keys-correlated",
+      "feature": "table-valued-function",
+      "requirement": "required",
+      "statement": "MATCH (n:Person {name:'Ada'}) CALL tvf.keys(n) YIELD key RETURN key ORDER BY key",
+      "expectation": "supported",
+      "notes": "TVF arguments are evaluated against each incoming row."
+    },
+    {
+      "id": "catalog-procedure-rejects-arguments",
+      "feature": "procedure-call",
+      "requirement": "required",
+      "statement": "CALL db.labels('x') YIELD label RETURN label",
+      "expectation": "rejected",
+      "errorKind": "type",
+      "notes": "The nullary db.* catalog procedures reject arguments with a structured type error."
+    },
+    {
+      "id": "unknown-procedure-rejected",
+      "feature": "procedure-call",
+      "requirement": "required",
+      "statement": "CALL db.nope() YIELD x RETURN x",
+      "expectation": "rejected",
+      "errorKind": "unsupported-feature"
+    },
+    {
+      "id": "shortest-path-single",
+      "feature": "shortest-path",
+      "requirement": "required",
+      "statement": "MATCH p = shortestPath((a:Person {name:'Ada'})-[:KNOWS*]->(b:Person {name:'Grace'})) RETURN length(p)",
+      "expectation": "supported",
+      "notes": "Minimal-length simple path per endpoint pair (Full39075 F10)."
+    },
+    {
+      "id": "shortest-path-all",
+      "feature": "shortest-path",
+      "requirement": "required",
+      "statement": "MATCH p = allShortestPaths((a:Person {name:'Ada'})-[:KNOWS*]->(b:Person)) RETURN b.name, length(p)",
+      "expectation": "supported"
+    },
+    {
+      "id": "shortest-path-multi-segment-rejected",
+      "feature": "shortest-path",
+      "requirement": "required",
+      "statement": "MATCH p = shortestPath((a)-[:KNOWS*]->(m)-[:KNOWS*]->(b)) RETURN p",
+      "expectation": "rejected",
+      "errorKind": "syntax",
+      "notes": "shortestPath(…) covers exactly one relationship segment."
     }
   ]
 }

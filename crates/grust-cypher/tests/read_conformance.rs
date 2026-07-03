@@ -368,3 +368,78 @@ fn unsupported_read_shapes_error() {
         .is_err()
     );
 }
+
+/// The portable-read conformance corpus is *executable*, not just
+/// integrity-checked: every case in `tests/gql/portable_read.json` runs
+/// against the shared fixture graph, and its outcome must match the case's
+/// expectation (including the structured error kind for rejected cases). This
+/// closes the loop the corpus left open ("execution deferred to Units 6/12")
+/// and would have caught the stale pre-F8 `subquery-future` rejection.
+#[test]
+fn portable_corpus_executes_as_expected() {
+    use grust_cypher::{GqlExpectation, load_manifest};
+
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("gql")
+        .join("portable_read.json");
+    let json = std::fs::read_to_string(&path).expect("portable_read.json must be readable");
+    let manifest = load_manifest(&json).expect("portable_read.json must load");
+    assert!(manifest.cases.len() >= 20, "corpus should stay meaningful");
+
+    let graph = fixture();
+    for case in &manifest.cases {
+        let result = run_read_query(&graph, &case.statement, &CypherParameters::new());
+        match case.expectation {
+            GqlExpectation::Supported => {
+                let table = result.unwrap_or_else(|e| {
+                    panic!(
+                        "case `{}` should execute on the reference: {e}\n  statement: {}",
+                        case.id, case.statement
+                    )
+                });
+                assert!(
+                    !table.columns.is_empty(),
+                    "case `{}` produced no columns",
+                    case.id
+                );
+            }
+            GqlExpectation::Rejected => {
+                let err = result.err().unwrap_or_else(|| {
+                    panic!(
+                        "case `{}` should be rejected but executed\n  statement: {}",
+                        case.id, case.statement
+                    )
+                });
+                let kind = case
+                    .error_kind
+                    .expect("rejected cases carry an errorKind (pinned by load_manifest)");
+                assert!(
+                    error_matches_kind(&err, kind),
+                    "case `{}` rejected with the wrong error kind: expected {kind:?}, got {err}",
+                    case.id
+                );
+            }
+        }
+    }
+}
+
+/// Mirror of `GqlError`'s kind → `GrustError` transport mapping.
+fn error_matches_kind(err: &grust_core::GrustError, kind: grust_cypher::GqlErrorKind) -> bool {
+    use grust_core::GrustError;
+    use grust_cypher::GqlErrorKind;
+    matches!(
+        (err, kind),
+        (GrustError::CypherSyntax(_), GqlErrorKind::Syntax)
+            | (GrustError::CypherUnresolvedIdentity(_), GqlErrorKind::Name)
+            | (
+                GrustError::CypherUnsupportedCardinality(_),
+                GqlErrorKind::Cardinality
+            )
+            | (GrustError::Unsupported(_), GqlErrorKind::UnsupportedFeature)
+            | (
+                GrustError::CypherExecution(_),
+                GqlErrorKind::Type | GqlErrorKind::Execution
+            )
+    )
+}
