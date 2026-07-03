@@ -966,6 +966,9 @@ fn expand_pattern(
     base_rows: Vec<Row>,
     params: &CypherParameters,
 ) -> Result<Vec<Row>> {
+    if let Some(kind) = pattern.shortest {
+        return expand_shortest(graph, index, pattern, kind, base_rows, params);
+    }
     let path_var = pattern.variable.as_deref();
     if path_var.is_some()
         && pattern
@@ -1007,6 +1010,143 @@ fn expand_pattern(
         }
     }
     Ok(out)
+}
+
+/// `shortestPath(…)` / `allShortestPaths(…)` over a single relationship
+/// segment: per (start, end) endpoint pair, find the minimal-length simple
+/// path(s) whose every hop satisfies the relationship pattern. Lengths are
+/// searched from the pattern's minimum upward (iterative lengthening over the
+/// existing bounded var-length enumeration), so the first hit per endpoint is
+/// shortest by construction; ties are kept for `All`, first-found (in
+/// deterministic edge order) for `Single`.
+fn expand_shortest(
+    graph: &Graph,
+    index: &NodeIndex,
+    pattern: &PathPattern,
+    kind: ShortestKind,
+    base_rows: Vec<Row>,
+    params: &CypherParameters,
+) -> Result<Vec<Row>> {
+    let [segment] = pattern.segments.as_slice() else {
+        return Err(unsupported_gql_feature(
+            GqlFeature::ShortestPath,
+            GqlConformanceProfile::Full39075,
+            "shortestPath(…) expects exactly one relationship segment",
+        ));
+    };
+    let rel = &segment.relationship;
+    let min = rel.length.map(|r| r.min.unwrap_or(1)).unwrap_or(1) as usize;
+    let max = rel.length.and_then(|r| r.max).map(|m| m as usize);
+    // Simple paths never repeat a node, so no shortest path is longer than
+    // |nodes| - 1 hops; that caps the open-ended `*` search.
+    let cap = graph.nodes.len().saturating_sub(1);
+    let cap = max.map_or(cap, |m| m.min(cap));
+
+    let mut out = Vec::new();
+    for row in base_rows {
+        for start in node_candidates(graph, &pattern.start, &row, params)? {
+            // end-node id -> minimal-length edge lists, in first-found order.
+            let mut resolved: BTreeMap<String, Vec<Vec<Edge>>> = BTreeMap::new();
+            for length in min..=cap.max(min) {
+                if length > cap {
+                    break;
+                }
+                let mut paths: Vec<(Node, Vec<Edge>)> = Vec::new();
+                let mut visited = std::collections::HashSet::new();
+                visited.insert(start.id.as_str().to_string());
+                collect_var_length_paths(
+                    graph,
+                    index,
+                    rel,
+                    &start,
+                    length,
+                    Some(length),
+                    &mut Vec::new(),
+                    &mut visited,
+                    params,
+                    &mut paths,
+                )?;
+                // Same-length ties accumulate here, then merge; endpoints
+                // resolved at an earlier (shorter) length are skipped.
+                let mut found: BTreeMap<String, Vec<Vec<Edge>>> = BTreeMap::new();
+                for (end, edges) in paths {
+                    let end_id = end.id.as_str().to_string();
+                    if resolved.contains_key(&end_id) {
+                        continue;
+                    }
+                    if !node_matches(&end, &segment.node, params)? {
+                        continue;
+                    }
+                    if let Some(var) = &segment.node.variable {
+                        if let Some(Bound::Node(bound)) = row.get(var) {
+                            if bound.id != end.id {
+                                continue;
+                            }
+                        }
+                    }
+                    found.entry(end_id).or_default().push(edges);
+                }
+                resolved.extend(found);
+            }
+
+            for (end_id, edge_lists) in resolved {
+                let Some(end_node) = index.get(graph, &end_id) else {
+                    continue;
+                };
+                let picked: Vec<&Vec<Edge>> = match kind {
+                    ShortestKind::Single => edge_lists.iter().take(1).collect(),
+                    ShortestKind::All => edge_lists.iter().collect(),
+                };
+                for edges in picked {
+                    let mut next_row = row.clone();
+                    if let Some(var) = &pattern.start.variable {
+                        next_row.insert(var.clone(), Bound::Node(start.clone()));
+                    }
+                    if let Some(var) = &segment.node.variable {
+                        next_row.insert(var.clone(), Bound::Node(end_node.clone()));
+                    }
+                    if let Some(var) = &rel.variable {
+                        let mut arr = Vec::with_capacity(edges.len());
+                        for edge in edges {
+                            arr.push(value_to_json(&graph_edge_value(edge)?));
+                        }
+                        next_row.insert(
+                            var.clone(),
+                            Bound::Value(Value::Json(serde_json::Value::Array(arr))),
+                        );
+                    }
+                    if let Some(path_var) = &pattern.variable {
+                        let nodes = walk_path_nodes(graph, index, &start, edges, rel.direction)?;
+                        next_row.insert(path_var.clone(), Bound::Value(path_value(&nodes, edges)?));
+                    }
+                    out.push(next_row);
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Reconstruct the node sequence of a path from its start node and edge list.
+fn walk_path_nodes(
+    graph: &Graph,
+    index: &NodeIndex,
+    start: &Node,
+    edges: &[Edge],
+    direction: ast::Direction,
+) -> Result<Vec<Node>> {
+    let mut nodes = vec![start.clone()];
+    let mut current = start.clone();
+    for edge in edges {
+        let next_id = edge_other_endpoint(edge, &current, direction)
+            .ok_or_else(|| gql_execution("shortest path edge does not connect to the path"))?;
+        let next = index
+            .get(graph, next_id)
+            .ok_or_else(|| gql_execution("shortest path endpoint node not found"))?;
+        nodes.push(next.clone());
+        current = next.clone();
+    }
+    Ok(nodes)
 }
 
 /// A bound first-class path value. `Value::to_json` preserves the historical
@@ -3052,6 +3192,121 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("gql:type"));
+    }
+
+    #[test]
+    fn shortest_path_finds_minimal_route() {
+        // p1 -KNOWS-> p2 -KNOWS-> p3; add a direct long-way-around check by
+        // asking for the Ada -> Grace shortest path: exactly 2 hops.
+        let t = run(
+            "MATCH p = shortestPath((a:Person {name:'Ada'})-[:KNOWS*]->(b:Person {name:'Grace'})) RETURN length(p) AS len",
+        );
+        assert_eq!(t.rows, vec![vec![Value::Int(2)]]);
+    }
+
+    #[test]
+    fn shortest_path_prefers_direct_edge() {
+        // Diamond with a shortcut: s -> m1 -> t and s -> t.
+        let nodes = vec![
+            node("N", "s", &[]),
+            node("N", "m1", &[]),
+            node("N", "t", &[]),
+        ];
+        let edges = vec![
+            Edge::new("R", "s", "m1", Props::new()),
+            Edge::new("R", "m1", "t", Props::new()),
+            Edge::new("R", "s", "t", Props::new()),
+        ];
+        let g = Graph::new(nodes, edges);
+        let t = run_read_query(
+            &g,
+            "MATCH p = shortestPath((a:N {id:'s'})-[:R*]->(b:N {id:'t'})) RETURN length(p) AS len",
+            &CypherParameters::new(),
+        )
+        .unwrap();
+        assert_eq!(t.rows, vec![vec![Value::Int(1)]]);
+    }
+
+    #[test]
+    fn all_shortest_paths_keeps_ties() {
+        // Two distinct 2-hop routes s -> {m1|m2} -> t and no direct edge.
+        let nodes = vec![
+            node("N", "s", &[]),
+            node("N", "m1", &[]),
+            node("N", "m2", &[]),
+            node("N", "t", &[]),
+        ];
+        let edges = vec![
+            Edge::new("R", "s", "m1", Props::new()),
+            Edge::new("R", "s", "m2", Props::new()),
+            Edge::new("R", "m1", "t", Props::new()),
+            Edge::new("R", "m2", "t", Props::new()),
+        ];
+        let g = Graph::new(nodes, edges);
+        let all = run_read_query(
+            &g,
+            "MATCH p = allShortestPaths((a:N {id:'s'})-[:R*]->(b:N {id:'t'})) RETURN length(p) AS len",
+            &CypherParameters::new(),
+        )
+        .unwrap();
+        assert_eq!(all.rows, vec![vec![Value::Int(2)], vec![Value::Int(2)]]);
+        // shortestPath keeps exactly one of the ties.
+        let single = run_read_query(
+            &g,
+            "MATCH p = shortestPath((a:N {id:'s'})-[:R*]->(b:N {id:'t'})) RETURN length(p) AS len",
+            &CypherParameters::new(),
+        )
+        .unwrap();
+        assert_eq!(single.rows, vec![vec![Value::Int(2)]]);
+    }
+
+    #[test]
+    fn shortest_path_binds_endpoints_and_relationships() {
+        let t = run(
+            "MATCH shortestPath((a:Person {name:'Ada'})-[r:KNOWS*]->(b:Person {name:'Grace'})) RETURN a.name, b.name, size(r) AS hops",
+        );
+        assert_eq!(
+            t.rows,
+            vec![vec![
+                Value::from("Ada"),
+                Value::from("Grace"),
+                Value::Int(2)
+            ]]
+        );
+    }
+
+    #[test]
+    fn shortest_path_per_endpoint_pair() {
+        // Unbound end node: one shortest path per reachable endpoint.
+        let t = run(
+            "MATCH p = shortestPath((a:Person {name:'Ada'})-[:KNOWS*]->(b:Person)) RETURN b.name, length(p) AS len ORDER BY b.name",
+        );
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::from("Alan"), Value::Int(1)],
+                vec![Value::from("Grace"), Value::Int(2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn shortest_path_no_route_yields_no_rows() {
+        let t = run(
+            "MATCH p = shortestPath((a:Person {name:'Grace'})-[:KNOWS*]->(b:City)) RETURN length(p)",
+        );
+        assert!(t.rows.is_empty());
+    }
+
+    #[test]
+    fn shortest_path_multi_segment_is_rejected() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH p = shortestPath((a)-[:KNOWS*]->(m)-[:KNOWS*]->(b)) RETURN p",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GrustError::CypherSyntax(_)));
     }
 
     #[test]

@@ -298,6 +298,9 @@ fn bind_pattern(
     if let Some(path_var) = &pattern.variable {
         bind_var(scope, path_var, ElementKind::Path)?;
     }
+    if pattern.shortest.is_some() {
+        report.note(GqlFeature::ShortestPath, pattern.span);
+    }
     bind_node(&pattern.start, scope)?;
     for segment in &pattern.segments {
         if let Some(var) = &segment.relationship.variable {

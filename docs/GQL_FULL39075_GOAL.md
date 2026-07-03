@@ -61,7 +61,7 @@ passthrough.
 | **F7** | `graph-values` | F2, F3, F6 | Done | First-class `Value::Graph(GraphValue)` landed: deduplicated node/relationship sets, `graph(nodes, relationships)` construction in the read reference, `nodes()`/`relationships()` accessors, stable JSON serialization. |
 | **F8** | `subquery` | F4, F5 | Done | `CALL { … }` correlated subqueries landed: outer bindings visible (import-all), WITH-style RETURN join with binding preservation, UNION arms, per-row execution, structured collision/RETURN-required/star rejections. |
 | **F9** | `table-valued-function` | F8 | Done | `CALL name(args) [YIELD …]` generalized into TVF-style row sources with per-row correlated argument evaluation; registry: `db.*` catalog procedures + `tvf.range`, `tvf.keys`. |
-| **F10** | `shortest-path` | F6 | Future | Add shortest-path families on top of first-class path values and a dedicated traversal/cost model. |
+| **F10** | `shortest-path` | F6 | Done | `shortestPath(…)`/`allShortestPaths(…)` over a single relationship segment landed: minimal-length simple paths per endpoint pair via iterative lengthening, with path/relationship/endpoint variable binding and first-class path values. |
 | **F11** | `native-cypher-passthrough` | backend descriptors, F5 | Planned | Add explicit backend-native escape hatches outside portable conformance, with capability flags and structured non-support. |
 
 ## Milestones
@@ -146,6 +146,25 @@ Deliverables:
   catalog snapshot when one is provided. **Done.**
 - `GqlBackendDescriptor::session_control` reports capability. **Done.**
 - Manifest/profile docs flipped `session-control` to `Supported`. **Done.**
+
+## Completed Work Item: F10 Shortest Path
+
+Goal: add shortest-path families on top of first-class path values.
+
+Deliverables:
+
+- `PathPattern::shortest` + `ShortestKind` AST and parser support for
+  `shortestPath((a)-[…*…]->(b))` / `allShortestPaths(…)` wrappers (exactly one
+  relationship segment; multi-segment forms are a structured syntax error).
+  **Done.**
+- Execution: per (start, end) endpoint pair, minimal-length **simple** paths
+  found by iterative lengthening over the bounded var-length enumerator —
+  first hit per endpoint is shortest by construction; `All` keeps same-length
+  ties, `Single` keeps the first in deterministic edge order. Endpoint, edge
+  list, and path variables bind exactly like the var-length path machinery;
+  path variables return `Value::Path`. **Done.**
+- Semantics report the `ShortestPath` feature; manifest/profile docs flipped
+  `shortest-path` to `Supported`. **Done.**
 
 ## Completed Work Item: F9 Table-Valued Functions
 

@@ -741,9 +741,9 @@ impl GqlFeature {
             GqlFeature::ShortestPath => d!(
                 "shortest-path",
                 PathMatching,
-                Future,
+                Supported,
                 Full39075,
-                "Shortest-path families (Unit 9)"
+                "shortestPath()/allShortestPaths() over a single relationship segment: minimal-length simple paths per endpoint pair with path/relationship variable binding (Full39075 F10)"
             ),
             GqlFeature::WithClause => d!(
                 "with-clause",
@@ -1696,8 +1696,10 @@ mod tests {
                 "{feature:?} should be supported in StrictWrite"
             );
         }
-        // A future feature is not supported yet, even at the widest profile.
-        assert!(!GqlFeature::ShortestPath.is_supported_in(GqlConformanceProfile::Full39075));
+        // A not-yet-supported feature is excluded, even at the widest profile.
+        assert!(
+            !GqlFeature::NativeCypherPassthrough.is_supported_in(GqlConformanceProfile::Full39075)
+        );
     }
 
     #[test]
@@ -1737,8 +1739,6 @@ mod tests {
             .map(|d| d.id)
             .collect();
         let expected: std::collections::BTreeSet<&str> = [
-            // Future — deferred to a later full-39075 pass (rationale in the doc).
-            "shortest-path",
             // Planned — near-term, partially scaffolded.
             "native-cypher-passthrough",
             // Rejected — intentional conformance guards, not gaps.

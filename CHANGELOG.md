@@ -6,6 +6,17 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added **shortest-path matching** (Full39075 F10): `MATCH p =
+  shortestPath((a)-[:T*]->(b))` and `allShortestPaths(…)` over a single
+  relationship segment now execute on the read reference. Per (start, end)
+  endpoint pair the executor finds minimal-length simple paths by iterative
+  lengthening over the bounded var-length enumerator; `allShortestPaths` keeps
+  same-length ties, `shortestPath` returns the first in deterministic edge
+  order. Endpoint, relationship-list, and path variables bind like the
+  var-length machinery, and path variables return first-class `Value::Path`
+  values. `ShortestPath` is now `Supported`; the candidate `Full39075`
+  remainder drops to 1 planned feature + 5 intentional rejections.
+
 - Added **table-valued functions** (Full39075 F9): `CALL name(args) [YIELD …]`
   now accepts argument expressions, evaluated against each incoming row
   (correlated TVFs), with the procedure's rows cross-joined onto the row

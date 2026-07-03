@@ -275,9 +275,21 @@ pub struct OrderItem {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PathPattern {
     pub variable: Option<String>,
+    /// `Some` when the pattern is wrapped in `shortestPath(…)` /
+    /// `allShortestPaths(…)` (exactly one relationship segment).
+    pub shortest: Option<ShortestKind>,
     pub start: NodePattern,
     pub segments: Vec<PathSegment>,
     pub span: Span,
+}
+
+/// Which shortest-path family a wrapped pattern requests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShortestKind {
+    /// `shortestPath(…)`: one shortest path per endpoint pair.
+    Single,
+    /// `allShortestPaths(…)`: every minimal-length path per endpoint pair.
+    All,
 }
 
 #[derive(Clone, Debug, PartialEq)]

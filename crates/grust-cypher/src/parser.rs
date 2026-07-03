@@ -713,6 +713,24 @@ impl Parser {
             None
         };
 
+        // optional shortest-path wrapper: `shortestPath(…)` / `allShortestPaths(…)`
+        let shortest = match self.peek() {
+            Token::Identifier(name) if self.peek_at(1) == &Token::LParen => {
+                if name.eq_ignore_ascii_case("shortestpath") {
+                    Some(ShortestKind::Single)
+                } else if name.eq_ignore_ascii_case("allshortestpaths") {
+                    Some(ShortestKind::All)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if shortest.is_some() {
+            self.advance(); // the wrapper name
+            self.expect(&Token::LParen, "( after shortestPath")?;
+        }
+
         let node_start = self.parse_node_pattern()?;
         let mut segments = Vec::new();
         while matches!(self.peek(), Token::Minus | Token::ArrowLeft) {
@@ -721,8 +739,19 @@ impl Parser {
             segments.push(PathSegment { relationship, node });
         }
 
+        if shortest.is_some() {
+            self.expect(&Token::RParen, ") to close shortestPath(…)")?;
+            if segments.len() != 1 {
+                return Err(ParseError::syntax(
+                    self.span_here(),
+                    "shortestPath(…) expects exactly one relationship segment",
+                ));
+            }
+        }
+
         Ok(PathPattern {
             variable,
+            shortest,
             start: node_start,
             segments,
             span: start.to(self.prev_span()),
