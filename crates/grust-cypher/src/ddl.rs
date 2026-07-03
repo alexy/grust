@@ -8,7 +8,7 @@ use crate::*;
 /// statements describe schema intent that callers apply to a [`GraphSchema`]
 /// (and then to a backend through [`GraphStore::apply_schema`]), rather than
 /// flowing through [`GraphMutationStore`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CypherDdlStatement {
     /// `CREATE CONSTRAINT [name] [IF NOT EXISTS] FOR ... REQUIRE ... IS ...`.
     CreateConstraint {
@@ -18,6 +18,22 @@ pub enum CypherDdlStatement {
     },
     /// `DROP CONSTRAINT name [IF EXISTS]`.
     DropConstraint { name: String, if_exists: bool },
+    /// `CREATE INDEX name [IF NOT EXISTS] FOR ... ON (...)`.
+    CreateIndex {
+        name: String,
+        if_not_exists: bool,
+        index: GraphIndexDefinition,
+    },
+    /// `DROP INDEX name [IF EXISTS]`.
+    DropIndex { name: String, if_exists: bool },
+    /// `CREATE GRAPH TYPE name [IF NOT EXISTS] ...`.
+    CreateGraphType {
+        name: String,
+        if_not_exists: bool,
+        graph_type: GraphTypeDefinition,
+    },
+    /// `DROP GRAPH TYPE name [IF EXISTS]`.
+    DropGraphType { name: String, if_exists: bool },
 }
 
 /// A named Cypher constraint stored outside [`GraphSchema`].
@@ -30,6 +46,33 @@ pub enum CypherDdlStatement {
 pub struct NamedGraphConstraint {
     pub name: String,
     pub constraint: GraphConstraint,
+}
+
+/// The graph element kind targeted by a portable index definition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GraphIndexElement {
+    Node,
+    Edge,
+}
+
+/// A backend-neutral single-property graph index declaration.
+///
+/// This is metadata for query planning and backend capability reporting. It is
+/// deliberately separate from [`GraphSchema`] constraints: indexes can improve
+/// lookups but do not imply uniqueness or required-property enforcement.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GraphIndexDefinition {
+    pub element: GraphIndexElement,
+    pub label: Label,
+    pub key: String,
+}
+
+/// A named Cypher index stored alongside named constraints.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NamedGraphIndex {
+    pub name: String,
+    pub index: GraphIndexDefinition,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -109,6 +152,10 @@ impl CypherSchemaManager {
 pub struct CypherConstraintRegistry {
     pub(crate) named: BTreeMap<String, GraphConstraint>,
     pub(crate) anonymous: Vec<GraphConstraint>,
+    #[serde(default)]
+    pub(crate) indexes: BTreeMap<String, GraphIndexDefinition>,
+    #[serde(default)]
+    pub(crate) graph_types: BTreeMap<String, GraphTypeDefinition>,
 }
 
 impl CypherConstraintRegistry {
@@ -120,6 +167,8 @@ impl CypherConstraintRegistry {
         Self {
             named: BTreeMap::new(),
             anonymous: schema.constraints.clone(),
+            indexes: BTreeMap::new(),
+            graph_types: BTreeMap::new(),
         }
     }
 
@@ -153,12 +202,36 @@ impl CypherConstraintRegistry {
         &self.anonymous
     }
 
+    pub fn named_indexes(&self) -> Vec<NamedGraphIndex> {
+        self.indexes
+            .iter()
+            .map(|(name, index)| NamedGraphIndex {
+                name: name.clone(),
+                index: index.clone(),
+            })
+            .collect()
+    }
+
+    pub fn named_graph_types(&self) -> Vec<NamedGraphType> {
+        self.graph_types
+            .iter()
+            .map(|(name, graph_type)| NamedGraphType {
+                name: name.clone(),
+                graph_type: graph_type.clone(),
+            })
+            .collect()
+    }
+
     pub fn constraints(&self) -> Vec<GraphConstraint> {
         self.named
             .values()
             .cloned()
             .chain(self.anonymous.iter().cloned())
             .collect()
+    }
+
+    pub fn catalog_snapshot(&self, graph_name: impl Into<String>) -> CypherCatalogSnapshot {
+        CypherCatalogSnapshot::single_graph(graph_name, self)
     }
 
     pub fn apply_to_schema(&self, schema: &GraphSchema) -> GraphSchema {
@@ -213,6 +286,84 @@ impl CypherConstraintRegistry {
                 }
                 Err(GrustError::CypherExecution(format!(
                     "constraint '{name}' does not exist"
+                )))
+            }
+            CypherDdlStatement::CreateIndex {
+                name,
+                if_not_exists,
+                index,
+            } => {
+                if self.indexes.contains_key(&name) {
+                    if if_not_exists {
+                        return Ok(CypherDdlApplicationReport {
+                            skipped: 1,
+                            ..Default::default()
+                        });
+                    }
+                    return Err(GrustError::CypherExecution(format!(
+                        "index '{name}' already exists"
+                    )));
+                }
+                self.indexes.insert(name, index);
+                Ok(CypherDdlApplicationReport {
+                    created: 1,
+                    ..Default::default()
+                })
+            }
+            CypherDdlStatement::DropIndex { name, if_exists } => {
+                if self.indexes.remove(&name).is_some() {
+                    return Ok(CypherDdlApplicationReport {
+                        dropped: 1,
+                        ..Default::default()
+                    });
+                }
+                if if_exists {
+                    return Ok(CypherDdlApplicationReport {
+                        missing: 1,
+                        ..Default::default()
+                    });
+                }
+                Err(GrustError::CypherExecution(format!(
+                    "index '{name}' does not exist"
+                )))
+            }
+            CypherDdlStatement::CreateGraphType {
+                name,
+                if_not_exists,
+                graph_type,
+            } => {
+                if self.graph_types.contains_key(&name) {
+                    if if_not_exists {
+                        return Ok(CypherDdlApplicationReport {
+                            skipped: 1,
+                            ..Default::default()
+                        });
+                    }
+                    return Err(GrustError::CypherExecution(format!(
+                        "graph type '{name}' already exists"
+                    )));
+                }
+                self.graph_types.insert(name, graph_type);
+                Ok(CypherDdlApplicationReport {
+                    created: 1,
+                    ..Default::default()
+                })
+            }
+            CypherDdlStatement::DropGraphType { name, if_exists } => {
+                if self.graph_types.remove(&name).is_some() {
+                    return Ok(CypherDdlApplicationReport {
+                        dropped: 1,
+                        ..Default::default()
+                    });
+                }
+                if if_exists {
+                    return Ok(CypherDdlApplicationReport {
+                        missing: 1,
+                        ..Default::default()
+                    });
+                }
+                Err(GrustError::CypherExecution(format!(
+                    "graph type '{name}' does not exist"
                 )))
             }
         }
@@ -288,13 +439,24 @@ where
                     "native Cypher constraint application does not support DROP CONSTRAINT",
                 ));
             }
+            CypherDdlStatement::CreateIndex { .. } | CypherDdlStatement::DropIndex { .. } => {
+                return Err(cypher_syntax(
+                    "native Cypher constraint application does not support index DDL",
+                ));
+            }
+            CypherDdlStatement::CreateGraphType { .. }
+            | CypherDdlStatement::DropGraphType { .. } => {
+                return Err(cypher_syntax(
+                    "native Cypher constraint application does not support graph type DDL",
+                ));
+            }
         }
     }
     Ok(report)
 }
 
-/// Parses one or more Cypher DDL statements (currently `CREATE CONSTRAINT` and
-/// `DROP CONSTRAINT`) into backend-neutral [`CypherDdlStatement`] values.
+/// Parses one or more Cypher DDL statements into backend-neutral
+/// [`CypherDdlStatement`] values.
 ///
 /// Supported constraint forms:
 ///
@@ -304,11 +466,19 @@ where
 /// CREATE CONSTRAINT FOR (n:Person) REQUIRE n.name IS NOT NULL;
 /// CREATE CONSTRAINT FOR ()-[r:KNOWS]-() REQUIRE r.since IS NOT NULL;
 /// DROP CONSTRAINT person_id IF EXISTS;
+/// CREATE INDEX person_email IF NOT EXISTS FOR (n:Person) ON (n.email);
+/// CREATE INDEX knows_since FOR ()-[r:KNOWS]-() ON (r.since);
+/// DROP INDEX person_email IF EXISTS;
+/// CREATE GRAPH TYPE social CLOSED AS
+///   NODE Person (id STRING REQUIRED, email STRING),
+///   EDGE KNOWS FROM Person TO Person (since INT);
+/// DROP GRAPH TYPE social IF EXISTS;
 /// ```
 ///
 /// The legacy `ON ... ASSERT ...` spelling is accepted as a synonym for
-/// `FOR ... REQUIRE ...`. Composite/node-key constraints, index DDL, and
-/// property existence on multiple keys are rejected with a clear error.
+/// `FOR ... REQUIRE ...`. Composite/node-key constraints and property existence
+/// on multiple keys are rejected with a clear error. Index definitions are
+/// metadata-only unless a backend exposes a native index capability.
 pub fn cypher_ddl(cypher: &str) -> Result<Vec<CypherDdlStatement>> {
     let cypher = strip_cypher_comments(cypher)?;
     let statements = split_cypher_statements(&cypher)?;
@@ -337,6 +507,13 @@ pub fn cypher_constraints(cypher: &str) -> Result<Vec<GraphConstraint>> {
             CypherDdlStatement::CreateConstraint { constraint, .. } => Ok(constraint),
             CypherDdlStatement::DropConstraint { .. } => Err(cypher_syntax(
                 "sail_cypher_constraints does not accept DROP CONSTRAINT statements",
+            )),
+            CypherDdlStatement::CreateIndex { .. } | CypherDdlStatement::DropIndex { .. } => Err(
+                cypher_syntax("sail_cypher_constraints does not accept index DDL statements"),
+            ),
+            CypherDdlStatement::CreateGraphType { .. }
+            | CypherDdlStatement::DropGraphType { .. } => Err(cypher_syntax(
+                "sail_cypher_constraints does not accept graph type DDL statements",
             )),
         })
         .collect()

@@ -259,7 +259,8 @@ pub(crate) fn validate_cypher_in_item(value: &Value) -> Result<()> {
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) => Err(cypher_syntax(
+        | Value::Json(_)
+        | Value::Path(_) => Err(cypher_syntax(
             "MATCH WHERE IN predicates only support scalar string, integer, float, or boolean list items",
         )),
     }

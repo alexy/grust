@@ -27,13 +27,18 @@ mod primitives;
 pub use primitives::*;
 pub mod graph_type;
 pub use graph_type::{
-    validate_edge, validate_graph, validate_node, value_matches_field_type, GraphTypeMode,
+    GraphTypeMode, validate_edge, validate_graph, validate_node, value_matches_field_type,
 };
+mod graph_type_ddl;
+pub use graph_type_ddl::{GraphTypeDefinition, NamedGraphType};
+mod catalog;
+pub use catalog::{CypherCatalogSnapshot, NamedGraphCatalog, cypher_catalog_procedure};
 pub mod pushdown;
 pub mod read;
+pub use read::run_read_query_on_named_graph;
 pub mod semantics;
+pub mod session;
 pub mod transaction;
-pub use transaction::{TransactionAccessMode, TransactionCommand, transactional_backends};
 pub use gql::{
     GqlBackend, GqlBackendDescriptor, GqlBackendRole, GqlConformanceProfile, GqlError,
     GqlErrorKind, GqlExpectation, GqlFeature, GqlFeatureDescriptor, GqlFeatureFamily,
@@ -42,6 +47,11 @@ pub use gql::{
     gql_execution, gql_name, gql_syntax, gql_type, load_manifest, load_manifest_cases,
     support_counts, support_summary, unsupported_gql_feature,
 };
+pub use session::{
+    CypherSession, SessionCommand, ensure_catalog_graph_selection, ensure_query_uses_graph,
+    query_graph_selection,
+};
+pub use transaction::{TransactionAccessMode, TransactionCommand, transactional_backends};
 
 pub type CypherMutationReport = GraphMutationReport;
 

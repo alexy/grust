@@ -54,6 +54,7 @@ fn value_kind(value: &Value) -> &'static str {
         Value::StringArray(_) => "string-array",
         Value::IntArray(_) => "int-array",
         Value::FloatArray(_) => "float-array",
+        Value::Path(_) => "path",
         Value::Json(_) => "json",
     }
 }
@@ -224,8 +225,16 @@ mod tests {
             .node(
                 "Person",
                 vec![
-                    Field { name: "name".into(), ty: FieldType::String, required: true },
-                    Field { name: "age".into(), ty: FieldType::Int, required: false },
+                    Field {
+                        name: "name".into(),
+                        ty: FieldType::String,
+                        required: true,
+                    },
+                    Field {
+                        name: "age".into(),
+                        ty: FieldType::Int,
+                        required: false,
+                    },
                 ],
             )
             .required_node_property("Person", "name")
@@ -247,7 +256,10 @@ mod tests {
         let city = Node::new("City", "c1", Props::new());
         assert!(validate_node(&s, GraphTypeMode::Open, &city).is_ok());
         // Undeclared property is fine when open (declared ones still type-checked).
-        let n = person("p1", &[("name", Value::from("Ada")), ("extra", Value::from("x"))]);
+        let n = person(
+            "p1",
+            &[("name", Value::from("Ada")), ("extra", Value::from("x"))],
+        );
         assert!(validate_node(&s, GraphTypeMode::Open, &n).is_ok());
     }
 
@@ -256,7 +268,10 @@ mod tests {
         let s = schema();
         let city = Node::new("City", "c1", Props::new());
         assert!(validate_node(&s, GraphTypeMode::Closed, &city).is_err());
-        let extra = person("p1", &[("name", Value::from("Ada")), ("extra", Value::from("x"))]);
+        let extra = person(
+            "p1",
+            &[("name", Value::from("Ada")), ("extra", Value::from("x"))],
+        );
         assert!(validate_node(&s, GraphTypeMode::Closed, &extra).is_err());
     }
 
@@ -264,14 +279,20 @@ mod tests {
     fn type_mismatch_and_required_are_enforced_in_both_modes() {
         let s = schema();
         // age declared Int but given a String → violation (open and closed).
-        let bad = person("p1", &[("name", Value::from("Ada")), ("age", Value::from("old"))]);
+        let bad = person(
+            "p1",
+            &[("name", Value::from("Ada")), ("age", Value::from("old"))],
+        );
         assert!(validate_node(&s, GraphTypeMode::Open, &bad).is_err());
         assert!(validate_node(&s, GraphTypeMode::Closed, &bad).is_err());
         // missing required `name`.
         let missing = person("p1", &[("age", Value::Int(36))]);
         assert!(validate_node(&s, GraphTypeMode::Open, &missing).is_err());
         // a conforming node passes both modes.
-        let ok = person("p1", &[("name", Value::from("Ada")), ("age", Value::Int(36))]);
+        let ok = person(
+            "p1",
+            &[("name", Value::from("Ada")), ("age", Value::Int(36))],
+        );
         assert!(validate_node(&s, GraphTypeMode::Open, &ok).is_ok());
         assert!(validate_node(&s, GraphTypeMode::Closed, &ok).is_ok());
     }

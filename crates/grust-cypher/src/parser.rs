@@ -213,6 +213,15 @@ impl Parser {
         }
     }
 
+    fn parse_dotted_name(&mut self, what: &str) -> PResult<String> {
+        let mut name = self.parse_name(what)?;
+        while self.eat(&Token::Dot) {
+            name.push('.');
+            name.push_str(&self.parse_name(what)?);
+        }
+        Ok(name)
+    }
+
     /// Parse a **key** name — like [`Self::parse_name`], but also accepts a
     /// reserved keyword used as a property/map key (e.g. `{order: 1, limit: 3}`),
     /// which standard Cypher permits. The keyword's exact source text (preserving
@@ -274,6 +283,7 @@ impl Parser {
         let mut clauses = Vec::new();
         loop {
             match self.peek() {
+                Token::Keyword(Keyword::Use) => clauses.push(Clause::Use(self.parse_use()?)),
                 Token::Keyword(Keyword::Match) => {
                     clauses.push(Clause::Match(self.parse_match(false)?))
                 }
@@ -307,9 +317,7 @@ impl Parser {
                     clauses.push(Clause::Return(self.parse_return()?));
                     break; // RETURN ends a single query
                 }
-                Token::Keyword(Keyword::Call) => {
-                    clauses.push(Clause::Call(self.parse_call()?))
-                }
+                Token::Keyword(Keyword::Call) => clauses.push(Clause::Call(self.parse_call()?)),
                 _ => break,
             }
             // a UNION or EOF/semicolon ends the single query
@@ -332,6 +340,16 @@ impl Parser {
         Ok(SingleQuery {
             clauses,
             span: start.to(end),
+        })
+    }
+
+    fn parse_use(&mut self) -> PResult<UseClause> {
+        let start = self.span_here();
+        self.expect(&Token::Keyword(Keyword::Use), "USE")?;
+        let graph = self.parse_dotted_name("a graph name")?;
+        Ok(UseClause {
+            graph,
+            span: start.to(self.prev_span()),
         })
     }
 

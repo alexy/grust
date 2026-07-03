@@ -26,39 +26,35 @@ fails if the scoped-out set below drifts from the manifest.
 
 ## Realized profile (today)
 
-**58 of 74 catalogued features are `Supported`** (implemented + tested). By family
+**64 of 74 catalogued features are `Supported`** (implemented + tested). By family
 (run `support_summary()` for the live list): parser/semantics, resolved writes,
 broad matched writes, row-producing relationship writes, returning & aggregates,
 predicates & expressions, read-only matching, path matching, query composition,
-type system (temporal/duration/decimal incl. arithmetic & ordering), constraints,
-transactions (control surface + capability reporting), catalog procedures.
+type system (temporal/duration/decimal/path incl. arithmetic, ordering, and
+stable serialization where applicable), constraints and index metadata, graph
+type metadata, catalog metadata, named graph selection, transactions (control
+surface + capability reporting), session state commands, catalog procedures.
 
-Counts: **supported 58 · rejected 5 · planned 3 · future 8 · total 74.**
+Counts: **supported 64 · rejected 5 · planned 1 · future 4 · total 74.**
 
 ## Scoped OUT of the realized profile (with rationale)
 
 These are the only gaps between the realized profile and a full-39075 claim. Each
 is deliberate and enumerated so the claim is never silently unbacked.
 
-### Future (8) — deferred to a later full-39075 pass
+### Future (4) — deferred to a later full-39075 pass
 
 | Feature | Rationale |
 |---|---|
 | `shortest-path` (U9) | Shortest-path families need a dedicated traversal/cost model; the bounded var-length read path is supported, shortest-path is not. |
 | `subquery` (U8) | `CALL { … }` subquery scoping is a substantial parser+semantics+execution addition; out of the portable core. |
-| `path-values` (UT) | First-class path values in the type lattice (beyond the read executor's path functions) are not modelled as a `Value`. |
 | `graph-values` (UT) | First-class graph values are not modelled. |
-| `graph-type-definition` (U11) | `CREATE GRAPH TYPE …` DDL; graph-type *validation* exists (`graph_type` module), but the DDL surface does not. |
-| `catalog-metadata` (U11) | Named graph collections / catalog metadata surface. |
-| `named-graph-selection` (U11/13) | `USE <graph>` session graph selection. |
 | `table-valued-function` (U14) | TVFs beyond the read-only catalog procedures. |
 
-### Planned (3) — near-term, partially scaffolded
+### Planned (1) — near-term, partially scaffolded
 
 | Feature | Rationale |
 |---|---|
-| `index-definition` (U11) | Index DDL + per-backend capability reporting; constraint DDL is supported, index DDL is scaffolded. |
-| `session-control` (U13) | Session `SET`/`RESET`/`USE`; the transaction-control surface + atomicity capability reporting is supported, session statements are not. |
 | `native-cypher-passthrough` (U14) | Backend-native Cypher/SurrealQL/Falkor passthrough, intentionally separate from portable conformance. |
 
 ## Intentional rejections (5) — conformance guards, not gaps

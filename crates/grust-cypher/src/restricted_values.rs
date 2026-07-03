@@ -15,11 +15,15 @@ pub(crate) fn restricted_size_value(value: Value) -> Result<Value> {
         }
         Value::Json(serde_json::Value::Array(values)) => Ok(Value::Int(values.len() as i64)),
         Value::Json(serde_json::Value::Object(values)) => Ok(Value::Int(values.len() as i64)),
-        Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => {
-            Err(cypher_unsupported_cardinality(
-                "writable Cypher RETURN size only supports string, array, or JSON collection values",
-            ))
-        }
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN size only supports string, array, or JSON collection values",
+        )),
     }
 }
 
@@ -148,7 +152,10 @@ pub(crate) fn restricted_list_index_value(value: Value, index: usize) -> Result<
         | Value::Float(_)
         | Value::String(_)
         | Value::DateTime(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN list indexes only support array values",
         )),
     }
@@ -274,7 +281,10 @@ pub(crate) fn restricted_list_slice_value(
         | Value::Float(_)
         | Value::String(_)
         | Value::DateTime(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN list slices only support array values",
         )),
     }
@@ -344,7 +354,10 @@ pub(crate) fn restricted_list_contains_value(value: Value, needle: &Value) -> Re
         | Value::Float(_)
         | Value::String(_)
         | Value::DateTime(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN IN only supports array values",
         )),
     }
@@ -450,7 +463,10 @@ pub(crate) fn restricted_list_predicate_value(
         | Value::Float(_)
         | Value::String(_)
         | Value::DateTime(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN list predicates only support array values",
         )),
     }
@@ -554,7 +570,10 @@ pub(crate) fn restricted_list_element_value(
         | Value::Float(_)
         | Value::String(_)
         | Value::DateTime(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN head/last only supports array values",
         )),
     }
@@ -624,7 +643,10 @@ pub(crate) fn restricted_list_tail_value(value: Value) -> Result<Value> {
         | Value::Float(_)
         | Value::String(_)
         | Value::DateTime(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN tail only supports array values",
         )),
     }
@@ -708,7 +730,10 @@ pub(crate) fn restricted_abs_value(value: Value) -> Result<Value> {
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN abs only supports numeric values",
         )),
     }
@@ -796,7 +821,10 @@ pub(crate) fn restricted_numeric_round_value(
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN ceil/floor only supports numeric values",
         )),
     }
@@ -882,7 +910,10 @@ pub(crate) fn restricted_numeric_sign_value(value: Value) -> Result<Value> {
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN sign only supports numeric values",
         )),
     }
@@ -1004,7 +1035,10 @@ pub(crate) fn restricted_list_cast_value(
         | Value::Float(_)
         | Value::String(_)
         | Value::DateTime(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN list casts only support array values",
         )),
     }
@@ -1179,7 +1213,10 @@ pub(crate) fn restricted_to_integer_value(value: Value) -> Result<Value> {
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN toInteger only supports numeric or integer-string values",
         )),
     }
@@ -1210,7 +1247,10 @@ pub(crate) fn restricted_to_float_value(value: Value) -> Result<Value> {
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN toFloat only supports numeric or numeric-string values",
         )),
     }
@@ -1305,7 +1345,10 @@ pub(crate) fn restricted_to_boolean_value(value: Value) -> Result<Value> {
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN toBoolean only supports boolean or boolean-string values",
         )),
     }
@@ -1383,7 +1426,8 @@ pub(crate) fn restricted_to_string_value(value: Value) -> Result<Value> {
         | Value::IntArray(_)
         | Value::FloatArray(_)
         | Value::Json(serde_json::Value::Array(_))
-        | Value::Json(serde_json::Value::Object(_)) => Err(cypher_unsupported_cardinality(
+        | Value::Json(serde_json::Value::Object(_))
+        | Value::Path(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN toString only supports scalar values",
         )),
     }
@@ -1444,11 +1488,15 @@ pub(crate) fn restricted_is_empty_value(value: Value) -> Result<Value> {
         Value::Json(serde_json::Value::String(value)) => Ok(Value::Bool(value.is_empty())),
         Value::Json(serde_json::Value::Array(values)) => Ok(Value::Bool(values.is_empty())),
         Value::Json(serde_json::Value::Object(values)) => Ok(Value::Bool(values.is_empty())),
-        Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => {
-            Err(cypher_unsupported_cardinality(
-                "writable Cypher RETURN isEmpty only supports string, array, or JSON collection values",
-            ))
-        }
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN isEmpty only supports string, array, or JSON collection values",
+        )),
     }
 }
 
@@ -1515,7 +1563,10 @@ pub(crate) fn restricted_string_transform_value(
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN string transforms only support string values",
         )),
     }
@@ -1585,7 +1636,10 @@ pub(crate) fn restricted_string_trim_value(
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN string trims only support string values",
         )),
     }
@@ -1648,11 +1702,15 @@ pub(crate) fn restricted_string_reverse_value(value: Value) -> Result<Value> {
         Value::Json(serde_json::Value::Array(values)) => Ok(Value::from_json(
             serde_json::Value::Array(values.into_iter().rev().collect()),
         )),
-        Value::Bool(_) | Value::Int(_) | Value::Float(_) | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => {
-            Err(cypher_unsupported_cardinality(
-                "writable Cypher RETURN reverse only supports string or array values",
-            ))
-        }
+        Value::Bool(_)
+        | Value::Int(_)
+        | Value::Float(_)
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+            "writable Cypher RETURN reverse only supports string or array values",
+        )),
     }
 }
 
@@ -1723,7 +1781,10 @@ pub(crate) fn restricted_string_split_value(
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN split only supports string values",
         )),
     }
@@ -1795,7 +1856,10 @@ pub(crate) fn restricted_substring_value(
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN substring only supports string values",
         )),
     }
@@ -1870,7 +1934,10 @@ pub(crate) fn restricted_string_slice_value(
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN left/right only supports string values",
         )),
     }
@@ -1936,7 +2003,10 @@ pub(crate) fn restricted_replace_value(
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN replace only supports string values",
         )),
     }
@@ -2006,7 +2076,10 @@ pub(crate) fn restricted_string_predicate_value(
         | Value::StringArray(_)
         | Value::IntArray(_)
         | Value::FloatArray(_)
-        | Value::Json(_) | Value::Decimal(_) | Value::Duration(_) => Err(cypher_unsupported_cardinality(
+        | Value::Json(_)
+        | Value::Path(_)
+        | Value::Decimal(_)
+        | Value::Duration(_) => Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN string predicates only support string values",
         )),
     }

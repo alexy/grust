@@ -692,9 +692,9 @@ impl GqlFeature {
             GqlFeature::IndexDefinition => d!(
                 "index-definition",
                 ConstraintsAndIndexes,
-                Planned,
+                Supported,
                 PortableGql,
-                "Index DDL with per-backend capability reporting (Unit 11)"
+                "Portable single-property CREATE/DROP INDEX DDL metadata with backend capability reporting (Full39075 F1)"
             ),
             GqlFeature::ReadOnlyMatchReturn => d!(
                 "read-only-match-return",
@@ -797,9 +797,9 @@ impl GqlFeature {
             GqlFeature::PathValues => d!(
                 "path-values",
                 TypeSystem,
-                Future,
+                Supported,
                 PortableGql,
-                "First-class path values in the type lattice (Unit T)"
+                "First-class path values in Value::Path with stable node/relationship JSON serialization (Full39075 F6)"
             ),
             GqlFeature::GraphValues => d!(
                 "graph-values",
@@ -818,30 +818,30 @@ impl GqlFeature {
             GqlFeature::SessionControl => d!(
                 "session-control",
                 Transactions,
-                Planned,
+                Supported,
                 Full39075,
-                "Session statements and session capability reporting (Unit 13)"
+                "Standalone USE/SET/RESET session state commands with catalog-aware graph validation (Full39075 F5)"
             ),
             GqlFeature::GraphTypeDefinition => d!(
                 "graph-type-definition",
                 CatalogAndSession,
-                Future,
+                Supported,
                 Full39075,
-                "Graph type definitions for nodes/edges/labels/properties (Unit 11)"
+                "Portable CREATE/DROP GRAPH TYPE metadata for nodes, edges, field types, and open/closed mode (Full39075 F2)"
             ),
             GqlFeature::CatalogMetadata => d!(
                 "catalog-metadata",
                 CatalogAndSession,
-                Future,
+                Supported,
                 Full39075,
-                "Catalog metadata and named graph collections (Unit 11)"
+                "Portable catalog snapshots and read-only metadata procedure rows for graphs, graph types, indexes, and constraints (Full39075 F3)"
             ),
             GqlFeature::NamedGraphSelection => d!(
                 "named-graph-selection",
                 CatalogAndSession,
-                Future,
+                Supported,
                 Full39075,
-                "Named graph selection and session defaults (Units 11, 13)"
+                "USE graph selection with single-graph fallback validation and catalog lookup helpers (Full39075 F4)"
             ),
             GqlFeature::ProcedureCall => d!(
                 "procedure-call",
@@ -1129,6 +1129,18 @@ pub struct GqlBackendDescriptor {
     pub portable_reads: bool,
     /// Has SQL read **pushdown** wired into a `run_read_query` entrypoint.
     pub read_pushdown: bool,
+    /// Accepts portable index DDL metadata. Physical/native index creation is
+    /// backend-specific and must be checked separately before relying on it.
+    pub index_ddl: bool,
+    /// Exposes portable catalog metadata snapshots/procedure rows for
+    /// caller-owned registry state.
+    pub catalog_metadata: bool,
+    /// Supports `USE <graph>` selection validation for portable single-graph
+    /// execution and catalog-backed graph lookup.
+    pub named_graph_selection: bool,
+    /// Supports standalone session state commands (`USE`, `SET`, `RESET`) in
+    /// the shared portable session model.
+    pub session_control: bool,
     /// The backend's mutation store reports `GraphMutationAtomicity::Transactional`
     /// (i.e. a statement batch can commit/rollback atomically). Verified against
     /// each backend's `mutation_atomicity()` in the working tree (Unit 13).
@@ -1140,41 +1152,142 @@ impl GqlBackend {
     pub const fn descriptor(self) -> GqlBackendDescriptor {
         use GqlBackend::*;
         use GqlBackendRole::*;
-        let (id, crate_name, role, publishable, in_facade, writes, reads, pushdown, summary) =
-            match self {
-                Memory => (
-                    "memory", "grust-memory", CypherExecutor, true, true, true, true, false,
-                    "In-memory reference executor: the portable read oracle and the strict-write reference.",
-                ),
-                Sail => (
-                    "sail", "grust-sail", CypherExecutor, true, true, true, true, true,
-                    "Sail/Spark: CypherMutationExecutor plus run_read_query SQL pushdown over grust_nodes/grust_edges.",
-                ),
-                Turso => (
-                    "turso", "grust-turso", CypherExecutor, true, true, true, false, false,
-                    "libSQL/Turso: CypherMutationExecutor (bounded matched-node patches); the embedded SQL differential oracle for read pushdown.",
-                ),
-                Postgres => (
-                    "postgres", "grust-postgres", SqlGraphBackend, true, true, false, false, false,
-                    "PostgreSQL universal-table SQL backend; no portable Cypher executor yet.",
-                ),
-                PostgresPgq => (
-                    "postgres-pgq", "grust-postgres-pgq", SqlGraphBackend, true, true, false, false, false,
-                    "PostgreSQL SQL/PGQ: native PROPERTY GRAPH + GRAPH_TABLE traversal; no portable Cypher executor yet.",
-                ),
-                Helix => (
-                    "helix", "grust-helix", Internal, false, false, false, false, false,
-                    "Internal only (publish=false): out of the facade and the executing-conformance set.",
-                ),
-                Ladybug => (
-                    "ladybug", "grust-ladybug", Internal, false, false, false, false, false,
-                    "Internal only (publish=false): out of the facade and the executing-conformance set.",
-                ),
-                CocoIndex => (
-                    "cocoindex", "grust-cocoindex", SyncTarget, true, true, false, false, false,
-                    "Sync/export target, not a query backend; out of the executing-conformance set.",
-                ),
-            };
+        let (
+            id,
+            crate_name,
+            role,
+            publishable,
+            in_facade,
+            writes,
+            reads,
+            pushdown,
+            index_ddl,
+            catalog_metadata,
+            named_graph_selection,
+            session_control,
+            summary,
+        ) = match self {
+            Memory => (
+                "memory",
+                "grust-memory",
+                CypherExecutor,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                "In-memory reference executor: the portable read oracle and the strict-write reference.",
+            ),
+            Sail => (
+                "sail",
+                "grust-sail",
+                CypherExecutor,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                "Sail/Spark: CypherMutationExecutor plus run_read_query SQL pushdown over grust_nodes/grust_edges.",
+            ),
+            Turso => (
+                "turso",
+                "grust-turso",
+                CypherExecutor,
+                true,
+                true,
+                true,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                "libSQL/Turso: CypherMutationExecutor (bounded matched-node patches); the embedded SQL differential oracle for read pushdown.",
+            ),
+            Postgres => (
+                "postgres",
+                "grust-postgres",
+                SqlGraphBackend,
+                true,
+                true,
+                false,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                "PostgreSQL universal-table SQL backend; no portable Cypher executor yet.",
+            ),
+            PostgresPgq => (
+                "postgres-pgq",
+                "grust-postgres-pgq",
+                SqlGraphBackend,
+                true,
+                true,
+                false,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                "PostgreSQL SQL/PGQ: native PROPERTY GRAPH + GRAPH_TABLE traversal; no portable Cypher executor yet.",
+            ),
+            Helix => (
+                "helix",
+                "grust-helix",
+                Internal,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                "Internal only (publish=false): out of the facade and the executing-conformance set.",
+            ),
+            Ladybug => (
+                "ladybug",
+                "grust-ladybug",
+                Internal,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                "Internal only (publish=false): out of the facade and the executing-conformance set.",
+            ),
+            CocoIndex => (
+                "cocoindex",
+                "grust-cocoindex",
+                SyncTarget,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                "Sync/export target, not a query backend; out of the executing-conformance set.",
+            ),
+        };
         GqlBackendDescriptor {
             backend: self,
             id,
@@ -1185,6 +1298,10 @@ impl GqlBackend {
             cypher_writes: writes,
             portable_reads: reads,
             read_pushdown: pushdown,
+            index_ddl,
+            catalog_metadata,
+            named_graph_selection,
+            session_control,
             transactional: self.transactional(),
             summary,
         }
@@ -1486,7 +1603,11 @@ mod tests {
             // Only Cypher executors execute writes / portable reads / pushdown.
             if d.role != GqlBackendRole::CypherExecutor {
                 assert!(!d.cypher_writes, "{} should not claim cypher writes", d.id);
-                assert!(!d.portable_reads, "{} should not claim portable reads", d.id);
+                assert!(
+                    !d.portable_reads,
+                    "{} should not claim portable reads",
+                    d.id
+                );
                 assert!(!d.read_pushdown, "{} should not claim read pushdown", d.id);
             }
             // Read pushdown implies portable reads.
@@ -1495,7 +1616,11 @@ mod tests {
             }
             // Internal backends are never publishable or in the facade.
             if d.role == GqlBackendRole::Internal {
-                assert!(!d.publishable && !d.in_facade, "{} internal but exposed", d.id);
+                assert!(
+                    !d.publishable && !d.in_facade,
+                    "{} internal but exposed",
+                    d.id
+                );
             }
         }
         // Verified specifics: only Sail has read pushdown; only Memory/Sail/Turso
@@ -1503,8 +1628,14 @@ mod tests {
         assert!(GqlBackend::Sail.descriptor().read_pushdown);
         assert!(!GqlBackend::Memory.descriptor().read_pushdown);
         assert!(!GqlBackend::Postgres.descriptor().cypher_writes);
-        assert_eq!(GqlBackend::Helix.descriptor().role, GqlBackendRole::Internal);
-        assert_eq!(GqlBackend::CocoIndex.descriptor().role, GqlBackendRole::SyncTarget);
+        assert_eq!(
+            GqlBackend::Helix.descriptor().role,
+            GqlBackendRole::Internal
+        );
+        assert_eq!(
+            GqlBackend::CocoIndex.descriptor().role,
+            GqlBackendRole::SyncTarget
+        );
     }
 
     #[test]
@@ -1609,15 +1740,9 @@ mod tests {
             // Future — deferred to a later full-39075 pass (rationale in the doc).
             "shortest-path",
             "subquery",
-            "path-values",
             "graph-values",
-            "graph-type-definition",
-            "catalog-metadata",
-            "named-graph-selection",
             "table-valued-function",
             // Planned — near-term, partially scaffolded.
-            "index-definition",
-            "session-control",
             "native-cypher-passthrough",
             // Rejected — intentional conformance guards, not gaps.
             "reject-create-node-without-explicit-identity",

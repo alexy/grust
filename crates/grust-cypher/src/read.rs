@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::ast;
 use crate::ast::*;
 use crate::parser::parse_query;
+use crate::session::ensure_query_uses_graph;
 use crate::*;
 
 /// A value bound to a variable in a candidate row. Pattern matching binds
@@ -52,7 +53,20 @@ pub fn run_read_query(
     params: &CypherParameters,
 ) -> Result<CypherResultTable> {
     let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
+    ensure_query_uses_graph(&query, "default")?;
     // Reuse the shared semantic analyzer for binding/kind checks.
+    crate::semantics::analyze(&query)?;
+    execute_read_query(graph, &query, params)
+}
+
+pub fn run_read_query_on_named_graph(
+    graph: &Graph,
+    graph_name: &str,
+    cypher: &str,
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
+    let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
+    ensure_query_uses_graph(&query, graph_name)?;
     crate::semantics::analyze(&query)?;
     execute_read_query(graph, &query, params)
 }
@@ -116,6 +130,7 @@ fn execute_single(
     // terminal and produces the result table.
     for clause in &query.clauses {
         match clause {
+            Clause::Use(_) => {}
             Clause::Match(m) if !m.optional => {
                 for pattern in &m.patterns {
                     rows = expand_pattern(graph, &index, pattern, rows, params)?;
@@ -140,7 +155,9 @@ fn execute_single(
                     if matched.is_empty() {
                         let mut padded = row;
                         for var in &new_vars {
-                            padded.entry(var.clone()).or_insert(Bound::Value(Value::Null));
+                            padded
+                                .entry(var.clone())
+                                .or_insert(Bound::Value(Value::Null));
                         }
                         out.push(padded);
                     } else {
@@ -187,7 +204,7 @@ fn execute_single(
             | Clause::Remove(_) => {
                 return Err(gql_execution(
                     "the read reference executor only runs read-only MATCH/WITH/UNWIND/RETURN queries",
-                ))
+                ));
             }
         }
     }
@@ -219,44 +236,47 @@ fn execute_single(
 /// Returns the procedure's full output columns and rows (deterministically
 /// sorted). `YIELD` projection/aliasing is applied by the caller.
 fn call_procedure(graph: &Graph, call: &CallClause) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-    let (column, values): (&str, std::collections::BTreeSet<String>) =
-        match call.name.to_ascii_lowercase().as_str() {
-            "db.labels" => (
-                "label",
-                graph
-                    .nodes
-                    .iter()
-                    .map(|n| n.label.as_str().to_string())
-                    .collect(),
-            ),
-            "db.relationshiptypes" => (
-                "relationshipType",
-                graph
-                    .edges
-                    .iter()
-                    .map(|e| e.label.as_str().to_string())
-                    .collect(),
-            ),
-            "db.propertykeys" => {
-                let mut keys = std::collections::BTreeSet::new();
-                for n in &graph.nodes {
-                    keys.extend(n.props.keys().cloned());
-                }
-                for e in &graph.edges {
-                    keys.extend(e.props.keys().cloned());
-                }
-                ("propertyKey", keys)
+    let (column, values): (&str, std::collections::BTreeSet<String>) = match call
+        .name
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "db.labels" => (
+            "label",
+            graph
+                .nodes
+                .iter()
+                .map(|n| n.label.as_str().to_string())
+                .collect(),
+        ),
+        "db.relationshiptypes" => (
+            "relationshipType",
+            graph
+                .edges
+                .iter()
+                .map(|e| e.label.as_str().to_string())
+                .collect(),
+        ),
+        "db.propertykeys" => {
+            let mut keys = std::collections::BTreeSet::new();
+            for n in &graph.nodes {
+                keys.extend(n.props.keys().cloned());
             }
-            other => {
-                return Err(unsupported_gql_feature(
-                    GqlFeature::ProcedureCall,
-                    GqlConformanceProfile::PortableGql,
-                    format!(
-                        "procedure `{other}` is not supported (known: db.labels, db.relationshipTypes, db.propertyKeys)"
-                    ),
-                ))
+            for e in &graph.edges {
+                keys.extend(e.props.keys().cloned());
             }
-        };
+            ("propertyKey", keys)
+        }
+        other => {
+            return Err(unsupported_gql_feature(
+                GqlFeature::ProcedureCall,
+                GqlConformanceProfile::PortableGql,
+                format!(
+                    "procedure `{other}` is not supported (known: db.labels, db.relationshipTypes, db.propertyKeys)"
+                ),
+            ));
+        }
+    };
 
     let full_cols = vec![column.to_string()];
     let full_rows: Vec<Vec<Value>> = values.into_iter().map(|s| vec![Value::from(s)]).collect();
@@ -298,7 +318,11 @@ fn filter_rows(rows: Vec<Row>, where_expr: &Expr, params: &CypherParameters) -> 
 
 /// `UNWIND list AS x`: expand each row into one row per list element. A NULL or
 /// empty list yields no rows for that input row.
-fn unwind_rows(rows: Vec<Row>, unwind: &UnwindClause, params: &CypherParameters) -> Result<Vec<Row>> {
+fn unwind_rows(
+    rows: Vec<Row>,
+    unwind: &UnwindClause,
+    params: &CypherParameters,
+) -> Result<Vec<Row>> {
     let mut out = Vec::new();
     for row in rows {
         // A list literal is evaluated element-wise (round-tripping a list
@@ -351,7 +375,11 @@ fn project_to_bindings(
     } else {
         let mut produced = Vec::with_capacity(rows.len());
         for row in &rows {
-            let mut next = if projection.star { row.clone() } else { Row::new() };
+            let mut next = if projection.star {
+                row.clone()
+            } else {
+                Row::new()
+            };
             for item in &projection.items {
                 let (name, bound) = binding_for_item(item, row, params)?;
                 next.insert(name, bound);
@@ -372,13 +400,14 @@ fn project_to_bindings(
 /// The (name, binding) a `WITH`/`RETURN` item contributes. A bare variable keeps
 /// its existing binding (so a node stays a node downstream); anything else binds
 /// a computed value under its alias.
-fn binding_for_item(item: &ReturnItem, row: &Row, params: &CypherParameters) -> Result<(String, Bound)> {
+fn binding_for_item(
+    item: &ReturnItem,
+    row: &Row,
+    params: &CypherParameters,
+) -> Result<(String, Bound)> {
     match &item.expr {
         Expr::Variable(v) => {
-            let bound = row
-                .get(v)
-                .cloned()
-                .unwrap_or(Bound::Value(Value::Null));
+            let bound = row.get(v).cloned().unwrap_or(Bound::Value(Value::Null));
             Ok((item.alias.clone().unwrap_or_else(|| v.clone()), bound))
         }
         other => {
@@ -434,7 +463,10 @@ fn grouped_bindings(
                 let name = item.alias.clone().ok_or_else(|| {
                     gql_name("WITH requires an alias (AS ...) for aggregate expressions")
                 })?;
-                next.insert(name, Bound::Value(eval_aggregate(&item.expr, &group_rows, params)?));
+                next.insert(
+                    name,
+                    Bound::Value(eval_aggregate(&item.expr, &group_rows, params)?),
+                );
             } else {
                 let (name, bound) = binding_for_item(item, representative, params)?;
                 next.insert(name, bound);
@@ -470,7 +502,11 @@ fn dedup_bindings(
     Ok(out)
 }
 
-fn order_bindings(rows: &mut [Row], order_by: &[OrderItem], params: &CypherParameters) -> Result<()> {
+fn order_bindings(
+    rows: &mut [Row],
+    order_by: &[OrderItem],
+    params: &CypherParameters,
+) -> Result<()> {
     if order_by.is_empty() {
         return Ok(());
     }
@@ -534,10 +570,7 @@ pub enum PushedBinding {
 
 /// Deduplicate result rows by value identity, preserving first-seen order — the
 /// shared `UNION` (distinct) dedup, reused by backend pushdown's union combine.
-pub(crate) fn dedup_return_rows(
-    rows: Vec<Vec<Value>>,
-    context: &str,
-) -> Result<Vec<Vec<Value>>> {
+pub(crate) fn dedup_return_rows(rows: Vec<Vec<Value>>, context: &str) -> Result<Vec<Vec<Value>>> {
     let mut seen = std::collections::HashSet::new();
     let mut deduped = Vec::with_capacity(rows.len());
     for values in rows {
@@ -632,7 +665,7 @@ pub(crate) fn project_binding_pipeline(
             _ => {
                 return Err(gql_execution(
                     "pushdown pipeline runs only WITH/UNWIND/RETURN tails",
-                ))
+                ));
             }
         }
     }
@@ -691,7 +724,12 @@ fn expand_pattern(
     params: &CypherParameters,
 ) -> Result<Vec<Row>> {
     let path_var = pattern.variable.as_deref();
-    if path_var.is_some() && pattern.segments.iter().any(|s| s.relationship.length.is_some()) {
+    if path_var.is_some()
+        && pattern
+            .segments
+            .iter()
+            .any(|s| s.relationship.length.is_some())
+    {
         return Err(unsupported_gql_feature(
             GqlFeature::PathVariableBinding,
             GqlConformanceProfile::PortableGql,
@@ -728,20 +766,10 @@ fn expand_pattern(
     Ok(out)
 }
 
-/// A bound path value: `{ "nodes": [...], "relationships": [...] }`.
+/// A bound first-class path value. `Value::to_json` preserves the historical
+/// `{ "nodes": [...], "relationships": [...] }` serialization shape.
 fn path_value(nodes: &[Node], edges: &[Edge]) -> Result<Value> {
-    let mut node_arr = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        node_arr.push(value_to_json(&graph_node_value(node)?));
-    }
-    let mut edge_arr = Vec::with_capacity(edges.len());
-    for edge in edges {
-        edge_arr.push(value_to_json(&graph_edge_value(edge)?));
-    }
-    let mut obj = serde_json::Map::new();
-    obj.insert("nodes".to_string(), serde_json::Value::Array(node_arr));
-    obj.insert("relationships".to_string(), serde_json::Value::Array(edge_arr));
-    Ok(Value::Json(serde_json::Value::Object(obj)))
+    Ok(Value::Path(PathValue::from_graph_parts(nodes, edges)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -761,7 +789,10 @@ fn expand_segments(
     if idx == segments.len() {
         let mut row = row;
         if let Some(p) = path_var {
-            row.insert(p.to_string(), Bound::Value(path_value(&acc_nodes, &acc_edges)?));
+            row.insert(
+                p.to_string(),
+                Bound::Value(path_value(&acc_nodes, &acc_edges)?),
+            );
         }
         out.push(row);
         return Ok(());
@@ -807,7 +838,10 @@ fn expand_segments(
                 for edge in &edges {
                     arr.push(value_to_json(&graph_edge_value(edge)?));
                 }
-                next_row.insert(var.clone(), Bound::Value(Value::Json(serde_json::Value::Array(arr))));
+                next_row.insert(
+                    var.clone(),
+                    Bound::Value(Value::Json(serde_json::Value::Array(arr))),
+                );
             }
             if let Some(var) = &segment.node.variable {
                 next_row.insert(var.clone(), Bound::Node(end_node.clone()));
@@ -871,7 +905,17 @@ fn expand_segments(
             (Vec::new(), Vec::new())
         };
         expand_segments(
-            graph, index, segments, idx + 1, next_node, next_row, params, path_var, na, ea, out,
+            graph,
+            index,
+            segments,
+            idx + 1,
+            next_node,
+            next_row,
+            params,
+            path_var,
+            na,
+            ea,
+            out,
         )?;
     }
     Ok(())
@@ -919,7 +963,16 @@ fn collect_var_length_paths(
         edges_so_far.push(edge.clone());
         visited.insert(next_id.to_string());
         collect_var_length_paths(
-            graph, index, rel, next_node, min, max, edges_so_far, visited, params, results,
+            graph,
+            index,
+            rel,
+            next_node,
+            min,
+            max,
+            edges_so_far,
+            visited,
+            params,
+            results,
         )?;
         visited.remove(next_id);
         edges_so_far.pop();
@@ -994,11 +1047,7 @@ fn node_matches(node: &Node, np: &NodePattern, params: &CypherParameters) -> Res
 }
 
 /// True when every entry in the inline pattern map equals the element's property.
-fn props_match(
-    props: &Props,
-    map: Option<&MapLiteral>,
-    params: &CypherParameters,
-) -> Result<bool> {
+fn props_match(props: &Props, map: Option<&MapLiteral>, params: &CypherParameters) -> Result<bool> {
     let Some(map) = map else {
         return Ok(true);
     };
@@ -1040,7 +1089,11 @@ fn project(
         }
     }
     for item in &projection.items {
-        columns.push(item.alias.clone().unwrap_or_else(|| column_name(&item.expr)));
+        columns.push(
+            item.alias
+                .clone()
+                .unwrap_or_else(|| column_name(&item.expr)),
+        );
         exprs.push(item.expr.clone());
     }
     if exprs.is_empty() {
@@ -1163,7 +1216,7 @@ fn grouped_project(
                     GqlFeature::AggregateFunctionRegistry,
                     GqlConformanceProfile::PortableGql,
                     "aggregates nested inside larger expressions are not supported by the read reference executor yet",
-                ))
+                ));
             }
             _ => kinds.push(Kind::Key(expr)),
         }
@@ -1210,15 +1263,8 @@ fn grouped_project(
         let mut values = Vec::with_capacity(kinds.len());
         for kind in &kinds {
             match kind {
-                Kind::Key(_) => values.push(
-                    key_iter
-                        .next()
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                ),
-                Kind::Aggregate(expr) => {
-                    values.push(eval_aggregate(expr, group_rows, params)?)
-                }
+                Kind::Key(_) => values.push(key_iter.next().cloned().unwrap_or(Value::Null)),
+                Kind::Aggregate(expr) => values.push(eval_aggregate(expr, group_rows, params)?),
             }
         }
         out_rows.push(values);
@@ -1275,16 +1321,8 @@ fn eval_aggregate(expr: &Expr, group_rows: &[&Row], params: &CypherParameters) -
                     None => v,
                     Some(current) => {
                         let ord = compare_return_values(&v, &current);
-                        let pick_v = if want_max {
-                            ord.is_gt()
-                        } else {
-                            ord.is_lt()
-                        };
-                        if pick_v {
-                            v
-                        } else {
-                            current
-                        }
+                        let pick_v = if want_max { ord.is_gt() } else { ord.is_lt() };
+                        if pick_v { v } else { current }
                     }
                 });
             }
@@ -1313,11 +1351,13 @@ fn order_by_columns(
                     GqlFeature::AggregateFunctionRegistry,
                     GqlConformanceProfile::PortableGql,
                     "ORDER BY with aggregates must reference an output column by name",
-                ))
+                ));
             }
         };
         let idx = columns.iter().position(|c| c == &name).ok_or_else(|| {
-            gql_name(format!("ORDER BY column `{name}` is not in the RETURN list"))
+            gql_name(format!(
+                "ORDER BY column `{name}` is not in the RETURN list"
+            ))
         })?;
         keys.push((idx, item.descending));
     }
@@ -1418,7 +1458,9 @@ fn eval_constant(expr: &Expr, params: &CypherParameters) -> Result<Value> {
 fn eval_usize(expr: &Expr, params: &CypherParameters, what: &str) -> Result<usize> {
     match eval(expr, &Row::new(), params)? {
         Value::Int(n) if n >= 0 => Ok(n as usize),
-        other => Err(gql_type(format!("{what} expects a non-negative integer, got {other:?}"))),
+        other => Err(gql_type(format!(
+            "{what} expects a non-negative integer, got {other:?}"
+        ))),
     }
 }
 
@@ -1477,7 +1519,13 @@ fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
             operand,
             branches,
             default,
-        } => eval_case(operand.as_deref(), branches, default.as_deref(), row, params),
+        } => eval_case(
+            operand.as_deref(),
+            branches,
+            default.as_deref(),
+            row,
+            params,
+        ),
         Expr::Map(_) | Expr::Index { .. } => Err(unsupported_gql_feature(
             GqlFeature::GeneralExpressionTree,
             GqlConformanceProfile::PortableGql,
@@ -1500,7 +1548,9 @@ fn list_elements(value: Value) -> Vec<Value> {
 /// `range(start, end[, step])` -> inclusive integer list.
 fn eval_range(args: &[Expr], row: &Row, params: &CypherParameters) -> Result<Value> {
     if args.len() < 2 || args.len() > 3 {
-        return Err(gql_type("range() expects 2 or 3 integer arguments".to_string()));
+        return Err(gql_type(
+            "range() expects 2 or 3 integer arguments".to_string(),
+        ));
     }
     let int_arg = |e: &Expr| -> Result<i64> {
         match eval(e, row, params)? {
@@ -1510,7 +1560,11 @@ fn eval_range(args: &[Expr], row: &Row, params: &CypherParameters) -> Result<Val
     };
     let start = int_arg(&args[0])?;
     let end = int_arg(&args[1])?;
-    let step = if args.len() == 3 { int_arg(&args[2])? } else { 1 };
+    let step = if args.len() == 3 {
+        int_arg(&args[2])?
+    } else {
+        1
+    };
     if step == 0 {
         return Err(gql_execution("range() step must not be zero"));
     }
@@ -1532,7 +1586,12 @@ fn eval_range(args: &[Expr], row: &Row, params: &CypherParameters) -> Result<Val
 
 /// `labels(n)` / `type(r)` / `id(n)`: read the element from its binding, or fall
 /// back to the element's serialized JSON shape.
-fn eval_element_function(name: &str, arg: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
+fn eval_element_function(
+    name: &str,
+    arg: &Expr,
+    row: &Row,
+    params: &CypherParameters,
+) -> Result<Value> {
     if let Expr::Variable(v) = arg {
         match row.get(v) {
             Some(Bound::Node(n)) => {
@@ -1540,18 +1599,22 @@ fn eval_element_function(name: &str, arg: &Expr, row: &Row, params: &CypherParam
                     "labels" => Value::StringArray(vec![n.label.as_str().to_string()]),
                     "id" => Value::String(n.id.as_str().to_string()),
                     _ => return Err(gql_type(format!("{name}() is not defined for a node"))),
-                })
+                });
             }
             Some(Bound::Edge(e)) => {
                 return Ok(match name {
                     "type" => Value::String(e.label.as_str().to_string()),
-                    "id" => e
-                        .id
-                        .as_ref()
-                        .map(|id| Value::String(id.as_str().to_string()))
-                        .unwrap_or(Value::Null),
-                    _ => return Err(gql_type(format!("{name}() is not defined for a relationship"))),
-                })
+                    "id" => {
+                        e.id.as_ref()
+                            .map(|id| Value::String(id.as_str().to_string()))
+                            .unwrap_or(Value::Null)
+                    }
+                    _ => {
+                        return Err(gql_type(format!(
+                            "{name}() is not defined for a relationship"
+                        )));
+                    }
+                });
             }
             _ => {}
         }
@@ -1569,13 +1632,20 @@ fn eval_element_function(name: &str, arg: &Expr, row: &Row, params: &CypherParam
             "id" => Ok(map.get("id").map(json_to_value).unwrap_or(Value::Null)),
             _ => Err(gql_type(format!("{name}() expects a node or relationship"))),
         },
-        other => Err(gql_type(format!("{name}() expects a node or relationship, got {other:?}"))),
+        other => Err(gql_type(format!(
+            "{name}() expects a node or relationship, got {other:?}"
+        ))),
     }
 }
 
 /// Extract the `nodes`/`relationships` array from a path value.
 fn path_component(value: Value, key: &str) -> Result<Value> {
     match value {
+        Value::Path(path) => match key {
+            "nodes" => Ok(Value::Json(serde_json::Value::Array(path.nodes))),
+            "relationships" => Ok(Value::Json(serde_json::Value::Array(path.relationships))),
+            _ => Ok(Value::Null),
+        },
         Value::Json(serde_json::Value::Object(mut m)) => {
             Ok(m.remove(key).map(Value::Json).unwrap_or(Value::Null))
         }
@@ -1633,7 +1703,9 @@ fn eval_scalar_function(
     // `coalesce` is variadic and null-aware; handle it before the unary helpers.
     if lower == "coalesce" {
         if args.is_empty() {
-            return Err(gql_type("coalesce() expects at least one argument".to_string()));
+            return Err(gql_type(
+                "coalesce() expects at least one argument".to_string(),
+            ));
         }
         for arg in args {
             let value = eval(arg, row, params)?;
@@ -1662,7 +1734,10 @@ fn eval_scalar_function(
         return Err(unsupported_gql_feature(
             GqlFeature::ScalarFunctionRegistry,
             GqlConformanceProfile::PortableGql,
-            format!("scalar function `{name}` with {} arguments is not supported yet", args.len()),
+            format!(
+                "scalar function `{name}` with {} arguments is not supported yet",
+                args.len()
+            ),
         ));
     };
     let value = eval(arg, row, params)?;
@@ -1702,6 +1777,7 @@ fn eval_scalar_function(
         // `length` is the path hop count for a path value; otherwise falls back
         // to collection size.
         "length" => match &value {
+            Value::Path(path) => Ok(Value::Int(path.relationships.len() as i64)),
             Value::Json(serde_json::Value::Object(m)) if m.contains_key("relationships") => Ok(
                 Value::Int(m["relationships"].as_array().map_or(0, |a| a.len()) as i64),
             ),
@@ -1717,14 +1793,18 @@ fn eval_scalar_function(
         "duration" => match value {
             Value::String(s) => Value::duration(&s),
             Value::Duration(_) => Ok(value),
-            other => Err(gql_type(format!("duration() expects an ISO 8601 string, got {other:?}"))),
+            other => Err(gql_type(format!(
+                "duration() expects an ISO 8601 string, got {other:?}"
+            ))),
         },
         "decimal" => match value {
             Value::String(s) => Value::decimal(&s),
             Value::Int(n) => Value::decimal(n.to_string()),
             Value::Float(f) => Value::decimal(f.to_string()),
             Value::Decimal(_) => Ok(value),
-            other => Err(gql_type(format!("decimal() expects a numeral string or number, got {other:?}"))),
+            other => Err(gql_type(format!(
+                "decimal() expects a numeral string or number, got {other:?}"
+            ))),
         },
         _ => Err(unsupported_gql_feature(
             GqlFeature::ScalarFunctionRegistry,
@@ -1740,7 +1820,9 @@ fn eval_scalar_function(
 fn unary_float_fn(value: Value, name: &str, f: fn(f64) -> f64) -> Result<Value> {
     match numeric(&value) {
         Some(x) => Ok(Value::Float(f(x))),
-        None => Err(gql_type(format!("{name}() expects a number, got {value:?}"))),
+        None => Err(gql_type(format!(
+            "{name}() expects a number, got {value:?}"
+        ))),
     }
 }
 
@@ -1758,10 +1840,9 @@ fn eval_property(base: &Expr, key: &str, row: &Row, params: &CypherParameters) -
     }
     // Nested access: evaluate the base to a JSON object and index it.
     match eval(base, row, params)? {
-        Value::Json(serde_json::Value::Object(map)) => Ok(map
-            .get(key)
-            .map(json_to_value)
-            .unwrap_or(Value::Null)),
+        Value::Json(serde_json::Value::Object(map)) => {
+            Ok(map.get(key).map(json_to_value).unwrap_or(Value::Null))
+        }
         _ => Ok(Value::Null),
     }
 }
@@ -1904,7 +1985,11 @@ fn membership(a: &Value, list_expr: &Expr, row: &Row, params: &CypherParameters)
             Some(false) => {}
         }
     }
-    Ok(if saw_null { Value::Null } else { Value::Bool(false) })
+    Ok(if saw_null {
+        Value::Null
+    } else {
+        Value::Bool(false)
+    })
 }
 
 fn string_predicate(op: BinaryOp, a: &Value, b: &Value) -> Result<Value> {
@@ -1912,7 +1997,9 @@ fn string_predicate(op: BinaryOp, a: &Value, b: &Value) -> Result<Value> {
         if matches!(a, Value::Null) || matches!(b, Value::Null) {
             return Ok(Value::Null);
         }
-        return Err(gql_type("string predicates expect string operands".to_string()));
+        return Err(gql_type(
+            "string predicates expect string operands".to_string(),
+        ));
     };
     let result = match op {
         BinaryOp::StartsWith => haystack.starts_with(needle),
@@ -1939,7 +2026,11 @@ fn arithmetic(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
         let r = match op {
             BinaryOp::Add => x.checked_add(y),
             BinaryOp::Subtract => x.checked_add(&y.negated()),
-            _ => return Err(gql_type("durations support only + and - arithmetic".to_string())),
+            _ => {
+                return Err(gql_type(
+                    "durations support only + and - arithmetic".to_string(),
+                ));
+            }
         };
         return r
             .map(Value::Duration)
@@ -2066,10 +2157,7 @@ fn value_order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 }
 
 fn value_to_json(value: &Value) -> serde_json::Value {
-    match serde_json::to_value(value) {
-        Ok(json) => json,
-        Err(_) => serde_json::Value::Null,
-    }
+    value.to_json()
 }
 
 fn json_to_value(json: &serde_json::Value) -> Value {
@@ -2093,9 +2181,21 @@ mod tests {
 
     fn graph() -> Graph {
         let nodes = vec![
-            node("Person", "p1", &[("name", Value::from("Ada")), ("age", Value::Int(36))]),
-            node("Person", "p2", &[("name", Value::from("Alan")), ("age", Value::Int(41))]),
-            node("Person", "p3", &[("name", Value::from("Grace")), ("age", Value::Int(85))]),
+            node(
+                "Person",
+                "p1",
+                &[("name", Value::from("Ada")), ("age", Value::Int(36))],
+            ),
+            node(
+                "Person",
+                "p2",
+                &[("name", Value::from("Alan")), ("age", Value::Int(41))],
+            ),
+            node(
+                "Person",
+                "p3",
+                &[("name", Value::from("Grace")), ("age", Value::Int(85))],
+            ),
             node("City", "c1", &[("name", Value::from("London"))]),
         ];
         let edges = vec![
@@ -2133,13 +2233,16 @@ mod tests {
 
     #[test]
     fn where_boolean_and_or() {
-        let t = run("MATCH (n:Person) WHERE n.age < 40 OR n.name = 'Grace' RETURN n.name ORDER BY n.name");
+        let t = run(
+            "MATCH (n:Person) WHERE n.age < 40 OR n.name = 'Grace' RETURN n.name ORDER BY n.name",
+        );
         assert_eq!(t.rows.len(), 2);
     }
 
     #[test]
     fn where_in_list() {
-        let t = run("MATCH (n:Person) WHERE n.name IN ['Ada', 'Grace'] RETURN n.name ORDER BY n.name");
+        let t =
+            run("MATCH (n:Person) WHERE n.name IN ['Ada', 'Grace'] RETURN n.name ORDER BY n.name");
         assert_eq!(
             t.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
             vec![Value::from("Ada"), Value::from("Grace")]
@@ -2194,8 +2297,12 @@ mod tests {
     fn parameters_bind() {
         let mut params = CypherParameters::new();
         params.insert("min".to_string(), Value::Int(40));
-        let t = run_read_query(&graph(), "MATCH (n:Person) WHERE n.age >= $min RETURN n.name", &params)
-            .unwrap();
+        let t = run_read_query(
+            &graph(),
+            "MATCH (n:Person) WHERE n.age >= $min RETURN n.name",
+            &params,
+        )
+        .unwrap();
         assert_eq!(t.rows.len(), 2);
     }
 
@@ -2221,7 +2328,8 @@ mod tests {
 
     #[test]
     fn variable_length_paths() {
-        let t = run("MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name ORDER BY b.name");
+        let t =
+            run("MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name ORDER BY b.name");
         assert_eq!(
             t.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
             vec![Value::from("Alan"), Value::from("Grace")]
@@ -2236,7 +2344,9 @@ mod tests {
 
     #[test]
     fn variable_length_binds_edge_list() {
-        let t = run("MATCH (a:Person {name:'Ada'})-[r:KNOWS*1..2]->(b) RETURN b.name AS name, size(r) AS hops ORDER BY name");
+        let t = run(
+            "MATCH (a:Person {name:'Ada'})-[r:KNOWS*1..2]->(b) RETURN b.name AS name, size(r) AS hops ORDER BY name",
+        );
         assert_eq!(
             t.rows,
             vec![
@@ -2251,13 +2361,31 @@ mod tests {
         let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(:Person) RETURN length(p) AS len");
         assert_eq!(t.rows, vec![vec![Value::Int(1)]]);
         // nodes(p) returns the 2 nodes on the path.
-        let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(b:Person) RETURN size(nodes(p)) AS n");
+        let t =
+            run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(b:Person) RETURN size(nodes(p)) AS n");
         assert_eq!(t.rows, vec![vec![Value::Int(2)]]);
     }
 
     #[test]
+    fn path_variable_returns_first_class_path_value() {
+        let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(b:Person) RETURN p");
+        let Value::Path(path) = &t.rows[0][0] else {
+            panic!("expected Value::Path, got {:?}", t.rows[0][0]);
+        };
+        assert_eq!(path.nodes.len(), 2);
+        assert_eq!(path.relationships.len(), 1);
+        assert_eq!(path.nodes[0]["props"]["name"], Value::from("Ada").to_json());
+
+        let json = t.rows[0][0].to_json();
+        assert!(json.get("nodes").is_some());
+        assert!(json.get("relationships").is_some());
+    }
+
+    #[test]
     fn path_variable_two_hop() {
-        let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->()-[:KNOWS]->() RETURN length(p) AS len");
+        let t = run(
+            "MATCH p = (:Person {name:'Ada'})-[:KNOWS]->()-[:KNOWS]->() RETURN length(p) AS len",
+        );
         assert_eq!(t.rows, vec![vec![Value::Int(2)]]);
     }
 
@@ -2277,13 +2405,19 @@ mod tests {
         let t = run("UNWIND range(1, 3) AS x RETURN x");
         assert_eq!(
             t.rows,
-            vec![vec![Value::Int(1)], vec![Value::Int(2)], vec![Value::Int(3)]]
+            vec![
+                vec![Value::Int(1)],
+                vec![Value::Int(2)],
+                vec![Value::Int(3)]
+            ]
         );
     }
 
     #[test]
     fn head_and_last_over_collect() {
-        let t = run("MATCH (n:Person) WITH collect(n.name) AS names RETURN head(names) AS h, last(names) AS l");
+        let t = run(
+            "MATCH (n:Person) WITH collect(n.name) AS names RETURN head(names) AS h, last(names) AS l",
+        );
         assert_eq!(t.rows, vec![vec![Value::from("Ada"), Value::from("Grace")]]);
     }
 
@@ -2317,7 +2451,9 @@ mod tests {
 
     #[test]
     fn union_all_concatenates() {
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN n.name AS x UNION ALL MATCH (m:City) RETURN m.name AS x");
+        let t = run(
+            "MATCH (n:Person {name:'Ada'}) RETURN n.name AS x UNION ALL MATCH (m:City) RETURN m.name AS x",
+        );
         assert_eq!(t.columns, vec!["x".to_string()]);
         assert_eq!(t.rows.len(), 2);
     }
@@ -2325,13 +2461,17 @@ mod tests {
     #[test]
     fn union_deduplicates() {
         // The same row from both arms collapses under UNION (distinct).
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION MATCH (m:Person {name:'Alan'}) RETURN m.label AS l");
+        let t = run(
+            "MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION MATCH (m:Person {name:'Alan'}) RETURN m.label AS l",
+        );
         assert_eq!(t.rows, vec![vec![Value::from("Person")]]);
     }
 
     #[test]
     fn union_all_keeps_duplicates() {
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION ALL MATCH (m:Person {name:'Alan'}) RETURN m.label AS l");
+        let t = run(
+            "MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION ALL MATCH (m:Person {name:'Alan'}) RETURN m.label AS l",
+        );
         assert_eq!(t.rows.len(), 2);
     }
 
@@ -2363,7 +2503,8 @@ mod tests {
 
     #[test]
     fn with_aggregate_then_return() {
-        let t = run("MATCH (n) WITH n.label AS label, count(*) AS c RETURN label, c ORDER BY label");
+        let t =
+            run("MATCH (n) WITH n.label AS label, count(*) AS c RETURN label, c ORDER BY label");
         assert_eq!(
             t.rows,
             vec![
@@ -2413,7 +2554,11 @@ mod tests {
         let t = run("UNWIND [1, 2, 3] AS x RETURN x");
         assert_eq!(
             t.rows,
-            vec![vec![Value::Int(1)], vec![Value::Int(2)], vec![Value::Int(3)]]
+            vec![
+                vec![Value::Int(1)],
+                vec![Value::Int(2)],
+                vec![Value::Int(3)]
+            ]
         );
     }
 
@@ -2430,26 +2575,37 @@ mod tests {
         );
         assert_eq!(
             t.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
-            vec![Value::from("young"), Value::from("mid"), Value::from("senior")]
+            vec![
+                Value::from("young"),
+                Value::from("mid"),
+                Value::from("senior")
+            ]
         );
     }
 
     #[test]
     fn simple_case_expression() {
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN CASE n.age WHEN 36 THEN 'yes' ELSE 'no' END AS m");
+        let t = run(
+            "MATCH (n:Person {name:'Ada'}) RETURN CASE n.age WHEN 36 THEN 'yes' ELSE 'no' END AS m",
+        );
         assert_eq!(t.rows, vec![vec![Value::from("yes")]]);
     }
 
     #[test]
     fn case_without_else_is_null() {
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN CASE WHEN n.age > 100 THEN 'old' END AS m");
+        let t =
+            run("MATCH (n:Person {name:'Ada'}) RETURN CASE WHEN n.age > 100 THEN 'old' END AS m");
         assert_eq!(t.rows, vec![vec![Value::Null]]);
     }
 
     #[test]
     fn unbound_variable_rejected_by_semantics() {
-        let err = run_read_query(&graph(), "MATCH (n:Person) RETURN m.name", &CypherParameters::new())
-            .unwrap_err();
+        let err = run_read_query(
+            &graph(),
+            "MATCH (n:Person) RETURN m.name",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
         assert!(matches!(err, GrustError::CypherUnresolvedIdentity(_)));
     }
 
@@ -2548,7 +2704,8 @@ mod tests {
 
     #[test]
     fn scalar_numeric_functions() {
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN abs(0 - n.age) AS a, toString(n.age) AS s");
+        let t =
+            run("MATCH (n:Person {name:'Ada'}) RETURN abs(0 - n.age) AS a, toString(n.age) AS s");
         assert_eq!(t.rows, vec![vec![Value::Int(36), Value::from("36")]]);
     }
 

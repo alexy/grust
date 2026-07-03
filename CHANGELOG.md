@@ -6,6 +6,67 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added the **Full39075 follow-on goal** (`docs/GQL_FULL39075_GOAL.md`) and
+  landed F1 index-definition support: `cypher_ddl` / `sail_cypher_ddl` now parse
+  portable single-property `CREATE INDEX name [IF NOT EXISTS] FOR ... ON (...)`
+  and `DROP INDEX name [IF EXISTS]` DDL for node and relationship properties.
+  `CypherConstraintRegistry` tracks named index metadata through
+  `named_indexes()`, new public metadata types (`GraphIndexDefinition`,
+  `GraphIndexElement`, `NamedGraphIndex`) are exported through `grust-cypher`,
+  `grust-sail`, and the `grust-graph` facade, and `GqlBackendDescriptor` gains an
+  `index_ddl` capability flag. `IndexDefinition` is now `Supported` in the GQL
+  manifest; the candidate `Full39075` remainder drops to 8 future + 2 planned
+  features + 5 intentional rejections.
+
+- Added **graph-type definition DDL** (Full39075 F2): `cypher_ddl` /
+  `sail_cypher_ddl` now parse portable `CREATE GRAPH TYPE name [IF NOT EXISTS]
+  [OPEN|CLOSED] AS ...` and `DROP GRAPH TYPE name [IF EXISTS]` metadata. The
+  first supported body surface covers `NODE Label (...)` and directed
+  `EDGE Type FROM Source TO Target (...)` declarations with scalar/array field
+  types and `REQUIRED` / `NOT NULL` markers, lowering to `GraphSchema` inside
+  `GraphTypeDefinition`. `CypherConstraintRegistry` now tracks named graph types
+  through `named_graph_types()`, and `GraphTypeDefinition` / `NamedGraphType` are
+  exported through the language crate and facade. `GraphTypeDefinition` is now
+  `Supported` in the GQL manifest; the candidate `Full39075` remainder drops to
+  7 future + 2 planned features + 5 intentional rejections.
+
+- Added **portable catalog metadata** (Full39075 F3): `CypherConstraintRegistry`
+  can now materialize a `CypherCatalogSnapshot` for a named graph, carrying graph
+  type, index, and named constraint metadata. `cypher_catalog_procedure` exposes
+  deterministic read-only metadata tables for `db.graphs`, `db.graphTypes`,
+  `db.indexes`, and `db.constraints`, and `GqlBackendDescriptor` gains a
+  `catalog_metadata` capability flag. `CatalogMetadata` is now `Supported`; the
+  candidate `Full39075` remainder drops to 6 future + 2 planned features + 5
+  intentional rejections.
+
+- Added **named graph selection** (Full39075 F4): the parser and semantic
+  analyzer now recognize `USE <graph>` clauses, the Memory read reference path
+  validates the selected graph before execution, and
+  `run_read_query_on_named_graph` lets callers bind a single-graph snapshot to a
+  non-default graph name. Catalog-backed callers can validate graph names through
+  `ensure_catalog_graph_selection`, and `GqlBackendDescriptor` gains a
+  `named_graph_selection` capability flag. `NamedGraphSelection` is now
+  `Supported`; the candidate `Full39075` remainder drops to 5 future + 2 planned
+  features + 5 intentional rejections.
+
+- Added **session control** (Full39075 F5): `CypherSession` tracks the current
+  graph and portable session settings, while `SessionCommand::parse` /
+  `SessionCommand::apply` handle standalone `USE`, `SET name = literal`,
+  `RESET name`, and `RESET ALL` commands. `USE` can validate against a
+  `CypherCatalogSnapshot` before changing session state, and transaction-control
+  behavior remains unchanged. `GqlBackendDescriptor` gains a `session_control`
+  capability flag. `SessionControl` is now `Supported`; the candidate
+  `Full39075` remainder drops to 5 future + 1 planned feature + 5 intentional
+  rejections.
+
+- Added **first-class path values** (Full39075 F6): `grust_core::PathValue` and
+  `Value::Path` now represent fixed-length path bindings directly while
+  `Value::to_json` preserves the existing `{nodes, relationships}` serialization
+  shape. Returning a path variable now yields `Value::Path`, and existing
+  `nodes(p)`, `relationships(p)`, and `length(p)` behavior remains compatible.
+  `PathValues` is now `Supported`; the candidate `Full39075` remainder drops to
+  4 future + 1 planned feature + 5 intentional rejections.
+
 ## 0.11.0 "Crab" - 2026-06-26
 
 - **Turso MVCC + concurrent writes:** `TursoConfig` gains a `journal_mode: TursoJournalMode` field (`Wal` default, or `Mvcc`). `Mvcc` enables Turso's multi-version concurrency control via `PRAGMA journal_mode = mvcc` on connect — a database-*header* mode, so it only applies to a fresh database (an existing WAL database can't be converted; `connect` verifies the mode and errors otherwise). In MVCC mode, data writes (`put_node`/`put_edge`/`put_graph`/`delete_*`/`apply_mutations`) run inside a `BEGIN CONCURRENT … COMMIT` transaction with bounded retry on write-write/busy conflicts, so concurrent writers make progress; WAL-mode behavior is unchanged. Verified end-to-end: mode reported as `mvcc`, `BEGIN CONCURRENT` accepted, batch round-trips, and two concurrent writers writing overlapping keys both succeed via retry.

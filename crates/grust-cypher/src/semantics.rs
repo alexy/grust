@@ -152,6 +152,9 @@ fn analyze_single(query: &SingleQuery, report: &mut SemanticReport) -> Result<()
 
 fn analyze_clause(clause: &Clause, scope: &mut Scope, report: &mut SemanticReport) -> Result<()> {
     match clause {
+        Clause::Use(u) => {
+            report.note(GqlFeature::NamedGraphSelection, u.span);
+        }
         Clause::Match(m) => {
             if m.optional {
                 report.note(GqlFeature::OptionalMatch, m.span);

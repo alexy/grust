@@ -1200,6 +1200,14 @@ ordering, and checked arithmetic wired through every backend. Read-only catalog
 procedures (`CALL db.labels()`, `db.relationshipTypes()`, `db.propertyKeys()`)
 expose schema metadata, and a `START TRANSACTION`/`BEGIN`/`COMMIT`/`ROLLBACK`
 command surface pairs with honest per-backend atomicity capability reporting.
+Caller-owned DDL metadata can also be materialized as a portable
+`CypherCatalogSnapshot`, with deterministic metadata tables for `db.graphs`,
+`db.graphTypes`, `db.indexes`, and `db.constraints`. Read queries may include
+`USE <graph>`; the default single-graph executor accepts `USE default`, and
+callers can bind a graph snapshot to another explicit graph name. Standalone
+`USE`, `SET`, and `RESET` commands update portable `CypherSession` state without
+changing transaction-control behavior. Fixed-length path bindings now return
+first-class `Value::Path` values while preserving the existing JSON path shape.
 
 The writable subset routes acceptance through the same standards-conformant
 parser, keeping the mutation plans byte-identical to the established write planner

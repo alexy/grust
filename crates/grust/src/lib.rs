@@ -12,16 +12,19 @@ pub use grust_cocoindex::*;
 
 #[cfg(feature = "cypher")]
 pub use grust_cypher::{
-    CypherConstraintRegistry, CypherCreateMode, CypherDdlApplicationReport, CypherDdlStatement,
-    CypherGeneratedNodeId, CypherMutationOptions, CypherMutationReport, CypherMutationResult,
-    CypherMutationTableResult, CypherNodeIdPolicy, CypherNullAssignment, CypherParameters,
-    CypherRelationshipIdPolicy, CypherResultTable, CypherSchemaApplication, CypherSchemaManager,
-    CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity, NamedGraphConstraint,
-    apply_cypher_ddl_to_schema, apply_cypher_native_constraints, cypher_constraints, cypher_ddl,
-    cypher_mutation_plan, cypher_mutation_plan_with_options,
-    cypher_mutation_plan_with_return_options,
-    execute_cypher_mutation_returning_with_options_on_store, sail_cypher_constraints,
-    sail_cypher_ddl, sail_cypher_mutation_plan, sail_cypher_mutation_plan_with_options,
+    CypherCatalogSnapshot, CypherConstraintRegistry, CypherCreateMode, CypherDdlApplicationReport,
+    CypherDdlStatement, CypherGeneratedNodeId, CypherMutationOptions, CypherMutationReport,
+    CypherMutationResult, CypherMutationTableResult, CypherNodeIdPolicy, CypherNullAssignment,
+    CypherParameters, CypherRelationshipIdPolicy, CypherResultTable, CypherSchemaApplication,
+    CypherSchemaManager, CypherSession, CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity,
+    GraphIndexDefinition, GraphIndexElement, GraphTypeDefinition, NamedGraphCatalog,
+    NamedGraphConstraint, NamedGraphIndex, NamedGraphType, SessionCommand,
+    apply_cypher_ddl_to_schema, apply_cypher_native_constraints, cypher_catalog_procedure,
+    cypher_constraints, cypher_ddl, cypher_mutation_plan, cypher_mutation_plan_with_options,
+    cypher_mutation_plan_with_return_options, ensure_catalog_graph_selection,
+    ensure_query_uses_graph, execute_cypher_mutation_returning_with_options_on_store,
+    query_graph_selection, run_read_query_on_named_graph, sail_cypher_constraints, sail_cypher_ddl,
+    sail_cypher_mutation_plan, sail_cypher_mutation_plan_with_options,
     sail_cypher_mutation_plan_with_return_options,
 };
 
@@ -75,15 +78,19 @@ pub mod prelude {
 
     #[cfg(feature = "cypher")]
     pub use grust_cypher::{
-        CypherConstraintRegistry, CypherCreateMode, CypherDdlApplicationReport, CypherDdlStatement,
-        CypherGeneratedNodeId, CypherMutationOptions, CypherMutationReport, CypherMutationResult,
+        CypherCatalogSnapshot, CypherConstraintRegistry, CypherCreateMode,
+        CypherDdlApplicationReport, CypherDdlStatement, CypherGeneratedNodeId,
+        CypherMutationOptions, CypherMutationReport, CypherMutationResult,
         CypherMutationTableResult, CypherNodeIdPolicy, CypherNullAssignment, CypherParameters,
         CypherRelationshipIdPolicy, CypherResultTable, CypherSchemaApplication,
-        CypherSchemaManager, CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity,
-        NamedGraphConstraint, apply_cypher_ddl_to_schema, apply_cypher_native_constraints,
+        CypherSchemaManager, CypherSession, CypherWrittenEdgeIdentity, CypherWrittenNodeIdentity,
+        GraphIndexDefinition, GraphIndexElement, GraphTypeDefinition, NamedGraphCatalog,
+        NamedGraphConstraint, NamedGraphIndex, NamedGraphType, SessionCommand,
+        apply_cypher_ddl_to_schema, apply_cypher_native_constraints, cypher_catalog_procedure,
         cypher_constraints, cypher_ddl, cypher_mutation_plan, cypher_mutation_plan_with_options,
-        cypher_mutation_plan_with_return_options,
-        execute_cypher_mutation_returning_with_options_on_store, sail_cypher_constraints,
+        cypher_mutation_plan_with_return_options, ensure_catalog_graph_selection,
+        ensure_query_uses_graph, execute_cypher_mutation_returning_with_options_on_store,
+        query_graph_selection, run_read_query_on_named_graph, sail_cypher_constraints,
         sail_cypher_ddl, sail_cypher_mutation_plan, sail_cypher_mutation_plan_with_options,
         sail_cypher_mutation_plan_with_return_options,
     };

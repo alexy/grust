@@ -53,6 +53,7 @@ pub struct SingleQuery {
 /// A top-level clause within a single query.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Clause {
+    Use(UseClause),
     Match(MatchClause),
     Create(CreateClause),
     Merge(MergeClause),
@@ -80,6 +81,7 @@ pub struct CallClause {
 impl Clause {
     pub fn span(&self) -> Span {
         match self {
+            Clause::Use(c) => c.span,
             Clause::Match(c) => c.span,
             Clause::Create(c) => c.span,
             Clause::Merge(c) => c.span,
@@ -97,7 +99,7 @@ impl Clause {
     pub fn is_reading(&self) -> bool {
         matches!(
             self,
-            Clause::Match(_) | Clause::Unwind(_) | Clause::Call(_)
+            Clause::Use(_) | Clause::Match(_) | Clause::Unwind(_) | Clause::Call(_)
         )
     }
 
@@ -117,6 +119,12 @@ impl Clause {
 // ---------------------------------------------------------------------------
 // Reading clauses
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UseClause {
+    pub graph: String,
+    pub span: Span,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatchClause {
