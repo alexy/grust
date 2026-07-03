@@ -6,6 +6,15 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added **`CALL { … }` subqueries** (Full39075 F8) to the read reference
+  executor: correlated import-all scoping (the subquery sees the outer row's
+  bindings), WITH-style `RETURN` that preserves node/edge bindings for later
+  `MATCH` extension, per-row execution (rows with empty subquery results are
+  dropped, join semantics otherwise), `UNION`/`UNION ALL` arms, and structured
+  rejections for column collisions, missing `RETURN`, and `RETURN *`.
+  `Subquery` is now `Supported`; the candidate `Full39075` remainder drops to
+  2 future + 1 planned features + 5 intentional rejections.
+
 - Added **first-class graph values** (Full39075 F7): `grust_core::GraphValue`
   and `Value::Graph` model set-shaped graph values — construction deduplicates
   nodes by id and relationships by id-or-endpoint identity, preserving

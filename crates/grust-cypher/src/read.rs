@@ -129,83 +129,14 @@ fn execute_single(
     // A clause pipeline: each clause transforms the binding-row stream; RETURN is
     // terminal and produces the result table.
     for clause in &query.clauses {
-        match clause {
-            Clause::Use(_) => {}
-            Clause::Match(m) if !m.optional => {
-                for pattern in &m.patterns {
-                    rows = expand_pattern(graph, &index, pattern, rows, params)?;
-                }
-                if let Some(where_expr) = &m.where_clause {
-                    rows = filter_rows(rows, where_expr, params)?;
-                }
-            }
-            Clause::Match(m) => {
-                // OPTIONAL MATCH: each incoming row produces its matches, or a
-                // single row with this match's new variables NULL-padded.
-                let new_vars = pattern_variables(&m.patterns);
-                let mut out = Vec::new();
-                for row in rows {
-                    let mut matched = vec![row.clone()];
-                    for pattern in &m.patterns {
-                        matched = expand_pattern(graph, &index, pattern, matched, params)?;
-                    }
-                    if let Some(where_expr) = &m.where_clause {
-                        matched = filter_rows(matched, where_expr, params)?;
-                    }
-                    if matched.is_empty() {
-                        let mut padded = row;
-                        for var in &new_vars {
-                            padded
-                                .entry(var.clone())
-                                .or_insert(Bound::Value(Value::Null));
-                        }
-                        out.push(padded);
-                    } else {
-                        out.extend(matched);
-                    }
-                }
-                rows = out;
-            }
-            Clause::With(w) => {
-                rows = project_to_bindings(&w.projection, rows, params)?;
-                if let Some(where_expr) = &w.where_clause {
-                    rows = filter_rows(rows, where_expr, params)?;
-                }
-            }
-            Clause::Unwind(u) => {
-                rows = unwind_rows(rows, u, params)?;
-            }
-            Clause::Call(c) => {
-                let (out_cols, out_rows) = call_procedure(graph, c)?;
-                let mut next = Vec::new();
-                for row in &rows {
-                    for vals in &out_rows {
-                        let mut nr = row.clone();
-                        for (col, val) in out_cols.iter().zip(vals.iter()) {
-                            nr.insert(col.clone(), Bound::Value(val.clone()));
-                        }
-                        next.push(nr);
-                    }
-                }
-                rows = next;
-                if let Some(where_expr) = &c.where_clause {
-                    rows = filter_rows(rows, where_expr, params)?;
-                }
-                call_output = Some(out_cols);
-            }
-            Clause::Return(r) => {
-                // Terminal: project the current bindings to the result table.
-                return project(graph, &rows, &r.projection, params);
-            }
-            Clause::Create(_)
-            | Clause::Merge(_)
-            | Clause::Delete(_)
-            | Clause::Set(_)
-            | Clause::Remove(_) => {
-                return Err(gql_execution(
-                    "the read reference executor only runs read-only MATCH/WITH/UNWIND/RETURN queries",
-                ));
-            }
+        if let Clause::Return(r) = clause {
+            // Terminal: project the current bindings to the result table.
+            return project(graph, &rows, &r.projection, params);
+        }
+        let (next, call_cols) = advance_rows(graph, &index, clause, rows, params)?;
+        rows = next;
+        if call_cols.is_some() {
+            call_output = call_cols;
         }
     }
 
@@ -229,6 +160,241 @@ fn execute_single(
     }
 
     Err(gql_execution("read query has no RETURN clause"))
+}
+
+/// Apply one non-`RETURN` clause to the binding-row stream. Returns the new
+/// rows plus, for a `CALL <proc>`, the procedure's output columns (so a
+/// standalone trailing `CALL` can shape the result table).
+fn advance_rows(
+    graph: &Graph,
+    index: &NodeIndex,
+    clause: &Clause,
+    rows: Vec<Row>,
+    params: &CypherParameters,
+) -> Result<(Vec<Row>, Option<Vec<String>>)> {
+    match clause {
+        Clause::Use(_) => Ok((rows, None)),
+        Clause::Match(m) if !m.optional => {
+            let mut rows = rows;
+            for pattern in &m.patterns {
+                rows = expand_pattern(graph, index, pattern, rows, params)?;
+            }
+            if let Some(where_expr) = &m.where_clause {
+                rows = filter_rows(rows, where_expr, params)?;
+            }
+            Ok((rows, None))
+        }
+        Clause::Match(m) => {
+            // OPTIONAL MATCH: each incoming row produces its matches, or a
+            // single row with this match's new variables NULL-padded.
+            let new_vars = pattern_variables(&m.patterns);
+            let mut out = Vec::new();
+            for row in rows {
+                let mut matched = vec![row.clone()];
+                for pattern in &m.patterns {
+                    matched = expand_pattern(graph, index, pattern, matched, params)?;
+                }
+                if let Some(where_expr) = &m.where_clause {
+                    matched = filter_rows(matched, where_expr, params)?;
+                }
+                if matched.is_empty() {
+                    let mut padded = row;
+                    for var in &new_vars {
+                        padded
+                            .entry(var.clone())
+                            .or_insert(Bound::Value(Value::Null));
+                    }
+                    out.push(padded);
+                } else {
+                    out.extend(matched);
+                }
+            }
+            Ok((out, None))
+        }
+        Clause::With(w) => {
+            let mut rows = project_to_bindings(&w.projection, rows, params)?;
+            if let Some(where_expr) = &w.where_clause {
+                rows = filter_rows(rows, where_expr, params)?;
+            }
+            Ok((rows, None))
+        }
+        Clause::Unwind(u) => Ok((unwind_rows(rows, u, params)?, None)),
+        Clause::Call(c) => {
+            let (out_cols, out_rows) = call_procedure(graph, c)?;
+            let mut next = Vec::new();
+            for row in &rows {
+                for vals in &out_rows {
+                    let mut nr = row.clone();
+                    for (col, val) in out_cols.iter().zip(vals.iter()) {
+                        nr.insert(col.clone(), Bound::Value(val.clone()));
+                    }
+                    next.push(nr);
+                }
+            }
+            let next = if let Some(where_expr) = &c.where_clause {
+                filter_rows(next, where_expr, params)?
+            } else {
+                next
+            };
+            Ok((next, Some(out_cols)))
+        }
+        Clause::Subquery(s) => Ok((execute_subquery_clause(graph, s, rows, params)?, None)),
+        Clause::Return(_) => unreachable!("RETURN is handled by the caller"),
+        Clause::Create(_)
+        | Clause::Merge(_)
+        | Clause::Delete(_)
+        | Clause::Set(_)
+        | Clause::Remove(_) => Err(gql_execution(
+            "the read reference executor only runs read-only MATCH/WITH/UNWIND/RETURN queries",
+        )),
+    }
+}
+
+/// `CALL { … }`: execute the inline subquery once per incoming row (the outer
+/// bindings are visible inside), joining its returned columns onto the row.
+/// A row whose subquery returns no rows is dropped.
+fn execute_subquery_clause(
+    graph: &Graph,
+    subquery: &SubqueryClause,
+    rows: Vec<Row>,
+    params: &CypherParameters,
+) -> Result<Vec<Row>> {
+    let mut out = Vec::new();
+    for row in rows {
+        let (columns, inner_rows) = run_subquery(graph, &subquery.query, &row, params)?;
+        for col in &columns {
+            if row.contains_key(col) {
+                return Err(gql_name(format!(
+                    "CALL {{ … }} returns `{col}`, which is already bound in the outer scope"
+                )));
+            }
+        }
+        for inner in inner_rows {
+            let mut next = row.clone();
+            for col in &columns {
+                let bound = inner.get(col).cloned().unwrap_or(Bound::Value(Value::Null));
+                next.insert(col.clone(), bound);
+            }
+            out.push(next);
+        }
+    }
+    Ok(out)
+}
+
+/// Run a subquery (possibly `UNION`-composed) seeded with the outer row's
+/// bindings. Returns the output column names and one binding row per result.
+fn run_subquery(
+    graph: &Graph,
+    query: &Query,
+    seed: &Row,
+    params: &CypherParameters,
+) -> Result<(Vec<String>, Vec<Row>)> {
+    let mut columns: Option<Vec<String>> = None;
+    let mut all: Vec<Row> = Vec::new();
+    let mut distinct = false;
+    for part in &query.parts {
+        if part.union == Some(UnionKind::Distinct) {
+            distinct = true;
+        }
+        let (cols, rows) = run_subquery_single(graph, &part.query, seed, params)?;
+        match &columns {
+            None => columns = Some(cols),
+            Some(existing) if existing != &cols => {
+                return Err(gql_name(
+                    "all UNION arms inside CALL { … } must return the same column names in the same order",
+                ));
+            }
+            Some(_) => {}
+        }
+        all.extend(rows);
+    }
+    let columns = columns.ok_or_else(|| gql_execution("CALL { … } subquery has no parts"))?;
+    if distinct {
+        let mut seen = std::collections::HashSet::new();
+        let mut deduped = Vec::with_capacity(all.len());
+        for row in all {
+            let mut values = Vec::with_capacity(columns.len());
+            for col in &columns {
+                values.push(match row.get(col) {
+                    Some(bound) => bound_value(bound)?,
+                    None => Value::Null,
+                });
+            }
+            if seen.insert(return_row_key(&values, "CALL { … } UNION")?) {
+                deduped.push(row);
+            }
+        }
+        all = deduped;
+    }
+    Ok((columns, all))
+}
+
+fn run_subquery_single(
+    graph: &Graph,
+    query: &SingleQuery,
+    seed: &Row,
+    params: &CypherParameters,
+) -> Result<(Vec<String>, Vec<Row>)> {
+    let index = NodeIndex::build(graph);
+    let mut rows = vec![seed.clone()];
+    for clause in &query.clauses {
+        if let Clause::Return(r) = clause {
+            return project_subquery_return(&r.projection, rows, params);
+        }
+        let (next, _) = advance_rows(graph, &index, clause, rows, params)?;
+        rows = next;
+    }
+    Err(gql_execution("CALL { … } subquery must end in RETURN"))
+}
+
+/// Project a subquery's terminal `RETURN` to named binding rows (WITH-style:
+/// bare variables keep their node/edge binding; computed items bind values
+/// under their alias or derived column name).
+fn project_subquery_return(
+    projection: &Projection,
+    rows: Vec<Row>,
+    params: &CypherParameters,
+) -> Result<(Vec<String>, Vec<Row>)> {
+    if projection.star {
+        return Err(unsupported_gql_feature(
+            GqlFeature::Subquery,
+            GqlConformanceProfile::PortableGql,
+            "RETURN * inside CALL { … } is not supported (it would re-project the imported outer scope)",
+        ));
+    }
+    let items: Vec<ReturnItem> = projection
+        .items
+        .iter()
+        .map(|item| ReturnItem {
+            expr: item.expr.clone(),
+            alias: Some(item.alias.clone().unwrap_or_else(|| match &item.expr {
+                Expr::Variable(v) => v.clone(),
+                other => column_name(other),
+            })),
+        })
+        .collect();
+    let columns: Vec<String> = items
+        .iter()
+        .map(|item| item.alias.clone().expect("alias was just filled in"))
+        .collect();
+    let mut unique = std::collections::HashSet::new();
+    for col in &columns {
+        if !unique.insert(col.as_str()) {
+            return Err(gql_name(format!(
+                "CALL {{ … }} returns the column `{col}` more than once; alias the items uniquely"
+            )));
+        }
+    }
+    let named = Projection {
+        distinct: projection.distinct,
+        star: false,
+        items,
+        order_by: projection.order_by.clone(),
+        skip: projection.skip.clone(),
+        limit: projection.limit.clone(),
+    };
+    let out = project_to_bindings(&named, rows, params)?;
+    Ok((columns, out))
 }
 
 /// Execute a read-only catalog procedure against the graph snapshot.
@@ -2809,6 +2975,86 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("gql:type"));
+    }
+
+    #[test]
+    fn call_subquery_correlated_join() {
+        // The outer binding `a` is visible inside; a row whose subquery
+        // returns nothing (Grace has no outgoing KNOWS) is dropped.
+        let t = run(
+            "MATCH (a:Person) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS friend } RETURN a.name, friend ORDER BY a.name",
+        );
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::from("Ada"), Value::from("Alan")],
+                vec![Value::from("Alan"), Value::from("Grace")],
+            ]
+        );
+    }
+
+    #[test]
+    fn call_subquery_uncorrelated_aggregate() {
+        let t = run(
+            "MATCH (a:Person) CALL { MATCH (c:City) RETURN count(*) AS cities } RETURN a.name, cities ORDER BY a.name",
+        );
+        assert_eq!(t.rows.len(), 3);
+        assert!(t.rows.iter().all(|r| r[1] == Value::Int(1)));
+    }
+
+    #[test]
+    fn call_subquery_returns_node_binding_for_later_match() {
+        // A bare-variable subquery RETURN keeps its node binding, so a later
+        // MATCH can extend from it.
+        let t = run(
+            "CALL { MATCH (a:Person {name:'Ada'}) RETURN a } MATCH (a)-[:KNOWS]->(b) RETURN b.name",
+        );
+        assert_eq!(t.rows, vec![vec![Value::from("Alan")]]);
+    }
+
+    #[test]
+    fn call_subquery_union_arms() {
+        let t = run(
+            "CALL { MATCH (p:Person {name:'Ada'}) RETURN p.name AS n UNION MATCH (c:City) RETURN c.name AS n } RETURN n ORDER BY n",
+        );
+        assert_eq!(
+            t.rows,
+            vec![vec![Value::from("Ada")], vec![Value::from("London")]]
+        );
+    }
+
+    #[test]
+    fn call_subquery_column_collision_rejected() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH (a:Person) CALL { MATCH (x:City) RETURN x.name AS a } RETURN a",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GrustError::CypherUnresolvedIdentity(_)));
+        assert!(err.to_string().contains("already bound"));
+    }
+
+    #[test]
+    fn call_subquery_requires_return() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH (a:Person) CALL { MATCH (c:City) } RETURN a.name",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must end in RETURN"));
+    }
+
+    #[test]
+    fn call_subquery_return_star_is_feature_tagged() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH (a:Person) CALL { MATCH (c:City) RETURN * } RETURN a.name",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GrustError::Unsupported(_)));
     }
 
     #[test]

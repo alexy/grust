@@ -317,7 +317,7 @@ impl Parser {
                     clauses.push(Clause::Return(self.parse_return()?));
                     break; // RETURN ends a single query
                 }
-                Token::Keyword(Keyword::Call) => clauses.push(Clause::Call(self.parse_call()?)),
+                Token::Keyword(Keyword::Call) => clauses.push(self.parse_call()?),
                 _ => break,
             }
             // a UNION or EOF/semicolon ends the single query
@@ -561,13 +561,22 @@ impl Parser {
         })
     }
 
-    /// `CALL <dotted.name>() [YIELD col [AS alias], …]`
+    /// `CALL { <query> }` (inline subquery) or
+    /// `CALL <dotted.name>() [YIELD col [AS alias], …]` (procedure).
     ///
     /// Only nullary read-only catalog procedures are accepted (Unit 14); a
     /// non-empty argument list is feature-tagged as unsupported.
-    fn parse_call(&mut self) -> PResult<CallClause> {
+    fn parse_call(&mut self) -> PResult<Clause> {
         let start = self.span_here();
         self.expect(&Token::Keyword(Keyword::Call), "CALL")?;
+        if self.eat(&Token::LBrace) {
+            let query = self.parse_one_query()?;
+            self.expect(&Token::RBrace, "} to close CALL { … }")?;
+            return Ok(Clause::Subquery(SubqueryClause {
+                query,
+                span: start.to(self.prev_span()),
+            }));
+        }
         let mut name = self.parse_name("a procedure name")?;
         while self.eat(&Token::Dot) {
             name.push('.');
@@ -602,12 +611,12 @@ impl Parser {
                 where_clause = Some(self.parse_expr()?);
             }
         }
-        Ok(CallClause {
+        Ok(Clause::Call(CallClause {
             name,
             yields,
             where_clause,
             span: start.to(self.prev_span()),
-        })
+        }))
     }
 
     fn parse_projection(&mut self) -> PResult<Projection> {

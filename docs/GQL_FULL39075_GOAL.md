@@ -59,7 +59,7 @@ passthrough.
 | **F5** | `session-control` | F4 | Done | Standalone `USE`, `SET`, `RESET`, and `RESET ALL` session commands now parse and update portable `CypherSession` state without changing transaction control behavior. |
 | **F6** | `path-values` | current path bindings | Done | Fixed-length path bindings now return first-class `Value::Path(PathValue)` values with stable node/relationship JSON serialization. |
 | **F7** | `graph-values` | F2, F3, F6 | Done | First-class `Value::Graph(GraphValue)` landed: deduplicated node/relationship sets, `graph(nodes, relationships)` construction in the read reference, `nodes()`/`relationships()` accessors, stable JSON serialization. |
-| **F8** | `subquery` | F4, F5 | Future | Implement `CALL { ... }` scoping and execution. Depends on settled scope/session graph behavior. |
+| **F8** | `subquery` | F4, F5 | Done | `CALL { … }` correlated subqueries landed: outer bindings visible (import-all), WITH-style RETURN join with binding preservation, UNION arms, per-row execution, structured collision/RETURN-required/star rejections. |
 | **F9** | `table-valued-function` | F8 | Future | Generalize the existing read-only catalog procedures into TVF-style row sources. |
 | **F10** | `shortest-path` | F6 | Future | Add shortest-path families on top of first-class path values and a dedicated traversal/cost model. |
 | **F11** | `native-cypher-passthrough` | backend descriptors, F5 | Planned | Add explicit backend-native escape hatches outside portable conformance, with capability flags and structured non-support. |
@@ -146,6 +146,23 @@ Deliverables:
   catalog snapshot when one is provided. **Done.**
 - `GqlBackendDescriptor::session_control` reports capability. **Done.**
 - Manifest/profile docs flipped `session-control` to `Supported`. **Done.**
+
+## Completed Work Item: F8 Subquery
+
+Goal: implement `CALL { ... }` scoping and execution on the read reference.
+
+Deliverables:
+
+- `Clause::Subquery`/`SubqueryClause` AST + parser support (`CALL {` branches
+  off the existing procedure `CALL`). **Done.**
+- Correlated import-all scoping: the subquery sees the outer row's bindings;
+  its `RETURN` columns join onto the outer scope, with structured errors for
+  column collisions, missing `RETURN`, and `RETURN *`. **Done.**
+- Execution: per-incoming-row evaluation with binding-preserving WITH-style
+  RETURN (bare node/edge variables stay MATCH-extensible downstream), rows
+  with empty subquery results dropped, `UNION`/`UNION ALL` arms combined with
+  distinct dedup. **Done.**
+- Manifest/profile docs flipped `subquery` to `Supported`. **Done.**
 
 ## Completed Work Item: F7 Graph Values
 

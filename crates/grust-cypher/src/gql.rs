@@ -762,9 +762,9 @@ impl GqlFeature {
             GqlFeature::Subquery => d!(
                 "subquery",
                 QueryComposition,
-                Future,
+                Supported,
                 PortableGql,
-                "Subquery skeletons with scope visibility (Unit 8)"
+                "CALL { … } correlated subqueries in the read reference: outer bindings visible, WITH-style RETURN join, UNION arms, per-row execution (Full39075 F8)"
             ),
             GqlFeature::DistinctOrderingLimit => d!(
                 "distinct-ordering-limit",
@@ -1739,7 +1739,6 @@ mod tests {
         let expected: std::collections::BTreeSet<&str> = [
             // Future — deferred to a later full-39075 pass (rationale in the doc).
             "shortest-path",
-            "subquery",
             "table-valued-function",
             // Planned — near-term, partially scaffolded.
             "native-cypher-passthrough",
