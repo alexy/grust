@@ -6,6 +6,48 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **PUSHDOWN2 PM3**: correlated subqueries and shortest paths now push into
+  backend SQL. A correlated inner `WHERE` (e.g. `b.age > a.age` under type
+  hints) lowers through the segment predicate machinery into the subquery
+  join's `ON` clause — the inner pipeline, aggregates included, still runs in
+  the reference — and the correlation rule relaxed to reject only *rebinds*
+  of the outer variable (pure references are honored by the reference seeds).
+  Endpoint-only `shortestPath`/`allShortestPaths` lower to a recursive walk
+  CTE with per-pair minimal-depth selection (SQLite-gated); `allShortestPaths`
+  keeps tie multiplicity and `shortestPath` picks the reference's DFS-first
+  path via a zero-padded edge-`rowid` sequence key. The oracle exposed and
+  fixed an F10 reference bug: a no-`*` relationship inside `shortestPath`
+  searched unbounded instead of exactly one hop. Oracle 20 differential
+  tests.
+
+- **PUSHDOWN2 PM2**: uncorrelated `CALL { … }` subqueries now push into
+  backend SQL (`SubqueryReadPushdown`): a leading subquery lowers to its inner
+  node scan, and `MATCH … CALL { … } …` lowers to a `LEFT JOIN ON 1=1` of the
+  two scans — LEFT so an inner aggregate over an empty inner scan still
+  produces its per-outer-row empty-group row, exactly like the reference. The
+  inner pipeline, subquery-`RETURN` join, and outer tail run through the
+  shared reference; correlated shapes (including same-name shadowing) fall
+  back conservatively. Correlated `tvf.keys(n)` also pushes via a lateral
+  `json_each` join (SQLite-gated). The oracle work exposed and fixed a latent
+  reference bug: `DISTINCT` over computed `WITH`/subquery-`RETURN` items
+  errored ("variable not bound") because dedup re-evaluated pre-projection
+  expressions against post-projection rows; dedup now keys on the produced
+  rows' values. Oracle +2 differential tests.
+
+- Started the **PUSHDOWN2 goal** (`docs/GQL_PUSHDOWN2_GOAL.md`): PM1 done.
+  Catalog procedures now push into backend SQL as a `ProcedureReadPushdown`
+  leaf — `db.labels`/`db.relationshipTypes` as `SELECT DISTINCT` scans on both
+  dialects, `db.propertyKeys` via SQLite `json_each`, and `tvf.range` with
+  constant/parameter arguments via a guarded SQLite recursive CTE — with
+  `YIELD`/`WHERE`/pipeline tails running through the shared reference so
+  results stay byte-identical by construction. Dialect-gated row sources are
+  reported through the new `ReadPushdown::supported_by`, and Sail falls back
+  to the reference for them. The P0 fallback-pinning test found and fixed a
+  bug where F10's `shortestPath(…)` wrapper was not rejected by the pushdown
+  lowerers (a bare wrapped var-length pattern lowered as a plain var-length
+  scan, returning wrong rows on Sail). Differential-oracle coverage grows by
+  two tests over the embedded `turso` and real-SQLite engines.
+
 ## 0.12.0 "Lobster" - 2026-07-03
 
 Note: `0.12.0` widens public enums and structs (`Value::Graph`,

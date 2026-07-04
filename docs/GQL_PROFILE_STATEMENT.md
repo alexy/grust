@@ -88,7 +88,14 @@ more. Notable deliberate scopings:
 ## Per-backend conformance
 
 The executing-Cypher set is **Memory** (reference), **Sail** (writes + read
-pushdown), **Turso** (writes + differential oracle). Postgres/Postgres-PGQ are
+pushdown), **Turso** (writes + differential oracle). The pushed read subset
+(see `docs/GQL_PUSHDOWN2_GOAL.md`) covers node/segment/var-length patterns,
+`UNION`, `OPTIONAL MATCH`, multi-pattern `MATCH`, the `WITH` horizon, catalog
+procedures, TVF row sources, `CALL { … }` subqueries (uncorrelated and
+correlated-`WHERE`), and endpoint-only shortest paths — with SQLite-gated
+leaves falling back to the reference on Spark, and the `RETURN` projection
+always running through the shared reference so pushed results match it by
+construction. Postgres/Postgres-PGQ are
 SQL/PGQ backends without a portable Cypher executor; **Falkor** and **Surreal**
 are native-graph backends (backend-native Cypher / SurrealQL passthrough via
 `run_native_cypher` / `run_native_surrealql`); Helix/Ladybug are internal

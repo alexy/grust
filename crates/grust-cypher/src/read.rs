@@ -633,7 +633,7 @@ fn project_to_bindings(
     };
 
     if projection.distinct {
-        out = dedup_bindings(out, &projection.items, projection.star, params)?;
+        out = dedup_bindings(out)?;
     }
     order_bindings(&mut out, &projection.order_by, params)?;
     skip_limit_bindings(&mut out, projection, params)?;
@@ -720,23 +720,18 @@ fn grouped_bindings(
     Ok(out)
 }
 
-fn dedup_bindings(
-    rows: Vec<Row>,
-    items: &[ReturnItem],
-    star: bool,
-    params: &CypherParameters,
-) -> Result<Vec<Row>> {
+/// Deduplicate a `WITH DISTINCT` (or subquery `RETURN DISTINCT`) row stream by
+/// the **produced** rows' bound values. The projection has already run, so the
+/// items' source expressions may reference variables the new rows no longer
+/// bind (e.g. `WITH DISTINCT p.name AS n` drops `p`); the produced bindings
+/// are exactly the projected values, so they are the dedup key.
+fn dedup_bindings(rows: Vec<Row>) -> Result<Vec<Row>> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let mut values: Vec<Value> = Vec::new();
-        if star {
-            for (_, bound) in &row {
-                values.push(bound_value(bound)?);
-            }
-        }
-        for item in items {
-            values.push(eval(&item.expr, &row, params)?);
+        let mut values: Vec<Value> = Vec::with_capacity(row.len());
+        for (_, bound) in &row {
+            values.push(bound_value(bound)?);
         }
         if seen.insert(return_row_key(&values, "WITH DISTINCT")?) {
             out.push(row);
@@ -868,16 +863,19 @@ fn binding_rows_to_rows(binding_rows: Vec<Vec<(String, PushedBinding)>>) -> Vec<
         .map(|bindings| {
             let mut row = Row::new();
             for (var, binding) in bindings {
-                let bound = match binding {
-                    PushedBinding::Node(node) => Bound::Node(node),
-                    PushedBinding::Edge(edge) => Bound::Edge(edge),
-                    PushedBinding::Null => Bound::Value(Value::Null),
-                };
-                row.insert(var, bound);
+                row.insert(var, bound_from_pushed(binding));
             }
             row
         })
         .collect()
+}
+
+fn bound_from_pushed(binding: PushedBinding) -> Bound {
+    match binding {
+        PushedBinding::Node(node) => Bound::Node(node),
+        PushedBinding::Edge(edge) => Bound::Edge(edge),
+        PushedBinding::Null => Bound::Value(Value::Null),
+    }
 }
 
 /// Run a `WITH`/`UNWIND`/`RETURN` tail pipeline over pre-matched binding rows —
@@ -889,7 +887,17 @@ pub(crate) fn project_binding_pipeline(
     tail: &[Clause],
     params: &CypherParameters,
 ) -> Result<CypherResultTable> {
-    let mut rows = binding_rows_to_rows(binding_rows);
+    run_tail_pipeline(binding_rows_to_rows(binding_rows), tail, params)
+}
+
+/// Run a `WITH`/`UNWIND`/`RETURN` tail over already-materialized binding rows —
+/// the shared pipeline core of [`project_binding_pipeline`] and the
+/// catalog-procedure pushdown tail.
+fn run_tail_pipeline(
+    mut rows: Vec<Row>,
+    tail: &[Clause],
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
     for clause in tail {
         match clause {
             Clause::With(w) => {
@@ -913,6 +921,168 @@ pub(crate) fn project_binding_pipeline(
         }
     }
     Err(gql_execution("pushdown pipeline has no RETURN"))
+}
+
+/// Shared tail for catalog-procedure / TVF **read pushdown** (PUSHDOWN2 P1/P2):
+/// a backend's SQL produced the procedure's full (pre-`YIELD`) rows; apply the
+/// `CALL`'s `YIELD` projection/aliasing and `WHERE` exactly like the reference,
+/// then run the remaining `WITH`/`UNWIND`/`RETURN` tail through the shared
+/// pipeline (or shape the standalone-`CALL` result table when there is no
+/// tail). Byte-identical to [`run_read_query`]'s `CALL` path by construction.
+pub(crate) fn project_procedure_pipeline(
+    call: &CallClause,
+    full_cols: &[String],
+    full_rows: Vec<Vec<Value>>,
+    tail: &[Clause],
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
+    let (out_cols, indices) = yield_projection(&call.name, full_cols, &call.yields)?;
+    let mut rows: Vec<Row> = Vec::with_capacity(full_rows.len());
+    for vals in &full_rows {
+        let mut row = Row::new();
+        for (col, &i) in out_cols.iter().zip(indices.iter()) {
+            row.insert(col.clone(), Bound::Value(vals[i].clone()));
+        }
+        rows.push(row);
+    }
+    if let Some(where_expr) = &call.where_clause {
+        rows = filter_rows(rows, where_expr, params)?;
+    }
+    if tail.is_empty() {
+        // Standalone `CALL …`: the YIELD shape is the result table.
+        return Ok(standalone_call_table(&rows, out_cols));
+    }
+    run_tail_pipeline(rows, tail, params)
+}
+
+/// Shape the standalone-`CALL` result table from the yielded columns.
+fn standalone_call_table(rows: &[Row], out_cols: Vec<String>) -> CypherResultTable {
+    let out_rows = rows
+        .iter()
+        .map(|row| {
+            out_cols
+                .iter()
+                .map(|col| match row.get(col) {
+                    Some(Bound::Value(v)) => v.clone(),
+                    _ => Value::Null,
+                })
+                .collect()
+        })
+        .collect();
+    CypherResultTable {
+        columns: out_cols,
+        rows: out_rows,
+    }
+}
+
+/// Run a subquery's inner clause tail (`WITH`/`UNWIND` steps ending in the
+/// subquery `RETURN`) over seeded rows — the reference's inner pipeline core,
+/// shared with subquery pushdown.
+fn run_subquery_tail(
+    mut rows: Vec<Row>,
+    clauses: &[Clause],
+    params: &CypherParameters,
+) -> Result<(Vec<String>, Vec<Row>)> {
+    for clause in clauses {
+        match clause {
+            Clause::Return(r) => return project_subquery_return(&r.projection, rows, params),
+            Clause::With(w) => {
+                rows = project_to_bindings(&w.projection, rows, params)?;
+                if let Some(where_expr) = &w.where_clause {
+                    rows = filter_rows(rows, where_expr, params)?;
+                }
+            }
+            Clause::Unwind(u) => {
+                rows = unwind_rows(rows, u, params)?;
+            }
+            _ => {
+                return Err(gql_execution(
+                    "subquery pushdown runs only WITH/UNWIND/RETURN inner tails",
+                ));
+            }
+        }
+    }
+    Err(gql_execution("CALL { … } subquery must end in RETURN"))
+}
+
+/// Shared tail for **uncorrelated `CALL { … }` pushdown** (PUSHDOWN2 P3): for
+/// each outer row (its pushed bindings) and the pushed inner-scan nodes of its
+/// group, seed the inner pipeline with the outer bindings plus each inner node
+/// (exactly like the reference's per-row subquery execution), run the inner
+/// `WITH`/`UNWIND`/`RETURN` tail, join the returned columns onto the outer
+/// row, and finish with the outer tail. Byte-identical to [`run_read_query`]'s
+/// subquery path by construction.
+pub(crate) fn project_subquery_join_pipeline(
+    groups: Vec<(Vec<(String, PushedBinding)>, Vec<Node>)>,
+    inner_var: &str,
+    inner_tail: &[Clause],
+    outer_tail: &[Clause],
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
+    let mut joined: Vec<Row> = Vec::new();
+    for (outer_bindings, inner_nodes) in groups {
+        let mut outer_row = Row::new();
+        for (var, binding) in outer_bindings {
+            outer_row.insert(var, bound_from_pushed(binding));
+        }
+        let seeds: Vec<Row> = inner_nodes
+            .into_iter()
+            .map(|node| {
+                let mut row = outer_row.clone();
+                row.insert(inner_var.to_string(), Bound::Node(node));
+                row
+            })
+            .collect();
+        let (columns, produced) = run_subquery_tail(seeds, inner_tail, params)?;
+        for col in &columns {
+            if outer_row.contains_key(col) {
+                return Err(gql_name(format!(
+                    "CALL {{ … }} returns `{col}`, which is already bound in the outer scope"
+                )));
+            }
+        }
+        for prow in produced {
+            let mut next = outer_row.clone();
+            for col in &columns {
+                let bound = prow.get(col).cloned().unwrap_or(Bound::Value(Value::Null));
+                next.insert(col.clone(), bound);
+            }
+            joined.push(next);
+        }
+    }
+    run_tail_pipeline(joined, outer_tail, params)
+}
+
+/// Shared tail for **correlated TVF pushdown** (PUSHDOWN2 P4, `tvf.keys`):
+/// each pushed row carries the outer bindings plus the procedure's full
+/// (pre-`YIELD`) row; apply `YIELD`/`WHERE` like the reference and run the
+/// remaining pipeline (or shape the standalone-`CALL` table).
+pub(crate) fn project_correlated_procedure_pipeline(
+    rows_in: Vec<(Vec<(String, PushedBinding)>, Vec<Value>)>,
+    call: &CallClause,
+    full_cols: &[String],
+    tail: &[Clause],
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
+    let (out_cols, indices) = yield_projection(&call.name, full_cols, &call.yields)?;
+    let mut rows: Vec<Row> = Vec::with_capacity(rows_in.len());
+    for (bindings, vals) in rows_in {
+        let mut row = Row::new();
+        for (var, binding) in bindings {
+            row.insert(var, bound_from_pushed(binding));
+        }
+        for (col, &i) in out_cols.iter().zip(indices.iter()) {
+            row.insert(col.clone(), Bound::Value(vals[i].clone()));
+        }
+        rows.push(row);
+    }
+    if let Some(where_expr) = &call.where_clause {
+        rows = filter_rows(rows, where_expr, params)?;
+    }
+    if tail.is_empty() {
+        return Ok(standalone_call_table(&rows, out_cols));
+    }
+    run_tail_pipeline(rows, tail, params)
 }
 
 // ---------------------------------------------------------------------------
@@ -1036,7 +1206,13 @@ fn expand_shortest(
     };
     let rel = &segment.relationship;
     let min = rel.length.map(|r| r.min.unwrap_or(1)).unwrap_or(1) as usize;
-    let max = rel.length.and_then(|r| r.max).map(|m| m as usize);
+    // No `*` means exactly one hop, matching pattern semantics everywhere
+    // else (`-[:R]->` is a single relationship); only an explicit `*`/`*m..`
+    // leaves the upper bound open.
+    let max = match rel.length {
+        None => Some(1),
+        Some(range) => range.max.map(|m| m as usize),
+    };
     // Simple paths never repeat a node, so no shortest path is longer than
     // |nodes| - 1 hops; that caps the open-ended `*` search.
     let cap = graph.nodes.len().saturating_sub(1);
@@ -3276,6 +3452,16 @@ mod tests {
     }
 
     #[test]
+    fn shortest_path_without_star_is_one_hop() {
+        // `-[:R]->` inside shortestPath means exactly one hop, like every
+        // other pattern position; only `*` opens the bound. Ada's only 1-hop
+        // KNOWS endpoint is Alan (Grace is 2 hops away and must not appear).
+        let t =
+            run("MATCH shortestPath((a:Person {name:'Ada'})-[:KNOWS]->(b:Person)) RETURN b.name");
+        assert_eq!(t.rows, vec![vec![Value::from("Alan")]]);
+    }
+
+    #[test]
     fn shortest_path_per_endpoint_pair() {
         // Unbound end node: one shortest path per reachable endpoint.
         let t = run(
@@ -3362,6 +3548,25 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("expects no arguments"));
+    }
+
+    #[test]
+    fn with_distinct_over_computed_alias() {
+        // DISTINCT dedups by the produced (post-projection) values; the source
+        // expression's variable is out of scope after the horizon.
+        let t = run("MATCH (n:Person) WITH DISTINCT n.label AS l RETURN l");
+        assert_eq!(t.rows, vec![vec![Value::from("Person")]]);
+    }
+
+    #[test]
+    fn call_subquery_distinct_computed_return() {
+        let t = run(
+            "MATCH (a:City) CALL { MATCH (p:Person) RETURN DISTINCT p.label AS l } RETURN a.name, l",
+        );
+        assert_eq!(
+            t.rows,
+            vec![vec![Value::from("London"), Value::from("Person")]]
+        );
     }
 
     #[test]

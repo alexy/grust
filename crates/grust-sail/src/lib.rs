@@ -1350,6 +1350,12 @@ impl SailGraphStore {
         };
         if let Some(plan) = grust_cypher::pushdown::plan_read(cypher, params, &hints)? {
             let dialect = grust_cypher::pushdown::SparkDialect;
+            // Dialect-gated leaves (e.g. the db.propertyKeys / tvf.range row
+            // sources) fall back to the reference on Spark.
+            if !plan.supported_by(&dialect) {
+                let graph = self.read_graph().await?;
+                return grust_cypher::read::run_read_query(&graph, cypher, params);
+            }
             // `UNION`: run each arm and combine the result tables (a recursive
             // CTE for var-length arms requires recursive-CTE engine support).
             if let Some((arms, distinct)) = plan.union_arms() {

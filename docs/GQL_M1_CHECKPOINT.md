@@ -109,7 +109,21 @@ projections.
 Not yet done for the read core (deferred): wiring the legacy write entrypoints
 onto the new pipeline (below).
 
-## Unit 15 — read pushdown (PAUSED at a comprehensive point)
+## Unit 15 — read pushdown (completed as scoped; extended by PUSHDOWN2)
+
+> **2026-07-04 addendum:** the follow-on goal `docs/GQL_PUSHDOWN2_GOAL.md`
+> (branch `pushdown2`) extended this module with row-source and composition
+> leaves: catalog procedures (`db.*` as DISTINCT scans), `tvf.range`
+> (recursive CTE) and correlated `tvf.keys` (lateral `json_each`),
+> uncorrelated **and** correlated `CALL { … }` subqueries (a `LEFT JOIN` of
+> two node scans; a correlated inner `WHERE` renders into the join `ON`), and
+> endpoint-only `shortestPath`/`allShortestPaths` (recursive walk CTE with
+> per-pair minimal-depth selection). Dialect-gated leaves report through
+> `ReadPushdown::supported_by` and Sail falls back for them. The section
+> below is the original Unit 15 record; the future-work list still holds
+> except where the addendum says otherwise.
+
+### Original Unit 15 record (PAUSED at a comprehensive point)
 
 Status: the cleanly-additive predicate/path pushdown work is **complete and
 verified**; paused here on request. 16 sub-commits (`c238e25` … `cfa6e3e`) on
@@ -197,6 +211,11 @@ answer).
    (see above). Remaining (all niche): chained/multiple `OPTIONAL MATCH` and
    optional multi-segment; pushing a post-`WITH` `MATCH` (correlated, needs the
    graph); `WITH` after a non-node leading pattern (segment/var-length).
+5. **PUSHDOWN2 (2026-07-04)** — subsumed more of this list's spirit: CALL-based
+   row sources, subqueries (uncorrelated + correlated-WHERE), and endpoint-only
+   shortest paths now push (see the addendum above and
+   `docs/GQL_PUSHDOWN2_GOAL.md`). Items 1–3 still stand (the shortest-path leaf
+   inherits the same exclusions: no edge-list bindings, no path variables).
 
 Other backends: only Sail wires pushdown into its read entrypoint today. Turso
 is used as the oracle but its own `run_read_query` is not wired (and its tagged

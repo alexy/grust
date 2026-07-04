@@ -1,6 +1,6 @@
 # Grust Pushdown 2 Goal — lowering the Full39075 read features into backend SQL
 
-Status: **planned, not started.** This is the agreed next goal after the
+Status: **implementation COMPLETE (P0–P6, 2026-07-04) on branch `pushdown2`; PM4 docs are consolidated and the branch awaits human review before merge.** This is the agreed next goal after the
 Full39075 completion goal (`docs/GQL_FULL39075_GOAL.md`, done 2026-07-03). It
 plans the lowering of the newer read features — table-valued functions,
 `CALL { … }` subqueries, and shortest-path matching — into the backend-neutral
@@ -61,26 +61,36 @@ Memory-only execution of these features is a bottleneck, not before.
 
 | Task | Feature slice | Depends on | Sketch |
 |---|---|---|---|
-| **P0** | Inventory + fallback pin | — | Write tests pinning that F8/F9/F10 shapes currently return `None` from the pushdown planner and fall back to the reference on `SailGraphStore::run_read_query`. This is the safety net every later task diffs against. |
-| **P1** | Catalog procedures as SQL | P0 | `CALL db.labels()` → `SELECT DISTINCT label FROM <nodes>`; `db.relationshipTypes` / `db.propertyKeys` likewise (propertyKeys via JSON key extraction). Easiest win; both dialects. YIELD/WHERE tail stays in the reference. |
-| **P2** | `tvf.range` / `tvf.keys` row sources | P1 | `tvf.range` → recursive CTE (SQLite) / `sequence()+explode` (Spark); `tvf.keys` → `json_each` (SQLite) / `explode(map_keys(...))` (Spark). Correlated arguments limited to pushed bindings' columns. |
-| **P3** | Uncorrelated subqueries | P0 | `CALL { … }` with no outer references and a pushable inner shape → push the inner query, cross-join its rows onto the outer pushed rows. Distinct-union arms via the existing union combine. |
-| **P4** | Correlated subqueries (bounded) | P3 | Start with correlated **scalar** subqueries (single column, aggregate inner) → correlated subselect in both dialects. Row-producing correlated subqueries need `LATERAL`-style support and likely stay SQLite-`json_each`-tricks or reference-fallback; scope explicitly. |
-| **P5** | Shortest path (SQLite first) | P0 | Recursive CTE BFS with visited-set tracking (path string or JSON array), minimal-length selection per endpoint pair (`MIN(depth)` join), tie handling for `allShortestPaths`. Deterministic ordering must match the reference's edge-order determinism — expect this to be the hardest equivalence argument in the goal. Spark: only if recursive CTEs exist in the Sail version; otherwise document as reference-only. |
+| **P0** | Inventory + fallback pin | — | **Done.** `full39075_read_features_fall_back_to_the_reference` pins subqueries, correlated TVF args, and shortest-path shapes to `Ok(None)`. Pinning found and fixed a real bug: the F10 `shortestPath(…)` wrapper was not rejected by the lowerer guards, so a bare wrapped var-length pattern lowered as a plain var-length scan (wrong rows on Sail). Every pattern guard now rejects `shortest`. |
+| **P1** | Catalog procedures as SQL | P0 | **Done.** `ProcedureReadPushdown` leaf: `db.labels`/`db.relationshipTypes` as DISTINCT scans (both dialects), `db.propertyKeys` via `json_each` (SQLite-gated through `SqlDialect::json_props_keys_scan`; Spark falls back via the new `ReadPushdown::supported_by`). YIELD/WHERE/tail run through `read::project_procedure_pipeline`. Oracle-backed. |
+| **P2** | `tvf.range` row source | P1 | **Done (rescoped).** `tvf.range` with constant/parameter integer args → guarded recursive CTE (SQLite-gated through `SqlDialect::integer_series_sql`; empty ranges and negative steps match the reference; zero step falls back so the structured error stays identical). Spark parity deferred pending Sail `sequence`/`explode` verification. `tvf.keys` is inherently correlated (keys of a bound element), so it moves to P4's correlated scope and stays reference-only for now — pinned by the P0 test. |
+| **P3** | Uncorrelated subqueries | P0 | **Done.** `SubqueryReadPushdown`: leading `CALL { … }` (single scan) and `MATCH × CALL { … }` (a `LEFT JOIN ON 1=1` of the two scans — LEFT, not CROSS, so an inner-aggregate over an empty inner scan still yields its one row per outer row, exactly like the reference). Inner pipeline, subquery-RETURN join, and outer tail run through `read::project_subquery_join_pipeline`; correlation (including same-name shadowing) falls back conservatively. Both dialects; oracle-backed. The oracle work also exposed and fixed a latent **reference** bug: `dedup_bindings` re-evaluated pre-projection expressions against post-projection rows, so `DISTINCT` over computed items errored. |
+| **P4** | Correlated subqueries (bounded) | P3 | **P4a done:** correlated `tvf.keys(n)` over the outer scan variable → lateral `json_each` join (`SqlDialect::lateral_json_keys_sql`, SQLite-gated; stored props are sorted JSON so key order matches the reference). **P4b done (PM3):** the inner `WHERE`'s cross-scope predicate lowers through the segment predicate machinery (roles `n0` = outer / `n1` = inner) into the `LEFT JOIN ON` clause; the whole inner pipeline stays in the reference, aggregates included. Numeric prop-vs-prop comparisons need type hints (no hints → fallback); string prop-vs-prop has no typed lowering yet. The correlation rule relaxed from "no references" to "no **rebinds**": pure references to the outer variable are honored (the reference seeds carry the outer bindings). |
+| **P5** | Shortest path (SQLite first) | P0 | **Done (endpoint-only scope).** `ShortestReadPushdown`: a recursive walk CTE (visited-set like the var-length leaf) + per-pair `MIN(depth)` selection; `allShortestPaths` keeps tie multiplicity; `shortestPath` picks the DFS-first path via the minimal zero-padded edge-`rowid` sequence key (at fixed length, the reference's depth-first enumeration in edge insertion order is exactly the lexicographically smallest edge-index sequence, and `rowid` order is insertion order). Endpoint bindings only — path/relationship variables and `WHERE` stay reference-only, like the var-length leaf's exclusions. SQLite-gated (`SqlDialect::shortest_walk_supported`); Spark falls back (no recursive CTEs). The oracle exposed and fixed an F10 reference bug: a no-`*` relationship inside `shortestPath` searched unbounded instead of exactly one hop. |
 | **P6** | Oracle + corpus expansion | each of P1–P5 | Differential oracle cases per shape; promote pushable `portable_read.json` cases into the oracle. |
 
 ## Milestones
 
-- **PM1 Row sources (P0–P2):** catalog procedures and TVFs push on SQLite +
-  Spark; oracle green.
-- **PM2 Subqueries (P3–P4):** uncorrelated and scalar-correlated subqueries
-  push on SQLite (Spark where expressible); oracle green.
-- **PM3 Shortest path (P5):** SQLite recursive-CTE shortest path with the
-  determinism-equivalence argument written down; Spark explicitly scoped in
-  or out based on the recursive-CTE check.
-- **PM4 Claim + docs:** update `docs/GQL_M1_CHECKPOINT.md` Unit 15 status,
-  the profile statement's per-backend section, and backend descriptors if any
-  user-visible capability changed. STOP for human review before merging.
+- **PM1 Row sources (P0–P2):** **done (2026-07-04)** — catalog procedures push
+  on both dialects (propertyKeys and tvf.range SQLite-gated); oracle green
+  (+2 differential tests over the turso and rusqlite engines).
+- **PM2 Subqueries (P3–P4):** **done (2026-07-04, P4b deferred to PM3)** —
+  uncorrelated subqueries push on both dialects, correlated `tvf.keys` on
+  SQLite; oracle green (+2 differential tests). Correlated subqueries via
+  LEFT-JOIN-ON follow in PM3 alongside shortest path.
+- **PM3 Shortest path + correlated subqueries (P4b, P5):** **done
+  (2026-07-04)** — correlated inner WHEREs push into the JOIN ON; shortest
+  path pushes on SQLite with the rowid-sequence determinism argument; Spark
+  scoped out for recursive CTEs via the dialect gate. Oracle +2 tests.
+- **PM4 Claim + docs:** **docs done (2026-07-04)** — the Unit 15 checkpoint
+  section carries a PUSHDOWN2 addendum, the profile statement's per-backend
+  section describes the widened pushed subset, and backend descriptors needed
+  no change (Sail's `read_pushdown` flag already held; dialect gates are
+  planner-level). **STOPPED for human review before merging** — the branch is
+  five commits on `pushdown2`, each green and oracle-backed; three latent
+  bugs (an F10 shortestPath lowering leak, DISTINCT-over-computed dedup, and
+  the no-`*` shortestPath unbounded search) were found and fixed along the
+  way.
 
 ## Rough size
 
