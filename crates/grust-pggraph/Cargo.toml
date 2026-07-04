@@ -11,8 +11,8 @@ categories.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-grust-core = { version = "0.11.0", path = "../grust-core" }
-grust-postgres-core = { version = "0.11.0", path = "../grust-postgres-core" }
+grust-core = { version = "0.12.0", path = "../grust-core" }
+grust-postgres-core = { version = "0.12.0", path = "../grust-postgres-core" }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-postgres = { workspace = true }

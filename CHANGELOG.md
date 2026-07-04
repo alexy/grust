@@ -6,6 +6,13 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 0.12.0 "Lobster" - 2026-07-03
+
+Note: `0.12.0` widens public enums and structs (`Value::Graph`,
+`GqlBackend::Falkor`/`Surreal`, new `GqlBackendDescriptor` and `CallClause`
+fields), which is technically breaking for exhaustive matchers even within
+`0.x`.
+
 - Added **atomic Cypher transaction batches**: `CypherTransaction` accumulates
   eagerly-planned write statements between `START TRANSACTION`/`BEGIN` and
   `COMMIT` (with `READ ONLY` enforcement), and
