@@ -6,6 +6,20 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Started the **PUSHDOWN2 goal** (`docs/GQL_PUSHDOWN2_GOAL.md`): PM1 done.
+  Catalog procedures now push into backend SQL as a `ProcedureReadPushdown`
+  leaf — `db.labels`/`db.relationshipTypes` as `SELECT DISTINCT` scans on both
+  dialects, `db.propertyKeys` via SQLite `json_each`, and `tvf.range` with
+  constant/parameter arguments via a guarded SQLite recursive CTE — with
+  `YIELD`/`WHERE`/pipeline tails running through the shared reference so
+  results stay byte-identical by construction. Dialect-gated row sources are
+  reported through the new `ReadPushdown::supported_by`, and Sail falls back
+  to the reference for them. The P0 fallback-pinning test found and fixed a
+  bug where F10's `shortestPath(…)` wrapper was not rejected by the pushdown
+  lowerers (a bare wrapped var-length pattern lowered as a plain var-length
+  scan, returning wrong rows on Sail). Differential-oracle coverage grows by
+  two tests over the embedded `turso` and real-SQLite engines.
+
 ## 0.12.0 "Lobster" - 2026-07-03
 
 Note: `0.12.0` widens public enums and structs (`Value::Graph`,

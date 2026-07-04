@@ -380,6 +380,22 @@ pub trait SqlDialect {
     fn orders_json_typed(&self) -> bool {
         false
     }
+
+    /// A SQL subquery producing one text column `k` — the JSON property key of
+    /// each props entry of each row of `table` — or `None` when the dialect
+    /// cannot enumerate JSON object keys (the `db.propertyKeys` leaf is then
+    /// unsupported for this dialect and the backend falls back).
+    fn json_props_keys_scan(&self, _table: &str) -> Option<String> {
+        None
+    }
+
+    /// A SQL query producing the inclusive integer series `start..end` by
+    /// `step` (non-zero) as one column `value`, **in generation order** — or
+    /// `None` when the dialect cannot generate series (the `tvf.range` leaf is
+    /// then unsupported for this dialect and the backend falls back).
+    fn integer_series_sql(&self, _start: i64, _end: i64, _step: i64) -> Option<String> {
+        None
+    }
 }
 
 /// Spark SQL dialect (the Sail backend): `GET_JSON_OBJECT`, backtick idents,
@@ -474,6 +490,25 @@ impl SqlDialect for SqliteDialect {
         // SQLite / libSQL `json_extract` returns INTEGER/REAL/TEXT, so ORDER BY
         // sorts by type+value the way the reference does.
         true
+    }
+
+    fn json_props_keys_scan(&self, table: &str) -> Option<String> {
+        let t = self.quote_ident(table);
+        Some(format!(
+            "SELECT j.key AS k FROM {t}, json_each({t}.props) AS j"
+        ))
+    }
+
+    fn integer_series_sql(&self, start: i64, end: i64, step: i64) -> Option<String> {
+        // Anchor guarded so an empty range (start already past end) yields no
+        // rows, matching the reference's `range()` loop.
+        let cmp = if step > 0 { "<=" } else { ">=" };
+        Some(format!(
+            "WITH RECURSIVE series(value) AS (\
+             SELECT {start} WHERE {start} {cmp} {end} \
+             UNION ALL SELECT value + {step} FROM series WHERE value + {step} {cmp} {end}\
+             ) SELECT value FROM series"
+        ))
     }
 }
 
@@ -2535,7 +2570,11 @@ fn lower_optional_single(
         return None;
     }
     let a_pat = &m.patterns[0];
-    if a_pat.variable.is_some() || a_pat.shortest.is_some() || !a_pat.segments.is_empty() || a_pat.start.labels.len() > 1 {
+    if a_pat.variable.is_some()
+        || a_pat.shortest.is_some()
+        || !a_pat.segments.is_empty()
+        || a_pat.start.labels.len() > 1
+    {
         return None;
     }
     let a_node = &a_pat.start;
@@ -3222,6 +3261,186 @@ fn parse_props(text: Option<&str>) -> Result<Props> {
 }
 
 // ===========================================================================
+// Catalog-procedure / TVF row-source pushdown (PUSHDOWN2 P1/P2)
+// ===========================================================================
+
+/// The row source of a pushable `CALL` clause.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProcedureRowSource {
+    /// `db.labels()` — `SELECT DISTINCT label FROM <nodes>` (all dialects).
+    Labels,
+    /// `db.relationshipTypes()` — `SELECT DISTINCT edge_type FROM <edges>`.
+    RelationshipTypes,
+    /// `db.propertyKeys()` — JSON key enumeration over node + edge props
+    /// (dialect-gated: requires [`SqlDialect::json_props_keys_scan`]).
+    PropertyKeys,
+    /// `tvf.range(start, end[, step])` with constant/parameter integer
+    /// arguments (dialect-gated: requires [`SqlDialect::integer_series_sql`]).
+    /// Rows come back in generation order, matching the reference.
+    Range { start: i64, end: i64, step: i64 },
+}
+
+impl ProcedureRowSource {
+    /// The procedure's full (pre-`YIELD`) output column, and whether its text
+    /// cells decode as integers.
+    fn signature(&self) -> (&'static str, bool) {
+        match self {
+            ProcedureRowSource::Labels => ("label", false),
+            ProcedureRowSource::RelationshipTypes => ("relationshipType", false),
+            ProcedureRowSource::PropertyKeys => ("propertyKey", false),
+            ProcedureRowSource::Range { .. } => ("value", true),
+        }
+    }
+}
+
+/// A pushable `CALL <procedure> [YIELD …] [WITH/UNWIND/… RETURN …]` query: the
+/// procedure's rows come from backend SQL instead of a graph snapshot; the
+/// `YIELD`/`WHERE` and the trailing pipeline run through the shared reference
+/// (`read::project_procedure_pipeline`), so results are byte-identical to the
+/// reference by construction.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProcedureReadPushdown {
+    source: ProcedureRowSource,
+    call: CallClause,
+    /// The clauses after the `CALL` (only `WITH`/`UNWIND`/`RETURN`; empty for
+    /// a standalone `CALL`).
+    tail: Vec<Clause>,
+}
+
+impl ProcedureReadPushdown {
+    /// Whether `dialect` can render this row source. Backends must check this
+    /// before executing and fall back to the reference when false.
+    pub fn supported_by(&self, dialect: &dyn SqlDialect) -> bool {
+        match &self.source {
+            ProcedureRowSource::Labels | ProcedureRowSource::RelationshipTypes => true,
+            ProcedureRowSource::PropertyKeys => dialect
+                .json_props_keys_scan(dialect.nodes_table())
+                .is_some(),
+            ProcedureRowSource::Range { start, end, step } => {
+                dialect.integer_series_sql(*start, *end, *step).is_some()
+            }
+        }
+    }
+
+    /// Render the row-source SQL: one text column, rows in the exact order the
+    /// reference produces (sorted for the catalog procedures — SQLite BINARY /
+    /// Spark UTF8_BINARY collation both match Rust byte order — and generation
+    /// order for `tvf.range`).
+    pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
+        match &self.source {
+            ProcedureRowSource::Labels => {
+                let t = dialect.quote_ident(dialect.nodes_table());
+                format!("SELECT DISTINCT label FROM {t} ORDER BY label")
+            }
+            ProcedureRowSource::RelationshipTypes => {
+                let t = dialect.quote_ident(dialect.edges_table());
+                format!("SELECT DISTINCT edge_type FROM {t} ORDER BY edge_type")
+            }
+            ProcedureRowSource::PropertyKeys => {
+                let nodes = dialect
+                    .json_props_keys_scan(dialect.nodes_table())
+                    .expect("supported_by gates PropertyKeys");
+                let edges = dialect
+                    .json_props_keys_scan(dialect.edges_table())
+                    .expect("supported_by gates PropertyKeys");
+                // UNION deduplicates across the two scans.
+                format!("SELECT k FROM ({nodes} UNION {edges}) ORDER BY k")
+            }
+            ProcedureRowSource::Range { start, end, step } => dialect
+                .integer_series_sql(*start, *end, *step)
+                .expect("supported_by gates Range"),
+        }
+    }
+
+    /// The number of text columns `to_sql` emits.
+    pub fn column_count(&self) -> usize {
+        1
+    }
+
+    /// Decode the backend's text rows into the procedure's typed rows and run
+    /// the `YIELD`/`WHERE`/tail through the shared reference.
+    pub fn project_text_rows(
+        &self,
+        _dialect: &dyn SqlDialect,
+        rows: Vec<Vec<Option<String>>>,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        let (column, is_int) = self.source.signature();
+        let mut full_rows = Vec::with_capacity(rows.len());
+        for row in rows {
+            let cell = row.into_iter().next().flatten();
+            let value = match cell {
+                None => Value::Null,
+                Some(text) if is_int => Value::Int(text.parse::<i64>().map_err(|e| {
+                    crate::gql::gql_execution(format!(
+                        "procedure pushdown expected an integer cell, got `{text}`: {e}"
+                    ))
+                })?),
+                Some(text) => Value::String(text),
+            };
+            full_rows.push(vec![value]);
+        }
+        crate::read::project_procedure_pipeline(
+            &self.call,
+            &[column.to_string()],
+            full_rows,
+            &self.tail,
+            params,
+        )
+    }
+}
+
+/// Lower a `CALL`-leading single query into a procedure/TVF row-source leaf.
+fn lower_procedure_single(
+    single: &SingleQuery,
+    params: &CypherParameters,
+) -> Option<ProcedureReadPushdown> {
+    let (first, tail) = single.clauses.split_first()?;
+    let Clause::Call(call) = first else {
+        return None;
+    };
+    // The tail may only re-shape rows (no further graph access / writes).
+    if !tail
+        .iter()
+        .all(|c| matches!(c, Clause::With(_) | Clause::Unwind(_) | Clause::Return(_)))
+    {
+        return None;
+    }
+    let source = match call.name.to_ascii_lowercase().as_str() {
+        "db.labels" if call.args.is_empty() => ProcedureRowSource::Labels,
+        "db.relationshiptypes" if call.args.is_empty() => ProcedureRowSource::RelationshipTypes,
+        "db.propertykeys" if call.args.is_empty() => ProcedureRowSource::PropertyKeys,
+        "tvf.range" if call.args.len() == 2 || call.args.len() == 3 => {
+            let ints: Vec<i64> = call
+                .args
+                .iter()
+                .map(|e| match lower_scalar(e, params)? {
+                    Scalar::Int(n) => Some(n),
+                    _ => None,
+                })
+                .collect::<Option<_>>()?;
+            let (start, end, step) = match ints[..] {
+                [start, end] => (start, end, 1),
+                [start, end, step] => (start, end, step),
+                _ => return None,
+            };
+            if step == 0 {
+                // The reference raises the structured step-must-not-be-zero
+                // error; fall back so the error surface stays identical.
+                return None;
+            }
+            ProcedureRowSource::Range { start, end, step }
+        }
+        _ => return None,
+    };
+    Some(ProcedureReadPushdown {
+        source,
+        call: call.clone(),
+        tail: tail.to_vec(),
+    })
+}
+
+// ===========================================================================
 // Unified read pushdown (single-query leaves + UNION composition)
 // ===========================================================================
 
@@ -3234,6 +3453,7 @@ fn parse_props(text: Option<&str>) -> Result<Props> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReadPushdown {
     Node(NodeReadPushdown),
+    Procedure(ProcedureReadPushdown),
     Segment(SegmentReadPushdown),
     VarLength(VarLengthReadPushdown),
     Optional(OptionalReadPushdown),
@@ -3262,10 +3482,22 @@ impl ReadPushdown {
         }
     }
 
+    /// Whether every leaf of this plan can be rendered for `dialect`.
+    /// Backends must fall back to the reference when false (dialect-gated row
+    /// sources such as `db.propertyKeys` / `tvf.range` on Spark).
+    pub fn supported_by(&self, dialect: &dyn SqlDialect) -> bool {
+        match self {
+            ReadPushdown::Procedure(p) => p.supported_by(dialect),
+            ReadPushdown::Union { arms, .. } => arms.iter().all(|a| a.supported_by(dialect)),
+            _ => true,
+        }
+    }
+
     /// Render the leaf's SQL (panics on `Union` — run its arms instead).
     pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
         match self {
             ReadPushdown::Node(p) => p.to_sql(dialect),
+            ReadPushdown::Procedure(p) => p.to_sql(dialect),
             ReadPushdown::Segment(p) => p.to_sql(dialect),
             ReadPushdown::VarLength(p) => p.to_sql(dialect),
             ReadPushdown::Optional(p) => p.to_sql(dialect),
@@ -3279,6 +3511,7 @@ impl ReadPushdown {
     pub fn column_count(&self) -> usize {
         match self {
             ReadPushdown::Node(p) => p.column_count(),
+            ReadPushdown::Procedure(p) => p.column_count(),
             ReadPushdown::Segment(p) => p.column_count(),
             ReadPushdown::VarLength(p) => p.column_count(),
             ReadPushdown::Optional(p) => p.column_count(),
@@ -3297,6 +3530,7 @@ impl ReadPushdown {
     ) -> Result<CypherResultTable> {
         match self {
             ReadPushdown::Node(p) => p.project_text_rows(dialect, rows, params),
+            ReadPushdown::Procedure(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Segment(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::VarLength(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Optional(p) => p.project_text_rows(dialect, rows, params),
@@ -3358,6 +3592,9 @@ fn lower_single(
     if let Some(p) = lower_multi_pattern_single(single, params, hints) {
         return Some(ReadPushdown::MultiPattern(p));
     }
+    if let Some(p) = lower_procedure_single(single, params) {
+        return Some(ReadPushdown::Procedure(p));
+    }
     lower_pipeline_single(single, params, hints).map(ReadPushdown::Pipeline)
 }
 
@@ -3394,6 +3631,73 @@ mod tests {
 
     fn plan(cypher: &str) -> Option<NodeReadPushdown> {
         plan_node_read(cypher, &params()).unwrap()
+    }
+
+    /// PUSHDOWN2 P1/P2: catalog procedures and constant-argument `tvf.range`
+    /// lower to row-source leaves; dialect gates keep Spark honest.
+    #[test]
+    fn procedure_row_sources_lower_and_gate_by_dialect() {
+        let plan = |cypher: &str| {
+            plan_read(cypher, &params(), &NoTypeHints)
+                .unwrap()
+                .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"))
+        };
+
+        // Catalog procedures: DISTINCT scans, both dialects.
+        let labels = plan("CALL db.labels() YIELD label RETURN label");
+        assert!(labels.supported_by(&SqliteDialect));
+        assert!(labels.supported_by(&SparkDialect));
+        assert_eq!(
+            labels.to_sql(&SqliteDialect),
+            "SELECT DISTINCT label FROM \"grust_nodes\" ORDER BY label"
+        );
+        let rels = plan("CALL db.relationshipTypes()");
+        assert_eq!(
+            rels.to_sql(&SqliteDialect),
+            "SELECT DISTINCT edge_type FROM \"grust_edges\" ORDER BY edge_type"
+        );
+
+        // db.propertyKeys: JSON key enumeration is SQLite-only for now.
+        let keys = plan("CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey");
+        assert!(keys.supported_by(&SqliteDialect));
+        assert!(!keys.supported_by(&SparkDialect));
+        assert!(keys.to_sql(&SqliteDialect).contains("json_each"));
+
+        // tvf.range with constant / parameter integer args: SQLite-only.
+        let range = plan("CALL tvf.range(1, 3) YIELD value RETURN value");
+        assert!(range.supported_by(&SqliteDialect));
+        assert!(!range.supported_by(&SparkDialect));
+        assert!(range.to_sql(&SqliteDialect).contains("WITH RECURSIVE"));
+        let mut p = params();
+        p.insert("hi".to_string(), Value::Int(4));
+        assert!(
+            plan_read(
+                "CALL tvf.range(1, $hi, 2) YIELD value RETURN value",
+                &p,
+                &NoTypeHints
+            )
+            .unwrap()
+            .is_some()
+        );
+
+        // Non-constant / zero-step arguments fall back to the reference.
+        for cypher in [
+            "MATCH (n:Person) CALL tvf.range(1, n.age) YIELD value RETURN value",
+            "CALL tvf.range(1, 3, 0) YIELD value RETURN value",
+            "CALL tvf.range(1.5, 3) YIELD value RETURN value",
+        ] {
+            assert_eq!(
+                plan_read(cypher, &params(), &NoTypeHints).unwrap(),
+                None,
+                "expected `{cypher}` to fall back"
+            );
+        }
+        // Unknown procedures also fall back (the reference raises the
+        // structured unknown-procedure error).
+        assert_eq!(
+            plan_read("CALL db.nope() YIELD x RETURN x", &params(), &NoTypeHints).unwrap(),
+            None
+        );
     }
 
     /// P0 of `docs/GQL_PUSHDOWN2_GOAL.md`: the Full39075 read features that are

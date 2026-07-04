@@ -889,7 +889,17 @@ pub(crate) fn project_binding_pipeline(
     tail: &[Clause],
     params: &CypherParameters,
 ) -> Result<CypherResultTable> {
-    let mut rows = binding_rows_to_rows(binding_rows);
+    run_tail_pipeline(binding_rows_to_rows(binding_rows), tail, params)
+}
+
+/// Run a `WITH`/`UNWIND`/`RETURN` tail over already-materialized binding rows —
+/// the shared pipeline core of [`project_binding_pipeline`] and the
+/// catalog-procedure pushdown tail.
+fn run_tail_pipeline(
+    mut rows: Vec<Row>,
+    tail: &[Clause],
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
     for clause in tail {
         match clause {
             Clause::With(w) => {
@@ -913,6 +923,53 @@ pub(crate) fn project_binding_pipeline(
         }
     }
     Err(gql_execution("pushdown pipeline has no RETURN"))
+}
+
+/// Shared tail for catalog-procedure / TVF **read pushdown** (PUSHDOWN2 P1/P2):
+/// a backend's SQL produced the procedure's full (pre-`YIELD`) rows; apply the
+/// `CALL`'s `YIELD` projection/aliasing and `WHERE` exactly like the reference,
+/// then run the remaining `WITH`/`UNWIND`/`RETURN` tail through the shared
+/// pipeline (or shape the standalone-`CALL` result table when there is no
+/// tail). Byte-identical to [`run_read_query`]'s `CALL` path by construction.
+pub(crate) fn project_procedure_pipeline(
+    call: &CallClause,
+    full_cols: &[String],
+    full_rows: Vec<Vec<Value>>,
+    tail: &[Clause],
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
+    let (out_cols, indices) = yield_projection(&call.name, full_cols, &call.yields)?;
+    let mut rows: Vec<Row> = Vec::with_capacity(full_rows.len());
+    for vals in &full_rows {
+        let mut row = Row::new();
+        for (col, &i) in out_cols.iter().zip(indices.iter()) {
+            row.insert(col.clone(), Bound::Value(vals[i].clone()));
+        }
+        rows.push(row);
+    }
+    if let Some(where_expr) = &call.where_clause {
+        rows = filter_rows(rows, where_expr, params)?;
+    }
+    if tail.is_empty() {
+        // Standalone `CALL …`: the YIELD shape is the result table.
+        let out_rows = rows
+            .iter()
+            .map(|row| {
+                out_cols
+                    .iter()
+                    .map(|col| match row.get(col) {
+                        Some(Bound::Value(v)) => v.clone(),
+                        _ => Value::Null,
+                    })
+                    .collect()
+            })
+            .collect();
+        return Ok(CypherResultTable {
+            columns: out_cols,
+            rows: out_rows,
+        });
+    }
+    run_tail_pipeline(rows, tail, params)
 }
 
 // ---------------------------------------------------------------------------

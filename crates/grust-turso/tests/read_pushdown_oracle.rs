@@ -770,3 +770,94 @@ fn opt_text(row: &turso::Row, idx: usize) -> Option<String> {
 fn lit(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
+
+/// Run a leaf `ReadPushdown` against real SQLite (rusqlite) — for row sources
+/// the embedded `turso` engine cannot execute (`WITH RECURSIVE`, `json_each`).
+fn run_leaf_sqlite(
+    conn: &rusqlite::Connection,
+    leaf: &ReadPushdown,
+    params: &CypherParameters,
+) -> CypherResultTable {
+    let sql = leaf.to_sql(&SqliteDialect);
+    let n = leaf.column_count();
+    let mut stmt = conn
+        .prepare(&sql)
+        .unwrap_or_else(|e| panic!("prepare failed for `{sql}`: {e}"));
+    let text_rows: Vec<Vec<Option<String>>> = stmt
+        .query_map([], |row| {
+            (0..n)
+                .map(|i| {
+                    // Decode typed cells (the range CTE yields INTEGER) as text.
+                    row.get::<usize, Option<rusqlite::types::Value>>(i)
+                        .map(|v| match v {
+                            None | Some(rusqlite::types::Value::Null) => None,
+                            Some(rusqlite::types::Value::Integer(x)) => Some(x.to_string()),
+                            Some(rusqlite::types::Value::Real(x)) => Some(x.to_string()),
+                            Some(rusqlite::types::Value::Text(x)) => Some(x),
+                            Some(rusqlite::types::Value::Blob(_)) => None,
+                        })
+                })
+                .collect()
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect();
+    leaf.project_text_rows(&SqliteDialect, text_rows, params)
+        .unwrap()
+}
+
+/// PUSHDOWN2 P1: catalog procedures lower to DISTINCT scans (plain SQL — the
+/// embedded `turso` engine runs them) and must match the reference exactly,
+/// including the YIELD/WHERE tail and aggregate pipelines.
+#[tokio::test]
+async fn catalog_procedure_pushdown_matches_reference() {
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in [
+        "CALL db.labels()",
+        "CALL db.labels() YIELD label RETURN label",
+        "CALL db.labels() YIELD label AS l WHERE l <> 'City' RETURN l ORDER BY l",
+        "CALL db.relationshipTypes()",
+        "CALL db.relationshipTypes() YIELD relationshipType AS t RETURN count(*) AS n",
+        "CALL db.labels() YIELD label WITH label AS l RETURN l ORDER BY l DESC",
+    ] {
+        let plan = plan_read(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"));
+        assert!(plan.supported_by(&SqliteDialect));
+        let actual = run_pushdown(&conn, &plan, &params).await;
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}
+
+/// PUSHDOWN2 P1/P2: `db.propertyKeys` (json_each) and `tvf.range` (recursive
+/// CTE) run against real SQLite and must match the reference exactly.
+#[test]
+fn property_keys_and_range_pushdown_match_reference() {
+    let graph = fixture();
+    let conn = embed_sqlite(&graph);
+    let mut params = CypherParameters::new();
+    params.insert("hi".to_string(), Value::Int(5));
+    for cypher in [
+        "CALL db.propertyKeys()",
+        "CALL db.propertyKeys() YIELD propertyKey RETURN propertyKey",
+        "CALL db.propertyKeys() YIELD propertyKey AS k WHERE k STARTS WITH 'a' RETURN k",
+        "CALL tvf.range(1, 3) YIELD value RETURN value",
+        "CALL tvf.range(1, 3)",
+        "CALL tvf.range(3, 1) YIELD value RETURN value",
+        "CALL tvf.range(5, 1, -2) YIELD value RETURN value",
+        "CALL tvf.range(1, $hi, 2) YIELD value RETURN value",
+        "CALL tvf.range(1, 4) YIELD value AS v WHERE v > 1 RETURN v, v * 10 AS tens",
+        "CALL tvf.range(1, 3) YIELD value RETURN sum(value) AS total",
+    ] {
+        let plan = plan_read(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"));
+        assert!(plan.supported_by(&SqliteDialect), "`{cypher}` gated off");
+        let actual = run_leaf_sqlite(&conn, &plan, &params);
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}
