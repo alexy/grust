@@ -43,6 +43,10 @@ impl ParseError {
         }
     }
 
+    /// Kept for future recognized-but-unsupported constructs; every current
+    /// parse-level construct is supported (the last user was F9 procedure
+    /// arguments), so non-test builds see no callers.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn unsupported(span: Span, feature: GqlFeature, message: impl Into<String>) -> Self {
         ParseError {
             kind: ParseErrorKind::Unsupported(feature),
@@ -213,6 +217,15 @@ impl Parser {
         }
     }
 
+    fn parse_dotted_name(&mut self, what: &str) -> PResult<String> {
+        let mut name = self.parse_name(what)?;
+        while self.eat(&Token::Dot) {
+            name.push('.');
+            name.push_str(&self.parse_name(what)?);
+        }
+        Ok(name)
+    }
+
     /// Parse a **key** name — like [`Self::parse_name`], but also accepts a
     /// reserved keyword used as a property/map key (e.g. `{order: 1, limit: 3}`),
     /// which standard Cypher permits. The keyword's exact source text (preserving
@@ -274,6 +287,7 @@ impl Parser {
         let mut clauses = Vec::new();
         loop {
             match self.peek() {
+                Token::Keyword(Keyword::Use) => clauses.push(Clause::Use(self.parse_use()?)),
                 Token::Keyword(Keyword::Match) => {
                     clauses.push(Clause::Match(self.parse_match(false)?))
                 }
@@ -307,9 +321,7 @@ impl Parser {
                     clauses.push(Clause::Return(self.parse_return()?));
                     break; // RETURN ends a single query
                 }
-                Token::Keyword(Keyword::Call) => {
-                    clauses.push(Clause::Call(self.parse_call()?))
-                }
+                Token::Keyword(Keyword::Call) => clauses.push(self.parse_call()?),
                 _ => break,
             }
             // a UNION or EOF/semicolon ends the single query
@@ -332,6 +344,16 @@ impl Parser {
         Ok(SingleQuery {
             clauses,
             span: start.to(end),
+        })
+    }
+
+    fn parse_use(&mut self) -> PResult<UseClause> {
+        let start = self.span_here();
+        self.expect(&Token::Keyword(Keyword::Use), "USE")?;
+        let graph = self.parse_dotted_name("a graph name")?;
+        Ok(UseClause {
+            graph,
+            span: start.to(self.prev_span()),
         })
     }
 
@@ -543,25 +565,31 @@ impl Parser {
         })
     }
 
-    /// `CALL <dotted.name>() [YIELD col [AS alias], …]`
-    ///
-    /// Only nullary read-only catalog procedures are accepted (Unit 14); a
-    /// non-empty argument list is feature-tagged as unsupported.
-    fn parse_call(&mut self) -> PResult<CallClause> {
+    /// `CALL { <query> }` (inline subquery) or
+    /// `CALL <dotted.name>(args) [YIELD col [AS alias], …]` (procedure / TVF).
+    fn parse_call(&mut self) -> PResult<Clause> {
         let start = self.span_here();
         self.expect(&Token::Keyword(Keyword::Call), "CALL")?;
+        if self.eat(&Token::LBrace) {
+            let query = self.parse_one_query()?;
+            self.expect(&Token::RBrace, "} to close CALL { … }")?;
+            return Ok(Clause::Subquery(SubqueryClause {
+                query,
+                span: start.to(self.prev_span()),
+            }));
+        }
         let mut name = self.parse_name("a procedure name")?;
         while self.eat(&Token::Dot) {
             name.push('.');
             name.push_str(&self.parse_name("a procedure name segment")?);
         }
         self.expect(&Token::LParen, "( after procedure name")?;
+        let mut args = Vec::new();
         if self.peek() != &Token::RParen {
-            return Err(ParseError::unsupported(
-                self.span_here(),
-                GqlFeature::ProcedureCall,
-                "procedure arguments are not supported yet (Unit 14)",
-            ));
+            args.push(self.parse_expr()?);
+            while self.eat(&Token::Comma) {
+                args.push(self.parse_expr()?);
+            }
         }
         self.expect(&Token::RParen, ") after procedure arguments")?;
         let mut yields = Vec::new();
@@ -584,12 +612,13 @@ impl Parser {
                 where_clause = Some(self.parse_expr()?);
             }
         }
-        Ok(CallClause {
+        Ok(Clause::Call(CallClause {
             name,
+            args,
             yields,
             where_clause,
             span: start.to(self.prev_span()),
-        })
+        }))
     }
 
     fn parse_projection(&mut self) -> PResult<Projection> {
@@ -684,6 +713,24 @@ impl Parser {
             None
         };
 
+        // optional shortest-path wrapper: `shortestPath(…)` / `allShortestPaths(…)`
+        let shortest = match self.peek() {
+            Token::Identifier(name) if self.peek_at(1) == &Token::LParen => {
+                if name.eq_ignore_ascii_case("shortestpath") {
+                    Some(ShortestKind::Single)
+                } else if name.eq_ignore_ascii_case("allshortestpaths") {
+                    Some(ShortestKind::All)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if shortest.is_some() {
+            self.advance(); // the wrapper name
+            self.expect(&Token::LParen, "( after shortestPath")?;
+        }
+
         let node_start = self.parse_node_pattern()?;
         let mut segments = Vec::new();
         while matches!(self.peek(), Token::Minus | Token::ArrowLeft) {
@@ -692,8 +739,19 @@ impl Parser {
             segments.push(PathSegment { relationship, node });
         }
 
+        if shortest.is_some() {
+            self.expect(&Token::RParen, ") to close shortestPath(…)")?;
+            if segments.len() != 1 {
+                return Err(ParseError::syntax(
+                    self.span_here(),
+                    "shortestPath(…) expects exactly one relationship segment",
+                ));
+            }
+        }
+
         Ok(PathPattern {
             variable,
+            shortest,
             start: node_start,
             segments,
             span: start.to(self.prev_span()),
@@ -1530,14 +1588,26 @@ mod tests {
 
     #[test]
     fn recognized_unsupported_construct_is_feature_tagged() {
-        // Nullary catalog procedures now parse (Unit 14); procedure *arguments*
-        // remain the recognized-but-unsupported construct.
-        let err = parse_query("CALL db.foo(1)").unwrap_err();
+        // Procedure arguments now parse (Full39075 F9): unknown procedures are
+        // feature-tagged at execution, not at parse. The parser's unsupported
+        // machinery still converts into the structured transport.
+        let q = parse_query("CALL db.foo(1)").unwrap();
+        match &q.parts[0].query.clauses[0] {
+            Clause::Call(c) => {
+                assert_eq!(c.name, "db.foo");
+                assert_eq!(c.args, vec![Expr::Integer(1)]);
+            }
+            other => panic!("expected CALL, got {other:?}"),
+        }
+        let err = ParseError::unsupported(
+            Span::new(0, 4),
+            GqlFeature::ProcedureCall,
+            "synthetic unsupported construct",
+        );
         assert_eq!(
             err.kind,
             ParseErrorKind::Unsupported(GqlFeature::ProcedureCall)
         );
-        // and it converts into the structured unsupported-feature transport
         let grust = err.into_grust("CALL db.foo(1)");
         assert!(matches!(grust, GrustError::Unsupported(_)));
         assert!(grust.to_string().contains("feature=procedure-call"));

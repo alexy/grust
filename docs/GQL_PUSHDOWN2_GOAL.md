@@ -1,0 +1,89 @@
+# Grust Pushdown 2 Goal — lowering the Full39075 read features into backend SQL
+
+Status: **planned, not started.** This is the agreed next goal after the
+Full39075 completion goal (`docs/GQL_FULL39075_GOAL.md`, done 2026-07-03). It
+plans the lowering of the newer read features — table-valued functions,
+`CALL { … }` subqueries, and shortest-path matching — into the backend-neutral
+read pushdown (`crates/grust-cypher/src/pushdown.rs`, Unit 15), so they
+execute in backend SQL instead of only on the Memory reference.
+
+**Do not start this goal casually.** It is sized like Unit 15 (a multi-session
+unit with its own milestones), it is dialect-divergent from day one, and every
+task is gated by the differential oracle. Read `docs/GQL_M1_CHECKPOINT.md`'s
+Unit 15 section first for the existing pushdown architecture and its deferred
+niche tails (some of which this goal subsumes).
+
+## Why (and why it can wait)
+
+Today F8/F9/F10 execute on the Memory reference only. That is *correct* — the
+pushdown planner returns `None` for any query outside the pushable subset and
+callers fall back to the reference — but it means backends materialize a full
+graph snapshot for these queries. This goal removes that cost where SQL can
+express the query. It should be scheduled when a real workload shows the
+Memory-only execution of these features is a bottleneck, not before.
+
+## Architecture invariants (carry over from Unit 15 — non-negotiable)
+
+1. **Byte-identical by construction.** Only the `MATCH`/`WHERE`/row-source
+   part of a query is lowered to SQL; the `RETURN`/`WITH` tail always runs
+   through the shared reference projection (`read::project_bindings` /
+   `project_binding_pipeline`). Pushed results must equal the reference
+   *by construction*, never by coincidence.
+2. **No silent wrong answers.** A shape the planner cannot push returns
+   `None` (reference fallback) or a structured error — never a partially
+   pushed query.
+3. **Oracle per shape.** Every newly pushable shape lands with differential
+   cases in the `grust-turso` embedded-SQLite oracle
+   (`crates/grust-turso/tests/read_pushdown_oracle.rs`): reference rows ==
+   pushed rows on the same data, including ordering when `ORDER BY` is pushed.
+4. **Corpus reuse.** Where a `tests/gql/portable_read.json` case becomes
+   pushable, add it (or its shape) to the oracle so the conformance corpus and
+   the pushdown corpus cannot drift.
+5. **Capability honesty.** If a feature is pushable on one dialect and not
+   another, that is expressed in planner dialect gates (and, if user-visible,
+   backend descriptor flags) — not by weakening semantics on the weaker
+   dialect.
+6. **Test floor and guardrails** from `docs/GQL_FULL39075_GOAL.md` apply
+   unchanged: counts only grow, no release without explicit request.
+
+## Dialect reality check (informs every estimate)
+
+- **SQLite (Turso oracle, `SqlDialect::Sqlite`)**: recursive CTEs, JSON1
+  (`json_each`, `json_extract`), correlated scalar subqueries. No `LATERAL`.
+  This is the *lead dialect* — everything lands here first.
+- **Spark (Sail, `SqlDialect::Spark`)**: no recursive CTEs (verify against the
+  Sail/Spark version in use — this single fact decides whether shortest path
+  and unbounded var-length can ever push to Sail); `explode`, `map_keys`,
+  higher-order functions available. Spark parity is a *trailing* milestone per
+  task, never a blocker for the SQLite slice.
+
+## Sequenced tasks
+
+| Task | Feature slice | Depends on | Sketch |
+|---|---|---|---|
+| **P0** | Inventory + fallback pin | — | Write tests pinning that F8/F9/F10 shapes currently return `None` from the pushdown planner and fall back to the reference on `SailGraphStore::run_read_query`. This is the safety net every later task diffs against. |
+| **P1** | Catalog procedures as SQL | P0 | `CALL db.labels()` → `SELECT DISTINCT label FROM <nodes>`; `db.relationshipTypes` / `db.propertyKeys` likewise (propertyKeys via JSON key extraction). Easiest win; both dialects. YIELD/WHERE tail stays in the reference. |
+| **P2** | `tvf.range` / `tvf.keys` row sources | P1 | `tvf.range` → recursive CTE (SQLite) / `sequence()+explode` (Spark); `tvf.keys` → `json_each` (SQLite) / `explode(map_keys(...))` (Spark). Correlated arguments limited to pushed bindings' columns. |
+| **P3** | Uncorrelated subqueries | P0 | `CALL { … }` with no outer references and a pushable inner shape → push the inner query, cross-join its rows onto the outer pushed rows. Distinct-union arms via the existing union combine. |
+| **P4** | Correlated subqueries (bounded) | P3 | Start with correlated **scalar** subqueries (single column, aggregate inner) → correlated subselect in both dialects. Row-producing correlated subqueries need `LATERAL`-style support and likely stay SQLite-`json_each`-tricks or reference-fallback; scope explicitly. |
+| **P5** | Shortest path (SQLite first) | P0 | Recursive CTE BFS with visited-set tracking (path string or JSON array), minimal-length selection per endpoint pair (`MIN(depth)` join), tie handling for `allShortestPaths`. Deterministic ordering must match the reference's edge-order determinism — expect this to be the hardest equivalence argument in the goal. Spark: only if recursive CTEs exist in the Sail version; otherwise document as reference-only. |
+| **P6** | Oracle + corpus expansion | each of P1–P5 | Differential oracle cases per shape; promote pushable `portable_read.json` cases into the oracle. |
+
+## Milestones
+
+- **PM1 Row sources (P0–P2):** catalog procedures and TVFs push on SQLite +
+  Spark; oracle green.
+- **PM2 Subqueries (P3–P4):** uncorrelated and scalar-correlated subqueries
+  push on SQLite (Spark where expressible); oracle green.
+- **PM3 Shortest path (P5):** SQLite recursive-CTE shortest path with the
+  determinism-equivalence argument written down; Spark explicitly scoped in
+  or out based on the recursive-CTE check.
+- **PM4 Claim + docs:** update `docs/GQL_M1_CHECKPOINT.md` Unit 15 status,
+  the profile statement's per-backend section, and backend descriptors if any
+  user-visible capability changed. STOP for human review before merging.
+
+## Rough size
+
+PM1 ≈ one focused session. PM2 ≈ one to two sessions. PM3 ≈ two-plus sessions
+(the equivalence argument, not the SQL, is the cost). Comparable overall to
+the original Unit 15.

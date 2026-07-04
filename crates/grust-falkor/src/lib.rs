@@ -64,6 +64,15 @@ impl FalkorGraphStore {
             .query::<RedisValue>(connection)
             .map_err(|err| GrustError::Backend(format!("FalkorDB query failed: {query}: {err}")))
     }
+
+    /// Backend-native Cypher escape hatch (Full39075 F11): run `query` verbatim
+    /// against the configured FalkorDB graph. This is deliberately **outside**
+    /// Grust's portable conformance surface — the text is FalkorDB's own
+    /// openCypher dialect and no portable semantics are claimed for it.
+    pub fn run_native_cypher(&self, query: &str) -> Result<()> {
+        let mut connection = self.connection()?;
+        self.query(&mut connection, query).map(|_| ())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -320,7 +329,9 @@ fn cypher_map(props: &Props, config: &FalkorConfig) -> String {
             Value::Float(value) => format!("{key}:{value}"),
             Value::String(value) => format!("{key}:{}", cypher_string(value)),
             Value::DateTime(value) => format!("{key}:{}", cypher_string(value.as_str())),
-            Value::Decimal(value) => format!("{key}:{}", cypher_string(&value.to_canonical_string())),
+            Value::Decimal(value) => {
+                format!("{key}:{}", cypher_string(&value.to_canonical_string()))
+            }
             Value::Duration(value) => format!("{key}:{}", cypher_string(&value.to_iso_string())),
             Value::IntArray(values) => format!(
                 "{key}:[{}]",
@@ -346,6 +357,9 @@ fn cypher_map(props: &Props, config: &FalkorConfig) -> String {
                     .collect::<Vec<_>>()
                     .join(",")
             ),
+            Value::Path(_) | Value::Graph(_) => {
+                format!("{key}:{}", cypher_string(&value.to_json().to_string()))
+            }
             Value::Json(value) => format!("{key}:{}", cypher_string(&value.to_string())),
         })
         .collect::<Vec<_>>()

@@ -25,7 +25,11 @@ fn builds_issue_graph_with_typed_edges() {
     let graph = build_graph(&issues);
     assert_eq!(graph.nodes.len(), 3);
     assert_eq!(graph.edges.len(), 2);
-    let labels: Vec<_> = graph.edges.iter().map(|e| e.label.as_str().to_string()).collect();
+    let labels: Vec<_> = graph
+        .edges
+        .iter()
+        .map(|e| e.label.as_str().to_string())
+        .collect();
     assert!(labels.contains(&"BLOCKS".to_string()));
     assert!(labels.contains(&"PARENT_CHILD".to_string()));
 }

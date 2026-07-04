@@ -258,7 +258,10 @@ async fn mvcc_journal_mode_enables_concurrent_writes_and_round_trips() {
     assert_eq!(mode.as_deref(), Some("mvcc"));
 
     // The MVCC concurrent-writer transaction syntax is accepted.
-    store.execute("BEGIN CONCURRENT").await.expect("begin concurrent");
+    store
+        .execute("BEGIN CONCURRENT")
+        .await
+        .expect("begin concurrent");
     store.execute("COMMIT").await.expect("commit concurrent");
 
     // End-to-end write/read works under MVCC.
@@ -279,7 +282,9 @@ async fn mvcc_journal_mode_enables_concurrent_writes_and_round_trips() {
 #[tokio::test]
 async fn default_journal_mode_is_wal() {
     // Default config leaves the engine in its WAL default (no MVCC).
-    let store = TursoGraphStore::in_memory().await.expect("open Turso store");
+    let store = TursoGraphStore::in_memory()
+        .await
+        .expect("open Turso store");
     let mode = store
         .query_scalar_text("PRAGMA journal_mode")
         .await
@@ -293,8 +298,12 @@ fn is_mvcc_conflict_detects_retryable_errors() {
     assert!(is_mvcc_conflict(&GrustError::Backend(
         "Turso command failed: Write-write conflict: BEGIN CONCURRENT".into()
     )));
-    assert!(is_mvcc_conflict(&GrustError::Backend("Database is busy".into())));
-    assert!(is_mvcc_conflict(&GrustError::Backend("Conflict: busy snapshot".into())));
+    assert!(is_mvcc_conflict(&GrustError::Backend(
+        "Database is busy".into()
+    )));
+    assert!(is_mvcc_conflict(&GrustError::Backend(
+        "Conflict: busy snapshot".into()
+    )));
     // Non-conflict errors are not retried.
     assert!(!is_mvcc_conflict(&GrustError::Backend(
         "near \"FROM\": syntax error".into()
@@ -305,7 +314,8 @@ fn is_mvcc_conflict_detects_retryable_errors() {
 async fn mvcc_apply_mutations_batch_round_trips() {
     // The MVCC apply_mutations path runs the batch as one BEGIN CONCURRENT
     // transaction (via execute_concurrent) and round-trips.
-    let path = std::env::temp_dir().join(format!("grust_turso_mvcc_batch_{}.db", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("grust_turso_mvcc_batch_{}.db", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let store = TursoGraphStore::connect(TursoConfig {
         path: path.to_string_lossy().into_owned(),
@@ -321,14 +331,25 @@ async fn mvcc_apply_mutations_batch_round_trips() {
         GraphMutation::UpsertNode(Node::new("Person", "p2", Props::new())),
         GraphMutation::DeleteNode(NodeId::new("p1")),
     ];
-    store.apply_mutations(&muts).await.expect("mvcc batch apply");
+    store
+        .apply_mutations(&muts)
+        .await
+        .expect("mvcc batch apply");
 
     assert!(
-        store.get_node(&NodeId::new("p1")).await.expect("read p1").is_none(),
+        store
+            .get_node(&NodeId::new("p1"))
+            .await
+            .expect("read p1")
+            .is_none(),
         "p1 should have been deleted in the batch"
     );
     assert!(
-        store.get_node(&NodeId::new("p2")).await.expect("read p2").is_some(),
+        store
+            .get_node(&NodeId::new("p2"))
+            .await
+            .expect("read p2")
+            .is_some(),
         "p2 should have been upserted in the batch"
     );
 
@@ -348,9 +369,13 @@ async fn mvcc_concurrent_writers_resolve_conflicts_via_retry() {
         ..TursoConfig::default()
     };
 
-    let writer = TursoGraphStore::connect(cfg()).await.expect("open writer 1");
+    let writer = TursoGraphStore::connect(cfg())
+        .await
+        .expect("open writer 1");
     writer.bootstrap().await.expect("bootstrap");
-    let writer2 = TursoGraphStore::connect(cfg()).await.expect("open writer 2");
+    let writer2 = TursoGraphStore::connect(cfg())
+        .await
+        .expect("open writer 2");
 
     let h1 = tokio::spawn(async move {
         for i in 0..10 {

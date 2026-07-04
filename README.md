@@ -802,6 +802,16 @@ through that native-constraint path. Other backends may still report
 metadata-only behavior until they add comparable preflight or native
 enforcement.
 
+Named DDL metadata remains portable. A `CypherConstraintRegistry` can
+materialize a `CypherCatalogSnapshot` for a graph name, and
+`cypher_catalog_procedure` returns deterministic catalog rows for `db.graphs`,
+`db.graphTypes`, `db.indexes`, and `db.constraints`.
+Read queries may select a named graph with `USE <graph>`; the default
+single-graph read path accepts `USE default`, while
+`run_read_query_on_named_graph` binds a graph snapshot to an explicit name.
+Standalone session commands use `CypherSession` / `SessionCommand` for `USE`,
+`SET`, and `RESET`; fixed-length path bindings now return `Value::Path`.
+
 The current backends use schema differently:
 
 - SurrealDB can run schemaless, but schema can define record tables, relation

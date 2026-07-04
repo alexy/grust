@@ -384,7 +384,7 @@ fn helix_property_json(value: &Value) -> Result<serde_json::Value> {
         Value::StringArray(values) => Ok(json!({"StringArray": values})),
         Value::IntArray(values) => Ok(json!({"I64Array": values})),
         Value::FloatArray(values) => Ok(json!({"F64Array": values})),
-        Value::Json(_) => Err(GrustError::Unsupported(
+        Value::Path(_) | Value::Graph(_) | Value::Json(_) => Err(GrustError::Unsupported(
             "Helix backend does not support JSON object properties".to_string(),
         )),
     }
@@ -523,7 +523,7 @@ fn helix_property_input(value: &Value) -> Result<PropertyInput> {
         Value::StringArray(values) => PropertyValue::StringArray(values.clone()),
         Value::IntArray(values) => PropertyValue::I64Array(values.clone()),
         Value::FloatArray(values) => PropertyValue::F64Array(values.clone()),
-        Value::Json(_) => {
+        Value::Path(_) | Value::Graph(_) | Value::Json(_) => {
             return Err(GrustError::Unsupported(
                 "Helix backend does not support JSON object properties".to_string(),
             ));

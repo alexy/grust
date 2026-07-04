@@ -128,7 +128,17 @@ pub fn analyze(query: &Query) -> Result<SemanticReport> {
 }
 
 fn analyze_single(query: &SingleQuery, report: &mut SemanticReport) -> Result<()> {
-    let mut scope = Scope::default();
+    analyze_single_scoped(query, Scope::default(), report).map(|_| ())
+}
+
+/// Analyze a single query starting from `scope` (the outer bindings for a
+/// `CALL { … }` subquery arm; empty at the top level). Returns the scope its
+/// terminal `RETURN` projects, if any.
+fn analyze_single_scoped(
+    query: &SingleQuery,
+    mut scope: Scope,
+    report: &mut SemanticReport,
+) -> Result<Option<Scope>> {
     let has_update = query.clauses.iter().any(Clause::is_updating);
     let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
 
@@ -144,14 +154,22 @@ fn analyze_single(query: &SingleQuery, report: &mut SemanticReport) -> Result<()
         }
     }
 
+    let mut return_scope = None;
     for clause in &query.clauses {
-        analyze_clause(clause, &mut scope, report)?;
+        if let Clause::Return(r) = clause {
+            return_scope = Some(project_scope_for_return(&r.projection, &scope, report)?);
+        } else {
+            analyze_clause(clause, &mut scope, report)?;
+        }
     }
-    Ok(())
+    Ok(return_scope)
 }
 
 fn analyze_clause(clause: &Clause, scope: &mut Scope, report: &mut SemanticReport) -> Result<()> {
     match clause {
+        Clause::Use(u) => {
+            report.note(GqlFeature::NamedGraphSelection, u.span);
+        }
         Clause::Match(m) => {
             if m.optional {
                 report.note(GqlFeature::OptionalMatch, m.span);
@@ -213,12 +231,54 @@ fn analyze_clause(clause: &Clause, scope: &mut Scope, report: &mut SemanticRepor
         }
         Clause::Call(c) => {
             report.note(GqlFeature::ProcedureCall, c.span);
+            if !c.args.is_empty() {
+                report.note(GqlFeature::TableValuedFunction, c.span);
+            }
+            // Arguments are evaluated against the incoming rows (correlated).
+            for arg in &c.args {
+                check_expr_bound(arg, scope)?;
+            }
             // YIELD columns (aliased or not) become value-kind bindings.
             for (col, alias) in &c.yields {
                 bind_var(scope, alias.as_deref().unwrap_or(col), ElementKind::Value)?;
             }
             if let Some(where_clause) = &c.where_clause {
                 check_expr_bound(where_clause, scope)?;
+            }
+        }
+        Clause::Subquery(s) => {
+            report.note(GqlFeature::Subquery, s.span);
+            // Each arm sees the outer bindings (correlated, import-all). The
+            // subquery's RETURN scope joins onto the outer scope; the first
+            // arm is authoritative (execution enforces column agreement).
+            for part in &s.query.parts {
+                if let Some(Clause::Return(r)) = part.query.clauses.last() {
+                    if r.projection.star {
+                        return Err(crate::gql::unsupported_gql_feature(
+                            GqlFeature::Subquery,
+                            crate::gql::GqlConformanceProfile::PortableGql,
+                            "RETURN * inside CALL { … } is not supported (it would re-project the imported outer scope)",
+                        ));
+                    }
+                }
+            }
+            let mut returned: Option<Scope> = None;
+            for part in &s.query.parts {
+                let arm = analyze_single_scoped(&part.query, scope.clone(), report)?
+                    .ok_or_else(|| name_error("CALL { … } subquery must end in RETURN"))?;
+                if returned.is_none() {
+                    returned = Some(arm);
+                }
+            }
+            let returned =
+                returned.ok_or_else(|| name_error("CALL { … } subquery must end in RETURN"))?;
+            for (name, kind) in &returned.vars {
+                if scope.get(name).is_some() {
+                    return Err(name_error(format!(
+                        "CALL {{ … }} returns `{name}`, which is already bound in the outer scope"
+                    )));
+                }
+                scope.vars.insert(name.clone(), *kind);
             }
         }
         Clause::Return(r) => {
@@ -237,6 +297,9 @@ fn bind_pattern(
 ) -> Result<()> {
     if let Some(path_var) = &pattern.variable {
         bind_var(scope, path_var, ElementKind::Path)?;
+    }
+    if pattern.shortest.is_some() {
+        report.note(GqlFeature::ShortestPath, pattern.span);
     }
     bind_node(&pattern.start, scope)?;
     for segment in &pattern.segments {
@@ -636,6 +699,29 @@ mod tests {
         let report = analyze_src("CREATE (n:Person {id:'p1'}) SET n.active = true").unwrap();
         // updating query, no read-only gate
         assert!(!report.uses_feature(GqlFeature::ReadOnlyMatchReturn));
+    }
+
+    #[test]
+    fn call_subquery_sees_outer_scope_and_exports_return() {
+        let report = analyze_src(
+            "MATCH (a:Person) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS friend } RETURN a.name, friend",
+        )
+        .unwrap();
+        assert!(report.uses_feature(GqlFeature::Subquery));
+    }
+
+    #[test]
+    fn call_subquery_collision_with_outer_scope_is_an_error() {
+        let err =
+            analyze_src("MATCH (a:Person) CALL { MATCH (x:City) RETURN x.name AS a } RETURN a")
+                .unwrap_err();
+        assert!(err.to_string().contains("already bound in the outer scope"));
+    }
+
+    #[test]
+    fn call_subquery_without_return_is_an_error() {
+        let err = analyze_src("MATCH (a:Person) CALL { MATCH (c:City) } RETURN a").unwrap_err();
+        assert!(err.to_string().contains("must end in RETURN"));
     }
 
     #[test]

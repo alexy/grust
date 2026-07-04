@@ -1663,9 +1663,18 @@ fn undirected_edge_type_accepts_reversed_endpoints_and_unordered_uniqueness() {
 
 #[test]
 fn decimal_parse_normalize_and_display() {
-    assert_eq!(Decimal::parse("1.50").unwrap(), Decimal::parse("1.5").unwrap());
-    assert_eq!(Decimal::parse("3.14").unwrap().to_canonical_string(), "3.14");
-    assert_eq!(Decimal::parse("-0.001").unwrap().to_canonical_string(), "-0.001");
+    assert_eq!(
+        Decimal::parse("1.50").unwrap(),
+        Decimal::parse("1.5").unwrap()
+    );
+    assert_eq!(
+        Decimal::parse("3.14").unwrap().to_canonical_string(),
+        "3.14"
+    );
+    assert_eq!(
+        Decimal::parse("-0.001").unwrap().to_canonical_string(),
+        "-0.001"
+    );
     assert_eq!(Decimal::parse("42").unwrap().to_canonical_string(), "42");
     assert_eq!(Decimal::parse("0.0").unwrap().to_canonical_string(), "0");
     assert_eq!(Decimal::parse("+5").unwrap().to_canonical_string(), "5");
@@ -1682,12 +1691,20 @@ fn decimal_ordering_and_arithmetic() {
     assert_eq!(a.checked_add(&b).unwrap().to_canonical_string(), "2.75");
     assert_eq!(a.checked_sub(&b).unwrap().to_canonical_string(), "0.25");
     assert_eq!(
-        Decimal::parse("0.1").unwrap().checked_mul(&Decimal::parse("0.2").unwrap()).unwrap().to_canonical_string(),
+        Decimal::parse("0.1")
+            .unwrap()
+            .checked_mul(&Decimal::parse("0.2").unwrap())
+            .unwrap()
+            .to_canonical_string(),
         "0.02"
     );
     // lossless where f64 would drift
     assert_eq!(
-        Decimal::parse("0.1").unwrap().checked_add(&Decimal::parse("0.2").unwrap()).unwrap().to_canonical_string(),
+        Decimal::parse("0.1")
+            .unwrap()
+            .checked_add(&Decimal::parse("0.2").unwrap())
+            .unwrap()
+            .to_canonical_string(),
         "0.3"
     );
 }
@@ -1725,4 +1742,39 @@ fn duration_arithmetic_and_serde() {
     assert_eq!(a.negated().months, -1);
     let json = serde_json::to_string(&a).unwrap();
     assert_eq!(serde_json::from_str::<Duration>(&json).unwrap(), a);
+}
+
+#[test]
+fn graph_value_deduplicates_and_serializes() {
+    let nodes = vec![
+        Node::new("Person", "p1", Props::new()),
+        Node::new("Person", "p2", Props::new()),
+        Node::new("Person", "p1", Props::new()),
+    ];
+    let edges = vec![
+        Edge::new("KNOWS", "p1", "p2", Props::new()),
+        Edge::new("KNOWS", "p1", "p2", Props::new()),
+    ];
+    let graph_value = GraphValue::from_graph_parts(&nodes, &edges);
+    assert_eq!(graph_value.nodes.len(), 2);
+    assert_eq!(graph_value.relationships.len(), 1);
+
+    // Plain JSON keeps the {nodes, relationships} shape.
+    let value = Value::Graph(graph_value.clone());
+    let json = value.to_json();
+    assert_eq!(json["nodes"].as_array().unwrap().len(), 2);
+    assert_eq!(json["relationships"].as_array().unwrap().len(), 1);
+
+    // The tagged serde form round-trips losslessly.
+    let tagged = serde_json::to_value(&value).unwrap();
+    assert_eq!(tagged["type"], "graph");
+    assert_eq!(Value::from_json(tagged), value);
+}
+
+#[test]
+fn graph_value_from_graph_snapshot() {
+    let graph = Graph::new(vec![Node::new("Person", "p1", Props::new())], vec![]);
+    let graph_value = GraphValue::from_graph(&graph);
+    assert_eq!(graph_value.nodes.len(), 1);
+    assert!(graph_value.relationships.is_empty());
 }

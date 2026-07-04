@@ -17,9 +17,9 @@
 
 use grust_core::{Edge, Graph, Label, Node, NodeId, Props, Value};
 use grust_cypher::pushdown::{
-    combine_union, plan_node_read, plan_node_read_with_hints, plan_read, plan_segment_read,
-    plan_segment_read_with_hints, plan_var_length_read, ReadPushdown, ScalarKind, SqlDialect,
-    SqliteDialect, StrOp, TypeHints,
+    ReadPushdown, ScalarKind, SqlDialect, SqliteDialect, StrOp, TypeHints, combine_union,
+    plan_node_read, plan_node_read_with_hints, plan_read, plan_segment_read,
+    plan_segment_read_with_hints, plan_var_length_read,
 };
 use grust_cypher::read::run_read_query;
 use grust_cypher::{CypherParameters, CypherResultTable};
@@ -210,7 +210,11 @@ impl SqlDialect for UntypedSqlite {
         }
     }
     fn bool_literal_sql(&self, value: bool) -> String {
-        if value { "1".to_string() } else { "0".to_string() }
+        if value {
+            "1".to_string()
+        } else {
+            "0".to_string()
+        }
     }
     // orders_json_typed defaults to false → ordering casts via TypeHints.
 }
@@ -253,7 +257,10 @@ async fn schema_aware_ordering_casts_match_reference() {
             "hints should make `{cypher}` pushable on an untyped dialect"
         );
         let sql = plan.to_sql(&UntypedSqlite);
-        assert!(sql.contains("CAST(json_extract"), "expected a cast in `{sql}`");
+        assert!(
+            sql.contains("CAST(json_extract"),
+            "expected a cast in `{sql}`"
+        );
         let mut rows = conn.query(&sql, ()).await.unwrap();
         let mut nodes = Vec::new();
         while let Some(row) = rows.next().await.unwrap() {
@@ -282,7 +289,10 @@ async fn untyped_segment_edge_ordering_matches_reference() {
         .unwrap();
     assert!(plan.pushes_ordering(&UntypedSqlite));
     let sql = plan.to_sql(&UntypedSqlite);
-    assert!(sql.contains("CAST(json_extract(e0.props"), "expected an edge cast in `{sql}`");
+    assert!(
+        sql.contains("CAST(json_extract(e0.props"),
+        "expected an edge cast in `{sql}`"
+    );
     let n = plan.column_count();
     let mut rows = conn.query(&sql, ()).await.unwrap();
     let mut text_rows = Vec::new();
@@ -437,7 +447,9 @@ fn var_length_pushdown_matches_reference() {
             .unwrap_or_else(|e| panic!("prepare failed for `{sql}`: {e}"));
         let text_rows: Vec<Vec<Option<String>>> = stmt
             .query_map([], |row| {
-                (0..n).map(|i| row.get::<usize, Option<String>>(i)).collect()
+                (0..n)
+                    .map(|i| row.get::<usize, Option<String>>(i))
+                    .collect()
             })
             .unwrap()
             .map(|r| r.unwrap())
@@ -468,11 +480,10 @@ fn embed_sqlite(graph: &Graph) -> rusqlite::Connection {
         .unwrap();
     }
     for e in &graph.edges {
-        let id = e
-            .id
-            .as_ref()
-            .map(|i| lit(i.as_str()))
-            .unwrap_or_else(|| "NULL".to_string());
+        let id =
+            e.id.as_ref()
+                .map(|i| lit(i.as_str()))
+                .unwrap_or_else(|| "NULL".to_string());
         conn.execute_batch(&format!(
             "INSERT INTO grust_edges (id, src_id, dst_id, edge_type, props) VALUES ({}, {}, {}, {}, {});",
             id,
@@ -496,7 +507,11 @@ fn assert_same(cypher: &str, actual: &CypherResultTable, expected: &CypherResult
         rows.sort();
         rows
     };
-    assert_eq!(sorted(actual), sorted(expected), "row multiset for `{cypher}`");
+    assert_eq!(
+        sorted(actual),
+        sorted(expected),
+        "row multiset for `{cypher}`"
+    );
 }
 
 #[tokio::test]
@@ -557,7 +572,8 @@ async fn segment_pushdown(
     while let Some(row) = rows.next().await.unwrap() {
         text_rows.push((0..n).map(|i| opt_text(&row, i)).collect());
     }
-    plan.project_text_rows(&SqliteDialect, text_rows, params).unwrap()
+    plan.project_text_rows(&SqliteDialect, text_rows, params)
+        .unwrap()
 }
 
 #[tokio::test]
@@ -698,11 +714,10 @@ async fn embed(graph: &Graph) -> turso::Connection {
         conn.execute_batch(&sql).await.unwrap();
     }
     for e in &graph.edges {
-        let id = e
-            .id
-            .as_ref()
-            .map(|i| lit(i.as_str()))
-            .unwrap_or_else(|| "NULL".to_string());
+        let id =
+            e.id.as_ref()
+                .map(|i| lit(i.as_str()))
+                .unwrap_or_else(|| "NULL".to_string());
         let sql = format!(
             "INSERT INTO grust_edges (id, src_id, dst_id, edge_type, props) VALUES ({}, {}, {}, {}, {});",
             id,

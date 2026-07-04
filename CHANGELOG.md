@@ -6,6 +6,151 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added **atomic Cypher transaction batches**: `CypherTransaction` accumulates
+  eagerly-planned write statements between `START TRANSACTION`/`BEGIN` and
+  `COMMIT` (with `READ ONLY` enforcement), and
+  `execute_cypher_transaction_on_store` submits the whole batch in a single
+  `apply_mutations` call — atomic on stores reporting
+  `GraphMutationAtomicity::Transactional` (proven end-to-end on Turso, whose
+  store wraps the slice in one `BEGIN…COMMIT` SQL transaction), and refused
+  with a structured feature-tagged error on `OrderedNonAtomic` stores rather
+  than silently committing non-atomically.
+  `run_cypher_transaction_script_on_store` executes a full
+  `BEGIN; …; COMMIT|ROLLBACK` script (lexer-aware statement splitting;
+  `ROLLBACK` never touches the store). This closes the Unit 13 deferred tail;
+  the `transaction-control` manifest summary now reflects executable
+  atomicity.
+
+- The **portable read corpus is now executable**: every case in
+  `tests/gql/portable_read.json` (grown to 24 cases covering path/graph
+  values, subqueries, TVFs, and shortest paths, including structured
+  rejections) runs against the fixture graph and must match its expected
+  outcome and error kind.
+
+- **Full39075 is now the realized GQL profile** (Full39075 FM5): with F1–F11
+  complete, every non-rejected feature in the manifest is `Supported` (69 of
+  74; the other 5 are intentional strict-write rejections — conformance
+  guards, not gaps). `docs/GQL_PROFILE_STATEMENT.md` now claims `Full39075` as
+  the realized profile, `gql::tests::full_profile_claim_is_backed` pins the
+  scoped-out set to exactly the five rejections, and the book chapter on the
+  GQL layer is updated accordingly.
+
+- Added **backend-native query passthrough** (Full39075 F11): the conformance
+  spine gains `NativeQuery` / `NativeQueryLanguage` (cypher · sql · surrealql),
+  a per-backend capability table (`GqlBackend::native_passthrough` + descriptor
+  field), `ensure_native_passthrough` with structured feature-tagged
+  non-support, and `native_passthrough_backends` reverse lookup. The backend
+  catalog now includes **Falkor** and **Surreal** as `native-graph-backend`
+  entries (Surreal honestly reports transactional atomicity). Executable
+  escape hatches: `FalkorGraphStore::run_native_cypher` and
+  `SurrealHttpGraphStore` / `SurrealSdkGraphStore::run_native_surrealql`
+  (Sail's `query_arrow_ipc` already covered native SQL). All are deliberately
+  outside portable conformance. `NativeCypherPassthrough` is now `Supported`:
+  **every non-rejected manifest feature is implemented** (69 supported + 5
+  intentional rejections).
+
+- Added **shortest-path matching** (Full39075 F10): `MATCH p =
+  shortestPath((a)-[:T*]->(b))` and `allShortestPaths(…)` over a single
+  relationship segment now execute on the read reference. Per (start, end)
+  endpoint pair the executor finds minimal-length simple paths by iterative
+  lengthening over the bounded var-length enumerator; `allShortestPaths` keeps
+  same-length ties, `shortestPath` returns the first in deterministic edge
+  order. Endpoint, relationship-list, and path variables bind like the
+  var-length machinery, and path variables return first-class `Value::Path`
+  values. `ShortestPath` is now `Supported`; the candidate `Full39075`
+  remainder drops to 1 planned feature + 5 intentional rejections.
+
+- Added **table-valued functions** (Full39075 F9): `CALL name(args) [YIELD …]`
+  now accepts argument expressions, evaluated against each incoming row
+  (correlated TVFs), with the procedure's rows cross-joined onto the row
+  stream. The registry keeps the nullary `db.*` catalog procedures (which now
+  reject arguments with a structured error) and adds
+  `tvf.range(start, end[, step]) YIELD value` and
+  `tvf.keys(element_or_map) YIELD key`. `TableValuedFunction` is now
+  `Supported`; the candidate `Full39075` remainder drops to 1 future + 1
+  planned feature + 5 intentional rejections.
+
+- Added **`CALL { … }` subqueries** (Full39075 F8) to the read reference
+  executor: correlated import-all scoping (the subquery sees the outer row's
+  bindings), WITH-style `RETURN` that preserves node/edge bindings for later
+  `MATCH` extension, per-row execution (rows with empty subquery results are
+  dropped, join semantics otherwise), `UNION`/`UNION ALL` arms, and structured
+  rejections for column collisions, missing `RETURN`, and `RETURN *`.
+  `Subquery` is now `Supported`; the candidate `Full39075` remainder drops to
+  2 future + 1 planned features + 5 intentional rejections.
+
+- Added **first-class graph values** (Full39075 F7): `grust_core::GraphValue`
+  and `Value::Graph` model set-shaped graph values — construction deduplicates
+  nodes by id and relationships by id-or-endpoint identity, preserving
+  first-seen order for deterministic serialization. `GraphValue::from_graph` /
+  `from_graph_parts` build graph values from snapshots, `Value::to_json` keeps
+  the `{nodes, relationships}` shape, and the read reference executor gains a
+  `graph(nodes, relationships)` constructor (e.g. over `collect(...)` lists)
+  plus `nodes(g)` / `relationships(g)` accessors. `GraphValues` is now
+  `Supported`; the candidate `Full39075` remainder drops to 3 future + 1
+  planned features + 5 intentional rejections.
+
+- Added the **Full39075 follow-on goal** (`docs/GQL_FULL39075_GOAL.md`) and
+  landed F1 index-definition support: `cypher_ddl` / `sail_cypher_ddl` now parse
+  portable single-property `CREATE INDEX name [IF NOT EXISTS] FOR ... ON (...)`
+  and `DROP INDEX name [IF EXISTS]` DDL for node and relationship properties.
+  `CypherConstraintRegistry` tracks named index metadata through
+  `named_indexes()`, new public metadata types (`GraphIndexDefinition`,
+  `GraphIndexElement`, `NamedGraphIndex`) are exported through `grust-cypher`,
+  `grust-sail`, and the `grust-graph` facade, and `GqlBackendDescriptor` gains an
+  `index_ddl` capability flag. `IndexDefinition` is now `Supported` in the GQL
+  manifest; the candidate `Full39075` remainder drops to 8 future + 2 planned
+  features + 5 intentional rejections.
+
+- Added **graph-type definition DDL** (Full39075 F2): `cypher_ddl` /
+  `sail_cypher_ddl` now parse portable `CREATE GRAPH TYPE name [IF NOT EXISTS]
+  [OPEN|CLOSED] AS ...` and `DROP GRAPH TYPE name [IF EXISTS]` metadata. The
+  first supported body surface covers `NODE Label (...)` and directed
+  `EDGE Type FROM Source TO Target (...)` declarations with scalar/array field
+  types and `REQUIRED` / `NOT NULL` markers, lowering to `GraphSchema` inside
+  `GraphTypeDefinition`. `CypherConstraintRegistry` now tracks named graph types
+  through `named_graph_types()`, and `GraphTypeDefinition` / `NamedGraphType` are
+  exported through the language crate and facade. `GraphTypeDefinition` is now
+  `Supported` in the GQL manifest; the candidate `Full39075` remainder drops to
+  7 future + 2 planned features + 5 intentional rejections.
+
+- Added **portable catalog metadata** (Full39075 F3): `CypherConstraintRegistry`
+  can now materialize a `CypherCatalogSnapshot` for a named graph, carrying graph
+  type, index, and named constraint metadata. `cypher_catalog_procedure` exposes
+  deterministic read-only metadata tables for `db.graphs`, `db.graphTypes`,
+  `db.indexes`, and `db.constraints`, and `GqlBackendDescriptor` gains a
+  `catalog_metadata` capability flag. `CatalogMetadata` is now `Supported`; the
+  candidate `Full39075` remainder drops to 6 future + 2 planned features + 5
+  intentional rejections.
+
+- Added **named graph selection** (Full39075 F4): the parser and semantic
+  analyzer now recognize `USE <graph>` clauses, the Memory read reference path
+  validates the selected graph before execution, and
+  `run_read_query_on_named_graph` lets callers bind a single-graph snapshot to a
+  non-default graph name. Catalog-backed callers can validate graph names through
+  `ensure_catalog_graph_selection`, and `GqlBackendDescriptor` gains a
+  `named_graph_selection` capability flag. `NamedGraphSelection` is now
+  `Supported`; the candidate `Full39075` remainder drops to 5 future + 2 planned
+  features + 5 intentional rejections.
+
+- Added **session control** (Full39075 F5): `CypherSession` tracks the current
+  graph and portable session settings, while `SessionCommand::parse` /
+  `SessionCommand::apply` handle standalone `USE`, `SET name = literal`,
+  `RESET name`, and `RESET ALL` commands. `USE` can validate against a
+  `CypherCatalogSnapshot` before changing session state, and transaction-control
+  behavior remains unchanged. `GqlBackendDescriptor` gains a `session_control`
+  capability flag. `SessionControl` is now `Supported`; the candidate
+  `Full39075` remainder drops to 5 future + 1 planned feature + 5 intentional
+  rejections.
+
+- Added **first-class path values** (Full39075 F6): `grust_core::PathValue` and
+  `Value::Path` now represent fixed-length path bindings directly while
+  `Value::to_json` preserves the existing `{nodes, relationships}` serialization
+  shape. Returning a path variable now yields `Value::Path`, and existing
+  `nodes(p)`, `relationships(p)`, and `length(p)` behavior remains compatible.
+  `PathValues` is now `Supported`; the candidate `Full39075` remainder drops to
+  4 future + 1 planned feature + 5 intentional rejections.
+
 ## 0.11.0 "Crab" - 2026-06-26
 
 - **Turso MVCC + concurrent writes:** `TursoConfig` gains a `journal_mode: TursoJournalMode` field (`Wal` default, or `Mvcc`). `Mvcc` enables Turso's multi-version concurrency control via `PRAGMA journal_mode = mvcc` on connect — a database-*header* mode, so it only applies to a fresh database (an existing WAL database can't be converted; `connect` verifies the mode and errors otherwise). In MVCC mode, data writes (`put_node`/`put_edge`/`put_graph`/`delete_*`/`apply_mutations`) run inside a `BEGIN CONCURRENT … COMMIT` transaction with bounded retry on write-write/busy conflicts, so concurrent writers make progress; WAL-mode behavior is unchanged. Verified end-to-end: mode reported as `mvcc`, `BEGIN CONCURRENT` accepted, batch round-trips, and two concurrent writers writing overlapping keys both succeed via retry.

@@ -1186,6 +1186,14 @@ a three-valued `WHERE` expression engine, and `RETURN` with aliases, `DISTINCT`,
 `ORDER BY`/`SKIP`/`LIMIT`, aggregates with implicit `GROUP BY`, `WITH`, `UNWIND`,
 and `UNION`. The reference is the definition of correct results.
 
+The read core also composes: `CALL { … }` subqueries execute once per incoming
+row with the outer bindings visible (correlated import-all scoping) and join
+their `RETURN` columns back onto the row, and `shortestPath(…)` /
+`allShortestPaths(…)` find minimal-length simple paths per endpoint pair over a
+relationship segment. Procedures generalize to table-valued functions:
+`CALL name(args) [YIELD …]` evaluates its arguments against each incoming row
+(`tvf.range`, `tvf.keys` join the `db.*` catalog procedures).
+
 Backends that can materialize SQL push the bounded read subset down: a query's
 `MATCH`/`WHERE` filter lowers into backend SQL (Spark and SQLite dialects), while
 the `RETURN` projection still runs through the shared reference. Pushed results
@@ -1200,6 +1208,21 @@ ordering, and checked arithmetic wired through every backend. Read-only catalog
 procedures (`CALL db.labels()`, `db.relationshipTypes()`, `db.propertyKeys()`)
 expose schema metadata, and a `START TRANSACTION`/`BEGIN`/`COMMIT`/`ROLLBACK`
 command surface pairs with honest per-backend atomicity capability reporting.
+Caller-owned DDL metadata can also be materialized as a portable
+`CypherCatalogSnapshot`, with deterministic metadata tables for `db.graphs`,
+`db.graphTypes`, `db.indexes`, and `db.constraints`. Read queries may include
+`USE <graph>`; the default single-graph executor accepts `USE default`, and
+callers can bind a graph snapshot to another explicit graph name. Standalone
+`USE`, `SET`, and `RESET` commands update portable `CypherSession` state without
+changing transaction-control behavior. Fixed-length path bindings now return
+first-class `Value::Path` values while preserving the existing JSON path shape,
+and `Value::Graph` adds first-class set-shaped graph values (deduplicated
+node/relationship sets built with `graph(nodes, relationships)`). For work that
+deliberately steps outside the portable surface, `NativeQuery` is an explicit
+backend-native escape hatch with per-backend language capability flags —
+FalkorDB accepts native Cypher, SurrealDB accepts SurrealQL, and the SQL
+backends accept their own dialects — with structured non-support everywhere
+else.
 
 The writable subset routes acceptance through the same standards-conformant
 parser, keeping the mutation plans byte-identical to the established write planner
@@ -1211,9 +1234,11 @@ and cross-variable correlated `SET`.
 
 What the layer claims to support is stated precisely in
 `docs/GQL_PROFILE_STATEMENT.md`: the realized profile is the set of `Supported`
-features, and every not-yet-supported feature is enumerated with a rationale, so
-the candidate full-39075 claim is never unbacked. A test pins that scoped-out set
-to the feature manifest, so the documentation and the code cannot drift apart.
+features — as of the Full39075 completion goal that is the **full ISO/IEC 39075
+profile**, with the only non-supported manifest entries being five intentional
+strict-write rejections (conformance guards, not gaps). A test pins that
+scoped-out set to the feature manifest, so the documentation and the code cannot
+drift apart.
 
 # 10. Example: A Conference Graph
 

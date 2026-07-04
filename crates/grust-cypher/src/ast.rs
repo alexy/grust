@@ -53,6 +53,7 @@ pub struct SingleQuery {
 /// A top-level clause within a single query.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Clause {
+    Use(UseClause),
     Match(MatchClause),
     Create(CreateClause),
     Merge(MergeClause),
@@ -62,14 +63,27 @@ pub enum Clause {
     With(WithClause),
     Unwind(UnwindClause),
     Call(CallClause),
+    Subquery(SubqueryClause),
     Return(ReturnClause),
 }
 
-/// `CALL <name>() [YIELD col [AS alias], …]` — a read-only catalog procedure.
+/// `CALL { <query> }` — an inline subquery executed once per incoming row.
+/// The outer row's bindings are visible inside (correlated, import-all
+/// semantics); the subquery's `RETURN` columns join onto the outer row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SubqueryClause {
+    pub query: Query,
+    pub span: Span,
+}
+
+/// `CALL <name>(args) [YIELD col [AS alias], …]` — a read-only catalog
+/// procedure or table-valued function invocation.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CallClause {
-    /// Dotted procedure name, e.g. `db.labels`.
+    /// Dotted procedure name, e.g. `db.labels` or `tvf.range`.
     pub name: String,
+    /// Argument expressions, evaluated against each incoming row (correlated).
+    pub args: Vec<Expr>,
     /// `YIELD` columns with optional aliases; empty means no explicit `YIELD`.
     pub yields: Vec<(String, Option<String>)>,
     /// Optional `WHERE` filter following `YIELD`.
@@ -80,6 +94,7 @@ pub struct CallClause {
 impl Clause {
     pub fn span(&self) -> Span {
         match self {
+            Clause::Use(c) => c.span,
             Clause::Match(c) => c.span,
             Clause::Create(c) => c.span,
             Clause::Merge(c) => c.span,
@@ -89,6 +104,7 @@ impl Clause {
             Clause::With(c) => c.span,
             Clause::Unwind(c) => c.span,
             Clause::Call(c) => c.span,
+            Clause::Subquery(c) => c.span,
             Clause::Return(c) => c.span,
         }
     }
@@ -97,7 +113,11 @@ impl Clause {
     pub fn is_reading(&self) -> bool {
         matches!(
             self,
-            Clause::Match(_) | Clause::Unwind(_) | Clause::Call(_)
+            Clause::Use(_)
+                | Clause::Match(_)
+                | Clause::Unwind(_)
+                | Clause::Call(_)
+                | Clause::Subquery(_)
         )
     }
 
@@ -117,6 +137,12 @@ impl Clause {
 // ---------------------------------------------------------------------------
 // Reading clauses
 // ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct UseClause {
+    pub graph: String,
+    pub span: Span,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MatchClause {
@@ -249,9 +275,21 @@ pub struct OrderItem {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PathPattern {
     pub variable: Option<String>,
+    /// `Some` when the pattern is wrapped in `shortestPath(…)` /
+    /// `allShortestPaths(…)` (exactly one relationship segment).
+    pub shortest: Option<ShortestKind>,
     pub start: NodePattern,
     pub segments: Vec<PathSegment>,
     pub span: Span,
+}
+
+/// Which shortest-path family a wrapped pattern requests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShortestKind {
+    /// `shortestPath(…)`: one shortest path per endpoint pair.
+    Single,
+    /// `allShortestPaths(…)`: every minimal-length path per endpoint pair.
+    All,
 }
 
 #[derive(Clone, Debug, PartialEq)]

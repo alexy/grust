@@ -68,8 +68,17 @@ pub(crate) fn parse_cypher_ddl_statement(statement: &str) -> Result<CypherDdlSta
         if let Some(rest) = strip_leading_keyword(rest, "CONSTRAINT") {
             return parse_create_constraint(rest.trim());
         }
+        if let Some(rest) = strip_leading_keyword(rest, "INDEX") {
+            return parse_create_index(rest.trim());
+        }
+        if let Some(rest) = strip_leading_keyword(rest, "GRAPH") {
+            let rest = rest.trim_start();
+            if let Some(rest) = strip_leading_keyword(rest, "TYPE") {
+                return crate::graph_type_ddl::parse_create_graph_type(rest.trim());
+            }
+        }
         return Err(cypher_syntax(
-            "only CREATE CONSTRAINT is supported as Cypher CREATE DDL",
+            "only CREATE CONSTRAINT, CREATE INDEX, or CREATE GRAPH TYPE is supported as Cypher CREATE DDL",
         ));
     }
     if let Some(rest) = strip_leading_keyword(statement, "DROP") {
@@ -77,12 +86,21 @@ pub(crate) fn parse_cypher_ddl_statement(statement: &str) -> Result<CypherDdlSta
         if let Some(rest) = strip_leading_keyword(rest, "CONSTRAINT") {
             return parse_drop_constraint(rest.trim());
         }
+        if let Some(rest) = strip_leading_keyword(rest, "INDEX") {
+            return parse_drop_index(rest.trim());
+        }
+        if let Some(rest) = strip_leading_keyword(rest, "GRAPH") {
+            let rest = rest.trim_start();
+            if let Some(rest) = strip_leading_keyword(rest, "TYPE") {
+                return crate::graph_type_ddl::parse_drop_graph_type(rest.trim());
+            }
+        }
         return Err(cypher_syntax(
-            "only DROP CONSTRAINT is supported as Cypher DROP DDL",
+            "only DROP CONSTRAINT, DROP INDEX, or DROP GRAPH TYPE is supported as Cypher DROP DDL",
         ));
     }
     Err(cypher_syntax(format!(
-        "unsupported Cypher DDL statement; expected CREATE CONSTRAINT or DROP CONSTRAINT: {statement}"
+        "unsupported Cypher DDL statement; expected CREATE/DROP CONSTRAINT, INDEX, or GRAPH TYPE: {statement}"
     )))
 }
 
@@ -156,6 +174,114 @@ pub(crate) fn parse_drop_constraint(rest: &str) -> Result<CypherDdlStatement> {
         name: name.to_string(),
         if_exists,
     })
+}
+
+pub(crate) fn parse_create_index(rest: &str) -> Result<CypherDdlStatement> {
+    let (for_index, body) = find_unquoted_keyword(rest, "FOR")
+        .map(|index| (index, &rest[index + "FOR".len()..]))
+        .ok_or_else(|| cypher_syntax("CREATE INDEX requires a FOR pattern clause"))?;
+    let header = rest[..for_index].trim();
+    let (name, if_not_exists) = parse_required_ddl_name_and_if_not_exists(header, "index")?;
+
+    let (on_index, on_len) = find_unquoted_keyword(body, "ON")
+        .map(|index| (index, "ON".len()))
+        .ok_or_else(|| cypher_syntax("CREATE INDEX requires an ON property clause"))?;
+    let pattern = body[..on_index].trim();
+    let property_clause = body[on_index + on_len..].trim();
+
+    let (is_edge, pattern_variable, label) = parse_constraint_pattern(pattern)?;
+    let key = parse_index_property_clause(property_clause, &pattern_variable)?;
+    let index = GraphIndexDefinition {
+        element: if is_edge {
+            GraphIndexElement::Edge
+        } else {
+            GraphIndexElement::Node
+        },
+        label,
+        key,
+    };
+    Ok(CypherDdlStatement::CreateIndex {
+        name,
+        if_not_exists,
+        index,
+    })
+}
+
+pub(crate) fn parse_drop_index(rest: &str) -> Result<CypherDdlStatement> {
+    let (name, if_exists) = parse_required_ddl_name_and_if_exists(rest, "index")?;
+    Ok(CypherDdlStatement::DropIndex { name, if_exists })
+}
+
+pub(crate) fn parse_required_ddl_name_and_if_not_exists(
+    header: &str,
+    object_kind: &str,
+) -> Result<(String, bool)> {
+    let (name, if_not_exists) = if let Some(if_index) = find_unquoted_keyword(header, "IF") {
+        let tail = header[if_index + "IF".len()..].trim();
+        if !tail.eq_ignore_ascii_case("NOT EXISTS")
+            && tail.split_whitespace().collect::<Vec<_>>() != ["NOT", "EXISTS"]
+        {
+            return Err(cypher_syntax(format!(
+                "CREATE {object_kind} only supports the IF NOT EXISTS modifier"
+            )));
+        }
+        (header[..if_index].trim(), true)
+    } else {
+        (header.trim(), false)
+    };
+    if !is_cypher_identifier(name) {
+        return Err(cypher_syntax(format!(
+            "CREATE {object_kind} requires a {object_kind} name"
+        )));
+    }
+    Ok((name.to_string(), if_not_exists))
+}
+
+pub(crate) fn parse_required_ddl_name_and_if_exists(
+    rest: &str,
+    object_kind: &str,
+) -> Result<(String, bool)> {
+    let (name, if_exists) = if let Some(if_index) = find_unquoted_keyword(rest, "IF") {
+        let tail = rest[if_index + "IF".len()..].trim();
+        if !tail.eq_ignore_ascii_case("EXISTS") {
+            return Err(cypher_syntax(format!(
+                "DROP {object_kind} only supports the IF EXISTS modifier"
+            )));
+        }
+        (rest[..if_index].trim(), true)
+    } else {
+        (rest.trim(), false)
+    };
+    if !is_cypher_identifier(name) {
+        return Err(cypher_syntax(format!(
+            "DROP {object_kind} requires a {object_kind} name"
+        )));
+    }
+    Ok((name.to_string(), if_exists))
+}
+
+pub(crate) fn parse_index_property_clause(
+    property_clause: &str,
+    pattern_variable: &str,
+) -> Result<String> {
+    let clause = property_clause.trim();
+    let inner = clause
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .ok_or_else(|| cypher_syntax("CREATE INDEX ON clause must be a parenthesized property"))?
+        .trim();
+    if inner.contains(',') {
+        return Err(cypher_syntax(
+            "CREATE INDEX only supports a single indexed property",
+        ));
+    }
+    let (variable, key) = parse_property_ref(inner, "index property")?;
+    if variable != pattern_variable {
+        return Err(cypher_syntax(format!(
+            "index property variable '{variable}' does not match pattern variable '{pattern_variable}'"
+        )));
+    }
+    Ok(key)
 }
 
 /// Parses the optional constraint name in a `CREATE CONSTRAINT` header.

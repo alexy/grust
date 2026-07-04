@@ -39,7 +39,9 @@ pub enum GqlConformanceProfile {
     /// The portable Grust GQL profile: backend-neutral reads, expressions,
     /// composition, and pattern matching executed by the Memory reference.
     PortableGql,
-    /// The target profile: the selected mandatory ISO/IEC 39075:2024 features.
+    /// The full profile: the selected mandatory ISO/IEC 39075:2024 features.
+    /// Realized as of the Full39075 completion goal — every non-rejected
+    /// cataloged feature is `Supported` (see `docs/GQL_PROFILE_STATEMENT.md`).
     Full39075,
 }
 
@@ -692,9 +694,9 @@ impl GqlFeature {
             GqlFeature::IndexDefinition => d!(
                 "index-definition",
                 ConstraintsAndIndexes,
-                Planned,
+                Supported,
                 PortableGql,
-                "Index DDL with per-backend capability reporting (Unit 11)"
+                "Portable single-property CREATE/DROP INDEX DDL metadata with backend capability reporting (Full39075 F1)"
             ),
             GqlFeature::ReadOnlyMatchReturn => d!(
                 "read-only-match-return",
@@ -741,9 +743,9 @@ impl GqlFeature {
             GqlFeature::ShortestPath => d!(
                 "shortest-path",
                 PathMatching,
-                Future,
+                Supported,
                 Full39075,
-                "Shortest-path families (Unit 9)"
+                "shortestPath()/allShortestPaths() over a single relationship segment: minimal-length simple paths per endpoint pair with path/relationship variable binding (Full39075 F10)"
             ),
             GqlFeature::WithClause => d!(
                 "with-clause",
@@ -762,9 +764,9 @@ impl GqlFeature {
             GqlFeature::Subquery => d!(
                 "subquery",
                 QueryComposition,
-                Future,
+                Supported,
                 PortableGql,
-                "Subquery skeletons with scope visibility (Unit 8)"
+                "CALL { … } correlated subqueries in the read reference: outer bindings visible, WITH-style RETURN join, UNION arms, per-row execution (Full39075 F8)"
             ),
             GqlFeature::DistinctOrderingLimit => d!(
                 "distinct-ordering-limit",
@@ -797,51 +799,51 @@ impl GqlFeature {
             GqlFeature::PathValues => d!(
                 "path-values",
                 TypeSystem,
-                Future,
+                Supported,
                 PortableGql,
-                "First-class path values in the type lattice (Unit T)"
+                "First-class path values in Value::Path with stable node/relationship JSON serialization (Full39075 F6)"
             ),
             GqlFeature::GraphValues => d!(
                 "graph-values",
                 TypeSystem,
-                Future,
+                Supported,
                 Full39075,
-                "First-class graph values in the type lattice (Unit T)"
+                "First-class graph values (Value::Graph): deduplicated node/relationship sets via graph() with stable JSON serialization (Full39075 F7)"
             ),
             GqlFeature::TransactionControl => d!(
                 "transaction-control",
                 Transactions,
                 Supported,
                 PortableGql,
-                "START TRANSACTION/BEGIN/COMMIT/ROLLBACK parsed + modeled; per-backend atomicity capability reporting via GqlBackend::transactional (Unit 13). Atomic execution delegated to the backend store, wired post write-path cutover."
+                "START TRANSACTION/BEGIN/COMMIT/ROLLBACK parsed + modeled; per-backend atomicity capability via GqlBackend::transactional; CypherTransaction batches COMMIT atomically in one apply_mutations call on Transactional stores (Turso end-to-end), with structured refusal on OrderedNonAtomic stores (Unit 13 + batch execution)."
             ),
             GqlFeature::SessionControl => d!(
                 "session-control",
                 Transactions,
-                Planned,
+                Supported,
                 Full39075,
-                "Session statements and session capability reporting (Unit 13)"
+                "Standalone USE/SET/RESET session state commands with catalog-aware graph validation (Full39075 F5)"
             ),
             GqlFeature::GraphTypeDefinition => d!(
                 "graph-type-definition",
                 CatalogAndSession,
-                Future,
+                Supported,
                 Full39075,
-                "Graph type definitions for nodes/edges/labels/properties (Unit 11)"
+                "Portable CREATE/DROP GRAPH TYPE metadata for nodes, edges, field types, and open/closed mode (Full39075 F2)"
             ),
             GqlFeature::CatalogMetadata => d!(
                 "catalog-metadata",
                 CatalogAndSession,
-                Future,
+                Supported,
                 Full39075,
-                "Catalog metadata and named graph collections (Unit 11)"
+                "Portable catalog snapshots and read-only metadata procedure rows for graphs, graph types, indexes, and constraints (Full39075 F3)"
             ),
             GqlFeature::NamedGraphSelection => d!(
                 "named-graph-selection",
                 CatalogAndSession,
-                Future,
+                Supported,
                 Full39075,
-                "Named graph selection and session defaults (Units 11, 13)"
+                "USE graph selection with single-graph fallback validation and catalog lookup helpers (Full39075 F4)"
             ),
             GqlFeature::ProcedureCall => d!(
                 "procedure-call",
@@ -853,16 +855,16 @@ impl GqlFeature {
             GqlFeature::TableValuedFunction => d!(
                 "table-valued-function",
                 ProceduresAndFunctions,
-                Future,
+                Supported,
                 Full39075,
-                "Table-valued functions (Unit 14)"
+                "TVF-style row sources via CALL name(args) [YIELD …] with per-row correlated argument evaluation: db.* catalog procedures plus tvf.range, tvf.keys (Full39075 F9)"
             ),
             GqlFeature::NativeCypherPassthrough => d!(
                 "native-cypher-passthrough",
                 NativePassthrough,
-                Planned,
+                Supported,
                 Full39075,
-                "Backend-native Cypher/SurrealQL/Falkor passthrough, separate from portable conformance (Unit 14)"
+                "Explicit backend-native escape hatches outside portable conformance: NativeQuery + per-backend language capability flags + structured non-support; Falkor Cypher, Surreal SurrealQL, Sail/Turso/Postgres SQL (Full39075 F11)"
             ),
             GqlFeature::RejectCreateNodeWithoutExplicitIdentity => d!(
                 "reject-create-node-without-explicit-identity",
@@ -1073,6 +1075,9 @@ pub enum GqlBackendRole {
     /// A SQL / SQL-PGQ graph store with its own surface; no portable Cypher
     /// executor yet (it could join the executing set later).
     SqlGraphBackend,
+    /// A graph store driven through backend-native queries (e.g. Cypher,
+    /// SurrealQL); no portable Cypher executor yet.
+    NativeGraphBackend,
     /// An export/sync target, not a query backend.
     SyncTarget,
     /// Internal-only (`publish = false`); out of the facade and the executing
@@ -1085,6 +1090,7 @@ impl GqlBackendRole {
         match self {
             GqlBackendRole::CypherExecutor => "cypher-executor",
             GqlBackendRole::SqlGraphBackend => "sql-graph-backend",
+            GqlBackendRole::NativeGraphBackend => "native-graph-backend",
             GqlBackendRole::SyncTarget => "sync-target",
             GqlBackendRole::Internal => "internal",
         }
@@ -1106,6 +1112,8 @@ pub enum GqlBackend {
     Turso,
     Postgres,
     PostgresPgq,
+    Falkor,
+    Surreal,
     Helix,
     Ladybug,
     CocoIndex,
@@ -1129,10 +1137,29 @@ pub struct GqlBackendDescriptor {
     pub portable_reads: bool,
     /// Has SQL read **pushdown** wired into a `run_read_query` entrypoint.
     pub read_pushdown: bool,
+    /// Accepts portable index DDL metadata. Physical/native index creation is
+    /// backend-specific and must be checked separately before relying on it.
+    pub index_ddl: bool,
+    /// Exposes portable catalog metadata snapshots/procedure rows for
+    /// caller-owned registry state.
+    pub catalog_metadata: bool,
+    /// Supports `USE <graph>` selection validation for portable single-graph
+    /// execution and catalog-backed graph lookup.
+    pub named_graph_selection: bool,
+    /// Supports standalone session state commands (`USE`, `SET`, `RESET`) in
+    /// the shared portable session model.
+    pub session_control: bool,
     /// The backend's mutation store reports `GraphMutationAtomicity::Transactional`
     /// (i.e. a statement batch can commit/rollback atomically). Verified against
     /// each backend's `mutation_atomicity()` in the working tree (Unit 13).
     pub transactional: bool,
+    /// The query languages this backend's engine accepts natively through an
+    /// explicit escape hatch, outside portable conformance (Full39075 F11).
+    /// Serialized in reports; deserialization restores the empty set (the
+    /// static capability table in [`GqlBackend::native_passthrough`] is the
+    /// source of truth).
+    #[serde(skip_deserializing)]
+    pub native_passthrough: &'static [NativeQueryLanguage],
     pub summary: &'static str,
 }
 
@@ -1140,41 +1167,172 @@ impl GqlBackend {
     pub const fn descriptor(self) -> GqlBackendDescriptor {
         use GqlBackend::*;
         use GqlBackendRole::*;
-        let (id, crate_name, role, publishable, in_facade, writes, reads, pushdown, summary) =
-            match self {
-                Memory => (
-                    "memory", "grust-memory", CypherExecutor, true, true, true, true, false,
-                    "In-memory reference executor: the portable read oracle and the strict-write reference.",
-                ),
-                Sail => (
-                    "sail", "grust-sail", CypherExecutor, true, true, true, true, true,
-                    "Sail/Spark: CypherMutationExecutor plus run_read_query SQL pushdown over grust_nodes/grust_edges.",
-                ),
-                Turso => (
-                    "turso", "grust-turso", CypherExecutor, true, true, true, false, false,
-                    "libSQL/Turso: CypherMutationExecutor (bounded matched-node patches); the embedded SQL differential oracle for read pushdown.",
-                ),
-                Postgres => (
-                    "postgres", "grust-postgres", SqlGraphBackend, true, true, false, false, false,
-                    "PostgreSQL universal-table SQL backend; no portable Cypher executor yet.",
-                ),
-                PostgresPgq => (
-                    "postgres-pgq", "grust-postgres-pgq", SqlGraphBackend, true, true, false, false, false,
-                    "PostgreSQL SQL/PGQ: native PROPERTY GRAPH + GRAPH_TABLE traversal; no portable Cypher executor yet.",
-                ),
-                Helix => (
-                    "helix", "grust-helix", Internal, false, false, false, false, false,
-                    "Internal only (publish=false): out of the facade and the executing-conformance set.",
-                ),
-                Ladybug => (
-                    "ladybug", "grust-ladybug", Internal, false, false, false, false, false,
-                    "Internal only (publish=false): out of the facade and the executing-conformance set.",
-                ),
-                CocoIndex => (
-                    "cocoindex", "grust-cocoindex", SyncTarget, true, true, false, false, false,
-                    "Sync/export target, not a query backend; out of the executing-conformance set.",
-                ),
-            };
+        let (
+            id,
+            crate_name,
+            role,
+            publishable,
+            in_facade,
+            writes,
+            reads,
+            pushdown,
+            index_ddl,
+            catalog_metadata,
+            named_graph_selection,
+            session_control,
+            summary,
+        ) = match self {
+            Memory => (
+                "memory",
+                "grust-memory",
+                CypherExecutor,
+                true,
+                true,
+                true,
+                true,
+                false,
+                true,
+                true,
+                true,
+                true,
+                "In-memory reference executor: the portable read oracle and the strict-write reference.",
+            ),
+            Sail => (
+                "sail",
+                "grust-sail",
+                CypherExecutor,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                "Sail/Spark: CypherMutationExecutor plus run_read_query SQL pushdown over grust_nodes/grust_edges.",
+            ),
+            Turso => (
+                "turso",
+                "grust-turso",
+                CypherExecutor,
+                true,
+                true,
+                true,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                "libSQL/Turso: CypherMutationExecutor (bounded matched-node patches); the embedded SQL differential oracle for read pushdown.",
+            ),
+            Postgres => (
+                "postgres",
+                "grust-postgres",
+                SqlGraphBackend,
+                true,
+                true,
+                false,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                "PostgreSQL universal-table SQL backend; no portable Cypher executor yet.",
+            ),
+            PostgresPgq => (
+                "postgres-pgq",
+                "grust-postgres-pgq",
+                SqlGraphBackend,
+                true,
+                true,
+                false,
+                false,
+                false,
+                true,
+                true,
+                true,
+                true,
+                "PostgreSQL SQL/PGQ: native PROPERTY GRAPH + GRAPH_TABLE traversal; no portable Cypher executor yet.",
+            ),
+            Falkor => (
+                "falkor",
+                "grust-falkor",
+                NativeGraphBackend,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                "FalkorDB (Redis graph): GraphStore writes lowered to backend-native Cypher; native Cypher passthrough via run_native_cypher; no portable executor.",
+            ),
+            Surreal => (
+                "surreal",
+                "grust-surreal",
+                NativeGraphBackend,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                "SurrealDB: GraphStore writes lowered to SurrealQL; native SurrealQL passthrough via run_native_surrealql; no portable executor.",
+            ),
+            Helix => (
+                "helix",
+                "grust-helix",
+                Internal,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                "Internal only (publish=false): out of the facade and the executing-conformance set.",
+            ),
+            Ladybug => (
+                "ladybug",
+                "grust-ladybug",
+                Internal,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                "Internal only (publish=false): out of the facade and the executing-conformance set.",
+            ),
+            CocoIndex => (
+                "cocoindex",
+                "grust-cocoindex",
+                SyncTarget,
+                true,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                "Sync/export target, not a query backend; out of the executing-conformance set.",
+            ),
+        };
         GqlBackendDescriptor {
             backend: self,
             id,
@@ -1185,7 +1343,12 @@ impl GqlBackend {
             cypher_writes: writes,
             portable_reads: reads,
             read_pushdown: pushdown,
+            index_ddl,
+            catalog_metadata,
+            named_graph_selection,
+            session_control,
             transactional: self.transactional(),
+            native_passthrough: self.native_passthrough(),
             summary,
         }
     }
@@ -1195,17 +1358,42 @@ impl GqlBackend {
     pub const fn transactional(self) -> bool {
         matches!(
             self,
-            GqlBackend::Turso | GqlBackend::Postgres | GqlBackend::PostgresPgq
+            GqlBackend::Turso
+                | GqlBackend::Postgres
+                | GqlBackend::PostgresPgq
+                | GqlBackend::Surreal
         )
     }
 
+    /// The query languages this backend's engine accepts natively, outside
+    /// the portable conformance surface (Full39075 F11). Verified against the
+    /// public escape hatches in the working tree: Sail `query_arrow_ipc`,
+    /// Turso/Postgres SQL surfaces, Falkor `run_native_cypher`, Surreal
+    /// `run_native_surrealql`.
+    pub const fn native_passthrough(self) -> &'static [NativeQueryLanguage] {
+        match self {
+            GqlBackend::Sail
+            | GqlBackend::Turso
+            | GqlBackend::Postgres
+            | GqlBackend::PostgresPgq => &[NativeQueryLanguage::Sql],
+            GqlBackend::Falkor => &[NativeQueryLanguage::Cypher],
+            GqlBackend::Surreal => &[NativeQueryLanguage::SurrealQl],
+            GqlBackend::Memory
+            | GqlBackend::Helix
+            | GqlBackend::Ladybug
+            | GqlBackend::CocoIndex => &[],
+        }
+    }
+
     /// All catalogued backends, narrowest concern first.
-    pub const ALL: [GqlBackend; 8] = [
+    pub const ALL: [GqlBackend; 10] = [
         GqlBackend::Memory,
         GqlBackend::Sail,
         GqlBackend::Turso,
         GqlBackend::Postgres,
         GqlBackend::PostgresPgq,
+        GqlBackend::Falkor,
+        GqlBackend::Surreal,
         GqlBackend::Helix,
         GqlBackend::Ladybug,
         GqlBackend::CocoIndex,
@@ -1224,6 +1412,94 @@ pub fn cypher_conformance_backends() -> Vec<GqlBackend> {
         .iter()
         .copied()
         .filter(|b| b.descriptor().role == GqlBackendRole::CypherExecutor)
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Backend-native query passthrough (Full39075 F11)
+// ---------------------------------------------------------------------------
+
+/// A query language a backend engine accepts natively, outside the portable
+/// conformance surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NativeQueryLanguage {
+    /// Backend-native Cypher (e.g. FalkorDB's openCypher dialect).
+    Cypher,
+    /// Backend-native SQL (Spark SQL, SQLite/libSQL, PostgreSQL).
+    Sql,
+    /// SurrealQL.
+    SurrealQl,
+}
+
+impl NativeQueryLanguage {
+    pub const fn id(self) -> &'static str {
+        match self {
+            NativeQueryLanguage::Cypher => "cypher",
+            NativeQueryLanguage::Sql => "sql",
+            NativeQueryLanguage::SurrealQl => "surrealql",
+        }
+    }
+}
+
+impl fmt::Display for NativeQueryLanguage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.id())
+    }
+}
+
+/// An explicit backend-native query. This is the deliberate escape hatch out
+/// of the portable surface: the text is handed to the backend engine verbatim
+/// and **no portable conformance claim applies to it**.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NativeQuery {
+    pub language: NativeQueryLanguage,
+    pub text: String,
+}
+
+impl NativeQuery {
+    pub fn new(language: NativeQueryLanguage, text: impl Into<String>) -> Self {
+        NativeQuery {
+            language,
+            text: text.into(),
+        }
+    }
+}
+
+/// Validate that `backend` accepts `language` natively; a structured,
+/// feature-tagged unsupported error otherwise.
+pub fn ensure_native_passthrough(backend: GqlBackend, language: NativeQueryLanguage) -> Result<()> {
+    if backend.native_passthrough().contains(&language) {
+        Ok(())
+    } else {
+        Err(unsupported_gql_feature(
+            GqlFeature::NativeCypherPassthrough,
+            GqlConformanceProfile::Full39075,
+            format!(
+                "backend `{}` does not accept native {} passthrough (accepted: {})",
+                backend.descriptor().id,
+                language,
+                if backend.native_passthrough().is_empty() {
+                    "none".to_string()
+                } else {
+                    backend
+                        .native_passthrough()
+                        .iter()
+                        .map(|l| l.id())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            ),
+        ))
+    }
+}
+
+/// The backends whose engines accept `language` natively.
+pub fn native_passthrough_backends(language: NativeQueryLanguage) -> Vec<GqlBackend> {
+    GqlBackend::ALL
+        .iter()
+        .copied()
+        .filter(|b| b.native_passthrough().contains(&language))
         .collect()
 }
 
@@ -1486,7 +1762,11 @@ mod tests {
             // Only Cypher executors execute writes / portable reads / pushdown.
             if d.role != GqlBackendRole::CypherExecutor {
                 assert!(!d.cypher_writes, "{} should not claim cypher writes", d.id);
-                assert!(!d.portable_reads, "{} should not claim portable reads", d.id);
+                assert!(
+                    !d.portable_reads,
+                    "{} should not claim portable reads",
+                    d.id
+                );
                 assert!(!d.read_pushdown, "{} should not claim read pushdown", d.id);
             }
             // Read pushdown implies portable reads.
@@ -1495,7 +1775,11 @@ mod tests {
             }
             // Internal backends are never publishable or in the facade.
             if d.role == GqlBackendRole::Internal {
-                assert!(!d.publishable && !d.in_facade, "{} internal but exposed", d.id);
+                assert!(
+                    !d.publishable && !d.in_facade,
+                    "{} internal but exposed",
+                    d.id
+                );
             }
         }
         // Verified specifics: only Sail has read pushdown; only Memory/Sail/Turso
@@ -1503,8 +1787,62 @@ mod tests {
         assert!(GqlBackend::Sail.descriptor().read_pushdown);
         assert!(!GqlBackend::Memory.descriptor().read_pushdown);
         assert!(!GqlBackend::Postgres.descriptor().cypher_writes);
-        assert_eq!(GqlBackend::Helix.descriptor().role, GqlBackendRole::Internal);
-        assert_eq!(GqlBackend::CocoIndex.descriptor().role, GqlBackendRole::SyncTarget);
+        assert_eq!(
+            GqlBackend::Helix.descriptor().role,
+            GqlBackendRole::Internal
+        );
+        assert_eq!(
+            GqlBackend::CocoIndex.descriptor().role,
+            GqlBackendRole::SyncTarget
+        );
+    }
+
+    #[test]
+    fn native_passthrough_capabilities_are_honest() {
+        use NativeQueryLanguage::*;
+        // Per-backend language flags match the public escape hatches.
+        assert_eq!(GqlBackend::Falkor.native_passthrough(), &[Cypher]);
+        assert_eq!(GqlBackend::Surreal.native_passthrough(), &[SurrealQl]);
+        assert_eq!(GqlBackend::Sail.native_passthrough(), &[Sql]);
+        assert_eq!(GqlBackend::Turso.native_passthrough(), &[Sql]);
+        assert!(GqlBackend::Memory.native_passthrough().is_empty());
+        assert!(GqlBackend::CocoIndex.native_passthrough().is_empty());
+
+        // Reverse lookup covers exactly the flagged backends.
+        assert_eq!(
+            native_passthrough_backends(Cypher),
+            vec![GqlBackend::Falkor]
+        );
+        assert_eq!(
+            native_passthrough_backends(Sql),
+            vec![
+                GqlBackend::Sail,
+                GqlBackend::Turso,
+                GqlBackend::Postgres,
+                GqlBackend::PostgresPgq
+            ]
+        );
+
+        // Structured non-support names the feature and the accepted set.
+        assert!(ensure_native_passthrough(GqlBackend::Falkor, Cypher).is_ok());
+        let err = ensure_native_passthrough(GqlBackend::Memory, Cypher).unwrap_err();
+        assert!(matches!(err, GrustError::Unsupported(_)));
+        assert!(
+            err.to_string()
+                .contains("feature=native-cypher-passthrough")
+        );
+        let err = ensure_native_passthrough(GqlBackend::Falkor, Sql).unwrap_err();
+        assert!(err.to_string().contains("accepted: cypher"));
+
+        // The descriptor carries the same flags.
+        assert_eq!(
+            GqlBackend::Falkor.descriptor().native_passthrough,
+            &[Cypher]
+        );
+        // A NativeQuery round-trips its language and text.
+        let q = NativeQuery::new(SurrealQl, "SELECT * FROM person");
+        assert_eq!(q.language, SurrealQl);
+        assert_eq!(q.text, "SELECT * FROM person");
     }
 
     #[test]
@@ -1565,8 +1903,12 @@ mod tests {
                 "{feature:?} should be supported in StrictWrite"
             );
         }
-        // A future feature is not supported yet, even at the widest profile.
-        assert!(!GqlFeature::GraphValues.is_supported_in(GqlConformanceProfile::Full39075));
+        // A rejected conformance guard is never "supported", even at the
+        // widest profile.
+        assert!(
+            !GqlFeature::RejectMergeWithoutExplicitIdentity
+                .is_supported_in(GqlConformanceProfile::Full39075)
+        );
     }
 
     #[test]
@@ -1593,11 +1935,13 @@ mod tests {
         assert_eq!(support_counts().total(), GqlFeature::ALL.len());
     }
 
-    /// Unit 16 hardening: the `Full39075` candidate profile is exactly the set of
-    /// `Supported` features. Everything not yet supported MUST be enumerated here
-    /// (and given a rationale in `docs/GQL_PROFILE_STATEMENT.md`), so the "full
-    /// 39075" claim is never silently unbacked. Flipping a feature's status
-    /// requires updating both this list and the profile statement.
+    /// Profile hardening (U16 + Full39075 FM5): the `Full39075` profile is
+    /// exactly the set of `Supported` features. As of the Full39075 completion
+    /// goal the only non-`Supported` entries are the five intentional
+    /// strict-write rejections (conformance guards, not gaps), so the realized
+    /// profile is `Full39075`. Any status change MUST update both this list
+    /// and `docs/GQL_PROFILE_STATEMENT.md`, so the claim is never silently
+    /// unbacked.
     #[test]
     fn full_profile_claim_is_backed() {
         let scoped_out: std::collections::BTreeSet<&str> = feature_manifest()
@@ -1606,19 +1950,6 @@ mod tests {
             .map(|d| d.id)
             .collect();
         let expected: std::collections::BTreeSet<&str> = [
-            // Future — deferred to a later full-39075 pass (rationale in the doc).
-            "shortest-path",
-            "subquery",
-            "path-values",
-            "graph-values",
-            "graph-type-definition",
-            "catalog-metadata",
-            "named-graph-selection",
-            "table-valued-function",
-            // Planned — near-term, partially scaffolded.
-            "index-definition",
-            "session-control",
-            "native-cypher-passthrough",
             // Rejected — intentional conformance guards, not gaps.
             "reject-create-node-without-explicit-identity",
             "reject-merge-without-explicit-identity",

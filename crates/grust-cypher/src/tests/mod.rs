@@ -10,9 +10,13 @@
 use super::*;
 use grust_memory::MemoryGraphStore;
 
+mod catalog_metadata;
 mod ddl_schema;
+mod graph_type_ddl;
+mod index_ddl;
 mod match_misc;
 mod mutations;
+mod named_graph_selection;
 mod predicates1;
 mod predicates2;
 mod returning1;

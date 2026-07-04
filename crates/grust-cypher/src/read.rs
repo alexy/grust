@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::ast;
 use crate::ast::*;
 use crate::parser::parse_query;
+use crate::session::ensure_query_uses_graph;
 use crate::*;
 
 /// A value bound to a variable in a candidate row. Pattern matching binds
@@ -52,7 +53,20 @@ pub fn run_read_query(
     params: &CypherParameters,
 ) -> Result<CypherResultTable> {
     let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
+    ensure_query_uses_graph(&query, "default")?;
     // Reuse the shared semantic analyzer for binding/kind checks.
+    crate::semantics::analyze(&query)?;
+    execute_read_query(graph, &query, params)
+}
+
+pub fn run_read_query_on_named_graph(
+    graph: &Graph,
+    graph_name: &str,
+    cypher: &str,
+    params: &CypherParameters,
+) -> Result<CypherResultTable> {
+    let query = parse_query(cypher).map_err(|e| e.into_grust(cypher))?;
+    ensure_query_uses_graph(&query, graph_name)?;
     crate::semantics::analyze(&query)?;
     execute_read_query(graph, &query, params)
 }
@@ -115,80 +129,14 @@ fn execute_single(
     // A clause pipeline: each clause transforms the binding-row stream; RETURN is
     // terminal and produces the result table.
     for clause in &query.clauses {
-        match clause {
-            Clause::Match(m) if !m.optional => {
-                for pattern in &m.patterns {
-                    rows = expand_pattern(graph, &index, pattern, rows, params)?;
-                }
-                if let Some(where_expr) = &m.where_clause {
-                    rows = filter_rows(rows, where_expr, params)?;
-                }
-            }
-            Clause::Match(m) => {
-                // OPTIONAL MATCH: each incoming row produces its matches, or a
-                // single row with this match's new variables NULL-padded.
-                let new_vars = pattern_variables(&m.patterns);
-                let mut out = Vec::new();
-                for row in rows {
-                    let mut matched = vec![row.clone()];
-                    for pattern in &m.patterns {
-                        matched = expand_pattern(graph, &index, pattern, matched, params)?;
-                    }
-                    if let Some(where_expr) = &m.where_clause {
-                        matched = filter_rows(matched, where_expr, params)?;
-                    }
-                    if matched.is_empty() {
-                        let mut padded = row;
-                        for var in &new_vars {
-                            padded.entry(var.clone()).or_insert(Bound::Value(Value::Null));
-                        }
-                        out.push(padded);
-                    } else {
-                        out.extend(matched);
-                    }
-                }
-                rows = out;
-            }
-            Clause::With(w) => {
-                rows = project_to_bindings(&w.projection, rows, params)?;
-                if let Some(where_expr) = &w.where_clause {
-                    rows = filter_rows(rows, where_expr, params)?;
-                }
-            }
-            Clause::Unwind(u) => {
-                rows = unwind_rows(rows, u, params)?;
-            }
-            Clause::Call(c) => {
-                let (out_cols, out_rows) = call_procedure(graph, c)?;
-                let mut next = Vec::new();
-                for row in &rows {
-                    for vals in &out_rows {
-                        let mut nr = row.clone();
-                        for (col, val) in out_cols.iter().zip(vals.iter()) {
-                            nr.insert(col.clone(), Bound::Value(val.clone()));
-                        }
-                        next.push(nr);
-                    }
-                }
-                rows = next;
-                if let Some(where_expr) = &c.where_clause {
-                    rows = filter_rows(rows, where_expr, params)?;
-                }
-                call_output = Some(out_cols);
-            }
-            Clause::Return(r) => {
-                // Terminal: project the current bindings to the result table.
-                return project(graph, &rows, &r.projection, params);
-            }
-            Clause::Create(_)
-            | Clause::Merge(_)
-            | Clause::Delete(_)
-            | Clause::Set(_)
-            | Clause::Remove(_) => {
-                return Err(gql_execution(
-                    "the read reference executor only runs read-only MATCH/WITH/UNWIND/RETURN queries",
-                ))
-            }
+        if let Clause::Return(r) = clause {
+            // Terminal: project the current bindings to the result table.
+            return project(graph, &rows, &r.projection, params);
+        }
+        let (next, call_cols) = advance_rows(graph, &index, clause, rows, params)?;
+        rows = next;
+        if call_cols.is_some() {
+            call_output = call_cols;
         }
     }
 
@@ -214,74 +162,389 @@ fn execute_single(
     Err(gql_execution("read query has no RETURN clause"))
 }
 
-/// Execute a read-only catalog procedure against the graph snapshot.
-///
-/// Returns the procedure's full output columns and rows (deterministically
-/// sorted). `YIELD` projection/aliasing is applied by the caller.
-fn call_procedure(graph: &Graph, call: &CallClause) -> Result<(Vec<String>, Vec<Vec<Value>>)> {
-    let (column, values): (&str, std::collections::BTreeSet<String>) =
-        match call.name.to_ascii_lowercase().as_str() {
-            "db.labels" => (
-                "label",
-                graph
-                    .nodes
-                    .iter()
-                    .map(|n| n.label.as_str().to_string())
-                    .collect(),
-            ),
-            "db.relationshiptypes" => (
-                "relationshipType",
-                graph
-                    .edges
-                    .iter()
-                    .map(|e| e.label.as_str().to_string())
-                    .collect(),
-            ),
-            "db.propertykeys" => {
-                let mut keys = std::collections::BTreeSet::new();
-                for n in &graph.nodes {
-                    keys.extend(n.props.keys().cloned());
-                }
-                for e in &graph.edges {
-                    keys.extend(e.props.keys().cloned());
-                }
-                ("propertyKey", keys)
+/// Apply one non-`RETURN` clause to the binding-row stream. Returns the new
+/// rows plus, for a `CALL <proc>`, the procedure's output columns (so a
+/// standalone trailing `CALL` can shape the result table).
+fn advance_rows(
+    graph: &Graph,
+    index: &NodeIndex,
+    clause: &Clause,
+    rows: Vec<Row>,
+    params: &CypherParameters,
+) -> Result<(Vec<Row>, Option<Vec<String>>)> {
+    match clause {
+        Clause::Use(_) => Ok((rows, None)),
+        Clause::Match(m) if !m.optional => {
+            let mut rows = rows;
+            for pattern in &m.patterns {
+                rows = expand_pattern(graph, index, pattern, rows, params)?;
             }
-            other => {
-                return Err(unsupported_gql_feature(
+            if let Some(where_expr) = &m.where_clause {
+                rows = filter_rows(rows, where_expr, params)?;
+            }
+            Ok((rows, None))
+        }
+        Clause::Match(m) => {
+            // OPTIONAL MATCH: each incoming row produces its matches, or a
+            // single row with this match's new variables NULL-padded.
+            let new_vars = pattern_variables(&m.patterns);
+            let mut out = Vec::new();
+            for row in rows {
+                let mut matched = vec![row.clone()];
+                for pattern in &m.patterns {
+                    matched = expand_pattern(graph, index, pattern, matched, params)?;
+                }
+                if let Some(where_expr) = &m.where_clause {
+                    matched = filter_rows(matched, where_expr, params)?;
+                }
+                if matched.is_empty() {
+                    let mut padded = row;
+                    for var in &new_vars {
+                        padded
+                            .entry(var.clone())
+                            .or_insert(Bound::Value(Value::Null));
+                    }
+                    out.push(padded);
+                } else {
+                    out.extend(matched);
+                }
+            }
+            Ok((out, None))
+        }
+        Clause::With(w) => {
+            let mut rows = project_to_bindings(&w.projection, rows, params)?;
+            if let Some(where_expr) = &w.where_clause {
+                rows = filter_rows(rows, where_expr, params)?;
+            }
+            Ok((rows, None))
+        }
+        Clause::Unwind(u) => Ok((unwind_rows(rows, u, params)?, None)),
+        Clause::Call(c) => {
+            let name_lower = c.name.to_ascii_lowercase();
+            let full_cols = procedure_signature(&name_lower).ok_or_else(|| {
+                unsupported_gql_feature(
                     GqlFeature::ProcedureCall,
                     GqlConformanceProfile::PortableGql,
                     format!(
-                        "procedure `{other}` is not supported (known: db.labels, db.relationshipTypes, db.propertyKeys)"
+                        "procedure `{}` is not supported (known: db.labels, db.relationshipTypes, db.propertyKeys, tvf.range, tvf.keys)",
+                        c.name
                     ),
-                ))
+                )
+            })?;
+            let (out_cols, indices) = yield_projection(&c.name, &full_cols, &c.yields)?;
+            let mut next = Vec::new();
+            for row in &rows {
+                // Arguments are evaluated per incoming row (correlated TVF).
+                for vals in procedure_rows(graph, &name_lower, &c.args, row, params)? {
+                    let mut nr = row.clone();
+                    for (col, &i) in out_cols.iter().zip(indices.iter()) {
+                        nr.insert(col.clone(), Bound::Value(vals[i].clone()));
+                    }
+                    next.push(nr);
+                }
             }
-        };
-
-    let full_cols = vec![column.to_string()];
-    let full_rows: Vec<Vec<Value>> = values.into_iter().map(|s| vec![Value::from(s)]).collect();
-
-    // Apply YIELD: validate each yielded column exists, then project/alias.
-    if call.yields.is_empty() {
-        return Ok((full_cols, full_rows));
+            let next = if let Some(where_expr) = &c.where_clause {
+                filter_rows(next, where_expr, params)?
+            } else {
+                next
+            };
+            Ok((next, Some(out_cols)))
+        }
+        Clause::Subquery(s) => Ok((execute_subquery_clause(graph, s, rows, params)?, None)),
+        Clause::Return(_) => unreachable!("RETURN is handled by the caller"),
+        Clause::Create(_)
+        | Clause::Merge(_)
+        | Clause::Delete(_)
+        | Clause::Set(_)
+        | Clause::Remove(_) => Err(gql_execution(
+            "the read reference executor only runs read-only MATCH/WITH/UNWIND/RETURN queries",
+        )),
     }
-    let mut out_cols = Vec::with_capacity(call.yields.len());
-    let mut indices = Vec::with_capacity(call.yields.len());
-    for (col, alias) in &call.yields {
+}
+
+/// `CALL { … }`: execute the inline subquery once per incoming row (the outer
+/// bindings are visible inside), joining its returned columns onto the row.
+/// A row whose subquery returns no rows is dropped.
+fn execute_subquery_clause(
+    graph: &Graph,
+    subquery: &SubqueryClause,
+    rows: Vec<Row>,
+    params: &CypherParameters,
+) -> Result<Vec<Row>> {
+    let mut out = Vec::new();
+    for row in rows {
+        let (columns, inner_rows) = run_subquery(graph, &subquery.query, &row, params)?;
+        for col in &columns {
+            if row.contains_key(col) {
+                return Err(gql_name(format!(
+                    "CALL {{ … }} returns `{col}`, which is already bound in the outer scope"
+                )));
+            }
+        }
+        for inner in inner_rows {
+            let mut next = row.clone();
+            for col in &columns {
+                let bound = inner.get(col).cloned().unwrap_or(Bound::Value(Value::Null));
+                next.insert(col.clone(), bound);
+            }
+            out.push(next);
+        }
+    }
+    Ok(out)
+}
+
+/// Run a subquery (possibly `UNION`-composed) seeded with the outer row's
+/// bindings. Returns the output column names and one binding row per result.
+fn run_subquery(
+    graph: &Graph,
+    query: &Query,
+    seed: &Row,
+    params: &CypherParameters,
+) -> Result<(Vec<String>, Vec<Row>)> {
+    let mut columns: Option<Vec<String>> = None;
+    let mut all: Vec<Row> = Vec::new();
+    let mut distinct = false;
+    for part in &query.parts {
+        if part.union == Some(UnionKind::Distinct) {
+            distinct = true;
+        }
+        let (cols, rows) = run_subquery_single(graph, &part.query, seed, params)?;
+        match &columns {
+            None => columns = Some(cols),
+            Some(existing) if existing != &cols => {
+                return Err(gql_name(
+                    "all UNION arms inside CALL { … } must return the same column names in the same order",
+                ));
+            }
+            Some(_) => {}
+        }
+        all.extend(rows);
+    }
+    let columns = columns.ok_or_else(|| gql_execution("CALL { … } subquery has no parts"))?;
+    if distinct {
+        let mut seen = std::collections::HashSet::new();
+        let mut deduped = Vec::with_capacity(all.len());
+        for row in all {
+            let mut values = Vec::with_capacity(columns.len());
+            for col in &columns {
+                values.push(match row.get(col) {
+                    Some(bound) => bound_value(bound)?,
+                    None => Value::Null,
+                });
+            }
+            if seen.insert(return_row_key(&values, "CALL { … } UNION")?) {
+                deduped.push(row);
+            }
+        }
+        all = deduped;
+    }
+    Ok((columns, all))
+}
+
+fn run_subquery_single(
+    graph: &Graph,
+    query: &SingleQuery,
+    seed: &Row,
+    params: &CypherParameters,
+) -> Result<(Vec<String>, Vec<Row>)> {
+    let index = NodeIndex::build(graph);
+    let mut rows = vec![seed.clone()];
+    for clause in &query.clauses {
+        if let Clause::Return(r) = clause {
+            return project_subquery_return(&r.projection, rows, params);
+        }
+        let (next, _) = advance_rows(graph, &index, clause, rows, params)?;
+        rows = next;
+    }
+    Err(gql_execution("CALL { … } subquery must end in RETURN"))
+}
+
+/// Project a subquery's terminal `RETURN` to named binding rows (WITH-style:
+/// bare variables keep their node/edge binding; computed items bind values
+/// under their alias or derived column name).
+fn project_subquery_return(
+    projection: &Projection,
+    rows: Vec<Row>,
+    params: &CypherParameters,
+) -> Result<(Vec<String>, Vec<Row>)> {
+    if projection.star {
+        return Err(unsupported_gql_feature(
+            GqlFeature::Subquery,
+            GqlConformanceProfile::PortableGql,
+            "RETURN * inside CALL { … } is not supported (it would re-project the imported outer scope)",
+        ));
+    }
+    let items: Vec<ReturnItem> = projection
+        .items
+        .iter()
+        .map(|item| ReturnItem {
+            expr: item.expr.clone(),
+            alias: Some(item.alias.clone().unwrap_or_else(|| match &item.expr {
+                Expr::Variable(v) => v.clone(),
+                other => column_name(other),
+            })),
+        })
+        .collect();
+    let columns: Vec<String> = items
+        .iter()
+        .map(|item| item.alias.clone().expect("alias was just filled in"))
+        .collect();
+    let mut unique = std::collections::HashSet::new();
+    for col in &columns {
+        if !unique.insert(col.as_str()) {
+            return Err(gql_name(format!(
+                "CALL {{ … }} returns the column `{col}` more than once; alias the items uniquely"
+            )));
+        }
+    }
+    let named = Projection {
+        distinct: projection.distinct,
+        star: false,
+        items,
+        order_by: projection.order_by.clone(),
+        skip: projection.skip.clone(),
+        limit: projection.limit.clone(),
+    };
+    let out = project_to_bindings(&named, rows, params)?;
+    Ok((columns, out))
+}
+
+/// The full output columns of a registered procedure / table-valued function,
+/// or `None` for an unknown name.
+fn procedure_signature(name_lower: &str) -> Option<Vec<String>> {
+    let cols: &[&str] = match name_lower {
+        "db.labels" => &["label"],
+        "db.relationshiptypes" => &["relationshipType"],
+        "db.propertykeys" => &["propertyKey"],
+        "tvf.range" => &["value"],
+        "tvf.keys" => &["key"],
+        _ => return None,
+    };
+    Some(cols.iter().map(|c| c.to_string()).collect())
+}
+
+/// Resolve a `YIELD` list against the procedure's full columns: the projected
+/// output names plus, for each, the index into the full row.
+fn yield_projection(
+    name: &str,
+    full_cols: &[String],
+    yields: &[(String, Option<String>)],
+) -> Result<(Vec<String>, Vec<usize>)> {
+    if yields.is_empty() {
+        return Ok((full_cols.to_vec(), (0..full_cols.len()).collect()));
+    }
+    let mut out_cols = Vec::with_capacity(yields.len());
+    let mut indices = Vec::with_capacity(yields.len());
+    for (col, alias) in yields {
         let idx = full_cols.iter().position(|c| c == col).ok_or_else(|| {
             gql_name(format!(
-                "procedure `{}` does not yield a column named `{col}`",
-                call.name
+                "procedure `{name}` does not yield a column named `{col}`"
             ))
         })?;
         out_cols.push(alias.clone().unwrap_or_else(|| col.clone()));
         indices.push(idx);
     }
-    let out_rows = full_rows
-        .iter()
-        .map(|r| indices.iter().map(|&i| r[i].clone()).collect())
-        .collect();
-    Ok((out_cols, out_rows))
+    Ok((out_cols, indices))
+}
+
+/// Produce the full (pre-`YIELD`) rows of a procedure / table-valued function
+/// invocation for one incoming row. Catalog procedures are nullary and
+/// row-independent; TVFs evaluate their arguments against the row.
+fn procedure_rows(
+    graph: &Graph,
+    name_lower: &str,
+    args: &[Expr],
+    row: &Row,
+    params: &CypherParameters,
+) -> Result<Vec<Vec<Value>>> {
+    let string_rows = |values: std::collections::BTreeSet<String>| {
+        values
+            .into_iter()
+            .map(|s| vec![Value::from(s)])
+            .collect::<Vec<Vec<Value>>>()
+    };
+    match name_lower {
+        "db.labels" | "db.relationshiptypes" | "db.propertykeys" => {
+            if !args.is_empty() {
+                return Err(gql_type(format!(
+                    "procedure `{name_lower}` expects no arguments"
+                )));
+            }
+            Ok(match name_lower {
+                "db.labels" => string_rows(
+                    graph
+                        .nodes
+                        .iter()
+                        .map(|n| n.label.as_str().to_string())
+                        .collect(),
+                ),
+                "db.relationshiptypes" => string_rows(
+                    graph
+                        .edges
+                        .iter()
+                        .map(|e| e.label.as_str().to_string())
+                        .collect(),
+                ),
+                _ => {
+                    let mut keys = std::collections::BTreeSet::new();
+                    for n in &graph.nodes {
+                        keys.extend(n.props.keys().cloned());
+                    }
+                    for e in &graph.edges {
+                        keys.extend(e.props.keys().cloned());
+                    }
+                    string_rows(keys)
+                }
+            })
+        }
+        // `tvf.range(start, end[, step]) YIELD value` — one row per integer.
+        "tvf.range" => match eval_range(args, row, params)? {
+            Value::IntArray(values) => {
+                Ok(values.into_iter().map(|n| vec![Value::Int(n)]).collect())
+            }
+            other => Err(gql_type(format!(
+                "tvf.range() produced a non-integer list: {other:?}"
+            ))),
+        },
+        // `tvf.keys(element_or_map) YIELD key` — sorted property/map keys.
+        "tvf.keys" => {
+            let [arg] = args else {
+                return Err(gql_type(
+                    "tvf.keys(element_or_map) expects exactly one argument".to_string(),
+                ));
+            };
+            // A variable bound to a node/edge yields its property keys.
+            if let Expr::Variable(v) = arg {
+                match row.get(v) {
+                    Some(Bound::Node(n)) => {
+                        return Ok(string_rows(n.props.keys().cloned().collect()));
+                    }
+                    Some(Bound::Edge(e)) => {
+                        return Ok(string_rows(e.props.keys().cloned().collect()));
+                    }
+                    _ => {}
+                }
+            }
+            let keys: std::collections::BTreeSet<String> = match eval(arg, row, params)? {
+                Value::Null => return Ok(Vec::new()),
+                Value::Json(serde_json::Value::Object(map)) => {
+                    // A serialized node/edge element exposes its `props`; a
+                    // plain map its own keys.
+                    match map.get("props") {
+                        Some(serde_json::Value::Object(props)) => props.keys().cloned().collect(),
+                        _ => map.keys().cloned().collect(),
+                    }
+                }
+                other => {
+                    return Err(gql_type(format!(
+                        "tvf.keys() expects a node, relationship, or map, got {other:?}"
+                    )));
+                }
+            };
+            Ok(string_rows(keys))
+        }
+        _ => unreachable!("procedure_signature gates the registry"),
+    }
 }
 
 /// Keep rows whose `where_expr` evaluates to TRUE (NULL/FALSE drop), surfacing
@@ -298,7 +561,11 @@ fn filter_rows(rows: Vec<Row>, where_expr: &Expr, params: &CypherParameters) -> 
 
 /// `UNWIND list AS x`: expand each row into one row per list element. A NULL or
 /// empty list yields no rows for that input row.
-fn unwind_rows(rows: Vec<Row>, unwind: &UnwindClause, params: &CypherParameters) -> Result<Vec<Row>> {
+fn unwind_rows(
+    rows: Vec<Row>,
+    unwind: &UnwindClause,
+    params: &CypherParameters,
+) -> Result<Vec<Row>> {
     let mut out = Vec::new();
     for row in rows {
         // A list literal is evaluated element-wise (round-tripping a list
@@ -351,7 +618,11 @@ fn project_to_bindings(
     } else {
         let mut produced = Vec::with_capacity(rows.len());
         for row in &rows {
-            let mut next = if projection.star { row.clone() } else { Row::new() };
+            let mut next = if projection.star {
+                row.clone()
+            } else {
+                Row::new()
+            };
             for item in &projection.items {
                 let (name, bound) = binding_for_item(item, row, params)?;
                 next.insert(name, bound);
@@ -372,13 +643,14 @@ fn project_to_bindings(
 /// The (name, binding) a `WITH`/`RETURN` item contributes. A bare variable keeps
 /// its existing binding (so a node stays a node downstream); anything else binds
 /// a computed value under its alias.
-fn binding_for_item(item: &ReturnItem, row: &Row, params: &CypherParameters) -> Result<(String, Bound)> {
+fn binding_for_item(
+    item: &ReturnItem,
+    row: &Row,
+    params: &CypherParameters,
+) -> Result<(String, Bound)> {
     match &item.expr {
         Expr::Variable(v) => {
-            let bound = row
-                .get(v)
-                .cloned()
-                .unwrap_or(Bound::Value(Value::Null));
+            let bound = row.get(v).cloned().unwrap_or(Bound::Value(Value::Null));
             Ok((item.alias.clone().unwrap_or_else(|| v.clone()), bound))
         }
         other => {
@@ -434,7 +706,10 @@ fn grouped_bindings(
                 let name = item.alias.clone().ok_or_else(|| {
                     gql_name("WITH requires an alias (AS ...) for aggregate expressions")
                 })?;
-                next.insert(name, Bound::Value(eval_aggregate(&item.expr, &group_rows, params)?));
+                next.insert(
+                    name,
+                    Bound::Value(eval_aggregate(&item.expr, &group_rows, params)?),
+                );
             } else {
                 let (name, bound) = binding_for_item(item, representative, params)?;
                 next.insert(name, bound);
@@ -470,7 +745,11 @@ fn dedup_bindings(
     Ok(out)
 }
 
-fn order_bindings(rows: &mut [Row], order_by: &[OrderItem], params: &CypherParameters) -> Result<()> {
+fn order_bindings(
+    rows: &mut [Row],
+    order_by: &[OrderItem],
+    params: &CypherParameters,
+) -> Result<()> {
     if order_by.is_empty() {
         return Ok(());
     }
@@ -534,10 +813,7 @@ pub enum PushedBinding {
 
 /// Deduplicate result rows by value identity, preserving first-seen order — the
 /// shared `UNION` (distinct) dedup, reused by backend pushdown's union combine.
-pub(crate) fn dedup_return_rows(
-    rows: Vec<Vec<Value>>,
-    context: &str,
-) -> Result<Vec<Vec<Value>>> {
+pub(crate) fn dedup_return_rows(rows: Vec<Vec<Value>>, context: &str) -> Result<Vec<Vec<Value>>> {
     let mut seen = std::collections::HashSet::new();
     let mut deduped = Vec::with_capacity(rows.len());
     for values in rows {
@@ -632,7 +908,7 @@ pub(crate) fn project_binding_pipeline(
             _ => {
                 return Err(gql_execution(
                     "pushdown pipeline runs only WITH/UNWIND/RETURN tails",
-                ))
+                ));
             }
         }
     }
@@ -690,8 +966,16 @@ fn expand_pattern(
     base_rows: Vec<Row>,
     params: &CypherParameters,
 ) -> Result<Vec<Row>> {
+    if let Some(kind) = pattern.shortest {
+        return expand_shortest(graph, index, pattern, kind, base_rows, params);
+    }
     let path_var = pattern.variable.as_deref();
-    if path_var.is_some() && pattern.segments.iter().any(|s| s.relationship.length.is_some()) {
+    if path_var.is_some()
+        && pattern
+            .segments
+            .iter()
+            .any(|s| s.relationship.length.is_some())
+    {
         return Err(unsupported_gql_feature(
             GqlFeature::PathVariableBinding,
             GqlConformanceProfile::PortableGql,
@@ -728,20 +1012,147 @@ fn expand_pattern(
     Ok(out)
 }
 
-/// A bound path value: `{ "nodes": [...], "relationships": [...] }`.
-fn path_value(nodes: &[Node], edges: &[Edge]) -> Result<Value> {
-    let mut node_arr = Vec::with_capacity(nodes.len());
-    for node in nodes {
-        node_arr.push(value_to_json(&graph_node_value(node)?));
+/// `shortestPath(…)` / `allShortestPaths(…)` over a single relationship
+/// segment: per (start, end) endpoint pair, find the minimal-length simple
+/// path(s) whose every hop satisfies the relationship pattern. Lengths are
+/// searched from the pattern's minimum upward (iterative lengthening over the
+/// existing bounded var-length enumeration), so the first hit per endpoint is
+/// shortest by construction; ties are kept for `All`, first-found (in
+/// deterministic edge order) for `Single`.
+fn expand_shortest(
+    graph: &Graph,
+    index: &NodeIndex,
+    pattern: &PathPattern,
+    kind: ShortestKind,
+    base_rows: Vec<Row>,
+    params: &CypherParameters,
+) -> Result<Vec<Row>> {
+    let [segment] = pattern.segments.as_slice() else {
+        return Err(unsupported_gql_feature(
+            GqlFeature::ShortestPath,
+            GqlConformanceProfile::Full39075,
+            "shortestPath(…) expects exactly one relationship segment",
+        ));
+    };
+    let rel = &segment.relationship;
+    let min = rel.length.map(|r| r.min.unwrap_or(1)).unwrap_or(1) as usize;
+    let max = rel.length.and_then(|r| r.max).map(|m| m as usize);
+    // Simple paths never repeat a node, so no shortest path is longer than
+    // |nodes| - 1 hops; that caps the open-ended `*` search.
+    let cap = graph.nodes.len().saturating_sub(1);
+    let cap = max.map_or(cap, |m| m.min(cap));
+
+    let mut out = Vec::new();
+    for row in base_rows {
+        for start in node_candidates(graph, &pattern.start, &row, params)? {
+            // end-node id -> minimal-length edge lists, in first-found order.
+            let mut resolved: BTreeMap<String, Vec<Vec<Edge>>> = BTreeMap::new();
+            for length in min..=cap.max(min) {
+                if length > cap {
+                    break;
+                }
+                let mut paths: Vec<(Node, Vec<Edge>)> = Vec::new();
+                let mut visited = std::collections::HashSet::new();
+                visited.insert(start.id.as_str().to_string());
+                collect_var_length_paths(
+                    graph,
+                    index,
+                    rel,
+                    &start,
+                    length,
+                    Some(length),
+                    &mut Vec::new(),
+                    &mut visited,
+                    params,
+                    &mut paths,
+                )?;
+                // Same-length ties accumulate here, then merge; endpoints
+                // resolved at an earlier (shorter) length are skipped.
+                let mut found: BTreeMap<String, Vec<Vec<Edge>>> = BTreeMap::new();
+                for (end, edges) in paths {
+                    let end_id = end.id.as_str().to_string();
+                    if resolved.contains_key(&end_id) {
+                        continue;
+                    }
+                    if !node_matches(&end, &segment.node, params)? {
+                        continue;
+                    }
+                    if let Some(var) = &segment.node.variable {
+                        if let Some(Bound::Node(bound)) = row.get(var) {
+                            if bound.id != end.id {
+                                continue;
+                            }
+                        }
+                    }
+                    found.entry(end_id).or_default().push(edges);
+                }
+                resolved.extend(found);
+            }
+
+            for (end_id, edge_lists) in resolved {
+                let Some(end_node) = index.get(graph, &end_id) else {
+                    continue;
+                };
+                let picked: Vec<&Vec<Edge>> = match kind {
+                    ShortestKind::Single => edge_lists.iter().take(1).collect(),
+                    ShortestKind::All => edge_lists.iter().collect(),
+                };
+                for edges in picked {
+                    let mut next_row = row.clone();
+                    if let Some(var) = &pattern.start.variable {
+                        next_row.insert(var.clone(), Bound::Node(start.clone()));
+                    }
+                    if let Some(var) = &segment.node.variable {
+                        next_row.insert(var.clone(), Bound::Node(end_node.clone()));
+                    }
+                    if let Some(var) = &rel.variable {
+                        let mut arr = Vec::with_capacity(edges.len());
+                        for edge in edges {
+                            arr.push(value_to_json(&graph_edge_value(edge)?));
+                        }
+                        next_row.insert(
+                            var.clone(),
+                            Bound::Value(Value::Json(serde_json::Value::Array(arr))),
+                        );
+                    }
+                    if let Some(path_var) = &pattern.variable {
+                        let nodes = walk_path_nodes(graph, index, &start, edges, rel.direction)?;
+                        next_row.insert(path_var.clone(), Bound::Value(path_value(&nodes, edges)?));
+                    }
+                    out.push(next_row);
+                }
+            }
+        }
     }
-    let mut edge_arr = Vec::with_capacity(edges.len());
+    Ok(out)
+}
+
+/// Reconstruct the node sequence of a path from its start node and edge list.
+fn walk_path_nodes(
+    graph: &Graph,
+    index: &NodeIndex,
+    start: &Node,
+    edges: &[Edge],
+    direction: ast::Direction,
+) -> Result<Vec<Node>> {
+    let mut nodes = vec![start.clone()];
+    let mut current = start.clone();
     for edge in edges {
-        edge_arr.push(value_to_json(&graph_edge_value(edge)?));
+        let next_id = edge_other_endpoint(edge, &current, direction)
+            .ok_or_else(|| gql_execution("shortest path edge does not connect to the path"))?;
+        let next = index
+            .get(graph, next_id)
+            .ok_or_else(|| gql_execution("shortest path endpoint node not found"))?;
+        nodes.push(next.clone());
+        current = next.clone();
     }
-    let mut obj = serde_json::Map::new();
-    obj.insert("nodes".to_string(), serde_json::Value::Array(node_arr));
-    obj.insert("relationships".to_string(), serde_json::Value::Array(edge_arr));
-    Ok(Value::Json(serde_json::Value::Object(obj)))
+    Ok(nodes)
+}
+
+/// A bound first-class path value. `Value::to_json` preserves the historical
+/// `{ "nodes": [...], "relationships": [...] }` serialization shape.
+fn path_value(nodes: &[Node], edges: &[Edge]) -> Result<Value> {
+    Ok(Value::Path(PathValue::from_graph_parts(nodes, edges)))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -761,7 +1172,10 @@ fn expand_segments(
     if idx == segments.len() {
         let mut row = row;
         if let Some(p) = path_var {
-            row.insert(p.to_string(), Bound::Value(path_value(&acc_nodes, &acc_edges)?));
+            row.insert(
+                p.to_string(),
+                Bound::Value(path_value(&acc_nodes, &acc_edges)?),
+            );
         }
         out.push(row);
         return Ok(());
@@ -807,7 +1221,10 @@ fn expand_segments(
                 for edge in &edges {
                     arr.push(value_to_json(&graph_edge_value(edge)?));
                 }
-                next_row.insert(var.clone(), Bound::Value(Value::Json(serde_json::Value::Array(arr))));
+                next_row.insert(
+                    var.clone(),
+                    Bound::Value(Value::Json(serde_json::Value::Array(arr))),
+                );
             }
             if let Some(var) = &segment.node.variable {
                 next_row.insert(var.clone(), Bound::Node(end_node.clone()));
@@ -871,7 +1288,17 @@ fn expand_segments(
             (Vec::new(), Vec::new())
         };
         expand_segments(
-            graph, index, segments, idx + 1, next_node, next_row, params, path_var, na, ea, out,
+            graph,
+            index,
+            segments,
+            idx + 1,
+            next_node,
+            next_row,
+            params,
+            path_var,
+            na,
+            ea,
+            out,
         )?;
     }
     Ok(())
@@ -919,7 +1346,16 @@ fn collect_var_length_paths(
         edges_so_far.push(edge.clone());
         visited.insert(next_id.to_string());
         collect_var_length_paths(
-            graph, index, rel, next_node, min, max, edges_so_far, visited, params, results,
+            graph,
+            index,
+            rel,
+            next_node,
+            min,
+            max,
+            edges_so_far,
+            visited,
+            params,
+            results,
         )?;
         visited.remove(next_id);
         edges_so_far.pop();
@@ -994,11 +1430,7 @@ fn node_matches(node: &Node, np: &NodePattern, params: &CypherParameters) -> Res
 }
 
 /// True when every entry in the inline pattern map equals the element's property.
-fn props_match(
-    props: &Props,
-    map: Option<&MapLiteral>,
-    params: &CypherParameters,
-) -> Result<bool> {
+fn props_match(props: &Props, map: Option<&MapLiteral>, params: &CypherParameters) -> Result<bool> {
     let Some(map) = map else {
         return Ok(true);
     };
@@ -1040,7 +1472,11 @@ fn project(
         }
     }
     for item in &projection.items {
-        columns.push(item.alias.clone().unwrap_or_else(|| column_name(&item.expr)));
+        columns.push(
+            item.alias
+                .clone()
+                .unwrap_or_else(|| column_name(&item.expr)),
+        );
         exprs.push(item.expr.clone());
     }
     if exprs.is_empty() {
@@ -1163,7 +1599,7 @@ fn grouped_project(
                     GqlFeature::AggregateFunctionRegistry,
                     GqlConformanceProfile::PortableGql,
                     "aggregates nested inside larger expressions are not supported by the read reference executor yet",
-                ))
+                ));
             }
             _ => kinds.push(Kind::Key(expr)),
         }
@@ -1210,15 +1646,8 @@ fn grouped_project(
         let mut values = Vec::with_capacity(kinds.len());
         for kind in &kinds {
             match kind {
-                Kind::Key(_) => values.push(
-                    key_iter
-                        .next()
-                        .cloned()
-                        .unwrap_or(Value::Null),
-                ),
-                Kind::Aggregate(expr) => {
-                    values.push(eval_aggregate(expr, group_rows, params)?)
-                }
+                Kind::Key(_) => values.push(key_iter.next().cloned().unwrap_or(Value::Null)),
+                Kind::Aggregate(expr) => values.push(eval_aggregate(expr, group_rows, params)?),
             }
         }
         out_rows.push(values);
@@ -1275,16 +1704,8 @@ fn eval_aggregate(expr: &Expr, group_rows: &[&Row], params: &CypherParameters) -
                     None => v,
                     Some(current) => {
                         let ord = compare_return_values(&v, &current);
-                        let pick_v = if want_max {
-                            ord.is_gt()
-                        } else {
-                            ord.is_lt()
-                        };
-                        if pick_v {
-                            v
-                        } else {
-                            current
-                        }
+                        let pick_v = if want_max { ord.is_gt() } else { ord.is_lt() };
+                        if pick_v { v } else { current }
                     }
                 });
             }
@@ -1313,11 +1734,13 @@ fn order_by_columns(
                     GqlFeature::AggregateFunctionRegistry,
                     GqlConformanceProfile::PortableGql,
                     "ORDER BY with aggregates must reference an output column by name",
-                ))
+                ));
             }
         };
         let idx = columns.iter().position(|c| c == &name).ok_or_else(|| {
-            gql_name(format!("ORDER BY column `{name}` is not in the RETURN list"))
+            gql_name(format!(
+                "ORDER BY column `{name}` is not in the RETURN list"
+            ))
         })?;
         keys.push((idx, item.descending));
     }
@@ -1418,7 +1841,9 @@ fn eval_constant(expr: &Expr, params: &CypherParameters) -> Result<Value> {
 fn eval_usize(expr: &Expr, params: &CypherParameters, what: &str) -> Result<usize> {
     match eval(expr, &Row::new(), params)? {
         Value::Int(n) if n >= 0 => Ok(n as usize),
-        other => Err(gql_type(format!("{what} expects a non-negative integer, got {other:?}"))),
+        other => Err(gql_type(format!(
+            "{what} expects a non-negative integer, got {other:?}"
+        ))),
     }
 }
 
@@ -1477,7 +1902,13 @@ fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
             operand,
             branches,
             default,
-        } => eval_case(operand.as_deref(), branches, default.as_deref(), row, params),
+        } => eval_case(
+            operand.as_deref(),
+            branches,
+            default.as_deref(),
+            row,
+            params,
+        ),
         Expr::Map(_) | Expr::Index { .. } => Err(unsupported_gql_feature(
             GqlFeature::GeneralExpressionTree,
             GqlConformanceProfile::PortableGql,
@@ -1500,7 +1931,9 @@ fn list_elements(value: Value) -> Vec<Value> {
 /// `range(start, end[, step])` -> inclusive integer list.
 fn eval_range(args: &[Expr], row: &Row, params: &CypherParameters) -> Result<Value> {
     if args.len() < 2 || args.len() > 3 {
-        return Err(gql_type("range() expects 2 or 3 integer arguments".to_string()));
+        return Err(gql_type(
+            "range() expects 2 or 3 integer arguments".to_string(),
+        ));
     }
     let int_arg = |e: &Expr| -> Result<i64> {
         match eval(e, row, params)? {
@@ -1510,7 +1943,11 @@ fn eval_range(args: &[Expr], row: &Row, params: &CypherParameters) -> Result<Val
     };
     let start = int_arg(&args[0])?;
     let end = int_arg(&args[1])?;
-    let step = if args.len() == 3 { int_arg(&args[2])? } else { 1 };
+    let step = if args.len() == 3 {
+        int_arg(&args[2])?
+    } else {
+        1
+    };
     if step == 0 {
         return Err(gql_execution("range() step must not be zero"));
     }
@@ -1532,7 +1969,12 @@ fn eval_range(args: &[Expr], row: &Row, params: &CypherParameters) -> Result<Val
 
 /// `labels(n)` / `type(r)` / `id(n)`: read the element from its binding, or fall
 /// back to the element's serialized JSON shape.
-fn eval_element_function(name: &str, arg: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
+fn eval_element_function(
+    name: &str,
+    arg: &Expr,
+    row: &Row,
+    params: &CypherParameters,
+) -> Result<Value> {
     if let Expr::Variable(v) = arg {
         match row.get(v) {
             Some(Bound::Node(n)) => {
@@ -1540,18 +1982,22 @@ fn eval_element_function(name: &str, arg: &Expr, row: &Row, params: &CypherParam
                     "labels" => Value::StringArray(vec![n.label.as_str().to_string()]),
                     "id" => Value::String(n.id.as_str().to_string()),
                     _ => return Err(gql_type(format!("{name}() is not defined for a node"))),
-                })
+                });
             }
             Some(Bound::Edge(e)) => {
                 return Ok(match name {
                     "type" => Value::String(e.label.as_str().to_string()),
-                    "id" => e
-                        .id
-                        .as_ref()
-                        .map(|id| Value::String(id.as_str().to_string()))
-                        .unwrap_or(Value::Null),
-                    _ => return Err(gql_type(format!("{name}() is not defined for a relationship"))),
-                })
+                    "id" => {
+                        e.id.as_ref()
+                            .map(|id| Value::String(id.as_str().to_string()))
+                            .unwrap_or(Value::Null)
+                    }
+                    _ => {
+                        return Err(gql_type(format!(
+                            "{name}() is not defined for a relationship"
+                        )));
+                    }
+                });
             }
             _ => {}
         }
@@ -1569,19 +2015,55 @@ fn eval_element_function(name: &str, arg: &Expr, row: &Row, params: &CypherParam
             "id" => Ok(map.get("id").map(json_to_value).unwrap_or(Value::Null)),
             _ => Err(gql_type(format!("{name}() expects a node or relationship"))),
         },
-        other => Err(gql_type(format!("{name}() expects a node or relationship, got {other:?}"))),
+        other => Err(gql_type(format!(
+            "{name}() expects a node or relationship, got {other:?}"
+        ))),
     }
 }
 
-/// Extract the `nodes`/`relationships` array from a path value.
+/// Extract the `nodes`/`relationships` array from a path or graph value.
 fn path_component(value: Value, key: &str) -> Result<Value> {
     match value {
+        Value::Path(path) => match key {
+            "nodes" => Ok(Value::Json(serde_json::Value::Array(path.nodes))),
+            "relationships" => Ok(Value::Json(serde_json::Value::Array(path.relationships))),
+            _ => Ok(Value::Null),
+        },
+        Value::Graph(graph) => match key {
+            "nodes" => Ok(Value::Json(serde_json::Value::Array(graph.nodes))),
+            "relationships" => Ok(Value::Json(serde_json::Value::Array(graph.relationships))),
+            _ => Ok(Value::Null),
+        },
         Value::Json(serde_json::Value::Object(mut m)) => {
             Ok(m.remove(key).map(Value::Json).unwrap_or(Value::Null))
         }
         Value::Null => Ok(Value::Null),
         other => Err(gql_type(format!(
-            "{key}() expects a path value, got {other:?}"
+            "{key}() expects a path or graph value, got {other:?}"
+        ))),
+    }
+}
+
+/// `graph(nodes, relationships)` -> a first-class graph value (Full39075 F7).
+/// Each argument is a (possibly empty or NULL) list of node/relationship
+/// elements, e.g. from `collect(n)`; construction deduplicates by identity.
+fn eval_graph_constructor(args: &[Expr], row: &Row, params: &CypherParameters) -> Result<Value> {
+    let [nodes_expr, rels_expr] = args else {
+        return Err(gql_type(
+            "graph() expects exactly two arguments: (nodes, relationships)".to_string(),
+        ));
+    };
+    let nodes = graph_element_list(eval(nodes_expr, row, params)?, "nodes")?;
+    let relationships = graph_element_list(eval(rels_expr, row, params)?, "relationships")?;
+    Ok(Value::Graph(GraphValue::new(nodes, relationships)))
+}
+
+fn graph_element_list(value: Value, what: &str) -> Result<Vec<serde_json::Value>> {
+    match value {
+        Value::Null => Ok(Vec::new()),
+        Value::Json(serde_json::Value::Array(elements)) => Ok(elements),
+        other => Err(gql_type(format!(
+            "graph() expects a list of {what} elements, got {other:?}"
         ))),
     }
 }
@@ -1633,7 +2115,9 @@ fn eval_scalar_function(
     // `coalesce` is variadic and null-aware; handle it before the unary helpers.
     if lower == "coalesce" {
         if args.is_empty() {
-            return Err(gql_type("coalesce() expects at least one argument".to_string()));
+            return Err(gql_type(
+                "coalesce() expects at least one argument".to_string(),
+            ));
         }
         for arg in args {
             let value = eval(arg, row, params)?;
@@ -1649,6 +2133,11 @@ fn eval_scalar_function(
         return eval_range(args, row, params);
     }
 
+    // `graph(nodes, relationships)` constructs a first-class graph value.
+    if lower == "graph" {
+        return eval_graph_constructor(args, row, params);
+    }
+
     // Element-introspection functions need the binding (or the element's JSON).
     if matches!(lower.as_str(), "labels" | "type" | "id") {
         let [arg] = args else {
@@ -1662,7 +2151,10 @@ fn eval_scalar_function(
         return Err(unsupported_gql_feature(
             GqlFeature::ScalarFunctionRegistry,
             GqlConformanceProfile::PortableGql,
-            format!("scalar function `{name}` with {} arguments is not supported yet", args.len()),
+            format!(
+                "scalar function `{name}` with {} arguments is not supported yet",
+                args.len()
+            ),
         ));
     };
     let value = eval(arg, row, params)?;
@@ -1702,6 +2194,7 @@ fn eval_scalar_function(
         // `length` is the path hop count for a path value; otherwise falls back
         // to collection size.
         "length" => match &value {
+            Value::Path(path) => Ok(Value::Int(path.relationships.len() as i64)),
             Value::Json(serde_json::Value::Object(m)) if m.contains_key("relationships") => Ok(
                 Value::Int(m["relationships"].as_array().map_or(0, |a| a.len()) as i64),
             ),
@@ -1717,14 +2210,18 @@ fn eval_scalar_function(
         "duration" => match value {
             Value::String(s) => Value::duration(&s),
             Value::Duration(_) => Ok(value),
-            other => Err(gql_type(format!("duration() expects an ISO 8601 string, got {other:?}"))),
+            other => Err(gql_type(format!(
+                "duration() expects an ISO 8601 string, got {other:?}"
+            ))),
         },
         "decimal" => match value {
             Value::String(s) => Value::decimal(&s),
             Value::Int(n) => Value::decimal(n.to_string()),
             Value::Float(f) => Value::decimal(f.to_string()),
             Value::Decimal(_) => Ok(value),
-            other => Err(gql_type(format!("decimal() expects a numeral string or number, got {other:?}"))),
+            other => Err(gql_type(format!(
+                "decimal() expects a numeral string or number, got {other:?}"
+            ))),
         },
         _ => Err(unsupported_gql_feature(
             GqlFeature::ScalarFunctionRegistry,
@@ -1740,7 +2237,9 @@ fn eval_scalar_function(
 fn unary_float_fn(value: Value, name: &str, f: fn(f64) -> f64) -> Result<Value> {
     match numeric(&value) {
         Some(x) => Ok(Value::Float(f(x))),
-        None => Err(gql_type(format!("{name}() expects a number, got {value:?}"))),
+        None => Err(gql_type(format!(
+            "{name}() expects a number, got {value:?}"
+        ))),
     }
 }
 
@@ -1758,10 +2257,9 @@ fn eval_property(base: &Expr, key: &str, row: &Row, params: &CypherParameters) -
     }
     // Nested access: evaluate the base to a JSON object and index it.
     match eval(base, row, params)? {
-        Value::Json(serde_json::Value::Object(map)) => Ok(map
-            .get(key)
-            .map(json_to_value)
-            .unwrap_or(Value::Null)),
+        Value::Json(serde_json::Value::Object(map)) => {
+            Ok(map.get(key).map(json_to_value).unwrap_or(Value::Null))
+        }
         _ => Ok(Value::Null),
     }
 }
@@ -1904,7 +2402,11 @@ fn membership(a: &Value, list_expr: &Expr, row: &Row, params: &CypherParameters)
             Some(false) => {}
         }
     }
-    Ok(if saw_null { Value::Null } else { Value::Bool(false) })
+    Ok(if saw_null {
+        Value::Null
+    } else {
+        Value::Bool(false)
+    })
 }
 
 fn string_predicate(op: BinaryOp, a: &Value, b: &Value) -> Result<Value> {
@@ -1912,7 +2414,9 @@ fn string_predicate(op: BinaryOp, a: &Value, b: &Value) -> Result<Value> {
         if matches!(a, Value::Null) || matches!(b, Value::Null) {
             return Ok(Value::Null);
         }
-        return Err(gql_type("string predicates expect string operands".to_string()));
+        return Err(gql_type(
+            "string predicates expect string operands".to_string(),
+        ));
     };
     let result = match op {
         BinaryOp::StartsWith => haystack.starts_with(needle),
@@ -1939,7 +2443,11 @@ fn arithmetic(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
         let r = match op {
             BinaryOp::Add => x.checked_add(y),
             BinaryOp::Subtract => x.checked_add(&y.negated()),
-            _ => return Err(gql_type("durations support only + and - arithmetic".to_string())),
+            _ => {
+                return Err(gql_type(
+                    "durations support only + and - arithmetic".to_string(),
+                ));
+            }
         };
         return r
             .map(Value::Duration)
@@ -2066,10 +2574,7 @@ fn value_order(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 }
 
 fn value_to_json(value: &Value) -> serde_json::Value {
-    match serde_json::to_value(value) {
-        Ok(json) => json,
-        Err(_) => serde_json::Value::Null,
-    }
+    value.to_json()
 }
 
 fn json_to_value(json: &serde_json::Value) -> Value {
@@ -2093,9 +2598,21 @@ mod tests {
 
     fn graph() -> Graph {
         let nodes = vec![
-            node("Person", "p1", &[("name", Value::from("Ada")), ("age", Value::Int(36))]),
-            node("Person", "p2", &[("name", Value::from("Alan")), ("age", Value::Int(41))]),
-            node("Person", "p3", &[("name", Value::from("Grace")), ("age", Value::Int(85))]),
+            node(
+                "Person",
+                "p1",
+                &[("name", Value::from("Ada")), ("age", Value::Int(36))],
+            ),
+            node(
+                "Person",
+                "p2",
+                &[("name", Value::from("Alan")), ("age", Value::Int(41))],
+            ),
+            node(
+                "Person",
+                "p3",
+                &[("name", Value::from("Grace")), ("age", Value::Int(85))],
+            ),
             node("City", "c1", &[("name", Value::from("London"))]),
         ];
         let edges = vec![
@@ -2133,13 +2650,16 @@ mod tests {
 
     #[test]
     fn where_boolean_and_or() {
-        let t = run("MATCH (n:Person) WHERE n.age < 40 OR n.name = 'Grace' RETURN n.name ORDER BY n.name");
+        let t = run(
+            "MATCH (n:Person) WHERE n.age < 40 OR n.name = 'Grace' RETURN n.name ORDER BY n.name",
+        );
         assert_eq!(t.rows.len(), 2);
     }
 
     #[test]
     fn where_in_list() {
-        let t = run("MATCH (n:Person) WHERE n.name IN ['Ada', 'Grace'] RETURN n.name ORDER BY n.name");
+        let t =
+            run("MATCH (n:Person) WHERE n.name IN ['Ada', 'Grace'] RETURN n.name ORDER BY n.name");
         assert_eq!(
             t.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
             vec![Value::from("Ada"), Value::from("Grace")]
@@ -2194,8 +2714,12 @@ mod tests {
     fn parameters_bind() {
         let mut params = CypherParameters::new();
         params.insert("min".to_string(), Value::Int(40));
-        let t = run_read_query(&graph(), "MATCH (n:Person) WHERE n.age >= $min RETURN n.name", &params)
-            .unwrap();
+        let t = run_read_query(
+            &graph(),
+            "MATCH (n:Person) WHERE n.age >= $min RETURN n.name",
+            &params,
+        )
+        .unwrap();
         assert_eq!(t.rows.len(), 2);
     }
 
@@ -2221,7 +2745,8 @@ mod tests {
 
     #[test]
     fn variable_length_paths() {
-        let t = run("MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name ORDER BY b.name");
+        let t =
+            run("MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name ORDER BY b.name");
         assert_eq!(
             t.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
             vec![Value::from("Alan"), Value::from("Grace")]
@@ -2236,7 +2761,9 @@ mod tests {
 
     #[test]
     fn variable_length_binds_edge_list() {
-        let t = run("MATCH (a:Person {name:'Ada'})-[r:KNOWS*1..2]->(b) RETURN b.name AS name, size(r) AS hops ORDER BY name");
+        let t = run(
+            "MATCH (a:Person {name:'Ada'})-[r:KNOWS*1..2]->(b) RETURN b.name AS name, size(r) AS hops ORDER BY name",
+        );
         assert_eq!(
             t.rows,
             vec![
@@ -2251,13 +2778,31 @@ mod tests {
         let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(:Person) RETURN length(p) AS len");
         assert_eq!(t.rows, vec![vec![Value::Int(1)]]);
         // nodes(p) returns the 2 nodes on the path.
-        let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(b:Person) RETURN size(nodes(p)) AS n");
+        let t =
+            run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(b:Person) RETURN size(nodes(p)) AS n");
         assert_eq!(t.rows, vec![vec![Value::Int(2)]]);
     }
 
     #[test]
+    fn path_variable_returns_first_class_path_value() {
+        let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->(b:Person) RETURN p");
+        let Value::Path(path) = &t.rows[0][0] else {
+            panic!("expected Value::Path, got {:?}", t.rows[0][0]);
+        };
+        assert_eq!(path.nodes.len(), 2);
+        assert_eq!(path.relationships.len(), 1);
+        assert_eq!(path.nodes[0]["props"]["name"], Value::from("Ada").to_json());
+
+        let json = t.rows[0][0].to_json();
+        assert!(json.get("nodes").is_some());
+        assert!(json.get("relationships").is_some());
+    }
+
+    #[test]
     fn path_variable_two_hop() {
-        let t = run("MATCH p = (:Person {name:'Ada'})-[:KNOWS]->()-[:KNOWS]->() RETURN length(p) AS len");
+        let t = run(
+            "MATCH p = (:Person {name:'Ada'})-[:KNOWS]->()-[:KNOWS]->() RETURN length(p) AS len",
+        );
         assert_eq!(t.rows, vec![vec![Value::Int(2)]]);
     }
 
@@ -2277,13 +2822,19 @@ mod tests {
         let t = run("UNWIND range(1, 3) AS x RETURN x");
         assert_eq!(
             t.rows,
-            vec![vec![Value::Int(1)], vec![Value::Int(2)], vec![Value::Int(3)]]
+            vec![
+                vec![Value::Int(1)],
+                vec![Value::Int(2)],
+                vec![Value::Int(3)]
+            ]
         );
     }
 
     #[test]
     fn head_and_last_over_collect() {
-        let t = run("MATCH (n:Person) WITH collect(n.name) AS names RETURN head(names) AS h, last(names) AS l");
+        let t = run(
+            "MATCH (n:Person) WITH collect(n.name) AS names RETURN head(names) AS h, last(names) AS l",
+        );
         assert_eq!(t.rows, vec![vec![Value::from("Ada"), Value::from("Grace")]]);
     }
 
@@ -2317,7 +2868,9 @@ mod tests {
 
     #[test]
     fn union_all_concatenates() {
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN n.name AS x UNION ALL MATCH (m:City) RETURN m.name AS x");
+        let t = run(
+            "MATCH (n:Person {name:'Ada'}) RETURN n.name AS x UNION ALL MATCH (m:City) RETURN m.name AS x",
+        );
         assert_eq!(t.columns, vec!["x".to_string()]);
         assert_eq!(t.rows.len(), 2);
     }
@@ -2325,13 +2878,17 @@ mod tests {
     #[test]
     fn union_deduplicates() {
         // The same row from both arms collapses under UNION (distinct).
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION MATCH (m:Person {name:'Alan'}) RETURN m.label AS l");
+        let t = run(
+            "MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION MATCH (m:Person {name:'Alan'}) RETURN m.label AS l",
+        );
         assert_eq!(t.rows, vec![vec![Value::from("Person")]]);
     }
 
     #[test]
     fn union_all_keeps_duplicates() {
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION ALL MATCH (m:Person {name:'Alan'}) RETURN m.label AS l");
+        let t = run(
+            "MATCH (n:Person {name:'Ada'}) RETURN n.label AS l UNION ALL MATCH (m:Person {name:'Alan'}) RETURN m.label AS l",
+        );
         assert_eq!(t.rows.len(), 2);
     }
 
@@ -2363,7 +2920,8 @@ mod tests {
 
     #[test]
     fn with_aggregate_then_return() {
-        let t = run("MATCH (n) WITH n.label AS label, count(*) AS c RETURN label, c ORDER BY label");
+        let t =
+            run("MATCH (n) WITH n.label AS label, count(*) AS c RETURN label, c ORDER BY label");
         assert_eq!(
             t.rows,
             vec![
@@ -2413,7 +2971,11 @@ mod tests {
         let t = run("UNWIND [1, 2, 3] AS x RETURN x");
         assert_eq!(
             t.rows,
-            vec![vec![Value::Int(1)], vec![Value::Int(2)], vec![Value::Int(3)]]
+            vec![
+                vec![Value::Int(1)],
+                vec![Value::Int(2)],
+                vec![Value::Int(3)]
+            ]
         );
     }
 
@@ -2430,26 +2992,37 @@ mod tests {
         );
         assert_eq!(
             t.rows.iter().map(|r| r[0].clone()).collect::<Vec<_>>(),
-            vec![Value::from("young"), Value::from("mid"), Value::from("senior")]
+            vec![
+                Value::from("young"),
+                Value::from("mid"),
+                Value::from("senior")
+            ]
         );
     }
 
     #[test]
     fn simple_case_expression() {
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN CASE n.age WHEN 36 THEN 'yes' ELSE 'no' END AS m");
+        let t = run(
+            "MATCH (n:Person {name:'Ada'}) RETURN CASE n.age WHEN 36 THEN 'yes' ELSE 'no' END AS m",
+        );
         assert_eq!(t.rows, vec![vec![Value::from("yes")]]);
     }
 
     #[test]
     fn case_without_else_is_null() {
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN CASE WHEN n.age > 100 THEN 'old' END AS m");
+        let t =
+            run("MATCH (n:Person {name:'Ada'}) RETURN CASE WHEN n.age > 100 THEN 'old' END AS m");
         assert_eq!(t.rows, vec![vec![Value::Null]]);
     }
 
     #[test]
     fn unbound_variable_rejected_by_semantics() {
-        let err = run_read_query(&graph(), "MATCH (n:Person) RETURN m.name", &CypherParameters::new())
-            .unwrap_err();
+        let err = run_read_query(
+            &graph(),
+            "MATCH (n:Person) RETURN m.name",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
         assert!(matches!(err, GrustError::CypherUnresolvedIdentity(_)));
     }
 
@@ -2548,7 +3121,8 @@ mod tests {
 
     #[test]
     fn scalar_numeric_functions() {
-        let t = run("MATCH (n:Person {name:'Ada'}) RETURN abs(0 - n.age) AS a, toString(n.age) AS s");
+        let t =
+            run("MATCH (n:Person {name:'Ada'}) RETURN abs(0 - n.age) AS a, toString(n.age) AS s");
         assert_eq!(t.rows, vec![vec![Value::Int(36), Value::from("36")]]);
     }
 
@@ -2568,6 +3142,306 @@ mod tests {
     fn scalar_in_where_filters() {
         let t = run("MATCH (n:Person) WHERE toUpper(n.name) = 'ADA' RETURN n.name");
         assert_eq!(t.rows, vec![vec![Value::from("Ada")]]);
+    }
+
+    #[test]
+    fn graph_constructor_builds_first_class_graph_value() {
+        let t = run(
+            "MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH collect(a) AS ns, collect(r) AS rs RETURN graph(ns, rs) AS g",
+        );
+        let Value::Graph(g) = &t.rows[0][0] else {
+            panic!("expected Value::Graph, got {:?}", t.rows[0][0]);
+        };
+        // Two KNOWS edges (p1->p2, p2->p3); start nodes p1, p2 deduplicate.
+        assert_eq!(g.nodes.len(), 2);
+        assert_eq!(g.relationships.len(), 2);
+
+        let json = t.rows[0][0].to_json();
+        assert!(json.get("nodes").is_some());
+        assert!(json.get("relationships").is_some());
+    }
+
+    #[test]
+    fn graph_value_deduplicates_repeated_elements() {
+        // Every KNOWS edge contributes its start node; collecting the same node
+        // twice still yields a set-shaped graph value.
+        let t = run(
+            "MATCH (a:Person {name:'Ada'})-[r:KNOWS]->(b) WITH collect(a) AS ns RETURN graph(ns, null) AS g",
+        );
+        let Value::Graph(g) = &t.rows[0][0] else {
+            panic!("expected Value::Graph");
+        };
+        assert_eq!(g.nodes.len(), 1);
+        assert!(g.relationships.is_empty());
+    }
+
+    #[test]
+    fn graph_value_nodes_and_relationships_accessors() {
+        let t = run(
+            "MATCH (a:Person)-[r:KNOWS]->(b:Person) WITH collect(a) AS ns, collect(r) AS rs WITH graph(ns, rs) AS g RETURN size(nodes(g)) AS n, size(relationships(g)) AS r",
+        );
+        assert_eq!(t.rows, vec![vec![Value::Int(2), Value::Int(2)]]);
+    }
+
+    #[test]
+    fn graph_constructor_rejects_non_list_arguments() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH (n:Person {name:'Ada'}) RETURN graph(n.age, null)",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("gql:type"));
+    }
+
+    #[test]
+    fn shortest_path_finds_minimal_route() {
+        // p1 -KNOWS-> p2 -KNOWS-> p3; add a direct long-way-around check by
+        // asking for the Ada -> Grace shortest path: exactly 2 hops.
+        let t = run(
+            "MATCH p = shortestPath((a:Person {name:'Ada'})-[:KNOWS*]->(b:Person {name:'Grace'})) RETURN length(p) AS len",
+        );
+        assert_eq!(t.rows, vec![vec![Value::Int(2)]]);
+    }
+
+    #[test]
+    fn shortest_path_prefers_direct_edge() {
+        // Diamond with a shortcut: s -> m1 -> t and s -> t.
+        let nodes = vec![
+            node("N", "s", &[]),
+            node("N", "m1", &[]),
+            node("N", "t", &[]),
+        ];
+        let edges = vec![
+            Edge::new("R", "s", "m1", Props::new()),
+            Edge::new("R", "m1", "t", Props::new()),
+            Edge::new("R", "s", "t", Props::new()),
+        ];
+        let g = Graph::new(nodes, edges);
+        let t = run_read_query(
+            &g,
+            "MATCH p = shortestPath((a:N {id:'s'})-[:R*]->(b:N {id:'t'})) RETURN length(p) AS len",
+            &CypherParameters::new(),
+        )
+        .unwrap();
+        assert_eq!(t.rows, vec![vec![Value::Int(1)]]);
+    }
+
+    #[test]
+    fn all_shortest_paths_keeps_ties() {
+        // Two distinct 2-hop routes s -> {m1|m2} -> t and no direct edge.
+        let nodes = vec![
+            node("N", "s", &[]),
+            node("N", "m1", &[]),
+            node("N", "m2", &[]),
+            node("N", "t", &[]),
+        ];
+        let edges = vec![
+            Edge::new("R", "s", "m1", Props::new()),
+            Edge::new("R", "s", "m2", Props::new()),
+            Edge::new("R", "m1", "t", Props::new()),
+            Edge::new("R", "m2", "t", Props::new()),
+        ];
+        let g = Graph::new(nodes, edges);
+        let all = run_read_query(
+            &g,
+            "MATCH p = allShortestPaths((a:N {id:'s'})-[:R*]->(b:N {id:'t'})) RETURN length(p) AS len",
+            &CypherParameters::new(),
+        )
+        .unwrap();
+        assert_eq!(all.rows, vec![vec![Value::Int(2)], vec![Value::Int(2)]]);
+        // shortestPath keeps exactly one of the ties.
+        let single = run_read_query(
+            &g,
+            "MATCH p = shortestPath((a:N {id:'s'})-[:R*]->(b:N {id:'t'})) RETURN length(p) AS len",
+            &CypherParameters::new(),
+        )
+        .unwrap();
+        assert_eq!(single.rows, vec![vec![Value::Int(2)]]);
+    }
+
+    #[test]
+    fn shortest_path_binds_endpoints_and_relationships() {
+        let t = run(
+            "MATCH shortestPath((a:Person {name:'Ada'})-[r:KNOWS*]->(b:Person {name:'Grace'})) RETURN a.name, b.name, size(r) AS hops",
+        );
+        assert_eq!(
+            t.rows,
+            vec![vec![
+                Value::from("Ada"),
+                Value::from("Grace"),
+                Value::Int(2)
+            ]]
+        );
+    }
+
+    #[test]
+    fn shortest_path_per_endpoint_pair() {
+        // Unbound end node: one shortest path per reachable endpoint.
+        let t = run(
+            "MATCH p = shortestPath((a:Person {name:'Ada'})-[:KNOWS*]->(b:Person)) RETURN b.name, length(p) AS len ORDER BY b.name",
+        );
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::from("Alan"), Value::Int(1)],
+                vec![Value::from("Grace"), Value::Int(2)],
+            ]
+        );
+    }
+
+    #[test]
+    fn shortest_path_no_route_yields_no_rows() {
+        let t = run(
+            "MATCH p = shortestPath((a:Person {name:'Grace'})-[:KNOWS*]->(b:City)) RETURN length(p)",
+        );
+        assert!(t.rows.is_empty());
+    }
+
+    #[test]
+    fn shortest_path_multi_segment_is_rejected() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH p = shortestPath((a)-[:KNOWS*]->(m)-[:KNOWS*]->(b)) RETURN p",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GrustError::CypherSyntax(_)));
+    }
+
+    #[test]
+    fn tvf_range_yields_rows() {
+        let t = run("CALL tvf.range(1, 3) YIELD value RETURN value");
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::Int(1)],
+                vec![Value::Int(2)],
+                vec![Value::Int(3)]
+            ]
+        );
+    }
+
+    #[test]
+    fn tvf_range_standalone_call_shapes_result() {
+        let t = run("CALL tvf.range(1, 2) YIELD value AS v");
+        assert_eq!(t.columns, vec!["v".to_string()]);
+        assert_eq!(t.rows.len(), 2);
+    }
+
+    #[test]
+    fn tvf_keys_is_correlated_per_row() {
+        // `id` is a real property key: Node::new mirrors the id into props.
+        let t =
+            run("MATCH (n:Person {name:'Ada'}) CALL tvf.keys(n) YIELD key RETURN key ORDER BY key");
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::from("age")],
+                vec![Value::from("id")],
+                vec![Value::from("name")]
+            ]
+        );
+    }
+
+    #[test]
+    fn tvf_range_with_correlated_argument() {
+        // end = n.age - 34 -> Ada (36) yields 1..2.
+        let t = run(
+            "MATCH (n:Person {name:'Ada'}) CALL tvf.range(1, n.age - 34) YIELD value RETURN value",
+        );
+        assert_eq!(t.rows, vec![vec![Value::Int(1)], vec![Value::Int(2)]]);
+    }
+
+    #[test]
+    fn catalog_procedure_rejects_arguments() {
+        let err = run_read_query(
+            &graph(),
+            "CALL db.labels('x') YIELD label RETURN label",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expects no arguments"));
+    }
+
+    #[test]
+    fn call_subquery_correlated_join() {
+        // The outer binding `a` is visible inside; a row whose subquery
+        // returns nothing (Grace has no outgoing KNOWS) is dropped.
+        let t = run(
+            "MATCH (a:Person) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS friend } RETURN a.name, friend ORDER BY a.name",
+        );
+        assert_eq!(
+            t.rows,
+            vec![
+                vec![Value::from("Ada"), Value::from("Alan")],
+                vec![Value::from("Alan"), Value::from("Grace")],
+            ]
+        );
+    }
+
+    #[test]
+    fn call_subquery_uncorrelated_aggregate() {
+        let t = run(
+            "MATCH (a:Person) CALL { MATCH (c:City) RETURN count(*) AS cities } RETURN a.name, cities ORDER BY a.name",
+        );
+        assert_eq!(t.rows.len(), 3);
+        assert!(t.rows.iter().all(|r| r[1] == Value::Int(1)));
+    }
+
+    #[test]
+    fn call_subquery_returns_node_binding_for_later_match() {
+        // A bare-variable subquery RETURN keeps its node binding, so a later
+        // MATCH can extend from it.
+        let t = run(
+            "CALL { MATCH (a:Person {name:'Ada'}) RETURN a } MATCH (a)-[:KNOWS]->(b) RETURN b.name",
+        );
+        assert_eq!(t.rows, vec![vec![Value::from("Alan")]]);
+    }
+
+    #[test]
+    fn call_subquery_union_arms() {
+        let t = run(
+            "CALL { MATCH (p:Person {name:'Ada'}) RETURN p.name AS n UNION MATCH (c:City) RETURN c.name AS n } RETURN n ORDER BY n",
+        );
+        assert_eq!(
+            t.rows,
+            vec![vec![Value::from("Ada")], vec![Value::from("London")]]
+        );
+    }
+
+    #[test]
+    fn call_subquery_column_collision_rejected() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH (a:Person) CALL { MATCH (x:City) RETURN x.name AS a } RETURN a",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GrustError::CypherUnresolvedIdentity(_)));
+        assert!(err.to_string().contains("already bound"));
+    }
+
+    #[test]
+    fn call_subquery_requires_return() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH (a:Person) CALL { MATCH (c:City) } RETURN a.name",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must end in RETURN"));
+    }
+
+    #[test]
+    fn call_subquery_return_star_is_feature_tagged() {
+        let err = run_read_query(
+            &graph(),
+            "MATCH (a:Person) CALL { MATCH (c:City) RETURN * } RETURN a.name",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, GrustError::Unsupported(_)));
     }
 
     #[test]

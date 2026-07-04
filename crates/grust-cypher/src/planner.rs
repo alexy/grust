@@ -653,7 +653,13 @@ impl CypherMutationPlanner {
                     "MATCH {keyword} requires a relationship pattern"
                 )));
             }
-            ops.push(self.plan_match_edge_segment(segment, path_variable, &matched_nodes, keyword, kind)?);
+            ops.push(self.plan_match_edge_segment(
+                segment,
+                path_variable,
+                &matched_nodes,
+                keyword,
+                kind,
+            )?);
         }
         Ok(GraphMutationPlan::new(ops))
     }
@@ -842,7 +848,12 @@ impl CypherMutationPlanner {
         if let PatchAssignmentKind::NumericExpression { source_target, .. } = &assignment.kind
             && source_target != &assignment.target
         {
-            return self.lower_cross_variable_set(pattern, path_variable, where_predicates, assignment);
+            return self.lower_cross_variable_set(
+                pattern,
+                path_variable,
+                where_predicates,
+                assignment,
+            );
         }
 
         if is_cypher_edge_pattern(pattern) {
@@ -1262,8 +1273,12 @@ impl CypherMutationPlanner {
         nodes_by_var.insert(target_var.clone(), target_node);
         nodes_by_var.insert(source_target.clone(), source_node);
         apply_match_where_predicates(&mut nodes_by_var, where_predicates, "MATCH SET")?;
-        let target_node = nodes_by_var.remove(&target_var).expect("target inserted above");
-        let source_node = nodes_by_var.remove(&source_target).expect("source inserted above");
+        let target_node = nodes_by_var
+            .remove(&target_var)
+            .expect("target inserted above");
+        let source_node = nodes_by_var
+            .remove(&source_target)
+            .expect("source inserted above");
 
         Ok(GraphMutationPlan::new(vec![
             GraphMutationPlanOp::SetMatchingNodeFromNode {
@@ -1441,7 +1456,11 @@ impl CypherMutationPlanner {
             )));
         }
         // Normalize to arrow source -> destination.
-        let (from, to) = if incoming { (second, first) } else { (first, second) };
+        let (from, to) = if incoming {
+            (second, first)
+        } else {
+            (first, second)
+        };
         Ok((from, rel, to))
     }
 

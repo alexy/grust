@@ -25,7 +25,12 @@ fn cypher_multiple_relationship_patterns_per_write() {
     .unwrap();
     assert_eq!(
         single.into_mutations(),
-        vec![GraphMutation::UpsertEdge(Edge::new("KNOWS", "p1", "p2", Props::new()))]
+        vec![GraphMutation::UpsertEdge(Edge::new(
+            "KNOWS",
+            "p1",
+            "p2",
+            Props::new()
+        ))]
     );
 }
 
@@ -33,19 +38,16 @@ fn cypher_multiple_relationship_patterns_per_write() {
 fn cypher_incoming_edge_writes_normalize_to_source_destination() {
     // Unit 10b / W2: an incoming `<-[:T]-` edge is accepted and normalized to the
     // arrow's source -> destination, identical to the equivalent outgoing form.
-    let incoming = sail_cypher_mutation_plan(
-        "CREATE (a:Person {id: 'p1'})<-[:KNOWS]-(b:Person {id: 'p2'})",
-    )
-    .unwrap();
-    let outgoing = sail_cypher_mutation_plan(
-        "CREATE (b:Person {id: 'p2'})-[:KNOWS]->(a:Person {id: 'p1'})",
-    )
-    .unwrap();
+    let incoming =
+        sail_cypher_mutation_plan("CREATE (a:Person {id: 'p1'})<-[:KNOWS]-(b:Person {id: 'p2'})")
+            .unwrap();
+    let outgoing =
+        sail_cypher_mutation_plan("CREATE (b:Person {id: 'p2'})-[:KNOWS]->(a:Person {id: 'p1'})")
+            .unwrap();
     assert_eq!(incoming.into_mutations(), outgoing.into_mutations());
-    let again = sail_cypher_mutation_plan(
-        "CREATE (a:Person {id: 'p1'})<-[:KNOWS]-(b:Person {id: 'p2'})",
-    )
-    .unwrap();
+    let again =
+        sail_cypher_mutation_plan("CREATE (a:Person {id: 'p1'})<-[:KNOWS]-(b:Person {id: 'p2'})")
+            .unwrap();
     assert_eq!(
         again.into_mutations(),
         vec![GraphMutation::UpsertEdge(Edge::new(
@@ -465,8 +467,10 @@ fn cypher_delete_lowers_resolved_node_and_edge_patterns() {
     // parser). Callers use `MATCH ... DELETE <var>` instead; the edge form lowers
     // to DeleteMatchingEdges (covered by the golden snapshot + edge-delete tests).
     assert!(sail_cypher_mutation_plan("DELETE (:Person {id: 'person-1'})").is_err());
-    assert!(sail_cypher_mutation_plan(
-        "DELETE (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'})"
-    )
-    .is_err());
+    assert!(
+        sail_cypher_mutation_plan(
+            "DELETE (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'})"
+        )
+        .is_err()
+    );
 }
