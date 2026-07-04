@@ -861,3 +861,64 @@ fn property_keys_and_range_pushdown_match_reference() {
         assert_same(cypher, &actual, &expected);
     }
 }
+
+/// PUSHDOWN2 P3: uncorrelated `CALL { … }` subqueries lower to plain scans /
+/// a LEFT JOIN of two scans (the embedded `turso` engine runs them) and must
+/// match the reference exactly — including the per-outer-row inner aggregate
+/// over an empty inner scan, and drop-on-empty for row-producing inners.
+#[tokio::test]
+async fn uncorrelated_subquery_pushdown_matches_reference() {
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in [
+        // Leading subquery: rows are the inner rows.
+        "CALL { MATCH (c:City) RETURN c.name AS n } RETURN n",
+        "CALL { MATCH (p:Person) WITH p.name AS n WHERE n STARTS WITH 'A' RETURN n } RETURN n ORDER BY n",
+        // MATCH × subquery join, filters pushed on both sides.
+        "MATCH (a:Person) CALL { MATCH (c:City) RETURN c.name AS city } RETURN a.name, city ORDER BY a.name",
+        "MATCH (a:Person {name:'Ada'}) CALL { MATCH (b:Person) WHERE b.age >= 41 RETURN b.name AS n } RETURN a.name, n ORDER BY n",
+        // Inner aggregate: one row per outer row…
+        "MATCH (a:Person) CALL { MATCH (c:City) RETURN count(*) AS cities } RETURN a.name, cities ORDER BY a.name",
+        // …including over an EMPTY inner scan (LEFT JOIN empty-group row).
+        "MATCH (a:Person {name:'Ada'}) CALL { MATCH (x:Nowhere) RETURN count(*) AS n } RETURN a.name, n",
+        // Row-producing empty inner drops the outer rows entirely.
+        "MATCH (a:Person) CALL { MATCH (x:Nowhere) RETURN x.name AS n } RETURN a.name, n",
+        // Inner DISTINCT + outer tail aggregate over the joined rows.
+        "MATCH (a:City) CALL { MATCH (p:Person) RETURN DISTINCT p.label AS l } RETURN a.name, l",
+        "MATCH (a:Person) CALL { MATCH (c:City) RETURN c.name AS city } WITH a, city RETURN count(*) AS total",
+    ] {
+        let plan = plan_read(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"));
+        assert!(plan.supported_by(&SqliteDialect));
+        let actual = run_pushdown(&conn, &plan, &params).await;
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}
+
+/// PUSHDOWN2 P4a: correlated `tvf.keys(n)` lowers to a lateral `json_each`
+/// join (real SQLite) and must match the reference exactly, including sorted
+/// key order per row, YIELD aliasing + WHERE, and aggregate tails.
+#[test]
+fn correlated_keys_pushdown_matches_reference() {
+    let graph = fixture();
+    let conn = embed_sqlite(&graph);
+    let params = CypherParameters::new();
+    for cypher in [
+        "MATCH (n:Person {name:'Ada'}) CALL tvf.keys(n) YIELD key RETURN key",
+        "MATCH (n:Person) CALL tvf.keys(n) YIELD key RETURN DISTINCT key",
+        "MATCH (n:Person) CALL tvf.keys(n) YIELD key AS k WHERE k STARTS WITH 'a' RETURN n.name, k ORDER BY n.name, k",
+        "MATCH (n:City) CALL tvf.keys(n) YIELD key RETURN n.name, count(*) AS props",
+        "MATCH (n:Person {name:'Ada'}) CALL tvf.keys(n) YIELD key",
+    ] {
+        let plan = plan_read(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"));
+        assert!(plan.supported_by(&SqliteDialect), "`{cypher}` gated off");
+        let actual = run_leaf_sqlite(&conn, &plan, &params);
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}

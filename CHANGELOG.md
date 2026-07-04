@@ -6,6 +6,20 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **PUSHDOWN2 PM2**: uncorrelated `CALL { … }` subqueries now push into
+  backend SQL (`SubqueryReadPushdown`): a leading subquery lowers to its inner
+  node scan, and `MATCH … CALL { … } …` lowers to a `LEFT JOIN ON 1=1` of the
+  two scans — LEFT so an inner aggregate over an empty inner scan still
+  produces its per-outer-row empty-group row, exactly like the reference. The
+  inner pipeline, subquery-`RETURN` join, and outer tail run through the
+  shared reference; correlated shapes (including same-name shadowing) fall
+  back conservatively. Correlated `tvf.keys(n)` also pushes via a lateral
+  `json_each` join (SQLite-gated). The oracle work exposed and fixed a latent
+  reference bug: `DISTINCT` over computed `WITH`/subquery-`RETURN` items
+  errored ("variable not bound") because dedup re-evaluated pre-projection
+  expressions against post-projection rows; dedup now keys on the produced
+  rows' values. Oracle +2 differential tests.
+
 - Started the **PUSHDOWN2 goal** (`docs/GQL_PUSHDOWN2_GOAL.md`): PM1 done.
   Catalog procedures now push into backend SQL as a `ProcedureReadPushdown`
   leaf — `db.labels`/`db.relationshipTypes` as `SELECT DISTINCT` scans on both
