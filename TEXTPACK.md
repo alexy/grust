@@ -30,6 +30,24 @@ Zip the `.textbundle` directory (with the directory as the top-level entry) to
 `<name>.textpack`. Ulysses imports the `.textpack` via the share sheet or
 **＋ → Import**.
 
+## Quick build
+
+The manual steps below are automated by `scripts/textpack.py` (Python 3, stdlib only):
+
+```sh
+python3 scripts/textpack.py docs/blog/grust-crab   # -> docs/blog/grust-crab/dist/grust-crab.textpack
+```
+
+The script reflows prose (bundled copy only — the repo post is untouched),
+collects the post's local images into `assets/`, and stamps `info.json` with
+Omnighost publishing metadata (`--blog querygraph.ai` by default, plus
+`--slug`, `--tags`, `--excerpt`; `--render` re-renders stale `diagrams/*.mmd`).
+The output lands in `dist/` next to the post.
+
+To publish: in Obsidian, run the Omnighost command **Import textpack** — the
+post and its images land in the blog's folder with Ghost frontmatter set,
+ready to sync to querygraph.ai. Ulysses imports the same pack unchanged.
+
 ## Prerequisites
 
 - `mmdc` — the Mermaid CLI (`@mermaid-js/mermaid-cli`). Renders fenced mermaid to
