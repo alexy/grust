@@ -545,7 +545,7 @@ fn lower_node_scan(
         return None;
     }
     let pattern = &match_clause.patterns[0];
-    if pattern.variable.is_some() || !pattern.segments.is_empty() {
+    if pattern.variable.is_some() || pattern.shortest.is_some() || !pattern.segments.is_empty() {
         return None;
     }
     let node = &pattern.start;
@@ -1414,7 +1414,7 @@ fn lower_segment_single(
     let pattern = &match_clause.patterns[0];
     // No path variable; at least one segment (node-only is handled by the node
     // planner).
-    if pattern.variable.is_some() || pattern.segments.is_empty() {
+    if pattern.variable.is_some() || pattern.shortest.is_some() || pattern.segments.is_empty() {
         return None;
     }
     let k = pattern.segments.len();
@@ -2257,7 +2257,7 @@ fn lower_var_length_single(
     }
     let pattern = &match_clause.patterns[0];
     // Exactly one segment, which must be variable-length, no path variable.
-    if pattern.variable.is_some() || pattern.segments.len() != 1 {
+    if pattern.variable.is_some() || pattern.shortest.is_some() || pattern.segments.len() != 1 {
         return None;
     }
     let a = &pattern.start;
@@ -2535,7 +2535,7 @@ fn lower_optional_single(
         return None;
     }
     let a_pat = &m.patterns[0];
-    if a_pat.variable.is_some() || !a_pat.segments.is_empty() || a_pat.start.labels.len() > 1 {
+    if a_pat.variable.is_some() || a_pat.shortest.is_some() || !a_pat.segments.is_empty() || a_pat.start.labels.len() > 1 {
         return None;
     }
     let a_node = &a_pat.start;
@@ -2546,7 +2546,7 @@ fn lower_optional_single(
         return None;
     }
     let o_pat = &o.patterns[0];
-    if o_pat.variable.is_some() || o_pat.segments.len() != 1 {
+    if o_pat.variable.is_some() || o_pat.shortest.is_some() || o_pat.segments.len() != 1 {
         return None;
     }
     // The optional start must be a bare back-reference to `a`.
@@ -2861,6 +2861,14 @@ fn lower_multi_pattern_single(
         _ => return None,
     };
     if match_clause.patterns.is_empty() {
+        return None;
+    }
+    // Path variables and shortestPath(...) wrappers are reference-only.
+    if match_clause
+        .patterns
+        .iter()
+        .any(|p| p.variable.is_some() || p.shortest.is_some())
+    {
         return None;
     }
 
@@ -3386,6 +3394,37 @@ mod tests {
 
     fn plan(cypher: &str) -> Option<NodeReadPushdown> {
         plan_node_read(cypher, &params()).unwrap()
+    }
+
+    /// P0 of `docs/GQL_PUSHDOWN2_GOAL.md`: the Full39075 read features that are
+    /// not yet lowered must make the unified planner decline (`Ok(None)`), so
+    /// backends fall back to the reference — never a partially/wrongly pushed
+    /// query. Later PUSHDOWN2 tasks move shapes OUT of this list deliberately.
+    #[test]
+    fn full39075_read_features_fall_back_to_the_reference() {
+        for cypher in [
+            // CALL { … } subqueries (F8) — PUSHDOWN2 P3/P4.
+            "MATCH (a:Person) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS friend } RETURN a.name, friend",
+            "CALL { MATCH (c:City) RETURN c.name AS n } RETURN n",
+            // Correlated TVF arguments (F9) — reference-only for now.
+            "MATCH (n:Person) CALL tvf.keys(n) YIELD key RETURN key",
+            // Shortest path (F10) — PUSHDOWN2 P5. The wrapped patterns must be
+            // declined in every lowerer position, with or without a path
+            // variable (a bare shortestPath over a var-length segment would
+            // otherwise lower as a plain var-length scan and return wrong rows).
+            "MATCH p = shortestPath((a:Person)-[:KNOWS*]->(b:Person)) RETURN length(p)",
+            "MATCH shortestPath((a:Person)-[:KNOWS*]->(b:Person)) RETURN b.name",
+            "MATCH shortestPath((a:Person)-[:KNOWS]->(b:Person)) RETURN b.name",
+            "MATCH allShortestPaths((a:Person)-[:KNOWS*]->(b:Person)) RETURN b.name",
+            "MATCH (c:City), shortestPath((a:Person)-[:KNOWS*]->(b:Person)) RETURN c.name, b.name",
+            "MATCH (a:Person) OPTIONAL MATCH shortestPath((a)-[:KNOWS*]->(b)) RETURN a.name, b.name",
+        ] {
+            assert_eq!(
+                plan_read(cypher, &params(), &NoTypeHints).unwrap(),
+                None,
+                "expected `{cypher}` to fall back to the reference"
+            );
+        }
     }
 
     fn spark_sql(cypher: &str) -> String {
