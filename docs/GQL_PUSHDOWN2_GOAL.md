@@ -1,6 +1,6 @@
 # Grust Pushdown 2 Goal — lowering the Full39075 read features into backend SQL
 
-Status: **in progress — PM1, PM2, and PM3 (P0–P5) done on branch `pushdown2`; PM4 (claim + docs consolidation, human review) remains.** This is the agreed next goal after the
+Status: **implementation COMPLETE (P0–P6, 2026-07-04) on branch `pushdown2`; PM4 docs are consolidated and the branch awaits human review before merge.** This is the agreed next goal after the
 Full39075 completion goal (`docs/GQL_FULL39075_GOAL.md`, done 2026-07-03). It
 plans the lowering of the newer read features — table-valued functions,
 `CALL { … }` subqueries, and shortest-path matching — into the backend-neutral
@@ -82,9 +82,15 @@ Memory-only execution of these features is a bottleneck, not before.
   (2026-07-04)** — correlated inner WHEREs push into the JOIN ON; shortest
   path pushes on SQLite with the rowid-sequence determinism argument; Spark
   scoped out for recursive CTEs via the dialect gate. Oracle +2 tests.
-- **PM4 Claim + docs:** update `docs/GQL_M1_CHECKPOINT.md` Unit 15 status,
-  the profile statement's per-backend section, and backend descriptors if any
-  user-visible capability changed. STOP for human review before merging.
+- **PM4 Claim + docs:** **docs done (2026-07-04)** — the Unit 15 checkpoint
+  section carries a PUSHDOWN2 addendum, the profile statement's per-backend
+  section describes the widened pushed subset, and backend descriptors needed
+  no change (Sail's `read_pushdown` flag already held; dialect gates are
+  planner-level). **STOPPED for human review before merging** — the branch is
+  five commits on `pushdown2`, each green and oracle-backed; three latent
+  bugs (an F10 shortestPath lowering leak, DISTINCT-over-computed dedup, and
+  the no-`*` shortestPath unbounded search) were found and fixed along the
+  way.
 
 ## Rough size
 
