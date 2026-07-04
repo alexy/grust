@@ -405,6 +405,14 @@ pub trait SqlDialect {
     fn lateral_json_keys_sql(&self, _outer_select: &str) -> Option<String> {
         None
     }
+
+    /// Whether the dialect can execute the shortest-path walk CTE: recursive
+    /// CTEs plus `printf` and an insertion-ordered `rowid` on the edge table
+    /// (the deterministic tie-break key). False (e.g. Spark has no recursive
+    /// CTEs) makes the shortest-path leaf unsupported → reference fallback.
+    fn shortest_walk_supported(&self) -> bool {
+        false
+    }
 }
 
 /// Spark SQL dialect (the Sail backend): `GET_JSON_OBJECT`, backtick idents,
@@ -517,6 +525,10 @@ impl SqlDialect for SqliteDialect {
         ))
     }
 
+    fn shortest_walk_supported(&self) -> bool {
+        true
+    }
+
     fn integer_series_sql(&self, start: i64, end: i64, step: i64) -> Option<String> {
         // Anchor guarded so an empty range (start already past end) yields no
         // rows, matching the reference's `range()` loop.
@@ -594,6 +606,22 @@ fn lower_node_scan(
     params: &CypherParameters,
     hints: &dyn TypeHints,
 ) -> Option<(String, Option<String>, Option<Predicate>)> {
+    let (var, label, mut filter) = lower_node_pattern_only(match_clause, params)?;
+    if let Some(where_expr) = &match_clause.where_clause {
+        let predicate = lower_predicate(where_expr, &var, label.as_deref(), params, hints)?;
+        filter = Some(conjoin(filter, predicate));
+    }
+    Some((var, label, filter))
+}
+
+/// Lower a `MATCH` clause's single node pattern (variable, label, inline-props
+/// equality filter) **without** its `WHERE` — the caller decides where the
+/// `WHERE` lands (the scan filter, or a cross-scope `JOIN ON` for correlated
+/// subqueries).
+fn lower_node_pattern_only(
+    match_clause: &MatchClause,
+    params: &CypherParameters,
+) -> Option<(String, Option<String>, Option<Predicate>)> {
     if match_clause.patterns.len() != 1 {
         return None;
     }
@@ -621,10 +649,6 @@ fn lower_node_scan(
                 },
             ));
         }
-    }
-    if let Some(where_expr) = &match_clause.where_clause {
-        let predicate = lower_predicate(where_expr, &var, label.as_deref(), params, hints)?;
-        filter = Some(conjoin(filter, predicate));
     }
     Some((var, label, filter))
 }
@@ -3497,82 +3521,39 @@ fn reshape_only(clauses: &[Clause]) -> bool {
         .all(|c| matches!(c, Clause::With(_) | Clause::Unwind(_) | Clause::Return(_)))
 }
 
-/// True when any expression under these clauses references `var` — the
-/// correlation check for subquery pushdown (conservative: a shadowing rebind
-/// of the same name also counts, so it falls back to the reference).
-fn clauses_reference_var(clauses: &[Clause], var: &str) -> bool {
-    fn expr_refs(e: &Expr, var: &str) -> bool {
-        match e {
-            Expr::Variable(v) => v == var,
-            Expr::Property { base, .. } => expr_refs(base, var),
-            Expr::Index { base, index } => expr_refs(base, var) || expr_refs(index, var),
-            Expr::List(items) => items.iter().any(|e| expr_refs(e, var)),
-            Expr::Map(entries) => entries.iter().any(|(_, e)| expr_refs(e, var)),
-            Expr::Function { args, .. } => args.iter().any(|e| expr_refs(e, var)),
-            Expr::Unary { operand, .. } => expr_refs(operand, var),
-            Expr::Binary { lhs, rhs, .. } => expr_refs(lhs, var) || expr_refs(rhs, var),
-            Expr::IsNull { operand, .. } => expr_refs(operand, var),
-            Expr::Case {
-                operand,
-                branches,
-                default,
-            } => {
-                operand.as_deref().is_some_and(|e| expr_refs(e, var))
-                    || branches
-                        .iter()
-                        .any(|b| expr_refs(&b.when, var) || expr_refs(&b.then, var))
-                    || default.as_deref().is_some_and(|e| expr_refs(e, var))
-            }
-            Expr::Null
-            | Expr::Boolean(_)
-            | Expr::Integer(_)
-            | Expr::Float(_)
-            | Expr::String(_)
-            | Expr::Parameter(_) => false,
-        }
-    }
-    fn projection_refs(p: &Projection, var: &str) -> bool {
-        p.items
-            .iter()
-            .any(|i| expr_refs(&i.expr, var) || i.alias.as_deref() == Some(var))
-            || p.order_by.iter().any(|o| expr_refs(&o.expr, var))
-            || p.skip.as_ref().is_some_and(|e| expr_refs(e, var))
-            || p.limit.as_ref().is_some_and(|e| expr_refs(e, var))
-    }
+/// True when these clauses **rebind** `var` (pattern variables, projection or
+/// `UNWIND`/`YIELD` aliases). Pure *references* to the outer variable are fine
+/// for subquery pushdown — the reference seeds carry the outer bindings — but
+/// a rebind changes scoping, so it falls back.
+fn clauses_rebind_var(clauses: &[Clause], var: &str) -> bool {
     clauses.iter().any(|clause| match clause {
-        Clause::With(w) => {
-            projection_refs(&w.projection, var)
-                || w.where_clause.as_ref().is_some_and(|e| expr_refs(e, var))
-        }
-        Clause::Return(r) => projection_refs(&r.projection, var),
-        Clause::Unwind(u) => expr_refs(&u.expr, var) || u.alias == var,
-        Clause::Call(c) => {
-            c.args.iter().any(|e| expr_refs(e, var))
-                || c.where_clause.as_ref().is_some_and(|e| expr_refs(e, var))
-                || c.yields
-                    .iter()
-                    .any(|(col, alias)| alias.as_deref().unwrap_or(col) == var)
-        }
-        Clause::Match(m) => {
-            m.where_clause.as_ref().is_some_and(|e| expr_refs(e, var))
-                || m.patterns.iter().any(|p| {
-                    let node_refs = |np: &NodePattern| {
-                        np.variable.as_deref() == Some(var)
-                            || np.properties.as_ref().is_some_and(|map| {
-                                map.entries.iter().any(|(_, e)| expr_refs(e, var))
-                            })
-                    };
-                    node_refs(&p.start)
-                        || p.segments.iter().any(|seg| {
-                            node_refs(&seg.node)
-                                || seg.relationship.variable.as_deref() == Some(var)
-                                || seg.relationship.properties.as_ref().is_some_and(|map| {
-                                    map.entries.iter().any(|(_, e)| expr_refs(e, var))
-                                })
-                        })
+        // A bare `WITH v` keeps `v`'s binding — a carry, not a rebind — so
+        // only explicit aliases count.
+        Clause::With(w) => w
+            .projection
+            .items
+            .iter()
+            .any(|i| i.alias.as_deref() == Some(var)),
+        Clause::Return(r) => r
+            .projection
+            .items
+            .iter()
+            .any(|i| i.alias.as_deref() == Some(var)),
+        Clause::Unwind(u) => u.alias == var,
+        Clause::Call(c) => c
+            .yields
+            .iter()
+            .any(|(col, alias)| alias.as_deref().unwrap_or(col) == var),
+        Clause::Match(m) => m.patterns.iter().any(|p| {
+            p.variable.as_deref() == Some(var)
+                || p.start.variable.as_deref() == Some(var)
+                || p.segments.iter().any(|seg| {
+                    seg.node.variable.as_deref() == Some(var)
+                        || seg.relationship.variable.as_deref() == Some(var)
                 })
-        }
-        _ => true, // anything else: be conservative
+        }),
+        // Anything else (nested subqueries, writes): be conservative.
+        _ => true,
     })
 }
 
@@ -3593,6 +3574,11 @@ pub struct SubqueryReadPushdown {
     outer: Option<NodeScan>,
     /// The inner query's leading node scan.
     inner: NodeScan,
+    /// A correlated inner `WHERE` (references both scopes), rendered into the
+    /// `LEFT JOIN ON` clause over `n0` (outer) / `n1` (inner). `None` means
+    /// `ON 1=1` (uncorrelated). The whole inner pipeline still runs in the
+    /// reference — no SQL-side aggregate is ever needed (PUSHDOWN2 P4b).
+    on: Option<SegPredicate>,
     /// Inner clauses after its `MATCH`, ending in the subquery `RETURN`.
     inner_tail: Vec<Clause>,
     /// Outer clauses after the `CALL`, ending in `RETURN`.
@@ -3611,12 +3597,18 @@ impl SubqueryReadPushdown {
             Some(outer) => {
                 let outer = node_scan_sql(outer, dialect);
                 // LEFT JOIN (not CROSS JOIN): an outer row with an empty inner
-                // scan must still surface (NULL inner columns) so an aggregate
+                // match must still surface (NULL inner columns) so an aggregate
                 // inner RETURN can produce its one empty-group row per outer
                 // row, exactly like the reference's per-row subquery execution.
+                // A correlated inner WHERE becomes the join condition (n0 =
+                // outer, n1 = inner).
+                let on = match &self.on {
+                    None => "1=1".to_string(),
+                    Some(pred) => render_seg_predicate(pred, dialect),
+                };
                 format!(
-                    "SELECT o.id, o.label, o.props, i.id, i.label, i.props \
-                     FROM ({outer}) AS o LEFT JOIN ({inner}) AS i ON 1=1"
+                    "SELECT n0.id, n0.label, n0.props, n1.id, n1.label, n1.props \
+                     FROM ({outer}) AS n0 LEFT JOIN ({inner}) AS n1 ON {on}"
                 )
             }
         }
@@ -3711,24 +3703,49 @@ fn lower_subquery_single(
     if inner_match.optional {
         return None;
     }
-    let inner = lower_node_scan(inner_match, params, hints)?;
+    let mut inner = lower_node_pattern_only(inner_match, params)?;
     if inner_tail.is_empty()
         || !reshape_only(inner_tail)
         || !matches!(inner_tail.last(), Some(Clause::Return(_)))
     {
         return None;
     }
-    // Uncorrelated only: nothing inside the subquery may reference (or rebind)
-    // the outer scan variable. Same-name inner scans are correlated
-    // (consistency binding) and fall back.
+    // Correlation rule: pure references to the outer variable are honored (the
+    // reference seeds carry the outer bindings, and a correlated inner WHERE
+    // renders into the JOIN ON); *rebinds* of the outer name — including a
+    // same-name inner scan (a consistency binding) — fall back.
     if let Some((outer_var, _, _)) = &outer {
-        if inner.0 == *outer_var || clauses_reference_var(inner_clauses, outer_var) {
+        if inner.0 == *outer_var || clauses_rebind_var(inner_clauses, outer_var) {
+            return None;
+        }
+    }
+    // Route the inner MATCH's WHERE: single-scope predicates fold into the
+    // inner scan; cross-scope predicates become the JOIN ON (P4b).
+    let mut on: Option<SegPredicate> = None;
+    if let Some(where_expr) = &inner_match.where_clause {
+        if let Some(pred) = lower_predicate(where_expr, &inner.0, inner.1.as_deref(), params, hints)
+        {
+            inner.2 = Some(conjoin(inner.2.take(), pred));
+        } else if let Some((outer_var, outer_label, _)) = &outer {
+            let mut roles: RoleMap = std::collections::HashMap::new();
+            roles.insert(outer_var.clone(), Role::Node(0));
+            roles.insert(inner.0.clone(), Role::Node(1));
+            let node_labels = vec![outer_label.clone(), inner.1.clone()];
+            let ctx = SegCtx {
+                roles: &roles,
+                node_labels: &node_labels,
+                segments: &[],
+                hints,
+            };
+            on = Some(lower_seg_predicate(where_expr, &ctx, params)?);
+        } else {
             return None;
         }
     }
     Some(SubqueryReadPushdown {
         outer,
         inner,
+        on,
         inner_tail: inner_tail.to_vec(),
         tail: tail.to_vec(),
     })
@@ -3820,6 +3837,225 @@ fn lower_correlated_keys_single(
 }
 
 // ===========================================================================
+// Shortest-path pushdown (PUSHDOWN2 P5)
+// ===========================================================================
+
+/// A pushable `MATCH shortestPath((a …)-[:T*m..n]->(b …)) RETURN …` /
+/// `allShortestPaths(…)`: a recursive walk CTE enumerates **simple** paths
+/// from the `a`-scan (visited-set check, exactly like the var-length leaf),
+/// and per `(start, end)` pair only minimal-depth rows survive. `Single`
+/// additionally keeps the DFS-first path via the minimal edge-`rowid`
+/// sequence key — at a fixed length, the reference's depth-first enumeration
+/// in edge insertion order produces exactly the lexicographically smallest
+/// edge-index sequence, and `rowid` order is insertion order. Endpoint
+/// bindings only (no path/relationship variables — those stay reference-only,
+/// like the var-length leaf); the `RETURN` runs through the shared reference.
+/// Dialect-gated ([`SqlDialect::shortest_walk_supported`]; Spark has no
+/// recursive CTEs).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShortestReadPushdown {
+    single: bool,
+    /// Endpoint scans: `(variable, label, inline-props filter)`.
+    a: (Option<String>, Option<String>, Option<Predicate>),
+    b: (Option<String>, Option<String>, Option<Predicate>),
+    rel_types: Vec<String>,
+    direction: SegDirection,
+    min: usize,
+    max: Option<usize>,
+    projection: Projection,
+}
+
+/// Render an endpoint scan (`SELECT id, label, props FROM <nodes> [WHERE …]`).
+fn endpoint_scan_sql(
+    label: &Option<String>,
+    filter: &Option<Predicate>,
+    dialect: &dyn SqlDialect,
+) -> String {
+    let table = dialect.quote_ident(dialect.nodes_table());
+    let mut sql = format!("SELECT id, label, props FROM {table}");
+    let mut conditions: Vec<String> = Vec::new();
+    if let Some(label) = label {
+        conditions.push(format!("label = {}", dialect.string_literal(label)));
+    }
+    if let Some(filter) = filter {
+        conditions.push(render_predicate(filter, dialect));
+    }
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&conditions.join(" AND "));
+    }
+    sql
+}
+
+impl ShortestReadPushdown {
+    pub fn supported_by(&self, dialect: &dyn SqlDialect) -> bool {
+        dialect.shortest_walk_supported()
+    }
+
+    /// The walk step, mirroring the var-length leaf's direction handling.
+    fn step(&self) -> (String, String) {
+        match self.direction {
+            SegDirection::Outgoing => ("ed.dst_id".to_string(), "ed.src_id = w.e".to_string()),
+            SegDirection::Incoming => ("ed.src_id".to_string(), "ed.dst_id = w.e".to_string()),
+            SegDirection::Undirected => (
+                "CASE WHEN ed.src_id = w.e THEN ed.dst_id ELSE ed.src_id END".to_string(),
+                "(ed.src_id = w.e OR ed.dst_id = w.e)".to_string(),
+            ),
+        }
+    }
+
+    pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
+        let nodes = dialect.quote_ident(dialect.nodes_table());
+        let edges = dialect.quote_ident(dialect.edges_table());
+        let sep = dialect.string_literal("\u{1f}");
+        let (next, incident) = self.step();
+        let a_scan = endpoint_scan_sql(&self.a.1, &self.a.2, dialect);
+        let b_scan = endpoint_scan_sql(&self.b.1, &self.b.2, dialect);
+
+        let edge_filter = match self.rel_types.as_slice() {
+            [] => String::new(),
+            [one] => format!(" AND ed.edge_type = {}", dialect.string_literal(one)),
+            many => {
+                let list = many
+                    .iter()
+                    .map(|t| dialect.string_literal(t))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(" AND ed.edge_type IN ({list})")
+            }
+        };
+        let depth_cap = match self.max {
+            Some(m) => format!(" AND w.depth + 1 <= {m}"),
+            None => String::new(),
+        };
+        let min = self.min;
+
+        let mut sql = format!(
+            "WITH RECURSIVE walk(s, e, depth, visited, ekey) AS (\
+             SELECT id, id, 0, {sep} || id || {sep}, '' FROM ({a_scan}) \
+             UNION ALL \
+             SELECT w.s, {next}, w.depth + 1, w.visited || {next} || {sep}, \
+             w.ekey || printf('%012d', ed.rowid) \
+             FROM walk w JOIN {edges} ed ON {incident} \
+             WHERE instr(w.visited, {sep} || {next} || {sep}) = 0{edge_filter}{depth_cap}), \
+             cand AS (\
+             SELECT w.s, w.e, w.depth, w.ekey FROM walk w \
+             JOIN ({b_scan}) nb ON nb.id = w.e WHERE w.depth >= {min}) \
+             SELECT n0.id, n0.label, n0.props, n1.id, n1.label, n1.props \
+             FROM cand c JOIN {nodes} n0 ON n0.id = c.s JOIN {nodes} n1 ON n1.id = c.e \
+             WHERE c.depth = (SELECT MIN(depth) FROM cand q WHERE q.s = c.s AND q.e = c.e)"
+        );
+        if self.single {
+            sql.push_str(
+                " AND c.ekey = (SELECT MIN(ekey) FROM cand q2 \
+                 WHERE q2.s = c.s AND q2.e = c.e AND q2.depth = c.depth)",
+            );
+        }
+        sql
+    }
+
+    pub fn column_count(&self) -> usize {
+        6
+    }
+
+    pub fn project_text_rows(
+        &self,
+        _dialect: &dyn SqlDialect,
+        rows: Vec<Vec<Option<String>>>,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        let mut binding_rows = Vec::with_capacity(rows.len());
+        for cells in &rows {
+            let mut bindings = Vec::new();
+            if let Some(var) = &self.a.0 {
+                bindings.push((var.clone(), PushedBinding::Node(node_from_cells(cells, 0)?)));
+            }
+            if let Some(var) = &self.b.0 {
+                bindings.push((var.clone(), PushedBinding::Node(node_from_cells(cells, 3)?)));
+            }
+            binding_rows.push(bindings);
+        }
+        crate::read::project_bindings(binding_rows, &self.projection, params)
+    }
+}
+
+/// Lower `MATCH shortestPath(…)/allShortestPaths(…) RETURN …` (single pattern,
+/// no `WHERE`, anonymous relationship, no path variable) to the walk leaf.
+fn lower_shortest_single(
+    single: &SingleQuery,
+    params: &CypherParameters,
+) -> Option<ShortestReadPushdown> {
+    let [Clause::Match(m), Clause::Return(r)] = single.clauses.as_slice() else {
+        return None;
+    };
+    if m.optional || m.where_clause.is_some() || m.patterns.len() != 1 {
+        return None;
+    }
+    let pattern = &m.patterns[0];
+    let kind = pattern.shortest?;
+    if pattern.variable.is_some() {
+        // Path variables (Value::Path reconstruction) stay reference-only.
+        return None;
+    }
+    let [segment] = pattern.segments.as_slice() else {
+        return None;
+    };
+    let rel = &segment.relationship;
+    if rel.variable.is_some() || rel.properties.is_some() {
+        return None;
+    }
+    let endpoint =
+        |np: &NodePattern| -> Option<(Option<String>, Option<String>, Option<Predicate>)> {
+            if np.labels.len() > 1 {
+                return None;
+            }
+            let mut filter: Option<Predicate> = None;
+            if let Some(map) = &np.properties {
+                for (key, value_expr) in &map.entries {
+                    let scalar = lower_scalar(value_expr, params)?;
+                    filter = Some(conjoin(
+                        filter,
+                        Predicate::Compare {
+                            prop: lower_prop_key(key)?,
+                            op: CmpOp::Eq,
+                            value: scalar,
+                        },
+                    ));
+                }
+            }
+            Some((np.variable.clone(), np.labels.first().cloned(), filter))
+        };
+    let a = endpoint(&pattern.start)?;
+    let b = endpoint(&segment.node)?;
+    // A shared endpoint variable is a consistency binding — reference-only.
+    if a.0.is_some() && a.0 == b.0 {
+        return None;
+    }
+    let direction = match rel.direction {
+        Direction::Outgoing => SegDirection::Outgoing,
+        Direction::Incoming => SegDirection::Incoming,
+        Direction::Undirected => SegDirection::Undirected,
+    };
+    // Mirror the reference's bounds: min defaults to 1 (also when no `*` is
+    // given), max stays open for `*`/`*m..`.
+    let min = rel.length.map(|l| l.min.unwrap_or(1)).unwrap_or(1) as usize;
+    let max = match rel.length {
+        None => Some(1),
+        Some(l) => l.max.map(|m| m as usize),
+    };
+    Some(ShortestReadPushdown {
+        single: matches!(kind, ShortestKind::Single),
+        a,
+        b,
+        rel_types: rel.types.clone(),
+        direction,
+        min,
+        max,
+        projection: r.projection.clone(),
+    })
+}
+
+// ===========================================================================
 // Unified read pushdown (single-query leaves + UNION composition)
 // ===========================================================================
 
@@ -3835,6 +4071,7 @@ pub enum ReadPushdown {
     Procedure(ProcedureReadPushdown),
     Subquery(SubqueryReadPushdown),
     CorrelatedKeys(CorrelatedKeysReadPushdown),
+    Shortest(ShortestReadPushdown),
     Segment(SegmentReadPushdown),
     VarLength(VarLengthReadPushdown),
     Optional(OptionalReadPushdown),
@@ -3871,6 +4108,7 @@ impl ReadPushdown {
             ReadPushdown::Procedure(p) => p.supported_by(dialect),
             ReadPushdown::Subquery(p) => p.supported_by(dialect),
             ReadPushdown::CorrelatedKeys(p) => p.supported_by(dialect),
+            ReadPushdown::Shortest(p) => p.supported_by(dialect),
             ReadPushdown::Union { arms, .. } => arms.iter().all(|a| a.supported_by(dialect)),
             _ => true,
         }
@@ -3883,6 +4121,7 @@ impl ReadPushdown {
             ReadPushdown::Procedure(p) => p.to_sql(dialect),
             ReadPushdown::Subquery(p) => p.to_sql(dialect),
             ReadPushdown::CorrelatedKeys(p) => p.to_sql(dialect),
+            ReadPushdown::Shortest(p) => p.to_sql(dialect),
             ReadPushdown::Segment(p) => p.to_sql(dialect),
             ReadPushdown::VarLength(p) => p.to_sql(dialect),
             ReadPushdown::Optional(p) => p.to_sql(dialect),
@@ -3899,6 +4138,7 @@ impl ReadPushdown {
             ReadPushdown::Procedure(p) => p.column_count(),
             ReadPushdown::Subquery(p) => p.column_count(),
             ReadPushdown::CorrelatedKeys(p) => p.column_count(),
+            ReadPushdown::Shortest(p) => p.column_count(),
             ReadPushdown::Segment(p) => p.column_count(),
             ReadPushdown::VarLength(p) => p.column_count(),
             ReadPushdown::Optional(p) => p.column_count(),
@@ -3920,6 +4160,7 @@ impl ReadPushdown {
             ReadPushdown::Procedure(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Subquery(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::CorrelatedKeys(p) => p.project_text_rows(dialect, rows, params),
+            ReadPushdown::Shortest(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Segment(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::VarLength(p) => p.project_text_rows(dialect, rows, params),
             ReadPushdown::Optional(p) => p.project_text_rows(dialect, rows, params),
@@ -3989,6 +4230,9 @@ fn lower_single(
     }
     if let Some(p) = lower_correlated_keys_single(single, params, hints) {
         return Some(ReadPushdown::CorrelatedKeys(p));
+    }
+    if let Some(p) = lower_shortest_single(single, params) {
+        return Some(ReadPushdown::Shortest(p));
     }
     lower_pipeline_single(single, params, hints).map(ReadPushdown::Pipeline)
 }
@@ -4131,6 +4375,86 @@ mod tests {
         assert!(keys.to_sql(&SqliteDialect).contains("json_each(o.props)"));
     }
 
+    /// PUSHDOWN2 P4b: a numeric cross-scope inner WHERE renders into the
+    /// LEFT JOIN ON clause under type hints; the inner pipeline (aggregates
+    /// included) stays in the reference.
+    #[test]
+    fn correlated_subquery_where_lowers_into_join_on() {
+        struct AgeHints;
+        impl TypeHints for AgeHints {
+            fn node_property_kind(&self, _label: Option<&str>, key: &str) -> Option<ScalarKind> {
+                (key == "age").then_some(ScalarKind::Int)
+            }
+        }
+        let cypher = "MATCH (a:Person) CALL { MATCH (b:Person) WHERE b.age > a.age RETURN count(*) AS older } RETURN a.name, older";
+        let plan = plan_read(cypher, &params(), &AgeHints)
+            .unwrap()
+            .expect("cross-scope numeric WHERE should push under hints");
+        let sql = plan.to_sql(&SqliteDialect);
+        assert!(sql.contains("LEFT JOIN"), "unexpected SQL: {sql}");
+        assert!(sql.contains("ON "), "unexpected SQL: {sql}");
+        assert!(
+            !sql.contains("ON 1=1"),
+            "correlated ON should not be 1=1: {sql}"
+        );
+        // References (not rebinds) of the outer var in the inner tail are fine.
+        assert!(
+            plan_read(
+                "MATCH (a:Person) CALL { MATCH (b:Person) RETURN b.name AS n, a.name AS me } RETURN n, me",
+                &params(),
+                &NoTypeHints,
+            )
+            .unwrap()
+            .is_some()
+        );
+        // Rebinds of the outer var inside the subquery fall back.
+        assert_eq!(
+            plan_read(
+                "MATCH (a:Person) CALL { MATCH (b:Person) WITH b.name AS a RETURN a AS n } RETURN n",
+                &params(),
+                &NoTypeHints,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    /// PUSHDOWN2 P5: endpoint-only shortestPath/allShortestPaths lower to the
+    /// walk CTE, SQLite-gated.
+    #[test]
+    fn shortest_path_lowers_to_walk_cte() {
+        let plan = |cypher: &str| {
+            plan_read(cypher, &params(), &NoTypeHints)
+                .unwrap()
+                .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"))
+        };
+        let single =
+            plan("MATCH shortestPath((a:Person)-[:KNOWS*]->(b:Person)) RETURN a.name, b.name");
+        assert!(single.supported_by(&SqliteDialect));
+        assert!(!single.supported_by(&SparkDialect));
+        let sql = single.to_sql(&SqliteDialect);
+        assert!(sql.contains("WITH RECURSIVE walk"), "unexpected SQL: {sql}");
+        assert!(sql.contains("MIN(depth)"), "unexpected SQL: {sql}");
+        assert!(
+            sql.contains("MIN(ekey)"),
+            "single picks the DFS-first path: {sql}"
+        );
+
+        let all =
+            plan("MATCH allShortestPaths((a:Person)-[:KNOWS*2..3]->(b:Person)) RETURN b.name");
+        let sql = all.to_sql(&SqliteDialect);
+        assert!(
+            !sql.contains("MIN(ekey)"),
+            "allShortestPaths keeps ties: {sql}"
+        );
+        assert!(sql.contains("w.depth >= 2"), "min bound: {sql}");
+        assert!(sql.contains("w.depth + 1 <= 3"), "max bound: {sql}");
+
+        // No `*`: exactly one hop, like the reference's defaults.
+        let one = plan("MATCH shortestPath((a:Person)-[:KNOWS]->(b:Person)) RETURN b.name");
+        assert!(one.to_sql(&SqliteDialect).contains("w.depth + 1 <= 1"));
+    }
+
     /// P0 of `docs/GQL_PUSHDOWN2_GOAL.md`: the Full39075 read features that are
     /// not yet lowered must make the unified planner decline (`Ok(None)`), so
     /// backends fall back to the reference — never a partially/wrongly pushed
@@ -4138,10 +4462,15 @@ mod tests {
     #[test]
     fn full39075_read_features_fall_back_to_the_reference() {
         for cypher in [
-            // Correlated CALL { … } subqueries (F8) — PUSHDOWN2 P4b (deferred):
-            // the inner references the outer variable (pattern or WHERE).
+            // Pattern-correlated CALL { … } subqueries (F8): the inner pattern
+            // extends the outer variable — reference-only.
             "MATCH (a:Person) CALL { MATCH (a)-[:KNOWS]->(b) RETURN b.name AS friend } RETURN a.name, friend",
+            // NOTE: a numeric cross-scope WHERE (`b.age > a.age`) pushes under
+            // TYPE HINTS (P4b); with NoTypeHints it still falls back, which is
+            // what this pin asserts.
             "MATCH (a:Person) CALL { MATCH (b:Person) WHERE b.age > a.age RETURN count(*) AS older } RETURN a.name, older",
+            // String cross-scope comparisons have no typed lowering yet.
+            "MATCH (a:Person) CALL { MATCH (b:Person) WHERE b.city = a.city RETURN b.name AS n } RETURN a.name, n",
             // Same-name inner scans are correlated consistency bindings.
             "MATCH (a:Person) CALL { MATCH (a:Person) RETURN a.name AS n } RETURN n",
             // Subqueries with UNION arms or non-scan inner shapes fall back.
@@ -4149,14 +4478,13 @@ mod tests {
             "CALL { MATCH (a:Person)-[:KNOWS]->(b) RETURN b.name AS n } RETURN n",
             // tvf.keys over a non-scan argument stays reference-only.
             "MATCH (a:Person)-[:KNOWS]->(n) CALL tvf.keys(n) YIELD key RETURN key",
-            // Shortest path (F10) — PUSHDOWN2 P5. The wrapped patterns must be
-            // declined in every lowerer position, with or without a path
-            // variable (a bare shortestPath over a var-length segment would
-            // otherwise lower as a plain var-length scan and return wrong rows).
+            // Shortest path (F10): endpoint-only shapes push as of P5; path
+            // variables (Value::Path reconstruction), relationship variables,
+            // WHERE, and multi-pattern/OPTIONAL positions stay reference-only —
+            // and must never lower as a plain var-length scan.
             "MATCH p = shortestPath((a:Person)-[:KNOWS*]->(b:Person)) RETURN length(p)",
-            "MATCH shortestPath((a:Person)-[:KNOWS*]->(b:Person)) RETURN b.name",
-            "MATCH shortestPath((a:Person)-[:KNOWS]->(b:Person)) RETURN b.name",
-            "MATCH allShortestPaths((a:Person)-[:KNOWS*]->(b:Person)) RETURN b.name",
+            "MATCH shortestPath((a:Person)-[r:KNOWS*]->(b:Person)) RETURN b.name",
+            "MATCH shortestPath((a:Person)-[:KNOWS*]->(b:Person)) WHERE a.age > 40 RETURN b.name",
             "MATCH (c:City), shortestPath((a:Person)-[:KNOWS*]->(b:Person)) RETURN c.name, b.name",
             "MATCH (a:Person) OPTIONAL MATCH shortestPath((a)-[:KNOWS*]->(b)) RETURN a.name, b.name",
         ] {

@@ -1,6 +1,6 @@
 # Grust Pushdown 2 Goal — lowering the Full39075 read features into backend SQL
 
-Status: **in progress — PM1 (P0–P2) and PM2 (P3–P4a) done on branch `pushdown2`.** This is the agreed next goal after the
+Status: **in progress — PM1, PM2, and PM3 (P0–P5) done on branch `pushdown2`; PM4 (claim + docs consolidation, human review) remains.** This is the agreed next goal after the
 Full39075 completion goal (`docs/GQL_FULL39075_GOAL.md`, done 2026-07-03). It
 plans the lowering of the newer read features — table-valued functions,
 `CALL { … }` subqueries, and shortest-path matching — into the backend-neutral
@@ -65,8 +65,8 @@ Memory-only execution of these features is a bottleneck, not before.
 | **P1** | Catalog procedures as SQL | P0 | **Done.** `ProcedureReadPushdown` leaf: `db.labels`/`db.relationshipTypes` as DISTINCT scans (both dialects), `db.propertyKeys` via `json_each` (SQLite-gated through `SqlDialect::json_props_keys_scan`; Spark falls back via the new `ReadPushdown::supported_by`). YIELD/WHERE/tail run through `read::project_procedure_pipeline`. Oracle-backed. |
 | **P2** | `tvf.range` row source | P1 | **Done (rescoped).** `tvf.range` with constant/parameter integer args → guarded recursive CTE (SQLite-gated through `SqlDialect::integer_series_sql`; empty ranges and negative steps match the reference; zero step falls back so the structured error stays identical). Spark parity deferred pending Sail `sequence`/`explode` verification. `tvf.keys` is inherently correlated (keys of a bound element), so it moves to P4's correlated scope and stays reference-only for now — pinned by the P0 test. |
 | **P3** | Uncorrelated subqueries | P0 | **Done.** `SubqueryReadPushdown`: leading `CALL { … }` (single scan) and `MATCH × CALL { … }` (a `LEFT JOIN ON 1=1` of the two scans — LEFT, not CROSS, so an inner-aggregate over an empty inner scan still yields its one row per outer row, exactly like the reference). Inner pipeline, subquery-RETURN join, and outer tail run through `read::project_subquery_join_pipeline`; correlation (including same-name shadowing) falls back conservatively. Both dialects; oracle-backed. The oracle work also exposed and fixed a latent **reference** bug: `dedup_bindings` re-evaluated pre-projection expressions against post-projection rows, so `DISTINCT` over computed items errored. |
-| **P4** | Correlated subqueries (bounded) | P3 | **P4a done:** correlated `tvf.keys(n)` over the outer scan variable → lateral `json_each` join (`SqlDialect::lateral_json_keys_sql`, SQLite-gated; stored props are sorted JSON so key order matches the reference). **P4b deferred to PM3:** the P3 machinery generalizes — render the inner `WHERE`'s cross-scope predicate into the `LEFT JOIN ON` clause (o-/i-qualified operands, reusing the segment predicate machinery) and the whole inner pipeline stays in the reference, aggregates included; no SQL-side aggregate is ever needed. Needs a two-scope qualified predicate renderer. |
-| **P5** | Shortest path (SQLite first) | P0 | Recursive CTE BFS with visited-set tracking (path string or JSON array), minimal-length selection per endpoint pair (`MIN(depth)` join), tie handling for `allShortestPaths`. Deterministic ordering must match the reference's edge-order determinism — expect this to be the hardest equivalence argument in the goal. Spark: only if recursive CTEs exist in the Sail version; otherwise document as reference-only. |
+| **P4** | Correlated subqueries (bounded) | P3 | **P4a done:** correlated `tvf.keys(n)` over the outer scan variable → lateral `json_each` join (`SqlDialect::lateral_json_keys_sql`, SQLite-gated; stored props are sorted JSON so key order matches the reference). **P4b done (PM3):** the inner `WHERE`'s cross-scope predicate lowers through the segment predicate machinery (roles `n0` = outer / `n1` = inner) into the `LEFT JOIN ON` clause; the whole inner pipeline stays in the reference, aggregates included. Numeric prop-vs-prop comparisons need type hints (no hints → fallback); string prop-vs-prop has no typed lowering yet. The correlation rule relaxed from "no references" to "no **rebinds**": pure references to the outer variable are honored (the reference seeds carry the outer bindings). |
+| **P5** | Shortest path (SQLite first) | P0 | **Done (endpoint-only scope).** `ShortestReadPushdown`: a recursive walk CTE (visited-set like the var-length leaf) + per-pair `MIN(depth)` selection; `allShortestPaths` keeps tie multiplicity; `shortestPath` picks the DFS-first path via the minimal zero-padded edge-`rowid` sequence key (at fixed length, the reference's depth-first enumeration in edge insertion order is exactly the lexicographically smallest edge-index sequence, and `rowid` order is insertion order). Endpoint bindings only — path/relationship variables and `WHERE` stay reference-only, like the var-length leaf's exclusions. SQLite-gated (`SqlDialect::shortest_walk_supported`); Spark falls back (no recursive CTEs). The oracle exposed and fixed an F10 reference bug: a no-`*` relationship inside `shortestPath` searched unbounded instead of exactly one hop. |
 | **P6** | Oracle + corpus expansion | each of P1–P5 | Differential oracle cases per shape; promote pushable `portable_read.json` cases into the oracle. |
 
 ## Milestones
@@ -78,9 +78,10 @@ Memory-only execution of these features is a bottleneck, not before.
   uncorrelated subqueries push on both dialects, correlated `tvf.keys` on
   SQLite; oracle green (+2 differential tests). Correlated subqueries via
   LEFT-JOIN-ON follow in PM3 alongside shortest path.
-- **PM3 Shortest path (P5):** SQLite recursive-CTE shortest path with the
-  determinism-equivalence argument written down; Spark explicitly scoped in
-  or out based on the recursive-CTE check.
+- **PM3 Shortest path + correlated subqueries (P4b, P5):** **done
+  (2026-07-04)** — correlated inner WHEREs push into the JOIN ON; shortest
+  path pushes on SQLite with the rowid-sequence determinism argument; Spark
+  scoped out for recursive CTEs via the dialect gate. Oracle +2 tests.
 - **PM4 Claim + docs:** update `docs/GQL_M1_CHECKPOINT.md` Unit 15 status,
   the profile statement's per-backend section, and backend descriptors if any
   user-visible capability changed. STOP for human review before merging.

@@ -1206,7 +1206,13 @@ fn expand_shortest(
     };
     let rel = &segment.relationship;
     let min = rel.length.map(|r| r.min.unwrap_or(1)).unwrap_or(1) as usize;
-    let max = rel.length.and_then(|r| r.max).map(|m| m as usize);
+    // No `*` means exactly one hop, matching pattern semantics everywhere
+    // else (`-[:R]->` is a single relationship); only an explicit `*`/`*m..`
+    // leaves the upper bound open.
+    let max = match rel.length {
+        None => Some(1),
+        Some(range) => range.max.map(|m| m as usize),
+    };
     // Simple paths never repeat a node, so no shortest path is longer than
     // |nodes| - 1 hops; that caps the open-ended `*` search.
     let cap = graph.nodes.len().saturating_sub(1);
@@ -3443,6 +3449,16 @@ mod tests {
                 Value::Int(2)
             ]]
         );
+    }
+
+    #[test]
+    fn shortest_path_without_star_is_one_hop() {
+        // `-[:R]->` inside shortestPath means exactly one hop, like every
+        // other pattern position; only `*` opens the bound. Ada's only 1-hop
+        // KNOWS endpoint is Alan (Grace is 2 hops away and must not appear).
+        let t =
+            run("MATCH shortestPath((a:Person {name:'Ada'})-[:KNOWS]->(b:Person)) RETURN b.name");
+        assert_eq!(t.rows, vec![vec![Value::from("Alan")]]);
     }
 
     #[test]

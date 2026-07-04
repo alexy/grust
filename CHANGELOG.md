@@ -6,6 +6,20 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **PUSHDOWN2 PM3**: correlated subqueries and shortest paths now push into
+  backend SQL. A correlated inner `WHERE` (e.g. `b.age > a.age` under type
+  hints) lowers through the segment predicate machinery into the subquery
+  join's `ON` clause — the inner pipeline, aggregates included, still runs in
+  the reference — and the correlation rule relaxed to reject only *rebinds*
+  of the outer variable (pure references are honored by the reference seeds).
+  Endpoint-only `shortestPath`/`allShortestPaths` lower to a recursive walk
+  CTE with per-pair minimal-depth selection (SQLite-gated); `allShortestPaths`
+  keeps tie multiplicity and `shortestPath` picks the reference's DFS-first
+  path via a zero-padded edge-`rowid` sequence key. The oracle exposed and
+  fixed an F10 reference bug: a no-`*` relationship inside `shortestPath`
+  searched unbounded instead of exactly one hop. Oracle 20 differential
+  tests.
+
 - **PUSHDOWN2 PM2**: uncorrelated `CALL { … }` subqueries now push into
   backend SQL (`SubqueryReadPushdown`): a leading subquery lowers to its inner
   node scan, and `MATCH … CALL { … } …` lowers to a `LEFT JOIN ON 1=1` of the

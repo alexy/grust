@@ -922,3 +922,100 @@ fn correlated_keys_pushdown_matches_reference() {
         assert_same(cypher, &actual, &expected);
     }
 }
+
+/// PUSHDOWN2 P4b: a correlated inner `WHERE` renders into the LEFT JOIN ON
+/// clause (numeric cross-scope comparisons under type hints); the inner
+/// pipeline — aggregates included — still runs in the reference and must
+/// match it exactly, including empty-group and drop-on-empty semantics.
+#[tokio::test]
+async fn correlated_subquery_pushdown_matches_reference() {
+    let graph = fixture();
+    let conn = embed(&graph).await;
+    let params = CypherParameters::new();
+    for cypher in [
+        // Correlated aggregate: Grace (85) has an empty inner set -> count 0.
+        "MATCH (a:Person) CALL { MATCH (b:Person) WHERE b.age > a.age RETURN count(*) AS older } RETURN a.name, older ORDER BY a.name",
+        // Correlated row-producing: empty inner drops the outer row.
+        "MATCH (a:Person) CALL { MATCH (b:Person) WHERE b.age > a.age RETURN b.name AS n } RETURN a.name, n ORDER BY a.name, n",
+        // Mixed conjunction: the inner-only conjunct rides along in the ON.
+        "MATCH (a:Person) CALL { MATCH (b:Person) WHERE b.age > a.age AND b.active = true RETURN count(*) AS n } RETURN a.name, n ORDER BY a.name",
+        // Outer-only correlated condition gates the whole inner set per row.
+        "MATCH (a:Person) CALL { MATCH (c:City) WHERE a.age >= 41 RETURN c.name AS city } RETURN a.name, city ORDER BY a.name",
+        // Inner-tail references to the outer variable are honored by the seeds.
+        "MATCH (a:Person) CALL { MATCH (c:City) RETURN c.name AS city, a.name AS me } RETURN me, city ORDER BY me",
+    ] {
+        let plan = plan_read(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"));
+        let actual = run_pushdown(&conn, &plan, &params).await;
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}
+
+/// PUSHDOWN2 P5: endpoint-only `shortestPath` / `allShortestPaths` lower to a
+/// recursive walk CTE with per-pair minimal-depth selection (real SQLite —
+/// recursive CTEs) and must match the reference exactly: tie multiplicity for
+/// `All`, exactly one row per pair for `Single`, shortcut preference, bounds,
+/// directions, and multigraph parallel edges.
+#[test]
+fn shortest_path_pushdown_matches_reference() {
+    // Diamond with ties and a shortcut: s -> {m1|m2} -> t (two 2-hop ties),
+    // s -> u -> v -> t (a longer route), plus x -> t so an incoming/undirected
+    // probe has variety, and parallel edges p -> q (multigraph tie at depth 1).
+    let nodes = vec![
+        node("N", "s", &[("name", Value::from("S"))]),
+        node("N", "m1", &[("name", Value::from("M1"))]),
+        node("N", "m2", &[("name", Value::from("M2"))]),
+        node("N", "t", &[("name", Value::from("T"))]),
+        node("N", "u", &[("name", Value::from("U"))]),
+        node("N", "v", &[("name", Value::from("V"))]),
+        node("N", "x", &[("name", Value::from("X"))]),
+        node("P", "p", &[("name", Value::from("P"))]),
+        node("P", "q", &[("name", Value::from("Q"))]),
+    ];
+    let edges = vec![
+        Edge::new("R", "s", "m1", Props::new()),
+        Edge::new("R", "s", "m2", Props::new()),
+        Edge::new("R", "m1", "t", Props::new()),
+        Edge::new("R", "m2", "t", Props::new()),
+        Edge::new("R", "s", "u", Props::new()),
+        Edge::new("R", "u", "v", Props::new()),
+        Edge::new("R", "v", "t", Props::new()),
+        Edge::new("R", "x", "t", Props::new()),
+        Edge::new("R", "p", "q", Props::new()),
+        Edge::new("R", "p", "q", Props::new()),
+    ];
+    let graph = Graph::new(nodes, edges);
+    let conn = embed_sqlite(&graph);
+    let params = CypherParameters::new();
+    for cypher in [
+        // Ties: All keeps both 2-hop paths; Single keeps exactly one.
+        "MATCH allShortestPaths((a:N {name:'S'})-[:R*]->(b:N {name:'T'})) RETURN a.name, b.name",
+        "MATCH shortestPath((a:N {name:'S'})-[:R*]->(b:N {name:'T'})) RETURN a.name, b.name",
+        // Per endpoint pair over an open scan.
+        "MATCH shortestPath((a:N {name:'S'})-[:R*]->(b:N)) RETURN b.name",
+        "MATCH allShortestPaths((a:N)-[:R*]->(b:N {name:'T'})) RETURN a.name",
+        // Bounds: exclude the short routes, force the 3-hop one.
+        "MATCH shortestPath((a:N {name:'S'})-[:R*3..]->(b:N {name:'T'})) RETURN a.name, b.name",
+        "MATCH allShortestPaths((a:N {name:'S'})-[:R*1..1]->(b:N)) RETURN b.name",
+        // Directions.
+        "MATCH shortestPath((a:N {name:'T'})<-[:R*]-(b:N)) RETURN b.name",
+        "MATCH shortestPath((a:N {name:'X'})-[:R*]-(b:N {name:'S'})) RETURN a.name, b.name",
+        // Multigraph parallel edges: two depth-1 ties for All, one for Single.
+        "MATCH allShortestPaths((a:P {name:'P'})-[:R*]->(b:P)) RETURN a.name, b.name",
+        "MATCH shortestPath((a:P {name:'P'})-[:R*]->(b:P)) RETURN a.name, b.name",
+        // Fixed one hop (no `*`), anonymous endpoint, aggregate tail.
+        "MATCH shortestPath((a:N {name:'S'})-[:R]->(b:N)) RETURN count(*) AS pairs",
+        // Zero-length allowed: start == end when min is 0.
+        "MATCH shortestPath((a:N {name:'S'})-[:R*0..1]->(b:N)) RETURN b.name",
+    ] {
+        let plan = plan_read(cypher, &params, &OracleHints)
+            .unwrap()
+            .unwrap_or_else(|| panic!("expected `{cypher}` to be pushable"));
+        assert!(plan.supported_by(&SqliteDialect), "`{cypher}` gated off");
+        let actual = run_leaf_sqlite(&conn, &plan, &params);
+        let expected = run_read_query(&graph, cypher, &params).unwrap();
+        assert_same(cypher, &actual, &expected);
+    }
+}
