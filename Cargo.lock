@@ -6519,6 +6519,7 @@ dependencies = [
  "grust-memory",
  "serde_json",
  "tokio",
+ "tracing",
  "typesec-core",
  "typesec-memory",
  "typesec-rbac",

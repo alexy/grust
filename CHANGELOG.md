@@ -18,7 +18,14 @@ reconstructed from Git history, release commits, and the shipped docs.
   end-to-end capability-gated vault test over the Grust backend. Path-dep on
   the sibling `../typesec` checkout (mirror of typesec's grust path deps);
   `publish = false` until typesec-memory is on crates.io. Next iterations
-  per FABLE-MEMORY-1 §5.2: lancedb ANN, sail analytics. **Space-filter
+  per FABLE-MEMORY-1 §5.2: sail analytics, lancedb-backed Embedder.
+  **Vector index** (`VectorIndex<E: Embedder>`) implements typesec-memory's
+  `SemanticIndex` with the embedding-privacy rule enforced by construction:
+  an `Embedder` declares `is_local()`, and above-Internal content is only
+  ever embedded by a local embedder (a remote one declines to index it — the
+  content never egresses). Cosine ranking + an optional bounded hybrid
+  graph re-rank (co-mentioned entities), always a reordering of authorized
+  candidates, never a widening. **Space-filter
   pushdown** (`query` starts from `NodesByProperty` on the record's `space`
   prop, so a scoped query never scans other tenants) and **transactional
   consolidation** (`apply_batch` maps the whole supersede-and-relink plan to

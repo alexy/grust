@@ -16,6 +16,7 @@ typesec-memory = { path = "../../../typesec/crates/typesec-memory" }
 chrono = { version = "0.4", features = ["serde"] }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+tracing = "0.1"
 
 [dev-dependencies]
 grust-memory = { path = "../grust-memory", version = "0.12.0" }
