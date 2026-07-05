@@ -1,0 +1,24 @@
+[package]
+name = "querygraph-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Marciana at scale: typesec-memory's MemoryStore over any Grust GraphStore backend"
+# Not publishable until typesec-memory itself is on crates.io.
+publish = false
+
+[dependencies]
+grust-core = { path = "../grust-core", version = "0.12.0" }
+# The security contract this crate implements against. Sibling checkout, the
+# mirror image of typesec's ../grust path deps; CI checks out both repos.
+typesec-memory = { path = "../../../typesec/crates/typesec-memory" }
+chrono = { version = "0.4", features = ["serde"] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+grust-memory = { path = "../grust-memory", version = "0.12.0" }
+typesec-memory = { path = "../../../typesec/crates/typesec-memory", features = ["conformance"] }
+typesec-core = { path = "../../../typesec/crates/typesec-core" }
+typesec-rbac = { path = "../../../typesec/crates/typesec-rbac", default-features = false }

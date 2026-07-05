@@ -6,6 +6,21 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **New crate `querygraph-memory`** (branch `fable/querygraph-memory`):
+  Marciana at scale — typesec-memory's `MemoryStore` implemented over any
+  Grust `GraphMutationStore`. Records and their entity knowledge graph are
+  written incrementally as nodes/edges (`MemoryRecord` -[:MENTIONS]->
+  `MemoryEntity`, `MemoryEntity` -[:RELATES {rel, fact_id}]->
+  `MemoryEntity`); neighborhood recall runs on `traverse`. Owns the one
+  sanctioned sync→async bridge (dedicated current-thread runtime, scoped
+  thread when already inside tokio — MCP-server-safe, tested). Passes
+  typesec-memory's full conformance corpus incl. graph reachability, and an
+  end-to-end capability-gated vault test over the Grust backend. Path-dep on
+  the sibling `../typesec` checkout (mirror of typesec's grust path deps);
+  `publish = false` until typesec-memory is on crates.io. Next iterations
+  per FABLE-MEMORY-1 §5.2: GQL pushdown for `query`, transactional
+  consolidation, lancedb ANN, sail analytics.
+
 - **Turso joins the read-pushdown consumers**: `TursoGraphStore::run_read_query`
   now pushes the portable read subset into SQL over the universal tables via a
   new `TursoReadDialect` — tagged-JSON property extraction (`$.key.value`),

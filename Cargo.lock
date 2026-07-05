@@ -6511,6 +6511,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "querygraph-memory"
+version = "0.12.0"
+dependencies = [
+ "chrono",
+ "grust-core",
+ "grust-memory",
+ "serde_json",
+ "tokio",
+ "typesec-core",
+ "typesec-memory",
+ "typesec-rbac",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.40.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7599,6 +7613,19 @@ dependencies = [
  "serde",
  "serde_core",
  "zmij",
+]
+
+[[package]]
+name = "serde_norway"
+version = "0.9.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e408f29489b5fd500fab51ff1484fc859bb655f32c671f307dcd733b72e8168c"
+dependencies = [
+ "indexmap 2.14.0",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml-norway",
 ]
 
 [[package]]
@@ -9156,6 +9183,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
+name = "typesec-core"
+version = "0.12.0"
+dependencies = [
+ "chrono",
+ "glob",
+ "thiserror",
+ "tracing",
+ "web-time",
+ "zeroize",
+]
+
+[[package]]
+name = "typesec-memory"
+version = "0.12.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "typesec-core",
+]
+
+[[package]]
+name = "typesec-rbac"
+version = "0.12.0"
+dependencies = [
+ "garde",
+ "glob",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "thiserror",
+ "tracing",
+ "typesec-core",
+]
+
+[[package]]
 name = "ulid"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9253,6 +9318,12 @@ name = "unsafe-libyaml"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
+name = "unsafe-libyaml-norway"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b39abd59bf32521c7f2301b52d05a6a2c975b6003521cbd0c6dc1582f0a22104"
 
 [[package]]
 name = "untrusted"
