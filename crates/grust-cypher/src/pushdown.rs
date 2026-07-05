@@ -413,6 +413,26 @@ pub trait SqlDialect {
     fn shortest_walk_supported(&self) -> bool {
         false
     }
+
+    /// Whether the engine executes `WITH RECURSIVE` (the var-length leaf).
+    /// Defaults to true to preserve the existing Sail/SQLite behavior; the
+    /// embedded Turso engine (limbo) overrides false and falls back.
+    fn recursive_cte_supported(&self) -> bool {
+        true
+    }
+
+    /// Edge-table column names. Sail's generic tables use
+    /// `src_id`/`dst_id`/`edge_type` (the defaults); the universal SQL tables
+    /// (Turso/Postgres, from `grust-sql-core`) use `from_id`/`to_id`/`label`.
+    fn edge_src_col(&self) -> &str {
+        "src_id"
+    }
+    fn edge_dst_col(&self) -> &str {
+        "dst_id"
+    }
+    fn edge_type_col(&self) -> &str {
+        "edge_type"
+    }
 }
 
 /// Spark SQL dialect (the Sail backend): `GET_JSON_OBJECT`, backtick idents,
@@ -1919,22 +1939,22 @@ impl SegmentReadPushdown {
     /// The `e{j}`/`n{j+1}` join clauses connecting node `j` to node `j+1` through
     /// segment `j`. Undirected matches either orientation, reproducing the
     /// reference's two-orientation behavior for non-self-loop edges.
-    fn segment_join(j: usize, direction: SegDirection) -> (String, String) {
+    fn segment_join(j: usize, direction: SegDirection, src: &str, dst: &str) -> (String, String) {
         let (nj, ej, nj1) = (format!("n{j}"), format!("e{j}"), format!("n{}", j + 1));
         match direction {
             SegDirection::Outgoing => (
-                format!("{ej}.src_id = {nj}.id"),
-                format!("{nj1}.id = {ej}.dst_id"),
+                format!("{ej}.{src} = {nj}.id"),
+                format!("{nj1}.id = {ej}.{dst}"),
             ),
             SegDirection::Incoming => (
-                format!("{ej}.dst_id = {nj}.id"),
-                format!("{nj1}.id = {ej}.src_id"),
+                format!("{ej}.{dst} = {nj}.id"),
+                format!("{nj1}.id = {ej}.{src}"),
             ),
             SegDirection::Undirected => (
-                format!("({ej}.src_id = {nj}.id OR {ej}.dst_id = {nj}.id)"),
+                format!("({ej}.{src} = {nj}.id OR {ej}.{dst} = {nj}.id)"),
                 format!(
-                    "(({ej}.src_id = {nj}.id AND {nj1}.id = {ej}.dst_id) \
-                     OR ({ej}.dst_id = {nj}.id AND {nj1}.id = {ej}.src_id))"
+                    "(({ej}.{src} = {nj}.id AND {nj1}.id = {ej}.{dst}) \
+                     OR ({ej}.{dst} = {nj}.id AND {nj1}.id = {ej}.{src}))"
                 ),
             ),
         }
@@ -1958,9 +1978,9 @@ impl SegmentReadPushdown {
                 }
                 SelectedBinding::Edge { edge, .. } => {
                     cols.push(format!("e{edge}.id"));
-                    cols.push(format!("e{edge}.src_id"));
-                    cols.push(format!("e{edge}.dst_id"));
-                    cols.push(format!("e{edge}.edge_type"));
+                    cols.push(format!("e{edge}.{}", dialect.edge_src_col()));
+                    cols.push(format!("e{edge}.{}", dialect.edge_dst_col()));
+                    cols.push(format!("e{edge}.{}", dialect.edge_type_col()));
                     cols.push(format!("e{edge}.props"));
                 }
             }
@@ -1976,7 +1996,12 @@ impl SegmentReadPushdown {
         // FROM n0, then chain: JOIN e{j} JOIN n{j+1} per segment.
         let mut sql = format!("SELECT {select_list} FROM {nodes} n0");
         for (j, seg) in self.segments.iter().enumerate() {
-            let (edge_on, node_on) = Self::segment_join(j, seg.direction);
+            let (edge_on, node_on) = Self::segment_join(
+                j,
+                seg.direction,
+                dialect.edge_src_col(),
+                dialect.edge_dst_col(),
+            );
             sql.push_str(&format!(
                 " JOIN {edges} e{j} ON {edge_on} JOIN {nodes} n{} ON {node_on}",
                 j + 1
@@ -1984,19 +2009,18 @@ impl SegmentReadPushdown {
         }
 
         let mut conditions: Vec<String> = Vec::new();
+        let tcol = dialect.edge_type_col();
         for (j, seg) in self.segments.iter().enumerate() {
             match seg.rel_types.as_slice() {
                 [] => {}
-                [one] => {
-                    conditions.push(format!("e{j}.edge_type = {}", dialect.string_literal(one)))
-                }
+                [one] => conditions.push(format!("e{j}.{tcol} = {}", dialect.string_literal(one))),
                 many => {
                     let list = many
                         .iter()
                         .map(|t| dialect.string_literal(t))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    conditions.push(format!("e{j}.edge_type IN ({list})"));
+                    conditions.push(format!("e{j}.{tcol} IN ({list})"));
                 }
             }
         }
@@ -2809,22 +2833,27 @@ impl OptionalReadPushdown {
         let edges = dialect.quote_ident(dialect.edges_table());
         // Subquery = the whole optional segment (edge e0 ⋈ end node n1), keyed by
         // the anchor endpoint that joins to the outer node n0.
+        let (src, dst, tcol) = (
+            dialect.edge_src_col(),
+            dialect.edge_dst_col(),
+            dialect.edge_type_col(),
+        );
         let (anchor, b_join) = match self.direction {
-            SegDirection::Outgoing => ("e0.src_id", "n1.id = e0.dst_id"),
+            SegDirection::Outgoing => (format!("e0.{src}"), format!("n1.id = e0.{dst}")),
             // Undirected is rejected at lowering.
-            _ => ("e0.dst_id", "n1.id = e0.src_id"),
+            _ => (format!("e0.{dst}"), format!("n1.id = e0.{src}")),
         };
         let mut sub_conds: Vec<String> = Vec::new();
         match self.rel_types.as_slice() {
             [] => {}
-            [one] => sub_conds.push(format!("e0.edge_type = {}", dialect.string_literal(one))),
+            [one] => sub_conds.push(format!("e0.{tcol} = {}", dialect.string_literal(one))),
             many => {
                 let list = many
                     .iter()
                     .map(|t| dialect.string_literal(t))
                     .collect::<Vec<_>>()
                     .join(", ");
-                sub_conds.push(format!("e0.edge_type IN ({list})"));
+                sub_conds.push(format!("e0.{tcol} IN ({list})"));
             }
         }
         if let Some(label) = &self.b_label {
@@ -2840,7 +2869,7 @@ impl OptionalReadPushdown {
         };
         let subquery = format!(
             "SELECT {anchor} AS anchor, \
-             e0.id AS r_id, e0.src_id AS r_src, e0.dst_id AS r_dst, e0.edge_type AS r_type, \
+             e0.id AS r_id, e0.{src} AS r_src, e0.{dst} AS r_dst, e0.{tcol} AS r_type, \
              e0.props AS r_props, n1.id AS b_id, n1.label AS b_label, n1.props AS b_props \
              FROM {edges} e0 JOIN {nodes} n1 ON {b_join}{sub_where}"
         );
@@ -3127,9 +3156,9 @@ impl MultiPatternReadPushdown {
                 ]),
                 SelectedBinding::Edge { edge, .. } => cols.extend([
                     format!("e{edge}.id"),
-                    format!("e{edge}.src_id"),
-                    format!("e{edge}.dst_id"),
-                    format!("e{edge}.edge_type"),
+                    format!("e{edge}.{}", dialect.edge_src_col()),
+                    format!("e{edge}.{}", dialect.edge_dst_col()),
+                    format!("e{edge}.{}", dialect.edge_type_col()),
                     format!("e{edge}.props"),
                 ]),
             }
@@ -3149,19 +3178,24 @@ impl MultiPatternReadPushdown {
         }
 
         let mut conds: Vec<String> = Vec::new();
+        let (src, dst, tcol) = (
+            dialect.edge_src_col(),
+            dialect.edge_dst_col(),
+            dialect.edge_type_col(),
+        );
         for (j, e) in self.edges.iter().enumerate() {
-            conds.push(format!("e{j}.src_id = n{}.id", e.src_node));
-            conds.push(format!("e{j}.dst_id = n{}.id", e.dst_node));
+            conds.push(format!("e{j}.{src} = n{}.id", e.src_node));
+            conds.push(format!("e{j}.{dst} = n{}.id", e.dst_node));
             match e.rel_types.as_slice() {
                 [] => {}
-                [one] => conds.push(format!("e{j}.edge_type = {}", dialect.string_literal(one))),
+                [one] => conds.push(format!("e{j}.{tcol} = {}", dialect.string_literal(one))),
                 many => {
                     let list = many
                         .iter()
                         .map(|t| dialect.string_literal(t))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    conds.push(format!("e{j}.edge_type IN ({list})"));
+                    conds.push(format!("e{j}.{tcol} IN ({list})"));
                 }
             }
         }
@@ -3376,7 +3410,8 @@ impl ProcedureReadPushdown {
             }
             ProcedureRowSource::RelationshipTypes => {
                 let t = dialect.quote_ident(dialect.edges_table());
-                format!("SELECT DISTINCT edge_type FROM {t} ORDER BY edge_type")
+                let tcol = dialect.edge_type_col();
+                format!("SELECT DISTINCT {tcol} FROM {t} ORDER BY {tcol}")
             }
             ProcedureRowSource::PropertyKeys => {
                 let nodes = dialect
@@ -4109,6 +4144,7 @@ impl ReadPushdown {
             ReadPushdown::Subquery(p) => p.supported_by(dialect),
             ReadPushdown::CorrelatedKeys(p) => p.supported_by(dialect),
             ReadPushdown::Shortest(p) => p.supported_by(dialect),
+            ReadPushdown::VarLength(_) => dialect.recursive_cte_supported(),
             ReadPushdown::Union { arms, .. } => arms.iter().all(|a| a.supported_by(dialect)),
             _ => true,
         }

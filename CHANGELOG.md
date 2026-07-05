@@ -6,6 +6,24 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **Turso joins the read-pushdown consumers**: `TursoGraphStore::run_read_query`
+  now pushes the portable read subset into SQL over the universal tables via a
+  new `TursoReadDialect` — tagged-JSON property extraction (`$.key.value`),
+  `from_id`/`to_id`/`label` edge columns (the pushdown SQL builders'
+  edge-column names are now dialect-owned), typed-JSON ordering — with the
+  embedded engine's gaps honestly gated (`WITH RECURSIVE` and `json_each`
+  leaves report unsupported and fall back to the reference over
+  `read_graph()`). The Turso backend descriptor flips `portable_reads` and
+  `read_pushdown` to true. A store-level differential test runs pushed and
+  gated shapes end-to-end against the reference.
+
+- **Reference executor expression gaps closed**: map literals evaluate,
+  list/map indexing works (negative indices, out-of-range → NULL),
+  `RETURN DISTINCT … ORDER BY` sorts deduplicated rows by projected items,
+  `RETURN *`/`WITH *` combine with aggregates (star variables become grouping
+  keys), and multi-label patterns are conjunctive over the single-label model
+  instead of erroring.
+
 - **PUSHDOWN2 PM3**: correlated subqueries and shortest paths now push into
   backend SQL. A correlated inner `WHERE` (e.g. `b.age > a.age` under type
   hints) lowers through the segment predicate machinery into the subquery
