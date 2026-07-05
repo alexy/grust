@@ -18,7 +18,16 @@ reconstructed from Git history, release commits, and the shipped docs.
   end-to-end capability-gated vault test over the Grust backend. Path-dep on
   the sibling `../typesec` checkout (mirror of typesec's grust path deps);
   `publish = false` until typesec-memory is on crates.io. Next iterations
-  per FABLE-MEMORY-1 §5.2: sail analytics, lancedb-backed Embedder.
+  per FABLE-MEMORY-1 §5.2: a production sail cognition tier and a
+  lancedb-backed `Embedder`. **Batch analytics** (`analytics`): dedup,
+  contradiction detection, and decay/importance scoring that emit
+  `ConsolidationPlan`s — their *only* output — applied through the
+  capability-gated vault (never a direct store write), so labels/quarantine/
+  audit stay intact at scale; an end-to-end test runs a contradiction plan
+  through the vault. **Multi-tenant isolation** proven: one shared Grust
+  store behind two vaults, typesec policies as the tenancy boundary — tenant
+  A can neither mint a capability for nor point its own capability at tenant
+  B's spaces, despite records sharing one graph.
   **Vector index** (`VectorIndex<E: Embedder>`) implements typesec-memory's
   `SemanticIndex` with the embedding-privacy rule enforced by construction:
   an `Embedder` declares `is_local()`, and above-Internal content is only

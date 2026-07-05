@@ -1,4 +1,5 @@
 use super::*;
+use chrono::{TimeZone, Utc};
 use grust_memory::MemoryGraphStore;
 use typesec_core::policy::{MintOptions, RequestContext, mint_capability_for_id};
 use typesec_core::{CanRead, CanWrite, Capability, Resource};
@@ -206,4 +207,95 @@ assignments:
             .any(|h| h.content.text.contains("works at ACME"))
     );
     assert_eq!(redacted.len(), 1, "the sensitive neighbor stays sealed");
+}
+
+/// Analytics propose a plan; the vault applies it. The invariant is that
+/// batch cognition never writes storage directly — it hands the vault a
+/// ConsolidationPlan and the vault does the label-join, invalidation, and
+/// audit. Here a contradiction analyzer retracts a superseded belief.
+#[test]
+fn analytics_plan_flows_through_the_vault_front_door() {
+    use crate::analytics::contradiction_plan;
+    use typesec_memory::RecallQuery;
+
+    const POLICY: &str = r#"
+roles:
+  - name: keeper
+    permissions: [read, write]
+    resources: ["memory/**"]
+assignments:
+  - subject: "agent:keeper"
+    roles: [keeper]
+"#;
+    let engine = typesec_rbac::RbacEngine::from_yaml(POLICY).expect("policy parses");
+    let space = MemorySpace::new("user:alice", "semantic");
+    let write: Capability<CanWrite, _> = mint_capability_for_id(
+        &engine,
+        "agent:keeper",
+        space.resource_id(),
+        &MintOptions::default(),
+    )
+    .unwrap();
+    let read: Capability<CanRead, _> = mint_capability_for_id(
+        &engine,
+        "agent:keeper",
+        space.resource_id(),
+        &MintOptions::default(),
+    )
+    .unwrap();
+
+    let vault = MemoryVault::new(store());
+    vault
+        .remember(
+            &space,
+            &write,
+            MemoryDraft::new(
+                MemoryKind::Semantic,
+                MemoryContent::text("Alice lives in Rome"),
+                Provenance::Operator,
+            )
+            .valid_from(Utc.with_ymd_and_hms(2023, 1, 1, 0, 0, 0).unwrap()),
+        )
+        .unwrap();
+    vault
+        .remember(
+            &space,
+            &write,
+            MemoryDraft::new(
+                MemoryKind::Semantic,
+                MemoryContent::text("Alice lives in Venice"),
+                Provenance::Operator,
+            )
+            .valid_from(Utc.with_ymd_and_hms(2025, 1, 1, 0, 0, 0).unwrap()),
+        )
+        .unwrap();
+
+    // Recall the current view, run analytics on it, apply the plan.
+    let view = vault
+        .recall::<typesec_core::secure_value::Internal>(
+            &space,
+            &read,
+            RecallQuery::all(),
+            &RequestContext::default(),
+        )
+        .unwrap();
+    let (found, plan) = contradiction_plan(&view.hits);
+    assert_eq!(found.len(), 1, "Rome vs Venice is a contradiction");
+
+    let report = vault
+        .consolidate(&space, &write, plan)
+        .expect("apply through vault");
+    assert_eq!(report.invalidated.len(), 1);
+
+    // Only the current belief remains live; the retracted one is history.
+    let after = vault
+        .recall::<typesec_core::secure_value::Internal>(
+            &space,
+            &read,
+            RecallQuery::all(),
+            &RequestContext::default(),
+        )
+        .unwrap();
+    assert_eq!(after.hits.len(), 1);
+    assert_eq!(after.hits[0].content.text, "Alice lives in Venice");
 }

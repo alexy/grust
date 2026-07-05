@@ -340,6 +340,7 @@ fn decode_record(node: &Node) -> Result<StoredRecord, StoreError> {
     }
 }
 
+pub mod analytics;
 pub mod vector;
 pub use vector::{Embedder, VectorIndex};
 
