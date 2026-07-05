@@ -74,6 +74,20 @@
       "notes": "Fixed-length path variables are supported; over variable-length they are not yet."
     },
     {
+      "id": "map-literal-and-indexing",
+      "feature": "general-expression-tree",
+      "requirement": "optional",
+      "statement": "MATCH (n:Person {name: 'Ada'}) RETURN {name: n.name}['name'] AS m",
+      "expectation": "supported"
+    },
+    {
+      "id": "distinct-with-order-by",
+      "feature": "distinct-ordering-limit",
+      "requirement": "required",
+      "statement": "MATCH (n) RETURN DISTINCT n.label AS l ORDER BY l",
+      "expectation": "supported"
+    },
+    {
       "id": "path-value-first-class",
       "feature": "path-values",
       "requirement": "required",

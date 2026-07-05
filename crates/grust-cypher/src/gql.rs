@@ -647,7 +647,7 @@ impl GqlFeature {
                 PredicatesAndExpressions,
                 Supported,
                 PortableGql,
-                "General expression evaluator in the read reference (arithmetic, boolean, comparison, null, list, CASE, property/parameter)"
+                "General expression evaluator in the read reference (arithmetic, boolean, comparison, null, list, map literals, list/map indexing, CASE, property/parameter)"
             ),
             GqlFeature::ThreeValuedLogic => d!(
                 "three-valued-logic",
@@ -710,7 +710,7 @@ impl GqlFeature {
                 ReadOnlyMatching,
                 Supported,
                 PortableGql,
-                "Single label + property-equality predicates in read matching (Memory reference)"
+                "Label + property-equality predicates in read matching; multi-label patterns are conjunctive over the single-label model (Memory reference)"
             ),
             GqlFeature::OptionalMatch => d!(
                 "optional-match",
