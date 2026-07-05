@@ -42,6 +42,10 @@ for human review / merge to `main`.
   live in `docs/GQL_M1_CHECKPOINT.md` Unit 15 (edge-list bindings, path
   variables, `/`·`%`·`^` arithmetic, Spark parity for the SQLite-gated
   leaves).
+- **Next planned goal:** `docs/GQL_POSTGRES_EXECUTOR_GOAL.md` — PostgreSQL
+  joins the executing conformance set (write executor + PostgresReadDialect +
+  gated live differential suite). Settle its Q0 typed-ordering /
+  insertion-ordinal decision before starting.
 
 ---
 
