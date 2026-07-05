@@ -18,8 +18,12 @@ reconstructed from Git history, release commits, and the shipped docs.
   end-to-end capability-gated vault test over the Grust backend. Path-dep on
   the sibling `../typesec` checkout (mirror of typesec's grust path deps);
   `publish = false` until typesec-memory is on crates.io. Next iterations
-  per FABLE-MEMORY-1 §5.2: GQL pushdown for `query`, transactional
-  consolidation, lancedb ANN, sail analytics.
+  per FABLE-MEMORY-1 §5.2: lancedb ANN, sail analytics. **Space-filter
+  pushdown** (`query` starts from `NodesByProperty` on the record's `space`
+  prop, so a scoped query never scans other tenants) and **transactional
+  consolidation** (`apply_batch` maps the whole supersede-and-relink plan to
+  one `apply_mutations` call, atomic on transactional backends) are done and
+  tested — including an end-to-end consolidation over the Grust backend.
 
 - **Turso joins the read-pushdown consumers**: `TursoGraphStore::run_read_query`
   now pushes the portable read subset into SQL over the universal tables via a

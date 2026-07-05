@@ -38,9 +38,10 @@ use std::future::Future;
 
 use chrono::{DateTime, Utc};
 use grust_core::prelude::{
-    Direction, Edge, EdgeQuery, GraphMutationStore, Node, NodeId, Start, Step, Traversal, Value,
+    Direction, Edge, EdgeQuery, GraphMutation, GraphMutationStore, Node, NodeId, Start, Step,
+    Traversal, Value,
 };
-use typesec_memory::{MemoryId, MemoryStore, StoreError, StoreQuery, StoredRecord};
+use typesec_memory::{MemoryId, MemoryStore, StoreBatchOp, StoreError, StoreQuery, StoredRecord};
 
 const RECORD_LABEL: &str = "MemoryRecord";
 const ENTITY_LABEL: &str = "MemoryEntity";
@@ -104,39 +105,80 @@ impl<G: GraphMutationStore> GraphStoreMemoryStore<G> {
         }
         Ok(seen)
     }
-}
 
-impl<G: GraphMutationStore> MemoryStore for GraphStoreMemoryStore<G> {
-    fn put(&self, record: StoredRecord) -> Result<(), StoreError> {
-        // Record node, entity nodes, and MENTIONS edges — incremental upserts.
-        let node = encode_record(&record)?;
-        self.run(self.graph.put_node(&node))?;
+    /// The graph mutations that persist one record: the record node plus its
+    /// entity nodes and MENTIONS edges. Shared by `put` and `apply_batch`.
+    fn record_mutations(record: &StoredRecord) -> Result<Vec<GraphMutation>, StoreError> {
+        let mut muts = vec![GraphMutation::UpsertNode(encode_record(record)?)];
         for entity in &record.entities {
             let mut props: BTreeMap<String, Value> = BTreeMap::new();
             props.insert("name".into(), Value::String(entity.name.clone()));
             props.insert("kind".into(), Value::String(entity.kind.clone()));
-            self.run(self.graph.put_node(&Node::new(
+            muts.push(GraphMutation::UpsertNode(Node::new(
                 ENTITY_LABEL,
                 entity_node_id(&entity.name),
                 props,
-            )))?;
-            self.run(self.graph.put_edge(&Edge::new(
+            )));
+            muts.push(GraphMutation::UpsertEdge(Edge::new(
                 MENTIONS,
                 record_node_id(&record.id),
                 entity_node_id(&entity.name),
                 BTreeMap::new(),
-            )))?;
+            )));
         }
-        Ok(())
+        Ok(muts)
+    }
+}
+
+impl<G: GraphMutationStore> MemoryStore for GraphStoreMemoryStore<G> {
+    fn put(&self, record: StoredRecord) -> Result<(), StoreError> {
+        let muts = Self::record_mutations(&record)?;
+        self.run(self.graph.apply_mutations(&muts))
     }
 
     fn get(&self, id: &MemoryId) -> Result<Option<StoredRecord>, StoreError> {
         self.fetch(id)
     }
 
+    /// Apply the whole batch as one `apply_mutations` call — atomic on any
+    /// backend whose `GraphMutationStore` overrides it transactionally (the
+    /// consolidation path relies on this so a supersede never half-commits).
+    /// An `Invalidate` reads the record, stamps `invalid_at`, and re-upserts
+    /// it; that read is outside the mutation set, but the capability that
+    /// authorized the consolidation is the logical lock.
+    fn apply_batch(&self, ops: Vec<StoreBatchOp>) -> Result<(), StoreError> {
+        let mut muts: Vec<GraphMutation> = Vec::new();
+        for op in ops {
+            match op {
+                StoreBatchOp::Put(record) => muts.extend(Self::record_mutations(&record)?),
+                StoreBatchOp::Invalidate { id, at } => {
+                    let mut record = self
+                        .fetch(&id)?
+                        .ok_or_else(|| StoreError::Backend(format!("no record {id}")))?;
+                    record.invalid_at = Some(at);
+                    muts.push(GraphMutation::UpsertNode(encode_record(&record)?));
+                }
+            }
+        }
+        self.run(self.graph.apply_mutations(&muts))
+    }
+
     fn query(&self, query: &StoreQuery) -> Result<Vec<StoredRecord>, StoreError> {
+        // Pushdown: the space filter travels to the backend as a property
+        // predicate (record nodes carry `space` as a plain prop), so a
+        // space-scoped query never scans other tenants' records. Remaining
+        // dimensions filter through the shared `StoreQuery::matches`
+        // semantics the conformance suite pins.
+        let start = match &query.space_id {
+            Some(space) => Start::NodesByProperty {
+                label: RECORD_LABEL.into(),
+                key: "space".into(),
+                value: Value::String(space.clone()),
+            },
+            None => Start::NodesByLabel(RECORD_LABEL.into()),
+        };
         let nodes = self.run(self.graph.traverse(Traversal {
-            start: Start::NodesByLabel(RECORD_LABEL.into()),
+            start,
             steps: Vec::new(),
             limit: None,
         }))?;
