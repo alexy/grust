@@ -908,7 +908,7 @@ fn correlated_keys_pushdown_matches_reference() {
     let params = CypherParameters::new();
     for cypher in [
         "MATCH (n:Person {name:'Ada'}) CALL tvf.keys(n) YIELD key RETURN key",
-        "MATCH (n:Person) CALL tvf.keys(n) YIELD key RETURN DISTINCT key",
+        "MATCH (n:Person) CALL tvf.keys(n) YIELD key RETURN DISTINCT key ORDER BY key",
         "MATCH (n:Person) CALL tvf.keys(n) YIELD key AS k WHERE k STARTS WITH 'a' RETURN n.name, k ORDER BY n.name, k",
         "MATCH (n:City) CALL tvf.keys(n) YIELD key RETURN n.name, count(*) AS props",
         "MATCH (n:Person {name:'Ada'}) CALL tvf.keys(n) YIELD key",

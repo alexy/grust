@@ -647,7 +647,7 @@ impl GqlFeature {
                 PredicatesAndExpressions,
                 Supported,
                 PortableGql,
-                "General expression evaluator in the read reference (arithmetic, boolean, comparison, null, list, CASE, property/parameter)"
+                "General expression evaluator in the read reference (arithmetic, boolean, comparison, null, list, map literals, list/map indexing, CASE, property/parameter)"
             ),
             GqlFeature::ThreeValuedLogic => d!(
                 "three-valued-logic",
@@ -710,7 +710,7 @@ impl GqlFeature {
                 ReadOnlyMatching,
                 Supported,
                 PortableGql,
-                "Single label + property-equality predicates in read matching (Memory reference)"
+                "Label + property-equality predicates in read matching; multi-label patterns are conjunctive over the single-label model (Memory reference)"
             ),
             GqlFeature::OptionalMatch => d!(
                 "optional-match",
@@ -1219,13 +1219,13 @@ impl GqlBackend {
                 true,
                 true,
                 true,
-                false,
-                false,
                 true,
                 true,
                 true,
                 true,
-                "libSQL/Turso: CypherMutationExecutor (bounded matched-node patches); the embedded SQL differential oracle for read pushdown.",
+                true,
+                true,
+                "libSQL/Turso: CypherMutationExecutor plus run_read_query pushdown over the universal tables (tagged-JSON dialect; non-recursive subset, reference fallback); also the embedded SQL differential oracle.",
             ),
             Postgres => (
                 "postgres",
@@ -1782,9 +1782,11 @@ mod tests {
                 );
             }
         }
-        // Verified specifics: only Sail has read pushdown; only Memory/Sail/Turso
-        // write Cypher; helix/ladybug are internal; cocoindex is a sync target.
+        // Verified specifics: Sail and Turso have read pushdown wired into a
+        // run_read_query entrypoint; only Memory/Sail/Turso write Cypher;
+        // helix/ladybug are internal; cocoindex is a sync target.
         assert!(GqlBackend::Sail.descriptor().read_pushdown);
+        assert!(GqlBackend::Turso.descriptor().read_pushdown);
         assert!(!GqlBackend::Memory.descriptor().read_pushdown);
         assert!(!GqlBackend::Postgres.descriptor().cypher_writes);
         assert_eq!(

@@ -607,14 +607,29 @@ fn project_to_bindings(
     let has_aggregate = projection.items.iter().any(|i| expr_has_aggregate(&i.expr));
 
     let mut out: Vec<Row> = if has_aggregate {
-        if projection.star {
-            return Err(unsupported_gql_feature(
-                GqlFeature::AggregateFunctionRegistry,
-                GqlConformanceProfile::PortableGql,
-                "WITH * combined with aggregates is not supported by the read reference executor yet",
-            ));
-        }
-        grouped_bindings(&projection.items, &rows, params)?
+        // `WITH *` + aggregates: the star expands to the bound variables
+        // (sorted), which become grouping keys alongside the explicit items.
+        let expanded: Vec<ReturnItem>;
+        let items: &[ReturnItem] = if projection.star {
+            let mut vars: BTreeMap<String, ()> = BTreeMap::new();
+            for row in &rows {
+                for var in row.keys() {
+                    vars.insert(var.clone(), ());
+                }
+            }
+            expanded = vars
+                .keys()
+                .map(|v| ReturnItem {
+                    expr: Expr::Variable(v.clone()),
+                    alias: None,
+                })
+                .chain(projection.items.iter().cloned())
+                .collect();
+            &expanded
+        } else {
+            &projection.items
+        };
+        grouped_bindings(items, &rows, params)?
     } else {
         let mut produced = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -1590,14 +1605,10 @@ fn node_candidates(
 }
 
 fn node_matches(node: &Node, np: &NodePattern, params: &CypherParameters) -> Result<bool> {
-    if np.labels.len() > 1 {
-        return Err(unsupported_gql_feature(
-            GqlFeature::LabelTypePredicateMatch,
-            GqlConformanceProfile::PortableGql,
-            "multi-label node patterns are not supported by the read reference executor yet",
-        ));
-    }
-    if let Some(label) = np.labels.first() {
+    // Conjunctive label semantics: every listed label must hold. Grust nodes
+    // carry a single label, so `(n:A:B)` with distinct labels is simply
+    // unsatisfiable — the same result Neo4j gives over singly-labeled nodes.
+    for label in &np.labels {
         if node.label.as_str() != label {
             return Ok(false);
         }
@@ -1669,13 +1680,8 @@ fn project(
     let has_aggregate = exprs.iter().any(expr_has_aggregate);
 
     let mut out_rows: Vec<Vec<Value>> = if has_aggregate {
-        if projection.star {
-            return Err(unsupported_gql_feature(
-                GqlFeature::AggregateFunctionRegistry,
-                GqlConformanceProfile::PortableGql,
-                "RETURN * combined with aggregates is not supported by the read reference executor yet",
-            ));
-        }
+        // `RETURN *` was already expanded into `exprs` above, so the star's
+        // variables participate as grouping keys.
         grouped_project(&exprs, rows, params)?
     } else {
         let mut rs = Vec::with_capacity(rows.len());
@@ -1705,6 +1711,11 @@ fn project(
         // Grouped rows no longer align with the source bindings, so ORDER BY
         // resolves against the output columns instead.
         order_by_columns(&mut out_rows, &columns, &projection.order_by)?;
+    } else if projection.distinct {
+        // Deduped rows no longer align 1:1 with the source bindings either:
+        // keys must resolve to projected items (by exact expression, output
+        // alias, or rendered column name).
+        order_after_distinct(&mut out_rows, &columns, &exprs, &projection.order_by)?;
     } else {
         apply_order_by(&mut out_rows, &projection.order_by, rows, &aliases, params)?;
     }
@@ -1933,6 +1944,51 @@ fn order_by_columns(
     Ok(())
 }
 
+/// `ORDER BY` after `RETURN DISTINCT`: sort the deduplicated output rows by
+/// projected columns. Each key must match a projected item — the exact
+/// expression, an output alias, or the rendered column name — since the
+/// source binding rows no longer align with the deduplicated output.
+fn order_after_distinct(
+    out_rows: &mut [Vec<Value>],
+    columns: &[String],
+    exprs: &[Expr],
+    order_by: &[OrderItem],
+) -> Result<()> {
+    if order_by.is_empty() {
+        return Ok(());
+    }
+    let mut keys = Vec::with_capacity(order_by.len());
+    for item in order_by {
+        let idx = exprs
+            .iter()
+            .position(|e| e == &item.expr)
+            .or_else(|| {
+                let name = match &item.expr {
+                    Expr::Variable(name) => name.clone(),
+                    other => column_name(other),
+                };
+                columns.iter().position(|c| c == &name)
+            })
+            .ok_or_else(|| {
+                gql_name(
+                    "with DISTINCT, ORDER BY must reference a projected item (by alias or the same expression)",
+                )
+            })?;
+        keys.push((idx, item.descending));
+    }
+    out_rows.sort_by(|a, b| {
+        for (idx, descending) in &keys {
+            let ord = compare_return_values(&a[*idx], &b[*idx]);
+            let ord = if *descending { ord.reverse() } else { ord };
+            if ord != std::cmp::Ordering::Equal {
+                return ord;
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+    Ok(())
+}
+
 fn apply_order_by(
     out_rows: &mut [Vec<Value>],
     order_by: &[OrderItem],
@@ -2085,11 +2141,49 @@ fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
             row,
             params,
         ),
-        Expr::Map(_) | Expr::Index { .. } => Err(unsupported_gql_feature(
-            GqlFeature::GeneralExpressionTree,
-            GqlConformanceProfile::PortableGql,
-            "map literals and indexing are not supported by the read reference executor yet (Unit 7)",
-        )),
+        Expr::Map(entries) => {
+            let mut out = serde_json::Map::new();
+            for (key, expr) in entries {
+                out.insert(key.clone(), value_to_json(&eval(expr, row, params)?));
+            }
+            Ok(Value::Json(serde_json::Value::Object(out)))
+        }
+        Expr::Index { base, index } => {
+            let base = eval(base, row, params)?;
+            let index = eval(index, row, params)?;
+            eval_index(base, index)
+        }
+    }
+}
+
+/// `base[index]`: list indexing (0-based, negative counts from the end, out of
+/// range → NULL) and map key lookup (missing key → NULL). NULL base or index
+/// propagates NULL.
+fn eval_index(base: Value, index: Value) -> Result<Value> {
+    match (&base, &index) {
+        (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
+        (Value::Json(serde_json::Value::Object(map)), Value::String(key)) => {
+            Ok(map.get(key).map(json_to_value).unwrap_or(Value::Null))
+        }
+        (
+            Value::StringArray(_)
+            | Value::IntArray(_)
+            | Value::FloatArray(_)
+            | Value::Json(serde_json::Value::Array(_)),
+            Value::Int(i),
+        ) => {
+            let items = list_elements(base.clone());
+            let len = items.len() as i64;
+            let idx = if *i < 0 { i + len } else { *i };
+            if idx < 0 || idx >= len {
+                Ok(Value::Null)
+            } else {
+                Ok(items[idx as usize].clone())
+            }
+        }
+        _ => Err(gql_type(format!(
+            "indexing expects list[integer] or map[string], got {base:?}[{index:?}]"
+        ))),
     }
 }
 
@@ -3031,15 +3125,78 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_shapes_are_feature_tagged() {
-        // Map literals in projections are still unsupported.
+    fn map_literals_and_indexing_evaluate() {
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN {name: n.name, older: n.age + 4} AS m");
+        assert_eq!(
+            t.rows,
+            vec![vec![Value::Json(serde_json::json!({
+                "name": "Ada",
+                "older": 40
+            }))]]
+        );
+        // Map key lookup on the literal; missing keys are NULL.
+        let t = run("MATCH (n:Person {name:'Ada'}) RETURN {a: 1}['a'] AS hit, {a: 1}['b'] AS miss");
+        assert_eq!(t.rows, vec![vec![Value::Int(1), Value::Null]]);
+        // List indexing: 0-based, negative from the end, out of range -> NULL.
+        let t = run("UNWIND [[10, 20, 30]] AS xs RETURN xs[0], xs[-1], xs[9]");
+        assert_eq!(
+            t.rows,
+            vec![vec![Value::Int(10), Value::Int(30), Value::Null]]
+        );
+        // Indexing a non-list is a structured type error.
         let err = run_read_query(
             &graph(),
-            "MATCH (n:Person) RETURN {age: n.age}",
+            "MATCH (n:Person) RETURN n.age[0]",
             &CypherParameters::new(),
         )
         .unwrap_err();
-        assert!(matches!(err, GrustError::Unsupported(_)));
+        assert!(err.to_string().contains("gql:type"));
+    }
+
+    #[test]
+    fn return_distinct_with_order_by() {
+        let t = run("MATCH (n) RETURN DISTINCT n.label AS l ORDER BY l DESC");
+        assert_eq!(
+            t.rows,
+            vec![vec![Value::from("Person")], vec![Value::from("City")]]
+        );
+        // The key may also be the projected expression itself.
+        let t = run("MATCH (n) RETURN DISTINCT n.label ORDER BY n.label");
+        assert_eq!(
+            t.rows,
+            vec![vec![Value::from("City")], vec![Value::from("Person")]]
+        );
+        // A non-projected key is a structured error.
+        let err = run_read_query(
+            &graph(),
+            "MATCH (n:Person) RETURN DISTINCT n.label ORDER BY n.age",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("must reference a projected item"));
+    }
+
+    #[test]
+    fn star_with_aggregates_groups_by_bound_variables() {
+        let t = run("MATCH (n:Person) RETURN *, count(*) AS c");
+        // n is the grouping key: three distinct persons, one row each.
+        assert_eq!(t.columns, vec!["n".to_string(), "c".to_string()]);
+        assert_eq!(t.rows.len(), 3);
+        assert!(t.rows.iter().all(|r| r[1] == Value::Int(1)));
+        let t = run(
+            "MATCH (a:Person)-[:KNOWS]->(b) WITH *, count(*) AS c RETURN a.name, c ORDER BY a.name",
+        );
+        assert_eq!(t.rows.len(), 2);
+    }
+
+    #[test]
+    fn multi_label_patterns_are_conjunctive() {
+        // Distinct labels can never both hold on a single-label node: empty.
+        let t = run("MATCH (n:Person:City) RETURN n.name");
+        assert!(t.rows.is_empty());
+        // A repeated label is satisfied.
+        let t = run("MATCH (n:Person:Person {name:'Ada'}) RETURN n.name");
+        assert_eq!(t.rows, vec![vec![Value::from("Ada")]]);
     }
 
     #[test]

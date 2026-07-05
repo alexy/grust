@@ -19,9 +19,9 @@ grust-core = { version = "0.12.0", path = "../grust-core" }
 grust-sql-core = { version = "0.12.0", path = "../grust-sql-core" }
 serde_json = { workspace = true }
 turso = { workspace = true, default-features = false }
+grust-cypher = { version = "0.12.0", path = "../grust-cypher" }
 
 [dev-dependencies]
-grust-cypher = { version = "0.12.0", path = "../grust-cypher" }
 rusqlite = { version = "0.31", features = ["bundled"] }
 tempfile = { workspace = true }
 tokio = { workspace = true }

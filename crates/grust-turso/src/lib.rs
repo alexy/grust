@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use grust_core::prelude::*;
+use grust_cypher::pushdown::{NoTypeHints, SqlDialect, StrOp, combine_union, plan_read};
+use grust_cypher::{CypherParameters, CypherResultTable};
 use grust_sql_core::{GraphSqlDialect, UniversalTableRefs};
 
 /// Journal/concurrency mode for a local Turso database.
@@ -719,6 +721,174 @@ fn row_optional_text(row: &turso::Row, idx: usize, name: &str) -> Result<Option<
 fn is_mvcc_conflict(err: &GrustError) -> bool {
     let msg = err.to_string().to_ascii_lowercase();
     msg.contains("conflict") || msg.contains("busy") || msg.contains("snapshot")
+}
+
+// ---------------------------------------------------------------------------
+// Portable read pushdown (PUSHDOWN2 follow-on: Turso joins the consumers)
+// ---------------------------------------------------------------------------
+
+/// The pushdown [`SqlDialect`] for Turso's universal tables: **tagged-JSON**
+/// props (each property is stored as `{"type": t, "value": v}`, so scalar
+/// extraction is `$.key.value`), `from_id`/`to_id`/`label` edge columns, and
+/// no recursive CTEs or JSON table functions in the embedded engine — those
+/// leaves report unsupported and the store falls back to the reference.
+#[derive(Clone, Debug)]
+pub struct TursoReadDialect {
+    nodes: String,
+    edges: String,
+}
+
+impl TursoReadDialect {
+    pub fn new(table_prefix: &str) -> Self {
+        Self {
+            nodes: format!("{table_prefix}_nodes"),
+            edges: format!("{table_prefix}_edges"),
+        }
+    }
+}
+
+impl SqlDialect for TursoReadDialect {
+    fn nodes_table(&self) -> &str {
+        &self.nodes
+    }
+    fn edges_table(&self) -> &str {
+        &self.edges
+    }
+    fn quote_ident(&self, ident: &str) -> String {
+        quote_ident(ident)
+    }
+    fn json_property(&self, props_column: &str, key: &str) -> String {
+        // Tagged storage: extract the scalar payload under the type tag.
+        format!("json_extract({props_column}, '$.{key}.value')")
+    }
+    fn cast_int(&self, expr: &str) -> String {
+        format!("CAST({expr} AS INTEGER)")
+    }
+    fn cast_float(&self, expr: &str) -> String {
+        format!("CAST({expr} AS REAL)")
+    }
+    fn string_literal(&self, value: &str) -> String {
+        sql_str(value)
+    }
+    fn string_predicate(&self, expr: &str, op: StrOp, needle: &str) -> String {
+        // Mirrors `SqliteDialect`: literal (non-LIKE) matching, NULL-propagating.
+        let n = self.string_literal(needle);
+        match op {
+            StrOp::StartsWith => format!("instr({expr}, {n}) = 1"),
+            StrOp::Contains => format!("instr({expr}, {n}) > 0"),
+            StrOp::EndsWith => format!("substr({expr}, -{}) = {n}", needle.chars().count()),
+        }
+    }
+    fn bool_literal_sql(&self, value: bool) -> String {
+        // json_extract returns the tagged JSON boolean as integer 1/0.
+        if value {
+            "1".to_string()
+        } else {
+            "0".to_string()
+        }
+    }
+    fn orders_json_typed(&self) -> bool {
+        // json_extract of the tagged `.value` yields INTEGER/REAL/TEXT.
+        true
+    }
+    fn recursive_cte_supported(&self) -> bool {
+        // The embedded turso (limbo) engine does not execute WITH RECURSIVE.
+        false
+    }
+    fn edge_src_col(&self) -> &str {
+        "from_id"
+    }
+    fn edge_dst_col(&self) -> &str {
+        "to_id"
+    }
+    fn edge_type_col(&self) -> &str {
+        "label"
+    }
+}
+
+impl TursoGraphStore {
+    fn read_dialect(&self) -> TursoReadDialect {
+        TursoReadDialect::new(&self.config.table_prefix)
+    }
+
+    /// Materialize the full graph — the reference-executor fallback input.
+    pub async fn read_graph(&self) -> Result<Graph> {
+        let nodes = self
+            .query_nodes(&format!(
+                "SELECT id, label, props FROM {}",
+                self.nodes_table()
+            ))
+            .await?;
+        let edges = self
+            .query_edges(&format!(
+                "SELECT id, from_id, to_id, label, props FROM {}",
+                self.edges_table()
+            ))
+            .await?;
+        Ok(Graph::new(nodes, edges))
+    }
+
+    /// Execute pushdown SQL whose result cells decode as optional text.
+    async fn run_text_rows(&self, sql: &str, columns: usize) -> Result<Vec<Vec<Option<String>>>> {
+        let mut rows = self.conn.query(sql, ()).await.map_err(|err| {
+            GrustError::Backend(format!("Turso read pushdown query failed: {err}: {sql}"))
+        })?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|err| {
+            GrustError::Backend(format!("Turso read pushdown row failed: {err}: {sql}"))
+        })? {
+            let mut cells = Vec::with_capacity(columns);
+            for i in 0..columns {
+                let cell = match row.get_value(i).map_err(|err| {
+                    GrustError::Backend(format!("Turso read pushdown cell failed: {err}"))
+                })? {
+                    turso::Value::Null => None,
+                    turso::Value::Text(v) => Some(v),
+                    turso::Value::Integer(v) => Some(v.to_string()),
+                    turso::Value::Real(v) => Some(v.to_string()),
+                    turso::Value::Blob(_) => None,
+                };
+                cells.push(cell);
+            }
+            out.push(cells);
+        }
+        Ok(out)
+    }
+
+    /// Portable read entrypoint: the query's `MATCH`/`WHERE`/row-source part
+    /// is pushed into SQL over the universal tables where the plan supports
+    /// this dialect (node scans, fixed segments, `OPTIONAL MATCH`,
+    /// multi-pattern, `UNION`, `WITH` pipelines, subqueries, and the
+    /// non-recursive catalog procedures); everything else falls back to the
+    /// Memory reference over [`Self::read_graph`]. Results are identical to
+    /// [`grust_cypher::read::run_read_query`] by construction.
+    pub async fn run_read_query(
+        &self,
+        cypher: &str,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        let dialect = self.read_dialect();
+        if let Some(plan) = plan_read(cypher, params, &NoTypeHints)? {
+            if plan.supported_by(&dialect) {
+                if let Some((arms, distinct)) = plan.union_arms() {
+                    let mut tables = Vec::with_capacity(arms.len());
+                    for arm in arms {
+                        let rows = self
+                            .run_text_rows(&arm.to_sql(&dialect), arm.column_count())
+                            .await?;
+                        tables.push(arm.project_text_rows(&dialect, rows, params)?);
+                    }
+                    return combine_union(tables, distinct);
+                }
+                let rows = self
+                    .run_text_rows(&plan.to_sql(&dialect), plan.column_count())
+                    .await?;
+                return plan.project_text_rows(&dialect, rows, params);
+            }
+        }
+        let graph = self.read_graph().await?;
+        grust_cypher::read::run_read_query(&graph, cypher, params)
+    }
 }
 
 fn quote_ident(value: &str) -> String {
