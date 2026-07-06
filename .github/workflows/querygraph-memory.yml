@@ -1,0 +1,72 @@
+name: querygraph-memory
+
+# Targeted CI for the querygraph-memory crate (Marciana at scale).
+#
+# querygraph-memory implements typesec-memory's `MemoryStore` over Grust, so it
+# has a *path* dependency on the sibling typesec repo
+# (`../../../typesec/crates/typesec-memory`). This is the mirror image of
+# typesec's own CI, which checks out Grust as a sibling; here we check out
+# typesec as a sibling of Grust so the path resolves.
+#
+# Scoped to `-p querygraph-memory` on purpose: the crate depends only on
+# grust-core + typesec-memory (no heavyweight backends), so this job stays
+# fast and does not require the full Grust workspace to build.
+
+on:
+  push:
+    branches: [main, fable/querygraph-memory]
+    paths:
+      - "crates/querygraph-memory/**"
+      - "crates/grust-core/**"
+      - "crates/grust-memory/**"
+      - ".github/workflows/querygraph-memory.yml"
+  pull_request:
+    paths:
+      - "crates/querygraph-memory/**"
+      - "crates/grust-core/**"
+      - "crates/grust-memory/**"
+      - ".github/workflows/querygraph-memory.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Grust
+        uses: actions/checkout@v4
+        with:
+          path: grust
+
+      # querygraph-memory depends on typesec-memory through a local *path*
+      # dependency (`../../../typesec/crates/...`). CI must place a typesec
+      # checkout as a sibling of the Grust checkout so the path resolves.
+      - name: Check out typesec (path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: querygraph/typesec
+          path: typesec
+          # Pin to the typesec ref that provides the MemoryStore contract this
+          # crate implements; bump deliberately when the contract changes.
+          # querygraph/typesec is private, so pass a token with read access:
+          #   token: ${{ secrets.TYPESEC_CHECKOUT_TOKEN }}
+          ref: main
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: rustfmt
+        working-directory: grust
+        run: cargo fmt --check -p querygraph-memory
+
+      - name: clippy
+        working-directory: grust
+        run: cargo clippy -p querygraph-memory --all-targets -- -D warnings
+
+      - name: test
+        working-directory: grust
+        run: cargo test -p querygraph-memory
