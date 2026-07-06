@@ -6,6 +6,60 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **PostgreSQL joins the executing Cypher conformance set**
+  (`docs/GQL_POSTGRES_EXECUTOR_GOAL.md`, complete): `PostgresGraphStore` now
+  implements `CypherMutationExecutor` (resolved writes, bounded matched-node
+  patches via `jsonb` predicates, atomic `CypherTransaction` batches through
+  its transactional `apply_mutations`) and `run_read_query` pushdown over the
+  universal tables via a new `PostgresReadDialect` — tagged-jsonb extraction
+  (`#>> ARRAY['key','value']`), `position()`/`right()` string predicates,
+  `generate_series` for `tvf.range`, `jsonb_object_keys` for
+  `db.propertyKeys`, byte-order (`COLLATE "C"`) procedure sorts, and
+  `WITH RECURSIVE` variable-length paths (the first non-SQLite engine to push
+  them). Shortest paths and correlated `tvf.keys` are honestly gated off (no
+  insertion-ordered rowid; jsonb key order) and fall back to the reference;
+  `ORDER BY` stays in the reference (collation). Proven by a gated live
+  differential suite (`GRUST_PG_URL`) run green against PostgreSQL 17:
+  pushed reads, fallback reads, writes, and transaction scripts all match the
+  Memory reference. The pushdown walk CTEs' remaining SQLite-isms (`instr`,
+  edge columns in the recursive step, `ORDER BY` collation under `DISTINCT`)
+  became dialect hooks; the executing set is now Memory/Sail/Turso/Postgres.
+
+- **New crate `querygraph-memory`** (branch `fable/querygraph-memory`):
+  Marciana at scale — typesec-memory's `MemoryStore` implemented over any
+  Grust `GraphMutationStore`. Records and their entity knowledge graph are
+  written incrementally as nodes/edges (`MemoryRecord` -[:MENTIONS]->
+  `MemoryEntity`, `MemoryEntity` -[:RELATES {rel, fact_id}]->
+  `MemoryEntity`); neighborhood recall runs on `traverse`. Owns the one
+  sanctioned sync→async bridge (dedicated current-thread runtime, scoped
+  thread when already inside tokio — MCP-server-safe, tested). Passes
+  typesec-memory's full conformance corpus incl. graph reachability, and an
+  end-to-end capability-gated vault test over the Grust backend. Path-dep on
+  the sibling `../typesec` checkout (mirror of typesec's grust path deps);
+  `publish = false` until typesec-memory is on crates.io. Next iterations
+  per FABLE-MEMORY-1 §5.2: a production sail cognition tier and a
+  lancedb-backed `Embedder`. **Batch analytics** (`analytics`): dedup,
+  contradiction detection, and decay/importance scoring that emit
+  `ConsolidationPlan`s — their *only* output — applied through the
+  capability-gated vault (never a direct store write), so labels/quarantine/
+  audit stay intact at scale; an end-to-end test runs a contradiction plan
+  through the vault. **Multi-tenant isolation** proven: one shared Grust
+  store behind two vaults, typesec policies as the tenancy boundary — tenant
+  A can neither mint a capability for nor point its own capability at tenant
+  B's spaces, despite records sharing one graph.
+  **Vector index** (`VectorIndex<E: Embedder>`) implements typesec-memory's
+  `SemanticIndex` with the embedding-privacy rule enforced by construction:
+  an `Embedder` declares `is_local()`, and above-Internal content is only
+  ever embedded by a local embedder (a remote one declines to index it — the
+  content never egresses). Cosine ranking + an optional bounded hybrid
+  graph re-rank (co-mentioned entities), always a reordering of authorized
+  candidates, never a widening. **Space-filter
+  pushdown** (`query` starts from `NodesByProperty` on the record's `space`
+  prop, so a scoped query never scans other tenants) and **transactional
+  consolidation** (`apply_batch` maps the whole supersede-and-relink plan to
+  one `apply_mutations` call, atomic on transactional backends) are done and
+  tested — including an end-to-end consolidation over the Grust backend.
+
 - **Turso joins the read-pushdown consumers**: `TursoGraphStore::run_read_query`
   now pushes the portable read subset into SQL over the universal tables via a
   new `TursoReadDialect` — tagged-JSON property extraction (`$.key.value`),

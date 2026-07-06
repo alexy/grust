@@ -17,6 +17,7 @@ members = [
     "crates/grust-sql-core",
     "crates/grust-surreal",
     "crates/grust-turso",
+    "crates/querygraph-memory",
     "examples/beads",
 ]
 resolver = "3"

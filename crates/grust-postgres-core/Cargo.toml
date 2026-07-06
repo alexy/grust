@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+grust-cypher = { version = "0.12.0", path = "../grust-cypher" }
 async-trait = { workspace = true }
 grust-core = { version = "0.12.0", path = "../grust-core" }
 grust-sql-core = { version = "0.12.0", path = "../grust-sql-core" }

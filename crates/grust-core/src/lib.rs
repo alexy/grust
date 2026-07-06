@@ -3009,8 +3009,9 @@ pub enum GraphMutationPlanKind {
     Merge,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GraphRowEdgeIdPolicy {
+    #[default]
     ExplicitOnly,
     GenerateForCreate,
     GenerateForCreateAndMerge,
@@ -3020,12 +3021,6 @@ pub enum GraphRowEdgeIdPolicy {
 pub enum GraphRelationshipEndpoint {
     From,
     To,
-}
-
-impl Default for GraphRowEdgeIdPolicy {
-    fn default() -> Self {
-        Self::ExplicitOnly
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

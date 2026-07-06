@@ -88,15 +88,20 @@ more. Notable deliberate scopings:
 ## Per-backend conformance
 
 The executing-Cypher set is **Memory** (reference), **Sail** (writes + read
-pushdown), **Turso** (writes + differential oracle). The pushed read subset
+pushdown), **Turso** (writes + read pushdown + the differential oracle), and
+**PostgreSQL** (writes incl. atomic transaction batches + read pushdown over
+the universal tables, proven by the gated live differential suite —
+`grust-postgres-core/tests/pg_cypher_live.rs`, run with a reachable
+PostgreSQL via `GRUST_PG_URL`). The pushed read subset
 (see `docs/GQL_PUSHDOWN2_GOAL.md`) covers node/segment/var-length patterns,
 `UNION`, `OPTIONAL MATCH`, multi-pattern `MATCH`, the `WITH` horizon, catalog
 procedures, TVF row sources, `CALL { … }` subqueries (uncorrelated and
 correlated-`WHERE`), and endpoint-only shortest paths — with SQLite-gated
 leaves falling back to the reference on Spark, and the `RETURN` projection
 always running through the shared reference so pushed results match it by
-construction. Postgres/Postgres-PGQ are
-SQL/PGQ backends without a portable Cypher executor; **Falkor** and **Surreal**
+construction. Postgres-PGQ wraps the
+executing Postgres core store but does not yet delegate the executor surface;
+**Falkor** and **Surreal**
 are native-graph backends (backend-native Cypher / SurrealQL passthrough via
 `run_native_cypher` / `run_native_surrealql`); Helix/Ladybug are internal
 (`publish=false`); CocoIndex is a sync target. See `GqlBackend::descriptor()`

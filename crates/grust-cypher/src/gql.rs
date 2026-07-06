@@ -1230,17 +1230,17 @@ impl GqlBackend {
             Postgres => (
                 "postgres",
                 "grust-postgres",
-                SqlGraphBackend,
-                true,
-                true,
-                false,
-                false,
-                false,
+                CypherExecutor,
                 true,
                 true,
                 true,
                 true,
-                "PostgreSQL universal-table SQL backend; no portable Cypher executor yet.",
+                true,
+                true,
+                true,
+                true,
+                true,
+                "PostgreSQL: CypherMutationExecutor (bounded matched-node patches) plus run_read_query pushdown over the universal tables (tagged-jsonb dialect incl. WITH RECURSIVE var-length; shortest/tvf.keys gated), proven by the gated live differential suite.",
             ),
             PostgresPgq => (
                 "postgres-pgq",
@@ -1255,7 +1255,7 @@ impl GqlBackend {
                 true,
                 true,
                 true,
-                "PostgreSQL SQL/PGQ: native PROPERTY GRAPH + GRAPH_TABLE traversal; no portable Cypher executor yet.",
+                "PostgreSQL SQL/PGQ: native PROPERTY GRAPH + GRAPH_TABLE traversal; wraps the executing grust-postgres-core store, but does not yet delegate the portable executor surface itself.",
             ),
             Falkor => (
                 "falkor",
@@ -1752,11 +1752,16 @@ mod tests {
         for d in &m {
             assert!(ids.insert(d.id), "duplicate backend id {}", d.id);
         }
-        // The executing Cypher-conformance set is exactly Memory/Sail/Turso.
+        // The executing Cypher-conformance set: Memory/Sail/Turso/Postgres.
         let exec: Vec<_> = cypher_conformance_backends();
         assert_eq!(
             exec,
-            vec![GqlBackend::Memory, GqlBackend::Sail, GqlBackend::Turso]
+            vec![
+                GqlBackend::Memory,
+                GqlBackend::Sail,
+                GqlBackend::Turso,
+                GqlBackend::Postgres
+            ]
         );
         for d in &m {
             // Only Cypher executors execute writes / portable reads / pushdown.
@@ -1787,8 +1792,10 @@ mod tests {
         // helix/ladybug are internal; cocoindex is a sync target.
         assert!(GqlBackend::Sail.descriptor().read_pushdown);
         assert!(GqlBackend::Turso.descriptor().read_pushdown);
+        assert!(GqlBackend::Postgres.descriptor().read_pushdown);
         assert!(!GqlBackend::Memory.descriptor().read_pushdown);
-        assert!(!GqlBackend::Postgres.descriptor().cypher_writes);
+        assert!(GqlBackend::Postgres.descriptor().cypher_writes);
+        assert!(!GqlBackend::PostgresPgq.descriptor().cypher_writes);
         assert_eq!(
             GqlBackend::Helix.descriptor().role,
             GqlBackendRole::Internal

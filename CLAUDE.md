@@ -34,18 +34,19 @@ rebuilt. **No release performed (guardrail 1).** Branch `full39075` is ready
 for human review / merge to `main`.
 
 ### NEXT (if resuming)
-- **PUSHDOWN2 is implementation-complete** (`docs/GQL_PUSHDOWN2_GOAL.md`,
-  branch `pushdown2`, pushed): catalog procedures, TVF row sources,
-  uncorrelated + correlated-WHERE subqueries, and endpoint-only shortest
-  paths all push to SQL, oracle-backed (20 differential tests). **Awaiting
-  human review before merge to `main`** (PM4 stop). Remaining niche tails
-  live in `docs/GQL_M1_CHECKPOINT.md` Unit 15 (edge-list bindings, path
-  variables, `/`·`%`·`^` arithmetic, Spark parity for the SQLite-gated
-  leaves).
-- **Next planned goal:** `docs/GQL_POSTGRES_EXECUTOR_GOAL.md` — PostgreSQL
-  joins the executing conformance set (write executor + PostgresReadDialect +
-  gated live differential suite). Settle its Q0 typed-ordering /
-  insertion-ordinal decision before starting.
+- **PUSHDOWN2 is merged to `main`** (`docs/GQL_PUSHDOWN2_GOAL.md`): row
+  sources, subqueries, and endpoint-only shortest paths push to SQL,
+  oracle-backed. Remaining niche tails live in `docs/GQL_M1_CHECKPOINT.md`
+  Unit 15 (edge-list bindings, path variables, `/`·`%`·`^` arithmetic, Spark
+  parity for the SQLite-gated leaves).
+- **Postgres executor goal is implementation-complete**
+  (`docs/GQL_POSTGRES_EXECUTOR_GOAL.md`, branch `postgres-executor`): the
+  executing set is Memory/Sail/Turso/**Postgres**, proven by the gated live
+  suite (`GRUST_PG_URL="host=127.0.0.1 user=alexy dbname=grust_test" cargo
+  test -p grust-postgres-core -- --ignored`; a local Homebrew PG 17 serves
+  grust_test). Awaiting human review before merge. Follow-ups in the goal
+  doc: PGQ executor delegation, shortest-path ordinal migration, PG
+  type-hints wiring.
 
 ---
 
