@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use grust_core::prelude::*;
+use grust_cypher::pushdown::{NoTypeHints, SqlDialect, StrOp, combine_union, plan_read};
+use grust_cypher::{CypherParameters, CypherResultTable};
 use grust_sql_core::{GraphSqlDialect, UniversalTableRefs};
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls};
@@ -97,6 +99,282 @@ impl PostgresGraphStore {
             &self.config.schema,
             &format!("{}_edges", self.config.table_prefix),
         )
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Portable Cypher execution (GQL_POSTGRES_EXECUTOR_GOAL: Q1-Q3)
+// ---------------------------------------------------------------------------
+
+/// The read-pushdown [`SqlDialect`] for the PostgreSQL universal tables:
+/// **tagged jsonb** props (each property is `{"type": t, "value": v}`, so
+/// scalar extraction is `props #>> ARRAY['key','value']`, yielding text like
+/// Spark's `GET_JSON_OBJECT`), `from_id`/`to_id`/`label` edge columns, and
+/// byte-order (`COLLATE "C"`) text sorting so procedure rows match the
+/// reference's Rust string order.
+///
+/// Honest gates: `ORDER BY` never pushes (`orders_json_typed` is false and
+/// the store wires `NoTypeHints`, so ordering always runs in the reference —
+/// PostgreSQL's default collation is not byte order); shortest-path walks are
+/// off (no insertion-ordered `rowid` for the deterministic tie-break; an
+/// ordinal-column migration is the noted follow-up); correlated `tvf.keys`
+/// is off (`jsonb_object_keys` yields keys in jsonb storage order —
+/// length-then-bytewise — not the reference's sorted order). Recursive CTEs,
+/// `generate_series`, and `jsonb_object_keys`-with-outer-sort are on.
+///
+/// Numeric casts assume type-consistent property values per key (which
+/// grust's own tagged writers produce); a mixed-type key would error the
+/// query rather than filter, unlike the lenient SQLite/Spark casts.
+#[derive(Clone, Debug)]
+pub struct PostgresReadDialect {
+    nodes: String,
+    edges: String,
+}
+
+impl PostgresReadDialect {
+    pub fn new(config: &PostgresGraphConfig) -> Self {
+        Self {
+            nodes: unquoted_qualified_table(
+                &config.schema,
+                &format!("{}_nodes", config.table_prefix),
+            ),
+            edges: unquoted_qualified_table(
+                &config.schema,
+                &format!("{}_edges", config.table_prefix),
+            ),
+        }
+    }
+}
+
+impl SqlDialect for PostgresReadDialect {
+    fn nodes_table(&self) -> &str {
+        &self.nodes
+    }
+    fn edges_table(&self) -> &str {
+        &self.edges
+    }
+    fn quote_ident(&self, ident: &str) -> String {
+        // Table names arrive schema-qualified (`schema.table`); quote each part.
+        ident
+            .split('.')
+            .map(quote_ident)
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+    fn json_property(&self, props_column: &str, key: &str) -> String {
+        format!("{props_column} #>> ARRAY[{}, 'value']", sql_str(key))
+    }
+    fn cast_int(&self, expr: &str) -> String {
+        format!("({expr})::bigint")
+    }
+    fn cast_float(&self, expr: &str) -> String {
+        format!("({expr})::double precision")
+    }
+    fn string_literal(&self, value: &str) -> String {
+        sql_str(value)
+    }
+    fn string_predicate(&self, expr: &str, op: StrOp, needle: &str) -> String {
+        // Literal (non-LIKE) matching; NULL operand propagates NULL.
+        let n = self.string_literal(needle);
+        match op {
+            StrOp::StartsWith => format!("position({n} in {expr}) = 1"),
+            StrOp::Contains => format!("position({n} in {expr}) > 0"),
+            StrOp::EndsWith => format!("right({expr}, {}) = {n}", needle.chars().count()),
+        }
+    }
+    fn bool_literal_sql(&self, value: bool) -> String {
+        // `#>>` renders the tagged jsonb boolean as text.
+        if value {
+            "'true'".to_string()
+        } else {
+            "'false'".to_string()
+        }
+    }
+    fn strpos_sql(&self, haystack: &str, needle: &str) -> String {
+        format!("position({needle} in {haystack})")
+    }
+    fn byte_order_expr(&self, expr: &str) -> String {
+        format!("{expr} COLLATE \"C\"")
+    }
+    fn edge_src_col(&self) -> &str {
+        "from_id"
+    }
+    fn edge_dst_col(&self) -> &str {
+        "to_id"
+    }
+    fn edge_type_col(&self) -> &str {
+        "label"
+    }
+    fn json_props_keys_scan(&self, table: &str) -> Option<String> {
+        let t = self.quote_ident(table);
+        Some(format!(
+            "SELECT j.k FROM {t}, LATERAL jsonb_object_keys({t}.props) AS j(k)"
+        ))
+    }
+    fn integer_series_sql(&self, start: i64, end: i64, step: i64) -> Option<String> {
+        // generate_series yields no rows when start is already past end.
+        Some(format!(
+            "SELECT g AS value FROM generate_series({start}, {end}, {step}) AS g"
+        ))
+    }
+}
+
+impl PostgresGraphStore {
+    fn read_dialect(&self) -> PostgresReadDialect {
+        PostgresReadDialect::new(&self.config)
+    }
+
+    /// Materialize the full graph — the reference-executor fallback input.
+    pub async fn read_graph(&self) -> Result<Graph> {
+        let nodes = self
+            .query_nodes(&format!(
+                "SELECT id, label, props::text AS props FROM {}",
+                self.nodes_table()
+            ))
+            .await?;
+        let edges = self
+            .query_edges(&format!(
+                "SELECT id, from_id, to_id, label, props::text AS props FROM {}",
+                self.edges_table()
+            ))
+            .await?;
+        Ok(Graph::new(nodes, edges))
+    }
+
+    /// Execute pushdown SQL through the simple query protocol, which renders
+    /// every column (text, bigint, jsonb, …) as text — exactly the
+    /// text-rows contract the pushdown leaves reconstruct from.
+    async fn run_text_rows(&self, sql: &str, columns: usize) -> Result<Vec<Vec<Option<String>>>> {
+        let messages = self.client.simple_query(sql).await.map_err(|err| {
+            GrustError::Backend(format!("PostgreSQL read pushdown failed: {err}: {sql}"))
+        })?;
+        let mut out = Vec::new();
+        for message in messages {
+            if let tokio_postgres::SimpleQueryMessage::Row(row) = message {
+                let mut cells = Vec::with_capacity(columns);
+                for i in 0..columns {
+                    cells.push(row.get(i).map(str::to_string));
+                }
+                out.push(cells);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Portable read entrypoint: the query's `MATCH`/`WHERE`/row-source part
+    /// pushes into PostgreSQL where the plan supports this dialect (node
+    /// scans, fixed segments, `OPTIONAL MATCH`, multi-pattern, `UNION`,
+    /// `WITH` pipelines, subqueries incl. correlated `WHERE`, variable-length
+    /// paths via `WITH RECURSIVE`, catalog procedures, and `tvf.range` via
+    /// `generate_series`); shortest paths, correlated `tvf.keys`, and
+    /// everything unplannable fall back to the Memory reference over
+    /// [`Self::read_graph`]. Results are identical to
+    /// [`grust_cypher::read::run_read_query`] by construction.
+    pub async fn run_read_query(
+        &self,
+        cypher: &str,
+        params: &CypherParameters,
+    ) -> Result<CypherResultTable> {
+        let dialect = self.read_dialect();
+        if let Some(plan) = plan_read(cypher, params, &NoTypeHints)? {
+            if plan.supported_by(&dialect) {
+                if let Some((arms, distinct)) = plan.union_arms() {
+                    let mut tables = Vec::with_capacity(arms.len());
+                    for arm in arms {
+                        let rows = self
+                            .run_text_rows(&arm.to_sql(&dialect), arm.column_count())
+                            .await?;
+                        tables.push(arm.project_text_rows(&dialect, rows, params)?);
+                    }
+                    return combine_union(tables, distinct);
+                }
+                let rows = self
+                    .run_text_rows(&plan.to_sql(&dialect), plan.column_count())
+                    .await?;
+                return plan.project_text_rows(&dialect, rows, params);
+            }
+        }
+        let graph = self.read_graph().await?;
+        grust_cypher::read::run_read_query(&graph, cypher, params)
+    }
+
+    /// Nodes matching a label + inline props (+ post-filtered predicates) —
+    /// the bounded matched-write support, mirroring the Turso executor.
+    async fn matching_nodes(
+        &self,
+        label: Option<&Label>,
+        props: &Props,
+        predicates: &[GraphPropertyPredicate],
+    ) -> Result<Vec<Node>> {
+        let mut clauses = Vec::new();
+        if let Some(label) = label {
+            clauses.push(format!("n.label = {}", sql_str(label.as_str())));
+        }
+        for (key, value) in props {
+            if key == "id" {
+                let Some(id) = value.as_str() else {
+                    return Ok(Vec::new());
+                };
+                clauses.push(format!("n.id = {}", sql_str(id)));
+            } else {
+                clauses.push(jsonb_predicate("n", key, value)?);
+            }
+        }
+        let where_clause = if clauses.is_empty() {
+            String::new()
+        } else {
+            format!(" WHERE {}", clauses.join(" AND "))
+        };
+        let sql = format!(
+            "SELECT n.id, n.label, n.props::text AS props FROM {} n{where_clause}",
+            self.nodes_table()
+        );
+        let mut nodes = self.query_nodes(&sql).await?;
+        if !predicates.is_empty() {
+            nodes.retain(|node| {
+                predicates
+                    .iter()
+                    .all(|predicate| predicate.matches(node.props.get(&predicate.key)))
+            });
+        }
+        Ok(nodes)
+    }
+}
+
+#[async_trait]
+impl CypherMutationExecutor for PostgresGraphStore {
+    async fn execute_cypher_mutation_plan(
+        &self,
+        plan: &GraphMutationPlan,
+    ) -> Result<GraphMutationReport> {
+        let mut report = plan.report();
+        for operation in &plan.operations {
+            match operation {
+                GraphMutationPlanOp::PatchMatchingNodes {
+                    label,
+                    props,
+                    predicates,
+                    patch,
+                    ..
+                } => {
+                    let nodes = self
+                        .matching_nodes(label.as_ref(), props, predicates)
+                        .await?;
+                    report.matched_rows += nodes.len();
+                    report.node_patches += nodes.len();
+                    report.changed_nodes += nodes.len();
+                    for node in nodes {
+                        self.execute(&patch_node_sql(&self.nodes_table(), &node.id, patch)?)
+                            .await?;
+                    }
+                }
+                other => {
+                    self.apply_mutations(std::slice::from_ref(&other.clone().into()))
+                        .await?;
+                }
+            }
+        }
+        Ok(report)
     }
 }
 

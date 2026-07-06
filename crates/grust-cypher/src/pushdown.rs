@@ -421,6 +421,20 @@ pub trait SqlDialect {
         true
     }
 
+    /// Render "position of `needle` in `haystack`" (1-based, 0 when absent) —
+    /// SQLite `instr`; PostgreSQL overrides with `position(… in …)`. Used by
+    /// the recursive walk CTEs' visited-set membership check.
+    fn strpos_sql(&self, haystack: &str, needle: &str) -> String {
+        format!("instr({haystack}, {needle})")
+    }
+
+    /// Wrap a text ORDER BY operand so it sorts in byte order, matching the
+    /// reference's Rust string ordering. Identity for byte-collated engines
+    /// (SQLite BINARY, Spark UTF8_BINARY); PostgreSQL appends `COLLATE "C"`.
+    fn byte_order_expr(&self, expr: &str) -> String {
+        expr.to_string()
+    }
+
     /// Edge-table column names. Sail's generic tables use
     /// `src_id`/`dst_id`/`edge_type` (the defaults); the universal SQL tables
     /// (Turso/Postgres, from `grust-sql-core`) use `from_id`/`to_id`/`label`.
@@ -2487,13 +2501,14 @@ impl VarLengthReadPushdown {
 
     /// The recursive-CTE `next`-endpoint expression and the edge-incidence
     /// predicate connecting walk row `w` to an edge `ed`, per direction.
-    fn step(&self) -> (String, String) {
+    fn step(&self, dialect: &dyn SqlDialect) -> (String, String) {
+        let (src, dst) = (dialect.edge_src_col(), dialect.edge_dst_col());
         match self.direction {
-            SegDirection::Outgoing => ("ed.dst_id".to_string(), "ed.src_id = w.e".to_string()),
-            SegDirection::Incoming => ("ed.src_id".to_string(), "ed.dst_id = w.e".to_string()),
+            SegDirection::Outgoing => (format!("ed.{dst}"), format!("ed.{src} = w.e")),
+            SegDirection::Incoming => (format!("ed.{src}"), format!("ed.{dst} = w.e")),
             SegDirection::Undirected => (
-                "CASE WHEN ed.src_id = w.e THEN ed.dst_id ELSE ed.src_id END".to_string(),
-                "(ed.src_id = w.e OR ed.dst_id = w.e)".to_string(),
+                format!("CASE WHEN ed.{src} = w.e THEN ed.{dst} ELSE ed.{src} END"),
+                format!("(ed.{src} = w.e OR ed.{dst} = w.e)"),
             ),
         }
     }
@@ -2504,25 +2519,27 @@ impl VarLengthReadPushdown {
         // U+001F (unit separator) is the delimiter Grust already reserves in keys,
         // so wrapping ids with it makes the visited-set membership unambiguous.
         let sep = dialect.string_literal("\u{1f}");
-        let (next, incident) = self.step();
+        let (next, incident) = self.step(dialect);
 
         // Recursion edge-type filter.
+        let tcol = dialect.edge_type_col();
         let edge_filter = match self.rel_types.as_slice() {
             [] => String::new(),
-            [one] => format!(" AND ed.edge_type = {}", dialect.string_literal(one)),
+            [one] => format!(" AND ed.{tcol} = {}", dialect.string_literal(one)),
             many => {
                 let list = many
                     .iter()
                     .map(|t| dialect.string_literal(t))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!(" AND ed.edge_type IN ({list})")
+                format!(" AND ed.{tcol} IN ({list})")
             }
         };
         let depth_cap = match self.max {
             Some(m) => format!(" AND w.depth + 1 <= {m}"),
             None => String::new(),
         };
+        let visited_check = dialect.strpos_sql("w.visited", &format!("{sep} || {next} || {sep}"));
 
         let mut cte = format!(
             "WITH RECURSIVE walk(s, e, depth, visited) AS (\
@@ -2530,7 +2547,7 @@ impl VarLengthReadPushdown {
              UNION ALL \
              SELECT w.s, {next}, w.depth + 1, w.visited || {next} || {sep} \
              FROM walk w JOIN {edges} ed ON {incident} \
-             WHERE instr(w.visited, {sep} || {next} || {sep}) = 0{edge_filter}{depth_cap}) ",
+             WHERE {visited_check} = 0{edge_filter}{depth_cap}) ",
         );
 
         let mut cols: Vec<String> = Vec::new();
@@ -3406,12 +3423,17 @@ impl ProcedureReadPushdown {
         match &self.source {
             ProcedureRowSource::Labels => {
                 let t = dialect.quote_ident(dialect.nodes_table());
-                format!("SELECT DISTINCT label FROM {t} ORDER BY label")
+                // The byte-order collation must be part of the DISTINCT select
+                // list (PostgreSQL requires ORDER BY expressions to appear in
+                // it); identity on byte-collated engines.
+                let key = dialect.byte_order_expr("label");
+                format!("SELECT DISTINCT {key} AS label FROM {t} ORDER BY label")
             }
             ProcedureRowSource::RelationshipTypes => {
                 let t = dialect.quote_ident(dialect.edges_table());
                 let tcol = dialect.edge_type_col();
-                format!("SELECT DISTINCT {tcol} FROM {t} ORDER BY {tcol}")
+                let key = dialect.byte_order_expr(tcol);
+                format!("SELECT DISTINCT {key} AS {tcol} FROM {t} ORDER BY {tcol}")
             }
             ProcedureRowSource::PropertyKeys => {
                 let nodes = dialect
@@ -3421,7 +3443,8 @@ impl ProcedureReadPushdown {
                     .json_props_keys_scan(dialect.edges_table())
                     .expect("supported_by gates PropertyKeys");
                 // UNION deduplicates across the two scans.
-                format!("SELECT k FROM ({nodes} UNION {edges}) ORDER BY k")
+                let key = dialect.byte_order_expr("k");
+                format!("SELECT k FROM ({nodes} UNION {edges}) AS keys ORDER BY {key}")
             }
             ProcedureRowSource::Range { start, end, step } => dialect
                 .integer_series_sql(*start, *end, *step)
@@ -3928,13 +3951,14 @@ impl ShortestReadPushdown {
     }
 
     /// The walk step, mirroring the var-length leaf's direction handling.
-    fn step(&self) -> (String, String) {
+    fn step(&self, dialect: &dyn SqlDialect) -> (String, String) {
+        let (src, dst) = (dialect.edge_src_col(), dialect.edge_dst_col());
         match self.direction {
-            SegDirection::Outgoing => ("ed.dst_id".to_string(), "ed.src_id = w.e".to_string()),
-            SegDirection::Incoming => ("ed.src_id".to_string(), "ed.dst_id = w.e".to_string()),
+            SegDirection::Outgoing => (format!("ed.{dst}"), format!("ed.{src} = w.e")),
+            SegDirection::Incoming => (format!("ed.{src}"), format!("ed.{dst} = w.e")),
             SegDirection::Undirected => (
-                "CASE WHEN ed.src_id = w.e THEN ed.dst_id ELSE ed.src_id END".to_string(),
-                "(ed.src_id = w.e OR ed.dst_id = w.e)".to_string(),
+                format!("CASE WHEN ed.{src} = w.e THEN ed.{dst} ELSE ed.{src} END"),
+                format!("(ed.{src} = w.e OR ed.{dst} = w.e)"),
             ),
         }
     }
@@ -3943,20 +3967,21 @@ impl ShortestReadPushdown {
         let nodes = dialect.quote_ident(dialect.nodes_table());
         let edges = dialect.quote_ident(dialect.edges_table());
         let sep = dialect.string_literal("\u{1f}");
-        let (next, incident) = self.step();
+        let (next, incident) = self.step(dialect);
         let a_scan = endpoint_scan_sql(&self.a.1, &self.a.2, dialect);
         let b_scan = endpoint_scan_sql(&self.b.1, &self.b.2, dialect);
 
+        let tcol = dialect.edge_type_col();
         let edge_filter = match self.rel_types.as_slice() {
             [] => String::new(),
-            [one] => format!(" AND ed.edge_type = {}", dialect.string_literal(one)),
+            [one] => format!(" AND ed.{tcol} = {}", dialect.string_literal(one)),
             many => {
                 let list = many
                     .iter()
                     .map(|t| dialect.string_literal(t))
                     .collect::<Vec<_>>()
                     .join(", ");
-                format!(" AND ed.edge_type IN ({list})")
+                format!(" AND ed.{tcol} IN ({list})")
             }
         };
         let depth_cap = match self.max {
@@ -4324,12 +4349,12 @@ mod tests {
         assert!(labels.supported_by(&SparkDialect));
         assert_eq!(
             labels.to_sql(&SqliteDialect),
-            "SELECT DISTINCT label FROM \"grust_nodes\" ORDER BY label"
+            "SELECT DISTINCT label AS label FROM \"grust_nodes\" ORDER BY label"
         );
         let rels = plan("CALL db.relationshipTypes()");
         assert_eq!(
             rels.to_sql(&SqliteDialect),
-            "SELECT DISTINCT edge_type FROM \"grust_edges\" ORDER BY edge_type"
+            "SELECT DISTINCT edge_type AS edge_type FROM \"grust_edges\" ORDER BY edge_type"
         );
 
         // db.propertyKeys: JSON key enumeration is SQLite-only for now.

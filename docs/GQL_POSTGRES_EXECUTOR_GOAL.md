@@ -1,6 +1,19 @@
 # Grust Postgres Executor Goal — PostgreSQL joins the executing conformance set
 
-Status: **planned, not started.** This is the agreed strategic follow-on after
+Status: **implementation COMPLETE (Q0–Q5, 2026-07-05) on branch
+`postgres-executor`; awaiting human review before merge.** Q0 decisions are
+recorded below; Q1–Q3 are implemented; the Q4 live matrix ran **green against
+a live PostgreSQL 17** (28 pushed read shapes incl. `WITH RECURSIVE`
+var-length — the first non-SQLite engine to run them — plus fallbacks, writes
+with bounded matched patches, strict-write rejections, and atomic transaction
+scripts). Q5 flipped the Postgres descriptor to `CypherExecutor`
+(writes/reads/pushdown true) and the executing conformance set is now
+**Memory, Sail, Turso, PostgreSQL**. PGQ keeps its `sql-graph-backend` role —
+it wraps the executing core store but does not yet delegate the executor
+surface (noted follow-up, alongside the shortest-path ordinal migration and
+type-hints wiring for PG ordering/correlated-WHERE pushdown).
+
+This was the agreed strategic follow-on after
 PUSHDOWN2 (`docs/GQL_PUSHDOWN2_GOAL.md`, done 2026-07-04). It plans the
 promotion of `grust-postgres` (and, sharing the work, `grust-postgres-pgq`)
 from `sql-graph-backend` catalog entries to members of the **executing
@@ -45,6 +58,38 @@ reachable. The plan:
   without a server still guards the lowering.
 - A checklist in this doc tracks which shapes have live-oracle evidence; a
   shape without evidence stays gated off in `supported_by`.
+
+## Q0 record (decided 2026-07-05)
+
+- **Schema/encoding:** the universal tables are `<schema>.<prefix>_nodes(id,
+  label, props jsonb)` / `…_edges(id, from_id, to_id, label, props jsonb)`;
+  props are **tagged** jsonb (`{"type": t, "value": v}`, the same encoding as
+  Turso). Scalar extraction: `props #>> ARRAY['key','value']` (text, like
+  Spark's `GET_JSON_OBJECT`).
+- **Ordering:** `orders_json_typed = false` and the store wires `NoTypeHints`,
+  so `ORDER BY`/`SKIP`/`LIMIT` always run in the reference — PostgreSQL's
+  default collation is not byte order. Procedure row sorts (which the
+  reference *requires* in byte order) go through a new
+  `SqlDialect::byte_order_expr` hook (`COLLATE "C"` on PG, identity
+  elsewhere).
+- **Recursive CTEs:** on — variable-length paths push (the first non-SQLite
+  engine to run them). The walk CTE's `instr` became the dialect-owned
+  `strpos_sql` (`position(… in …)` on PG).
+- **Shortest path:** gated **off** (no insertion-ordered `rowid` for the
+  deterministic tie-break; the ordinal-column migration remains the noted
+  follow-up). Reference fallback, pinned by the live suite.
+- **Correlated `tvf.keys`:** gated **off** — `jsonb_object_keys` yields keys
+  in jsonb storage order (length-then-bytewise), not the reference's sorted
+  order. `db.propertyKeys` is fine (outer `ORDER BY … COLLATE "C"`).
+- **Casts:** `(…)::bigint` / `(…)::double precision` assume type-consistent
+  property values per key (grust's tagged writers guarantee this); a
+  mixed-type key errors rather than filters, unlike lenient SQLite/Spark.
+- **Text rows:** the simple query protocol (`client.simple_query`) renders
+  every column as text — exactly the pushdown text-rows contract.
+- **Writes:** `CypherMutationExecutor` implemented with the Turso-parity
+  `PatchMatchingNodes` override (via `matching_nodes` + `jsonb_predicate`);
+  everything else routes through the store's transactional
+  `apply_mutations`.
 
 ## Sequenced tasks
 

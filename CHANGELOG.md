@@ -6,6 +6,25 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **PostgreSQL joins the executing Cypher conformance set**
+  (`docs/GQL_POSTGRES_EXECUTOR_GOAL.md`, complete): `PostgresGraphStore` now
+  implements `CypherMutationExecutor` (resolved writes, bounded matched-node
+  patches via `jsonb` predicates, atomic `CypherTransaction` batches through
+  its transactional `apply_mutations`) and `run_read_query` pushdown over the
+  universal tables via a new `PostgresReadDialect` — tagged-jsonb extraction
+  (`#>> ARRAY['key','value']`), `position()`/`right()` string predicates,
+  `generate_series` for `tvf.range`, `jsonb_object_keys` for
+  `db.propertyKeys`, byte-order (`COLLATE "C"`) procedure sorts, and
+  `WITH RECURSIVE` variable-length paths (the first non-SQLite engine to push
+  them). Shortest paths and correlated `tvf.keys` are honestly gated off (no
+  insertion-ordered rowid; jsonb key order) and fall back to the reference;
+  `ORDER BY` stays in the reference (collation). Proven by a gated live
+  differential suite (`GRUST_PG_URL`) run green against PostgreSQL 17:
+  pushed reads, fallback reads, writes, and transaction scripts all match the
+  Memory reference. The pushdown walk CTEs' remaining SQLite-isms (`instr`,
+  edge columns in the recursive step, `ORDER BY` collation under `DISTINCT`)
+  became dialect hooks; the executing set is now Memory/Sail/Turso/Postgres.
+
 - **New crate `querygraph-memory`** (branch `fable/querygraph-memory`):
   Marciana at scale — typesec-memory's `MemoryStore` implemented over any
   Grust `GraphMutationStore`. Records and their entity knowledge graph are
