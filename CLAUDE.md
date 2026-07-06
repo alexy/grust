@@ -30,8 +30,8 @@ Both GQL goals are **done**:
 `Supported`; the other 5 are intentional strict-write rejections. Pinned by
 `gql::tests::full_profile_claim_is_backed`; stated in
 `docs/GQL_PROFILE_STATEMENT.md`. Book/CHANGELOG updated; book artifacts
-rebuilt. **No release performed (guardrail 1).** Branch `full39075` is ready
-for human review / merge to `main`.
+rebuilt. **No release performed (guardrail 1).** Branch `full39075` is
+merged to `main`.
 
 ### NEXT (if resuming)
 - **PUSHDOWN2 is merged to `main`** (`docs/GQL_PUSHDOWN2_GOAL.md`): row
@@ -39,14 +39,13 @@ for human review / merge to `main`.
   oracle-backed. Remaining niche tails live in `docs/GQL_M1_CHECKPOINT.md`
   Unit 15 (edge-list bindings, path variables, `/`·`%`·`^` arithmetic, Spark
   parity for the SQLite-gated leaves).
-- **Postgres executor goal is implementation-complete**
-  (`docs/GQL_POSTGRES_EXECUTOR_GOAL.md`, branch `postgres-executor`): the
-  executing set is Memory/Sail/Turso/**Postgres**, proven by the gated live
-  suite (`GRUST_PG_URL="host=127.0.0.1 user=alexy dbname=grust_test" cargo
+- **Postgres executor goal is merged to `main`** (2026-07-05,
+  `docs/GQL_POSTGRES_EXECUTOR_GOAL.md`): the executing set is
+  Memory/Sail/Turso/**Postgres**, proven by the gated live suite
+  (`GRUST_PG_URL="host=127.0.0.1 user=alexy dbname=grust_test" cargo
   test -p grust-postgres-core -- --ignored`; a local Homebrew PG 17 serves
-  grust_test). Awaiting human review before merge. Follow-ups in the goal
-  doc: PGQ executor delegation, shortest-path ordinal migration, PG
-  type-hints wiring.
+  grust_test). Follow-ups in the goal doc: PGQ executor delegation,
+  shortest-path ordinal migration, PG type-hints wiring.
 
 ---
 

@@ -1,7 +1,7 @@
 # Grust Postgres Executor Goal — PostgreSQL joins the executing conformance set
 
-Status: **implementation COMPLETE (Q0–Q5, 2026-07-05) on branch
-`postgres-executor`; awaiting human review before merge.** Q0 decisions are
+Status: **COMPLETE (Q0–Q5, 2026-07-05); merged to `main` 2026-07-05
+(commit 2e5bec0).** Q0 decisions are
 recorded below; Q1–Q3 are implemented; the Q4 live matrix ran **green against
 a live PostgreSQL 17** (28 pushed read shapes incl. `WITH RECURSIVE`
 var-length — the first non-SQLite engine to run them — plus fallbacks, writes
