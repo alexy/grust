@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov" />
+  <meta name="dcterms.date" content="2026-07-11" />
+  <title>9. Cypher and GQL</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Grust</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Grust</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-012.html" accesskey="n" rel="next">10. Example: A Conference Graph</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-010.html" accesskey="p" rel="previous">8. Backend Architecture</a>
+</span>
+</div>
+</nav>
+<h1 data-number="10" id="cypher-and-gql"><span
+class="header-section-number">10</span> 9. Cypher and GQL</h1>
+<p>The property graph model so far is a Rust API: builders, traversals,
+and the store contract. <code>grust-cypher</code> adds a query and
+mutation <em>language</em> on top of it — a backend-neutral GQL/Cypher
+layer — without changing that core.</p>
+<p>The language is built as a real pipeline, not ad-hoc string handling:
+a span-bearing lexer, a recursive-descent parser into a typed AST, and a
+semantic analysis pass that resolves bindings and kinds. A conformance
+spine — a <code>GqlFeature</code> taxonomy with structured errors —
+records exactly which constructs are supported, planned, or out of
+profile, so the surface is auditable rather than aspirational.</p>
+<h2 data-number="10.1" id="a-portable-read-core"><span
+class="header-section-number">10.1</span> A portable read core</h2>
+<p>Reads run through a Memory <em>reference executor</em> over a graph
+snapshot: <code>MATCH</code> and <code>OPTIONAL MATCH</code> (with null
+padding), multi-hop and variable-length paths, a three-valued
+<code>WHERE</code> expression engine, and <code>RETURN</code> with
+aliases, <code>DISTINCT</code>,
+<code>ORDER BY</code>/<code>SKIP</code>/<code>LIMIT</code>, aggregates
+with implicit <code>GROUP BY</code>, <code>WITH</code>,
+<code>UNWIND</code>, and <code>UNION</code>. The reference is the
+definition of correct results.</p>
+<p>The read core also composes: <code>CALL { … }</code> subqueries
+execute once per incoming row with the outer bindings visible
+(correlated import-all scoping) and join their <code>RETURN</code>
+columns back onto the row, and <code>shortestPath(…)</code> /
+<code>allShortestPaths(…)</code> find minimal-length simple paths per
+endpoint pair over a relationship segment. Procedures generalize to
+table-valued functions: <code>CALL name(args) [YIELD …]</code> evaluates
+its arguments against each incoming row (<code>tvf.range</code>,
+<code>tvf.keys</code> join the <code>db.*</code> catalog
+procedures).</p>
+<p>Backends that can materialize SQL push the bounded read subset down:
+a query’s <code>MATCH</code>/<code>WHERE</code> filter lowers into
+backend SQL (Spark and SQLite dialects), while the <code>RETURN</code>
+projection still runs through the shared reference. Pushed results are
+therefore identical to the reference <em>by construction</em>, and an
+embedded-SQLite differential oracle checks reference-vs-pushdown row
+equality on every change.</p>
+<h2 data-number="10.2" id="values-procedures-transactions-writes"><span
+class="header-section-number">10.2</span> Values, procedures,
+transactions, writes</h2>
+<p>The value model gains first-class lossless <code>Decimal</code> (SQL
+<code>DECIMAL</code>-style) and ISO 8601 <code>Duration</code> types
+alongside the temporal <code>DateTime</code>, with parsing, ordering,
+and checked arithmetic wired through every backend. Read-only catalog
+procedures (<code>CALL db.labels()</code>,
+<code>db.relationshipTypes()</code>, <code>db.propertyKeys()</code>)
+expose schema metadata, and a
+<code>START TRANSACTION</code>/<code>BEGIN</code>/<code>COMMIT</code>/<code>ROLLBACK</code>
+command surface pairs with honest per-backend atomicity capability
+reporting. Caller-owned DDL metadata can also be materialized as a
+portable <code>CypherCatalogSnapshot</code>, with deterministic metadata
+tables for <code>db.graphs</code>, <code>db.graphTypes</code>,
+<code>db.indexes</code>, and <code>db.constraints</code>. Read queries
+may include <code>USE &lt;graph&gt;</code>; the default single-graph
+executor accepts <code>USE default</code>, and callers can bind a graph
+snapshot to another explicit graph name. Standalone <code>USE</code>,
+<code>SET</code>, and <code>RESET</code> commands update portable
+<code>CypherSession</code> state without changing transaction-control
+behavior. Fixed-length path bindings now return first-class
+<code>Value::Path</code> values while preserving the existing JSON path
+shape, and <code>Value::Graph</code> adds first-class set-shaped graph
+values (deduplicated node/relationship sets built with
+<code>graph(nodes, relationships)</code>). For work that deliberately
+steps outside the portable surface, <code>NativeQuery</code> is an
+explicit backend-native escape hatch with per-backend language
+capability flags — FalkorDB accepts native Cypher, SurrealDB accepts
+SurrealQL, and the SQL backends accept their own dialects — with
+structured non-support everywhere else.</p>
+<p>The writable subset routes acceptance through the same
+standards-conformant parser, keeping the mutation plans byte-identical
+to the established write planner while narrowing the public surface to
+standard Cypher. Pattern-driven writes widen to multiple relationship
+patterns per statement, incoming <code>&lt;-[:T]-</code> edges, and
+cross-variable correlated <code>SET</code>.</p>
+<h2 data-number="10.3" id="a-backed-profile"><span
+class="header-section-number">10.3</span> A backed profile</h2>
+<p>What the layer claims to support is stated precisely in
+<code>docs/GQL_PROFILE_STATEMENT.md</code>: the realized profile is the
+set of <code>Supported</code> features — as of the Full39075 completion
+goal that is the <strong>full ISO/IEC 39075 profile</strong>, with the
+only non-supported manifest entries being five intentional strict-write
+rejections (conformance guards, not gaps). A test pins that scoped-out
+set to the feature manifest, so the documentation and the code cannot
+drift apart.</p>
+</body>
+</html>

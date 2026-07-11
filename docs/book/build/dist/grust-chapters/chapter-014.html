@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov" />
+  <meta name="dcterms.date" content="2026-07-11" />
+  <title>11. Design Tradeoffs</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Grust</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Grust</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-015.html" accesskey="n" rel="next">12. Where Grust Can Grow</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-013.html" accesskey="p" rel="previous">10. Schema and Validation Direction</a>
+</span>
+</div>
+</nav>
+<h1 data-number="13" id="design-tradeoffs"><span
+class="header-section-number">13</span> 11. Design Tradeoffs</h1>
+<p>The universal node/edge layout appears in multiple backend plans
+because it is the easiest way to preserve arbitrary property graphs:</p>
+<figure>
+<img src="diagrams/diagram-07.png" alt="Diagram 7" />
+<figcaption aria-hidden="true">Diagram 7</figcaption>
+</figure>
+<p>The cost is that property typing and label-specific optimization
+require extra work. A label-partitioned backend can use stronger types
+and better indexes, but it needs schema, migrations, and more
+planning.</p>
+<p>Grust’s current architecture keeps both paths open. Core stays
+universal. Backends choose their storage layout. Schema support can
+become richer without forcing every backend to look the same.</p>
+</body>
+</html>

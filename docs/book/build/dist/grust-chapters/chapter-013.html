@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov" />
+  <meta name="dcterms.date" content="2026-07-11" />
+  <title>10. Schema and Validation Direction</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Grust</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Grust</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-014.html" accesskey="n" rel="next">11. Design Tradeoffs</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-012.html" accesskey="p" rel="previous">10. Example: A Conference Graph</a>
+</span>
+</div>
+</nav>
+<h1 data-number="12" id="schema-and-validation-direction"><span
+class="header-section-number">12</span> 10. Schema and Validation
+Direction</h1>
+<p>Grust has schema types: <code>GraphSchema</code>,
+<code>NodeType</code>, <code>EdgeType</code>, <code>Field</code>,
+<code>FieldType</code>, <code>EdgeUniqueness</code>, and
+<code>GraphConstraint</code>. <code>GraphSchema</code> validates labels,
+required fields, field value types, edge endpoint labels, edge
+direction, declared edge uniqueness, and required-property constraints.
+<code>FieldType</code> includes scalar strings, integers, floats,
+booleans, RFC 3339 date-times, string/int/float arrays, and JSON.
+Date-time values use the opaque <code>RfcDate</code> type internally;
+construct them through <code>Value::datetime</code> or
+<code>RfcDate::parse</code> so invalid strings cannot bypass validation.
+The default <code>GraphStore::apply_schema</code> implementation remains
+a no-op, which lets schemaless or schema-later backends work without
+ceremony.</p>
+<p>Schema becomes more important for backends that want typed tables,
+indexes, or label-partitioned layouts. The current schema-capable
+backends use it in different ways:</p>
+<ul>
+<li>Memory stores the schema and validates local writes.</li>
+<li>FalkorDB creates label/property indexes for declared node
+types.</li>
+<li>Helix validates schema names that can be lowered through dynamic
+queries.</li>
+<li>LadybugDB can run in untyped dynamic mode or typed schema-applied
+mode; typed mode validates writes against the applied schema.</li>
+<li>LanceDB creates typed Arrow tables per node and edge label and
+mirrors writes into them.</li>
+<li>pgGraph/PostgreSQL/PostgreSQL PGQ exposes typed label views and
+expression indexes over the universal tables.</li>
+<li>Sail creates typed Delta tables per node and edge label and mirrors
+writes into them.</li>
+<li>SurrealDB lowers schema into <code>DEFINE TABLE</code> and
+<code>DEFINE FIELD</code> statements.</li>
+</ul>
+<p><code>apply_schema</code> is therefore a backend metadata hook, not a
+portable promise that every future write is enforced by the database.
+<code>put_typed_graph</code> always validates the whole graph with
+<code>GraphSchema::validate_graph</code> before applying schema metadata
+and writing. Callers that need backend-independent guarantees can run
+the same validation before ordinary <code>put_graph</code> or
+single-element writes. Memory and LadybugDB enforce the applied schema
+on subsequent local writes; Sail and LanceDB validate writes before
+mirroring them into typed tables. FalkorDB, Helix, pgGraph, and
+SurrealDB currently use schema primarily for indexes, query-shape
+validation, views, or backend-native definitions. Constraint handling
+follows the same honest-capability rule. Required-property constraints
+validate through <code>GraphSchema</code>; unique-property constraints
+validate inside <code>GraphSchema::validate_graph</code>, and the memory
+backend reports validate-before-write behavior for them. Memory also
+supports explicit native constraint application through
+<code>GraphStore::apply_native_constraint</code>: it stores
+backend-owned required or unique property constraints, validates them
+against the current graph before accepting the request, honors
+<code>if_not_exists</code>, and enforces accepted constraints on later
+writes without requiring typed <code>GraphSchema</code> metadata.
+Backends that have not added a read-before-write preflight or native
+enforcement should continue reporting metadata-only behavior through
+<code>GraphStore::constraint_capability</code> and unsupported native
+DDL through <code>native_constraint_capability</code>.
+<code>grust-cypher</code> also exposes
+<code>apply_cypher_native_constraints</code> for applying parsed
+<code>CREATE CONSTRAINT</code> DDL through
+<code>GraphStore::apply_native_constraint</code>.</p>
+<p>A flexible backend can keep universal node and edge tables as the
+portable interchange surface. A typed backend can add native tables,
+fields, indexes, or constraints behind the same <code>GraphStore</code>
+trait.</p>
+<p>The key architectural point is that schema is metadata about a Grust
+graph, not a replacement for the graph. Application code can begin with
+plain graph construction, add schemas when operational needs demand it,
+and still speak the same store trait.</p>
+</body>
+</html>

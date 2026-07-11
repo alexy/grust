@@ -10,3 +10,6 @@ docs/book/build/dist/*
 !docs/book/build/dist/grust.epub
 !docs/book/build/dist/grust.mobi
 !docs/book/build/dist/VERSION.md
+!docs/book/build/dist/grust.html
+!docs/book/build/dist/grust-chapters/
+!docs/book/build/dist/grust-chapters/**

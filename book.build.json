@@ -1,0 +1,41 @@
+{
+  "$schema": "../firstpair/publishing/book.build.schema.json",
+  "schemaVersion": 1,
+  "bookRoot": "docs/book",
+  "manuscript": "docs/book/build/manuscript.rendered.md",
+  "metadata": "docs/book/metadata.yaml",
+  "cover": "docs/book/build/cover.rendered.md",
+  "css": "docs/book/epub.css",
+  "stem": "grust",
+  "version": {
+    "source": "cargo",
+    "file": "Cargo.toml"
+  },
+  "kindleName": "${stem} (${version})",
+  "dist": "docs/book/build/dist",
+  "buildDir": "docs/book/build",
+  "edition": "full",
+  "primaryFormat": "typst",
+  "mobi": true,
+  "pandoc": {
+    "reader": "markdown+smart",
+    "tocDepth": 2,
+    "resourcePaths": ["docs/book/build", "docs/book", "${repoRoot}"]
+  },
+  "hooks": {
+    "prepare": "node docs/book/build.mjs",
+    "postPdf": {
+      "python": "docs/book/fix_pdf_page_labels.py",
+      "project": "docs/book/python",
+      "args": ["${pdf}"]
+    },
+    "postEpub": "docs/book/fix_epub_layout.sh \"${epub}\" \"${kindleName}\" \"${title}\""
+  },
+  "validators": [
+    {
+      "python": "docs/book/check_epub_metadata.py",
+      "project": "docs/book/python",
+      "args": ["${distDir}/${stem}.epub"]
+    }
+  ]
+}

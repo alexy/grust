@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov" />
+  <meta name="dcterms.date" content="2026-07-11" />
+  <title>4. Typed Graph Ingestion with garde and zod-rs</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+    /* CSS for syntax highlighting */
+    html { -webkit-text-size-adjust: 100%; }
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { color: #008000; } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { color: #008000; font-weight: bold; } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Grust</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Grust</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-007.html" accesskey="n" rel="next">5. Traversal as an Intermediate Representation</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-005.html" accesskey="p" rel="previous">3. Building Graphs</a>
+</span>
+</div>
+</nav>
+<h1 data-number="5"
+id="typed-graph-ingestion-with-garde-and-zod-rs"><span
+class="header-section-number">5</span> 4. Typed Graph Ingestion with
+garde and zod-rs</h1>
+<p>The core <code>Graph</code>, <code>Node</code>, and <code>Edge</code>
+types are intentionally dynamic. A node has a label and a property map;
+an edge has a label, endpoints, and a property map. That dynamic shape
+is the right interchange format for backends, graph documents, audits,
+and cross-system movement. Application code, however, often starts with
+typed Rust structs: a <code>Person</code>, a <code>Project</code>, a
+<code>WorksOn</code> relationship, or some domain-specific event.
+Grust’s typed ingestion layer connects those two worlds.</p>
+<p>The typed layer is optional. It is enabled through Cargo
+features:</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode toml"><code class="sourceCode toml"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">[dependencies]</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="dt">grust</span> <span class="op">=</span> <span class="op">{ </span><span class="dt">package</span><span class="op"> =</span> <span class="st">&quot;grust-graph&quot;</span><span class="op">, </span><span class="dt">version</span><span class="op"> =</span> <span class="st">&quot;0.11.0&quot;</span><span class="op">, </span><span class="dt">features</span><span class="op"> =</span> <span class="op">[</span><span class="st">&quot;typed-garde&quot;</span><span class="op">] }</span></span></code></pre></div>
+<p><code>typed-garde</code> adds Rust-struct validation and typed
+lowering. A second feature, <code>typed-zod-rs</code>, layers raw JSON
+shape validation on top:</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode toml"><code class="sourceCode toml"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="kw">[dependencies]</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="dt">grust</span> <span class="op">=</span> <span class="op">{ </span><span class="dt">package</span><span class="op"> =</span> <span class="st">&quot;grust-graph&quot;</span><span class="op">, </span><span class="dt">version</span><span class="op"> =</span> <span class="st">&quot;0.11.0&quot;</span><span class="op">, </span><span class="dt">features</span><span class="op"> =</span> <span class="op">[</span><span class="st">&quot;typed-zod-rs&quot;</span><span class="op">] }</span></span></code></pre></div>
+<p><code>typed-zod-rs</code> implies <code>typed-garde</code>. That
+relationship matters: zod-rs checks untrusted JSON shape first, Serde
+turns the JSON into Rust values, and garde checks typed domain
+invariants before Grust lowers the value into a normal <code>Node</code>
+or <code>Edge</code>.</p>
+<figure>
+<img src="diagrams/diagram-02.png" alt="Diagram 2" />
+<figcaption aria-hidden="true">Diagram 2</figcaption>
+</figure>
+<p>The important promise is that typed ingestion does not create a
+second graph model. Once validation succeeds, everything becomes the
+ordinary Grust graph shape. Backends do not need to know whether a node
+came from <code>GraphBuilder</code>, a YAML document, a typed Rust
+struct, or a zod-rs-validated JSON payload.</p>
+<h2 data-number="5.1" id="garde-typed-rust-validation"><span
+class="header-section-number">5.1</span> garde: Typed Rust
+Validation</h2>
+<p><code>garde</code> is a Rust validation library built around a derive
+macro. You attach validation rules to fields, derive
+<code>garde::Validate</code>, and then call <code>validate()</code> or
+<code>validate_with(...)</code>. The rules live near the Rust type, so
+they travel with the domain model instead of being hidden in a loader
+function.</p>
+<p>Common garde rules include:</p>
+<ul>
+<li><code>length(min = 1)</code> for nonempty strings and
+collections.</li>
+<li><code>range(min = 1, max = 100)</code> for numeric bounds.</li>
+<li><code>inner(...)</code> for validating items inside a
+collection.</li>
+<li><code>custom(...)</code> for domain-specific validation
+functions.</li>
+<li><code>dive</code> for validating nested values that also implement
+<code>Validate</code>.</li>
+</ul>
+<p>In Grust, a typed node implements <code>TypedNode</code>. It supplies
+a graph label and a stable node id. The default property conversion
+serializes the struct through Serde and converts the resulting object
+fields into Grust properties:</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">grust::prelude::</span><span class="op">*;</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">grust::typed::</span>garde<span class="op">;</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">serde::</span>Serialize<span class="op">;</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>derive<span class="at">(</span><span class="bu">Debug</span><span class="op">,</span> Serialize<span class="op">,</span> <span class="pp">garde::</span>Validate<span class="at">)]</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>garde<span class="at">(</span>allow_unvalidated<span class="at">)]</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> Person <span class="op">{</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">))]</span></span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a>    id<span class="op">:</span> <span class="dt">String</span><span class="op">,</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">))]</span></span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a>    name<span class="op">:</span> <span class="dt">String</span><span class="op">,</span></span>
+<span id="cb3-12"><a href="#cb3-12" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">)</span><span class="op">,</span> inner<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">)))]</span></span>
+<span id="cb3-13"><a href="#cb3-13" aria-hidden="true" tabindex="-1"></a>    skills<span class="op">:</span> <span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">String</span><span class="op">&gt;,</span></span>
+<span id="cb3-14"><a href="#cb3-14" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb3-15"><a href="#cb3-15" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-16"><a href="#cb3-16" aria-hidden="true" tabindex="-1"></a><span class="kw">impl</span> TypedNode <span class="cf">for</span> Person <span class="op">{</span></span>
+<span id="cb3-17"><a href="#cb3-17" aria-hidden="true" tabindex="-1"></a>    <span class="kw">const</span> LABEL<span class="op">:</span> <span class="op">&amp;</span><span class="ot">&#39;static</span> <span class="dt">str</span> <span class="op">=</span> <span class="st">&quot;Person&quot;</span><span class="op">;</span></span>
+<span id="cb3-18"><a href="#cb3-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb3-19"><a href="#cb3-19" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> node_id(<span class="op">&amp;</span><span class="kw">self</span>) <span class="op">-&gt;</span> NodeId <span class="op">{</span></span>
+<span id="cb3-20"><a href="#cb3-20" aria-hidden="true" tabindex="-1"></a>        <span class="pp">format!</span>(<span class="st">&quot;person:{}&quot;</span><span class="op">,</span> <span class="kw">self</span><span class="op">.</span>id)<span class="op">.</span>into()</span>
+<span id="cb3-21"><a href="#cb3-21" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb3-22"><a href="#cb3-22" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p>Typed edges implement <code>TypedEdge</code>. They provide a label
+and endpoint ids:</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>derive<span class="at">(</span><span class="bu">Debug</span><span class="op">,</span> Serialize<span class="op">,</span> <span class="pp">garde::</span>Validate<span class="at">)]</span></span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>garde<span class="at">(</span>allow_unvalidated<span class="at">)]</span></span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> WorksOn <span class="op">{</span></span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">))]</span></span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a>    person_id<span class="op">:</span> <span class="dt">String</span><span class="op">,</span></span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">))]</span></span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a>    project_id<span class="op">:</span> <span class="dt">String</span><span class="op">,</span></span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>range<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="op">,</span> max <span class="op">=</span> <span class="dv">100</span><span class="at">))]</span></span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a>    allocation_percent<span class="op">:</span> <span class="dt">u8</span><span class="op">,</span></span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a><span class="kw">impl</span> TypedEdge <span class="cf">for</span> WorksOn <span class="op">{</span></span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">const</span> LABEL<span class="op">:</span> <span class="op">&amp;</span><span class="ot">&#39;static</span> <span class="dt">str</span> <span class="op">=</span> <span class="st">&quot;WORKS_ON&quot;</span><span class="op">;</span></span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> source_node_id(<span class="op">&amp;</span><span class="kw">self</span>) <span class="op">-&gt;</span> NodeId <span class="op">{</span></span>
+<span id="cb4-16"><a href="#cb4-16" aria-hidden="true" tabindex="-1"></a>        <span class="pp">format!</span>(<span class="st">&quot;person:{}&quot;</span><span class="op">,</span> <span class="kw">self</span><span class="op">.</span>person_id)<span class="op">.</span>into()</span>
+<span id="cb4-17"><a href="#cb4-17" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb4-18"><a href="#cb4-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb4-19"><a href="#cb4-19" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> target_node_id(<span class="op">&amp;</span><span class="kw">self</span>) <span class="op">-&gt;</span> NodeId <span class="op">{</span></span>
+<span id="cb4-20"><a href="#cb4-20" aria-hidden="true" tabindex="-1"></a>        <span class="pp">format!</span>(<span class="st">&quot;project:{}&quot;</span><span class="op">,</span> <span class="kw">self</span><span class="op">.</span>project_id)<span class="op">.</span>into()</span>
+<span id="cb4-21"><a href="#cb4-21" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb4-22"><a href="#cb4-22" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<p><code>TypedGraphBuilder</code> validates and lowers these values:</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">mut</span> builder <span class="op">=</span> <span class="pp">TypedGraphBuilder::</span>new()<span class="op">;</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a>builder<span class="op">.</span>add_node(<span class="op">&amp;</span>Person <span class="op">{</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a>    id<span class="op">:</span> <span class="st">&quot;nia&quot;</span><span class="op">.</span>to_string()<span class="op">,</span></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a>    name<span class="op">:</span> <span class="st">&quot;Nia&quot;</span><span class="op">.</span>to_string()<span class="op">,</span></span>
+<span id="cb5-6"><a href="#cb5-6" aria-hidden="true" tabindex="-1"></a>    skills<span class="op">:</span> <span class="pp">vec!</span>[<span class="st">&quot;rust&quot;</span><span class="op">.</span>to_string()<span class="op">,</span> <span class="st">&quot;graphs&quot;</span><span class="op">.</span>to_string()]<span class="op">,</span></span>
+<span id="cb5-7"><a href="#cb5-7" aria-hidden="true" tabindex="-1"></a><span class="op">}</span>)<span class="op">?;</span></span>
+<span id="cb5-8"><a href="#cb5-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-9"><a href="#cb5-9" aria-hidden="true" tabindex="-1"></a>builder<span class="op">.</span>add_edge(<span class="op">&amp;</span>WorksOn <span class="op">{</span></span>
+<span id="cb5-10"><a href="#cb5-10" aria-hidden="true" tabindex="-1"></a>    person_id<span class="op">:</span> <span class="st">&quot;nia&quot;</span><span class="op">.</span>to_string()<span class="op">,</span></span>
+<span id="cb5-11"><a href="#cb5-11" aria-hidden="true" tabindex="-1"></a>    project_id<span class="op">:</span> <span class="st">&quot;grust&quot;</span><span class="op">.</span>to_string()<span class="op">,</span></span>
+<span id="cb5-12"><a href="#cb5-12" aria-hidden="true" tabindex="-1"></a>    allocation_percent<span class="op">:</span> <span class="dv">80</span><span class="op">,</span></span>
+<span id="cb5-13"><a href="#cb5-13" aria-hidden="true" tabindex="-1"></a><span class="op">}</span>)<span class="op">?;</span></span>
+<span id="cb5-14"><a href="#cb5-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-15"><a href="#cb5-15" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> graph <span class="op">=</span> builder<span class="op">.</span>build()<span class="op">;</span></span></code></pre></div>
+<p>Validation fails before graph construction. If
+<code>allocation_percent</code> is <code>0</code>, the
+<code>range(min = 1, max = 100)</code> rule produces a Grust schema
+error and the edge is not added. This keeps invalid domain facts out of
+the graph rather than relying on a backend to reject them later.</p>
+<p>Typed values can also be reconstructed from ordinary Grust reads. The
+read path decodes node or edge properties back through serde, runs garde
+validation, and checks that the typed identity still matches the graph
+value:</p>
+<div class="sourceCode" id="cb6"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> stored <span class="op">=</span> store</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>get_node(<span class="op">&amp;</span><span class="pp">NodeId::</span>new(<span class="st">&quot;person:nia&quot;</span>))</span>
+<span id="cb6-3"><a href="#cb6-3" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span><span class="kw">await</span><span class="op">?</span></span>
+<span id="cb6-4"><a href="#cb6-4" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>expect(<span class="st">&quot;person exists&quot;</span>)<span class="op">;</span></span>
+<span id="cb6-5"><a href="#cb6-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb6-6"><a href="#cb6-6" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> person <span class="op">=</span> <span class="pp">Person::</span>from_node(<span class="op">&amp;</span>stored)<span class="op">?;</span></span>
+<span id="cb6-7"><a href="#cb6-7" aria-hidden="true" tabindex="-1"></a><span class="pp">assert_eq!</span>(person<span class="op">.</span>id<span class="op">,</span> <span class="st">&quot;nia&quot;</span>)<span class="op">;</span></span></code></pre></div>
+<p>Edges follow the same pattern with
+<code>WorksOn::from_edge(&amp;edge)?</code>. For validation contexts,
+use <code>from_node_with</code> or <code>from_edge_with</code>.</p>
+<h2 data-number="5.2" id="typed-and-untyped-graphs-coexist"><span
+class="header-section-number">5.2</span> Typed and Untyped Graphs
+Coexist</h2>
+<p>The typed layer is an ingestion layer over the ordinary
+<code>GraphBuilder</code>. It does not force an all-or-nothing choice. A
+graph can start as a document, accept raw nodes and edges, and then be
+extended with typed values:</p>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> existing <span class="op">=</span> <span class="pp">Graph::</span>new(</span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>    <span class="pp">vec!</span>[<span class="pp">Node::</span>new(<span class="st">&quot;Document&quot;</span><span class="op">,</span> <span class="st">&quot;doc:garde-proposal&quot;</span><span class="op">,</span> <span class="pp">Props::</span>new())]<span class="op">,</span></span>
+<span id="cb7-3"><a href="#cb7-3" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Vec</span><span class="pp">::</span>new()<span class="op">,</span></span>
+<span id="cb7-4"><a href="#cb7-4" aria-hidden="true" tabindex="-1"></a>)<span class="op">;</span></span>
+<span id="cb7-5"><a href="#cb7-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-6"><a href="#cb7-6" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">mut</span> builder <span class="op">=</span> <span class="pp">TypedGraphBuilder::</span>from_graph(existing)<span class="op">;</span></span>
+<span id="cb7-7"><a href="#cb7-7" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-8"><a href="#cb7-8" aria-hidden="true" tabindex="-1"></a>builder<span class="op">.</span>add_node(<span class="op">&amp;</span>Person <span class="op">{</span></span>
+<span id="cb7-9"><a href="#cb7-9" aria-hidden="true" tabindex="-1"></a>    id<span class="op">:</span> <span class="st">&quot;nia&quot;</span><span class="op">.</span>to_string()<span class="op">,</span></span>
+<span id="cb7-10"><a href="#cb7-10" aria-hidden="true" tabindex="-1"></a>    name<span class="op">:</span> <span class="st">&quot;Nia&quot;</span><span class="op">.</span>to_string()<span class="op">,</span></span>
+<span id="cb7-11"><a href="#cb7-11" aria-hidden="true" tabindex="-1"></a>    skills<span class="op">:</span> <span class="pp">vec!</span>[<span class="st">&quot;rust&quot;</span><span class="op">.</span>to_string()<span class="op">,</span> <span class="st">&quot;graphs&quot;</span><span class="op">.</span>to_string()]<span class="op">,</span></span>
+<span id="cb7-12"><a href="#cb7-12" aria-hidden="true" tabindex="-1"></a><span class="op">}</span>)<span class="op">?;</span></span>
+<span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a>builder<span class="op">.</span>add_raw_edge(<span class="pp">Edge::</span>new(</span>
+<span id="cb7-15"><a href="#cb7-15" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;AUTHORED&quot;</span><span class="op">,</span></span>
+<span id="cb7-16"><a href="#cb7-16" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;person:nia&quot;</span><span class="op">,</span></span>
+<span id="cb7-17"><a href="#cb7-17" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;doc:garde-proposal&quot;</span><span class="op">,</span></span>
+<span id="cb7-18"><a href="#cb7-18" aria-hidden="true" tabindex="-1"></a>    <span class="pp">Props::</span>new()<span class="op">,</span></span>
+<span id="cb7-19"><a href="#cb7-19" aria-hidden="true" tabindex="-1"></a>))<span class="op">;</span></span>
+<span id="cb7-20"><a href="#cb7-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb7-21"><a href="#cb7-21" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> graph <span class="op">=</span> builder<span class="op">.</span>build()<span class="op">;</span></span></code></pre></div>
+<p>The coexistence API is explicit:</p>
+<ul>
+<li><code>TypedGraphBuilder::from_graph(graph)</code> starts from an
+existing <code>Graph</code>.</li>
+<li><code>TypedGraphBuilder::from_builder(builder)</code> starts from an
+existing <code>GraphBuilder</code>.</li>
+<li><code>add_raw_node(node)</code> and <code>add_raw_edge(edge)</code>
+add ordinary Grust values.</li>
+<li><code>into_builder()</code> returns the inner
+<code>GraphBuilder</code> when lower-level builder operations are
+needed.</li>
+</ul>
+<figure>
+<img src="diagrams/diagram-03.png" alt="Diagram 3" />
+<figcaption aria-hidden="true">Diagram 3</figcaption>
+</figure>
+<p>This is useful during migrations. A project can keep loading existing
+graph documents while adding typed definitions for the domain facts that
+benefit most from Rust validation. Over time, more labels can move to
+typed constructors without breaking the storage or document formats.</p>
+<h2 data-number="5.3" id="what-zod-means-here"><span
+class="header-section-number">5.3</span> What Zod Means Here</h2>
+<p>Zod is best known from TypeScript. It lets developers define a
+runtime schema and validate untrusted input before treating it as
+application data. In TypeScript, this closes an important gap: static
+types disappear at runtime, so a value received from JSON, an HTTP
+request, a form, or a message queue still needs runtime validation.</p>
+<p>Rust has a different type system, but the boundary problem still
+exists. External data arrives as bytes or JSON. Serde can deserialize
+those bytes into a Rust struct, but it is often useful to separate two
+questions:</p>
+<ol type="1">
+<li>Does this JSON have the expected shape?</li>
+<li>Does the resulting Rust value satisfy my domain rules?</li>
+</ol>
+<p><code>zod-rs</code> answers the first question. <code>garde</code>
+answers the second. Grust’s <code>typed-zod-rs</code> feature wires
+those stages together:</p>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">grust::prelude::</span><span class="op">*;</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">serde::</span><span class="op">{</span>Deserialize<span class="op">,</span> Serialize<span class="op">};</span></span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">serde_json::</span>json<span class="op">;</span></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">zod_rs::prelude::</span><span class="op">{</span>Schema<span class="op">,</span> number<span class="op">,</span> object<span class="op">,</span> string<span class="op">};</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>derive<span class="at">(</span><span class="bu">Debug</span><span class="op">,</span> Deserialize<span class="op">,</span> Serialize<span class="op">,</span> <span class="pp">garde::</span>Validate<span class="at">)]</span></span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>garde<span class="at">(</span>allow_unvalidated<span class="at">)]</span></span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> Person <span class="op">{</span></span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">))]</span></span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true" tabindex="-1"></a>    id<span class="op">:</span> <span class="dt">String</span><span class="op">,</span></span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">))]</span></span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true" tabindex="-1"></a>    name<span class="op">:</span> <span class="dt">String</span><span class="op">,</span></span>
+<span id="cb8-13"><a href="#cb8-13" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">)</span><span class="op">,</span> inner<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">)))]</span></span>
+<span id="cb8-14"><a href="#cb8-14" aria-hidden="true" tabindex="-1"></a>    skills<span class="op">:</span> <span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">String</span><span class="op">&gt;,</span></span>
+<span id="cb8-15"><a href="#cb8-15" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb8-16"><a href="#cb8-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-17"><a href="#cb8-17" aria-hidden="true" tabindex="-1"></a><span class="kw">impl</span> TypedNode <span class="cf">for</span> Person <span class="op">{</span></span>
+<span id="cb8-18"><a href="#cb8-18" aria-hidden="true" tabindex="-1"></a>    <span class="kw">const</span> LABEL<span class="op">:</span> <span class="op">&amp;</span><span class="ot">&#39;static</span> <span class="dt">str</span> <span class="op">=</span> <span class="st">&quot;Person&quot;</span><span class="op">;</span></span>
+<span id="cb8-19"><a href="#cb8-19" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-20"><a href="#cb8-20" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> node_id(<span class="op">&amp;</span><span class="kw">self</span>) <span class="op">-&gt;</span> NodeId <span class="op">{</span></span>
+<span id="cb8-21"><a href="#cb8-21" aria-hidden="true" tabindex="-1"></a>        <span class="pp">format!</span>(<span class="st">&quot;person:{}&quot;</span><span class="op">,</span> <span class="kw">self</span><span class="op">.</span>id)<span class="op">.</span>into()</span>
+<span id="cb8-22"><a href="#cb8-22" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb8-23"><a href="#cb8-23" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb8-24"><a href="#cb8-24" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-25"><a href="#cb8-25" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> person_schema <span class="op">=</span> object()</span>
+<span id="cb8-26"><a href="#cb8-26" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>field(<span class="st">&quot;id&quot;</span><span class="op">,</span> string()<span class="op">.</span>min(<span class="dv">1</span>))</span>
+<span id="cb8-27"><a href="#cb8-27" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>field(<span class="st">&quot;name&quot;</span><span class="op">,</span> string()<span class="op">.</span>min(<span class="dv">1</span>))</span>
+<span id="cb8-28"><a href="#cb8-28" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>field(<span class="st">&quot;skills&quot;</span><span class="op">,</span> string()<span class="op">.</span>min(<span class="dv">1</span>)<span class="op">.</span>array())</span>
+<span id="cb8-29"><a href="#cb8-29" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>strict()<span class="op">;</span></span>
+<span id="cb8-30"><a href="#cb8-30" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-31"><a href="#cb8-31" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> json <span class="op">=</span> <span class="pp">json!</span>(<span class="op">{</span></span>
+<span id="cb8-32"><a href="#cb8-32" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;id&quot;</span><span class="op">:</span> <span class="st">&quot;nia&quot;</span><span class="op">,</span></span>
+<span id="cb8-33"><a href="#cb8-33" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;name&quot;</span><span class="op">:</span> <span class="st">&quot;Nia&quot;</span><span class="op">,</span></span>
+<span id="cb8-34"><a href="#cb8-34" aria-hidden="true" tabindex="-1"></a>    <span class="st">&quot;skills&quot;</span><span class="op">:</span> [<span class="st">&quot;rust&quot;</span><span class="op">,</span> <span class="st">&quot;graphs&quot;</span>]</span>
+<span id="cb8-35"><a href="#cb8-35" aria-hidden="true" tabindex="-1"></a><span class="op">}</span>)<span class="op">;</span></span>
+<span id="cb8-36"><a href="#cb8-36" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-37"><a href="#cb8-37" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> person<span class="op">:</span> Person <span class="op">=</span> parse_typed_json(<span class="op">&amp;</span>person_schema<span class="op">,</span> <span class="op">&amp;</span>json)<span class="op">?;</span></span></code></pre></div>
+<p>The same schema can feed the graph builder directly:</p>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> <span class="kw">mut</span> builder <span class="op">=</span> <span class="pp">TypedGraphBuilder::</span>new()<span class="op">;</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>builder<span class="op">.</span><span class="pp">add_node_from_json::</span><span class="op">&lt;</span>Person<span class="op">,</span> _<span class="op">&gt;</span>(<span class="op">&amp;</span>person_schema<span class="op">,</span> <span class="op">&amp;</span>json)<span class="op">?;</span></span></code></pre></div>
+<p>For edges, the pattern is the same:</p>
+<div class="sourceCode" id="cb10"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb10-1"><a href="#cb10-1" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>derive<span class="at">(</span><span class="bu">Debug</span><span class="op">,</span> Deserialize<span class="op">,</span> Serialize<span class="op">,</span> <span class="pp">garde::</span>Validate<span class="at">)]</span></span>
+<span id="cb10-2"><a href="#cb10-2" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span>garde<span class="at">(</span>allow_unvalidated<span class="at">)]</span></span>
+<span id="cb10-3"><a href="#cb10-3" aria-hidden="true" tabindex="-1"></a><span class="kw">struct</span> WorksOn <span class="op">{</span></span>
+<span id="cb10-4"><a href="#cb10-4" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">))]</span></span>
+<span id="cb10-5"><a href="#cb10-5" aria-hidden="true" tabindex="-1"></a>    person_id<span class="op">:</span> <span class="dt">String</span><span class="op">,</span></span>
+<span id="cb10-6"><a href="#cb10-6" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>length<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="at">))]</span></span>
+<span id="cb10-7"><a href="#cb10-7" aria-hidden="true" tabindex="-1"></a>    project_id<span class="op">:</span> <span class="dt">String</span><span class="op">,</span></span>
+<span id="cb10-8"><a href="#cb10-8" aria-hidden="true" tabindex="-1"></a>    <span class="at">#[</span>garde<span class="at">(</span>range<span class="at">(</span>min <span class="op">=</span> <span class="dv">1</span><span class="op">,</span> max <span class="op">=</span> <span class="dv">100</span><span class="at">))]</span></span>
+<span id="cb10-9"><a href="#cb10-9" aria-hidden="true" tabindex="-1"></a>    allocation_percent<span class="op">:</span> <span class="dt">u8</span><span class="op">,</span></span>
+<span id="cb10-10"><a href="#cb10-10" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb10-11"><a href="#cb10-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-12"><a href="#cb10-12" aria-hidden="true" tabindex="-1"></a><span class="kw">impl</span> TypedEdge <span class="cf">for</span> WorksOn <span class="op">{</span></span>
+<span id="cb10-13"><a href="#cb10-13" aria-hidden="true" tabindex="-1"></a>    <span class="kw">const</span> LABEL<span class="op">:</span> <span class="op">&amp;</span><span class="ot">&#39;static</span> <span class="dt">str</span> <span class="op">=</span> <span class="st">&quot;WORKS_ON&quot;</span><span class="op">;</span></span>
+<span id="cb10-14"><a href="#cb10-14" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-15"><a href="#cb10-15" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> source_node_id(<span class="op">&amp;</span><span class="kw">self</span>) <span class="op">-&gt;</span> NodeId <span class="op">{</span></span>
+<span id="cb10-16"><a href="#cb10-16" aria-hidden="true" tabindex="-1"></a>        <span class="pp">format!</span>(<span class="st">&quot;person:{}&quot;</span><span class="op">,</span> <span class="kw">self</span><span class="op">.</span>person_id)<span class="op">.</span>into()</span>
+<span id="cb10-17"><a href="#cb10-17" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb10-18"><a href="#cb10-18" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-19"><a href="#cb10-19" aria-hidden="true" tabindex="-1"></a>    <span class="kw">fn</span> target_node_id(<span class="op">&amp;</span><span class="kw">self</span>) <span class="op">-&gt;</span> NodeId <span class="op">{</span></span>
+<span id="cb10-20"><a href="#cb10-20" aria-hidden="true" tabindex="-1"></a>        <span class="pp">format!</span>(<span class="st">&quot;project:{}&quot;</span><span class="op">,</span> <span class="kw">self</span><span class="op">.</span>project_id)<span class="op">.</span>into()</span>
+<span id="cb10-21"><a href="#cb10-21" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span></span>
+<span id="cb10-22"><a href="#cb10-22" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span>
+<span id="cb10-23"><a href="#cb10-23" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-24"><a href="#cb10-24" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> works_on_schema <span class="op">=</span> object()</span>
+<span id="cb10-25"><a href="#cb10-25" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>field(<span class="st">&quot;person_id&quot;</span><span class="op">,</span> string()<span class="op">.</span>min(<span class="dv">1</span>))</span>
+<span id="cb10-26"><a href="#cb10-26" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>field(<span class="st">&quot;project_id&quot;</span><span class="op">,</span> string()<span class="op">.</span>min(<span class="dv">1</span>))</span>
+<span id="cb10-27"><a href="#cb10-27" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>field(<span class="st">&quot;allocation_percent&quot;</span><span class="op">,</span> number()<span class="op">.</span>int()<span class="op">.</span>min(<span class="dv">1.0</span>)<span class="op">.</span>max(<span class="dv">100.0</span>))</span>
+<span id="cb10-28"><a href="#cb10-28" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>strict()<span class="op">;</span></span>
+<span id="cb10-29"><a href="#cb10-29" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb10-30"><a href="#cb10-30" aria-hidden="true" tabindex="-1"></a>builder<span class="op">.</span><span class="pp">add_edge_from_json::</span><span class="op">&lt;</span>WorksOn<span class="op">,</span> _<span class="op">&gt;</span>(</span>
+<span id="cb10-31"><a href="#cb10-31" aria-hidden="true" tabindex="-1"></a>    <span class="op">&amp;</span>works_on_schema<span class="op">,</span></span>
+<span id="cb10-32"><a href="#cb10-32" aria-hidden="true" tabindex="-1"></a>    <span class="op">&amp;</span><span class="pp">json!</span>(<span class="op">{</span></span>
+<span id="cb10-33"><a href="#cb10-33" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;person_id&quot;</span><span class="op">:</span> <span class="st">&quot;nia&quot;</span><span class="op">,</span></span>
+<span id="cb10-34"><a href="#cb10-34" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;project_id&quot;</span><span class="op">:</span> <span class="st">&quot;grust&quot;</span><span class="op">,</span></span>
+<span id="cb10-35"><a href="#cb10-35" aria-hidden="true" tabindex="-1"></a>        <span class="st">&quot;allocation_percent&quot;</span><span class="op">:</span> <span class="dv">80</span></span>
+<span id="cb10-36"><a href="#cb10-36" aria-hidden="true" tabindex="-1"></a>    <span class="op">}</span>)<span class="op">,</span></span>
+<span id="cb10-37"><a href="#cb10-37" aria-hidden="true" tabindex="-1"></a>)<span class="op">?;</span></span></code></pre></div>
+<p>The adapter intentionally deserializes the original JSON after zod-rs
+accepts it. This preserves Rust integer types. For example,
+<code>zod-rs</code> validates numbers through a floating-point schema,
+but Serde should still be allowed to decode the original JSON integer
+<code>80</code> into a Rust <code>u8</code>.</p>
+<h2 data-number="5.4" id="how-the-options-interact"><span
+class="header-section-number">5.4</span> How the Options Interact</h2>
+<p>There are four common construction paths:</p>
+<pre class="text"><code>Raw GraphBuilder:
+  trusted Rust code -&gt; Node/Edge -&gt; Graph
+
+Graph documents:
+  YAML/JSON/XML -&gt; Graph::from_* validation -&gt; Graph
+
+typed-garde:
+  Rust struct -&gt; garde validation -&gt; TypedNode/TypedEdge lowering -&gt; Graph
+
+typed-zod-rs:
+  raw JSON -&gt; zod-rs shape validation -&gt; Serde -&gt; garde validation -&gt; Graph</code></pre>
+<p>Choose <code>GraphBuilder</code> when the data is already trusted
+Rust code and the dynamic graph model is enough. Choose graph documents
+when you need readable fixtures, interchange files, or migration inputs.
+Choose <code>typed-garde</code> when the domain model lives in Rust
+structs and should enforce Rust-level invariants. Choose
+<code>typed-zod-rs</code> when the input is untrusted JSON and you want
+a separate shape gate before Serde and garde.</p>
+<p>These options compose. A single graph can contain nodes loaded from
+YAML, raw edges added by <code>GraphBuilder</code>, typed nodes
+validated by garde, and request payloads validated first by zod-rs. The
+result is still just <code>Graph</code>.</p>
+<p>The distinction between zod-rs and garde is worth keeping crisp:</p>
+<ul>
+<li>zod-rs sees <code>serde_json::Value</code>.</li>
+<li>Serde converts JSON into Rust types.</li>
+<li>garde sees Rust fields with Rust types.</li>
+<li><code>TypedNode</code> and <code>TypedEdge</code> convert validated
+Rust values into Grust labels, ids, endpoints, and properties.</li>
+</ul>
+<p>For example, this JSON fails at the zod-rs stage because
+<code>skills</code> is not an array:</p>
+<div class="sourceCode" id="cb12"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb12-1"><a href="#cb12-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb12-2"><a href="#cb12-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;nia&quot;</span><span class="fu">,</span></span>
+<span id="cb12-3"><a href="#cb12-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;name&quot;</span><span class="fu">:</span> <span class="st">&quot;Nia&quot;</span><span class="fu">,</span></span>
+<span id="cb12-4"><a href="#cb12-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;skills&quot;</span><span class="fu">:</span> <span class="st">&quot;rust&quot;</span></span>
+<span id="cb12-5"><a href="#cb12-5" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<p>This JSON can pass a loose zod-rs shape check but fail at the garde
+stage if the Rust type requires at least two skills:</p>
+<div class="sourceCode" id="cb13"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb13-1"><a href="#cb13-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb13-2"><a href="#cb13-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;id&quot;</span><span class="fu">:</span> <span class="st">&quot;nia&quot;</span><span class="fu">,</span></span>
+<span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;name&quot;</span><span class="fu">:</span> <span class="st">&quot;Nia&quot;</span><span class="fu">,</span></span>
+<span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;skills&quot;</span><span class="fu">:</span> <span class="ot">[</span><span class="st">&quot;rust&quot;</span><span class="ot">]</span></span>
+<span id="cb13-5"><a href="#cb13-5" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div>
+<p>That separation gives application authors precise error boundaries.
+Shape errors usually belong near the API or file-ingest boundary. Domain
+errors belong near the typed model.</p>
+<h2 data-number="5.5" id="relationship-to-graphschema"><span
+class="header-section-number">5.5</span> Relationship to
+GraphSchema</h2>
+<p><code>GraphSchema</code> and typed ingestion solve different
+problems. <code>GraphSchema</code> describes graph labels, fields,
+uniqueness, and backend-facing metadata. It can drive indexes,
+migrations, table layouts, or validation inside a store. Typed ingestion
+validates values before they become graph data.</p>
+<p>In practice they can reinforce each other:</p>
+<ul>
+<li><code>TypedNode</code> and <code>TypedEdge</code> keep application
+construction honest.</li>
+<li>zod-rs schemas protect JSON ingress points.</li>
+<li><code>GraphSchema</code> tells storage backends what structure to
+expect.</li>
+<li><code>GraphStore</code> remains the common persistence
+contract.</li>
+</ul>
+<p>This layered design keeps Grust from becoming either too loose or too
+rigid. Projects can start with raw graph construction, add typed Rust
+validation for important labels, add zod-rs for JSON ingress, and later
+add <code>GraphSchema</code> for backend optimization.</p>
+<p>The same schema can also validate and write in one step:</p>
+<div class="sourceCode" id="cb14"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb14-1"><a href="#cb14-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> report <span class="op">=</span> store<span class="op">.</span>put_typed_graph(<span class="op">&amp;</span>schema<span class="op">,</span> <span class="op">&amp;</span>graph)<span class="op">.</span><span class="kw">await</span><span class="op">?;</span></span></code></pre></div>
+<p>That call validates labels, required fields, field value types, and
+edge endpoint labels before delegating to the backend. Schema-capable
+stores then use <code>apply_schema</code> to lower the portable model
+into their native storage surfaces.</p>
+</body>
+</html>

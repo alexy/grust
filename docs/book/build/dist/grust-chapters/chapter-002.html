@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov" />
+  <meta name="dcterms.date" content="2026-07-11" />
+  <title>Preface</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Grust</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Grust</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-003.html" accesskey="n" rel="next">1. The Shape of Grust</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-001.html" accesskey="p" rel="previous">Grust</a>
+</span>
+</div>
+</nav>
+<h1 data-number="1" id="preface"><span
+class="header-section-number">1</span> Preface</h1>
+<p>Grust is a small Rust property graph API with a large architectural
+promise: application code should be able to build, validate, traverse,
+and persist graph data without committing itself to a database query
+language too early.</p>
+<p>That goal matters because many graph-shaped Rust applications live
+between worlds. A crawler wants a local graph while it extracts facts.
+An indexing pipeline wants deterministic target state. A data product
+may begin with tests and an in-memory backend, then later need
+SurrealDB, FalkorDB, PostgreSQL, LanceDB, Sail, or another backend.
+Grust gives those applications one model to program against:</p>
+<pre class="text"><code>Graph = nodes + edges
+Node  = id + label + properties
+Edge  = optional id + from + to + label + properties</code></pre>
+<p>This book is a guided tour of that model. It covers the workspace
+architecture, the Rust concepts the code leans on, the core graph types,
+traversal IR, backend contracts, implemented backends, proposed
+backends, and practical examples.</p>
+</body>
+</html>

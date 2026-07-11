@@ -11,11 +11,10 @@ Source:
 - `manuscript.md` keeps Mermaid diagrams inline as fenced `mermaid` blocks.
 - `build.mjs` renders the cover template, renders Mermaid blocks to SVG, and
   produces `build/manuscript.rendered.md` for Pandoc.
-- `build.sh` renders the cover and body separately for PDF, merges them, sets
-  PDF page labels so the cover is unnumbered and body numbering starts at 1,
-  then builds EPUB and MOBI with the cover before the manuscript. It also
-  creates a stable title-stem EPUB and an ignored versioned Send to Kindle
-  symlink.
+- `build.sh` delegates to FirstPair's unified builder using the repository-root
+  `book.build.json`. The shared build renders PDF, EPUB, MOBI, single-file HTML,
+  and chapter HTML, then sets PDF page labels, writes a complete manifest, and
+  runs rendered layout and package verification.
 - `fix_epub_layout.sh` rewrites Pandoc's EPUB defaults so the custom cover is
   first in the reading spine and marked as frontmatter.
 - `check_epub_metadata.py` verifies the generated EPUB package metadata, stable
@@ -50,4 +49,6 @@ Outputs:
 - `build/dist/grust.epub`
 - `build/dist/grust (<version>).epub` ignored symlink to `grust.epub`
 - `build/dist/grust.mobi`
+- `build/dist/grust.html`
+- `build/dist/grust-chapters/`
 - `build/dist/VERSION.md`

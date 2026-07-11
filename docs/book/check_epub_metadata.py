@@ -246,10 +246,17 @@ def validate(epub_path: Path) -> list[str]:
                     f"{version_marker} does not include {expected_link_line!r}"
                 )
             if date:
-                expected_date_line = f"built_at: {date}"
-                if expected_date_line not in marker.splitlines():
+                built_at = next(
+                    (
+                        line.removeprefix("built_at: ")
+                        for line in marker.splitlines()
+                        if line.startswith("built_at: ")
+                    ),
+                    "",
+                )
+                if not built_at.startswith(date):
                     errors.append(
-                        f"{version_marker} does not include {expected_date_line!r}"
+                        f"{version_marker} built_at {built_at!r} does not start with {date!r}"
                     )
 
         require_pattern(

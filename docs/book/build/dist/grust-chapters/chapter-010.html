@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-US" xml:lang="en-US">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <meta name="author" content="Alexy Khrabrov" />
+  <meta name="dcterms.date" content="2026-07-11" />
+  <title>8. Backend Architecture</title>
+  <style>
+    div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
+    span.navlink { flex: 1; }
+    span.navlink-label { display: inline-block; min-width: 4em; }
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+    /* CSS for syntax highlighting */
+    html { -webkit-text-size-adjust: 100%; }
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { color: #008000; } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { color: #008000; font-weight: bold; } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+  </style>
+  <link rel="stylesheet" href="book.css" />
+</head>
+<body>
+<nav id="sitenav">
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Up:</span> <a href="chapter-001.html" accesskey="u" rel="up">Grust</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Top:</span> <a href="index.html" accesskey="t" rel="top">Grust</a>
+</span>
+</div>
+<div class="sitenav">
+<span class="navlink">
+<span class="navlink-label">Next:</span> <a href="chapter-011.html" accesskey="n" rel="next">9. Cypher and GQL</a>
+</span>
+<span class="navlink">
+<span class="navlink-label">Previous:</span> <a href="chapter-009.html" accesskey="p" rel="previous">7. Rust Concepts Used</a>
+</span>
+</div>
+</nav>
+<h1 data-number="9" id="backend-architecture"><span
+class="header-section-number">9</span> 8. Backend Architecture</h1>
+<p>Backends share the same input model but not the same execution
+model:</p>
+<figure>
+<img src="diagrams/diagram-05.png" alt="Diagram 5" />
+<figcaption aria-hidden="true">Diagram 5</figcaption>
+</figure>
+<p>Some backends are full read/write/traversal stores today. Others
+still focus on writes and administrative loading. That is normal for an
+early multi-backend project, and the trait makes the maturity boundary
+explicit.</p>
+<h2 data-number="9.1" id="memory"><span
+class="header-section-number">9.1</span> Memory</h2>
+<p><code>grust-memory</code> is the deterministic local backend. It
+stores nodes in a <code>BTreeMap&lt;NodeId, Node&gt;</code> and stores
+edges by source, label, destination, and optional explicit edge ID. That
+means structural edges still behave deterministically, while id-bearing
+parallel edges between the same endpoints can coexist. Reads and
+traversals scan those maps. It is the best backend for tests, examples,
+and local workflows that need no external service. When a
+<code>GraphSchema</code> is applied, the memory backend validates writes
+against it, which makes it a useful conformance harness for typed
+storage behavior before a database enters the picture.</p>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">grust::prelude::</span><span class="op">*;</span></span>
+<span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-3"><a href="#cb1-3" aria-hidden="true" tabindex="-1"></a># <span class="kw">async</span> <span class="kw">fn</span> demo(graph<span class="op">:</span> Graph) <span class="op">-&gt;</span> <span class="pp">grust::</span><span class="dt">Result</span><span class="op">&lt;</span>()<span class="op">&gt;</span> <span class="op">{</span></span>
+<span id="cb1-4"><a href="#cb1-4" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> store <span class="op">=</span> <span class="pp">MemoryGraphStore::</span>new()<span class="op">;</span></span>
+<span id="cb1-5"><a href="#cb1-5" aria-hidden="true" tabindex="-1"></a>store<span class="op">.</span>put_graph(<span class="op">&amp;</span>graph)<span class="op">.</span><span class="kw">await</span><span class="op">?;</span></span>
+<span id="cb1-6"><a href="#cb1-6" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> people <span class="op">=</span> store</span>
+<span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span>traverse(</span>
+<span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>        <span class="pp">Traversal::</span>from_node(<span class="st">&quot;talk:rust-graph-api&quot;</span>)</span>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>            <span class="op">.</span>out(<span class="st">&quot;PRESENTED_BY&quot;</span>)</span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a>            <span class="op">.</span>to(<span class="st">&quot;Person&quot;</span>)<span class="op">,</span></span>
+<span id="cb1-12"><a href="#cb1-12" aria-hidden="true" tabindex="-1"></a>    )</span>
+<span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span><span class="kw">await</span><span class="op">?;</span></span>
+<span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a># <span class="cn">Ok</span>(())</span>
+<span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a># <span class="op">}</span></span></code></pre></div>
+<h2 data-number="9.2" id="lancedb"><span
+class="header-section-number">9.2</span> LanceDB</h2>
+<p><code>grust-lancedb</code> treats LanceDB first as a durable
+Arrow-native table store. It uses two tables, one for nodes and one for
+edges. Nodes are keyed by <code>id</code>. Edges are keyed by an
+explicit edge id when present, or by a deterministic
+<code>from + label + to</code> key otherwise. That fallback key is
+shared with other tabular/export backends through
+<code>grust-core::edge_key</code>, so structural edge identity does not
+drift across implementations. Writes use LanceDB
+<code>merge_insert</code>, and traversal performs hop-by-hop table
+queries. When a hop fans out to multiple target nodes, the backend reads
+those target nodes with <code>get_nodes</code> instead of issuing one
+node query per edge. Property-start traversal filters by label in
+LanceDB, then compares decoded Grust properties exactly so nested JSON
+or serialized fragments cannot produce false positives.</p>
+<p>This backend is a natural home for later vector-search extensions.
+The core <code>GraphStore</code> trait should stay graph-focused;
+LanceDB-specific nearest-neighbor search can live in an extension trait
+without leaking into every backend.</p>
+<p>With <code>GraphSchema</code>, LanceDB also creates typed Arrow
+tables per node and edge label. The universal <code>grust_nodes</code>
+and <code>grust_edges</code> tables remain the portable read/traversal
+surface, while schema-labeled rows are mirrored into tables such as
+<code>grust_node_person</code> or <code>grust_edge_presents</code> with
+typed columns for declared fields. That gives analytical consumers and
+future vector extensions a native columnar surface without giving up the
+backend-neutral graph model.</p>
+<h2 data-number="9.3" id="ladybugdb"><span
+class="header-section-number">9.3</span> LadybugDB</h2>
+<p><code>grust-ladybug</code> embeds LadybugDB directly through the Rust
+<code>lbug</code> crate. It is the durable local graph-database backend:
+no Docker service, no HTTP bridge, and no separate daemon. The store
+opens either an in-memory Ladybug database or an on-disk Ladybug
+directory and creates Grust-managed Ladybug node and relationship tables
+from graph labels.</p>
+<p>Ladybug can be used for typed or untyped property graphs, and the
+Grust backend now exposes that distinction directly. The default
+<code>LadybugGraphMode::Untyped</code> accepts ordinary Grust graphs and
+creates the needed Ladybug node and relationship tables from graph
+labels and endpoint labels on write. That mode matches Grust’s raw
+<code>Graph</code>, JSON, YAML, and XML loading path, where labels and
+properties are data owned by the application.</p>
+<p><code>LadybugGraphMode::Typed</code> requires
+<code>apply_schema</code> or <code>put_typed_graph</code> before writes.
+In that mode the backend creates the declared Ladybug tables up front,
+does not create undeclared tables during writes, and validates later
+writes against the applied <code>GraphSchema</code>. Reads reconstruct
+Grust <code>Node</code> and <code>Edge</code> values from the managed
+tables, while traversal evaluates the portable Grust traversal IR by
+walking Ladybug relationship tables and reading target nodes through the
+same <code>GraphStore</code> contract.</p>
+<p>The <code>ladybug-arrow</code> facade feature also exposes Ladybug’s
+embedded Arrow table path through Arrow IPC streams. A caller can
+register IPC node tables, relationship tables, and CSR relationship
+tables directly with Ladybug, then query them with Ladybug Cypher and
+receive result chunks back as Arrow IPC. The public boundary is IPC
+bytes rather than a Rust <code>RecordBatch</code> type, so callers do
+not have to match Ladybug’s internal Arrow crate version exactly.</p>
+<p>The first implementation stores Grust properties as JSON text for
+portable round trips. Later schema lowering can add typed Ladybug
+columns, full-text indexes, vector indexes, and direct graph-RAG
+extension traits without changing the core graph model.</p>
+<h2 data-number="9.4" id="postgresql-and-pggraph"><span
+class="header-section-number">9.4</span> PostgreSQL and pgGraph</h2>
+<p><code>grust-postgres</code> stores the source of truth in ordinary
+PostgreSQL tables:</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode sql"><code class="sourceCode sql"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>grust_nodes(<span class="kw">id</span> text <span class="kw">primary</span> <span class="kw">key</span>, <span class="kw">label</span> text <span class="kw">not</span> <span class="kw">null</span>, props jsonb <span class="kw">not</span> <span class="kw">null</span>)</span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>grust_edges(<span class="kw">id</span> text, from_id text <span class="kw">not</span> <span class="kw">null</span>, to_id text <span class="kw">not</span> <span class="kw">null</span>,</span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>            <span class="kw">label</span> text <span class="kw">not</span> <span class="kw">null</span>, props jsonb <span class="kw">not</span> <span class="kw">null</span>)</span></code></pre></div>
+<p>The generic backend creates tables and indexes with ordinary
+PostgreSQL DDL. It does not require PostgreSQL extensions, so the same
+<code>PostgresGraphStore</code> can target local PostgreSQL, Neon, or
+another managed PostgreSQL-compatible service. Reads use SQL against the
+universal tables. Traversal is lowered to SQL joins over those tables.
+Mutation batches are wrapped in PostgreSQL transactions.</p>
+<p>Schema application adds typed label views and expression indexes. For
+example, a <code>Person</code> node schema with
+<code>name: String</code> and <code>age: Int</code> can produce a
+<code>grust_node_person</code> view over the universal node table, with
+<code>age</code> exposed as a <code>bigint</code> expression. This is a
+deliberately incremental typed-storage path: PostgreSQL keeps the
+flexible JSONB source of truth while callers that know the schema get
+typed SQL surfaces.</p>
+<p><code>grust-pggraph</code> is now the pgGraph extension layer over
+that same shared PostgreSQL implementation. It bootstraps the
+<code>graph</code> extension, registers the universal tables, and can
+optionally build the pgGraph projection for graph-index experiments
+without forking the storage and traversal code.</p>
+<p><code>grust-postgres-pgq</code> targets PostgreSQL 19’s native
+SQL/PGQ support. It uses the same universal tables as the durable
+storage layout, creates a native <code>PROPERTY GRAPH</code> over them,
+and executes bounded traversal through <code>GRAPH_TABLE</code>. That
+keeps writes, reads, schema views, and mutation batches on the proven
+PostgreSQL backend while letting traversal exercise PostgreSQL’s
+standard property-graph query engine.</p>
+<p>The reusable SQL boundary lives in <code>grust-sql-core</code>. It
+owns the parts that are really common across row-store SQL graph
+backends: universal table DDL, reads, bounded traversal joins, mutation
+framing, schema views, expression indexes, identifier quoting, and
+literal escaping. Dialects keep the pieces that affect correctness or
+efficiency. PostgreSQL keeps JSONB predicates, <code>ON CONFLICT</code>,
+<code>CREATE OR REPLACE VIEW</code>, transaction text, and lateral joins
+for undirected steps. Turso keeps JSON text, <code>json_extract</code>,
+<code>json_patch</code>, SQLite-compatible views, and a derived-table
+undirected join shape. Sail does not use this SQL core because its SQL
+path runs through Spark Connect, Arrow IPC staging, and distributed
+Spark SQL rather than a direct row-store connection.</p>
+<h2 data-number="9.5" id="turso"><span
+class="header-section-number">9.5</span> Turso</h2>
+<p><code>grust-turso</code> uses the Turso Rust SDK directly. The
+default connection path opens a local in-process Turso database:</p>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a># <span class="kw">use</span> <span class="pp">grust::prelude::</span><span class="op">*;</span></span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a># <span class="kw">async</span> <span class="kw">fn</span> open() <span class="op">-&gt;</span> <span class="pp">grust::</span><span class="dt">Result</span><span class="op">&lt;</span>()<span class="op">&gt;</span> <span class="op">{</span></span>
+<span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> store <span class="op">=</span> <span class="pp">TursoGraphStore::</span>connect(TursoConfig <span class="op">{</span></span>
+<span id="cb3-4"><a href="#cb3-4" aria-hidden="true" tabindex="-1"></a>    path<span class="op">:</span> <span class="st">&quot;data/grust.db&quot;</span><span class="op">.</span>to_string()<span class="op">,</span></span>
+<span id="cb3-5"><a href="#cb3-5" aria-hidden="true" tabindex="-1"></a>    table_prefix<span class="op">:</span> <span class="st">&quot;grust&quot;</span><span class="op">.</span>to_string()<span class="op">,</span></span>
+<span id="cb3-6"><a href="#cb3-6" aria-hidden="true" tabindex="-1"></a>    batch_size<span class="op">:</span> <span class="dv">500</span><span class="op">,</span></span>
+<span id="cb3-7"><a href="#cb3-7" aria-hidden="true" tabindex="-1"></a>    journal_mode<span class="op">:</span> <span class="pp">TursoJournalMode::</span>Wal<span class="op">,</span></span>
+<span id="cb3-8"><a href="#cb3-8" aria-hidden="true" tabindex="-1"></a><span class="op">}</span>)</span>
+<span id="cb3-9"><a href="#cb3-9" aria-hidden="true" tabindex="-1"></a><span class="op">.</span><span class="kw">await</span><span class="op">?;</span></span>
+<span id="cb3-10"><a href="#cb3-10" aria-hidden="true" tabindex="-1"></a># <span class="cn">Ok</span>(())</span>
+<span id="cb3-11"><a href="#cb3-11" aria-hidden="true" tabindex="-1"></a># <span class="op">}</span></span></code></pre></div>
+<p>The storage layout mirrors the universal table shape used by the
+PostgreSQL backend, but uses SQLite-compatible types and JSON text
+properties:</p>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode sql"><code class="sourceCode sql"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a>grust_nodes(<span class="kw">id</span> text <span class="kw">primary</span> <span class="kw">key</span>, <span class="kw">label</span> text <span class="kw">not</span> <span class="kw">null</span>, props text <span class="kw">not</span> <span class="kw">null</span>)</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a>grust_edges(<span class="kw">id</span> text, from_id text <span class="kw">not</span> <span class="kw">null</span>, to_id text <span class="kw">not</span> <span class="kw">null</span>,</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a>            <span class="kw">label</span> text <span class="kw">not</span> <span class="kw">null</span>, props text <span class="kw">not</span> <span class="kw">null</span>)</span></code></pre></div>
+<p>Reads and traversal use ordinary SQL over the local Turso connection.
+Schema application creates label-specific SQL views and expression
+indexes using <code>json_extract</code>. Mutation batches are wrapped in
+a Turso transaction.</p>
+<p>The <code>journal_mode</code> option selects the concurrency model.
+The default <code>Wal</code> is Turso’s single-writer write-ahead log.
+Selecting <code>Mvcc</code> enables Turso’s multi-version concurrency
+control (<code>PRAGMA journal_mode = mvcc</code>, a database-header mode
+applied to a fresh database); data writes then run inside
+<code>BEGIN CONCURRENT</code> transactions with bounded conflict retry,
+so concurrent writers make progress.</p>
+<p>With the <code>turso-sync</code> facade feature, callers can
+construct a synced store from a local path, remote URL, and optional
+auth token. The <code>GraphStore</code> API continues to operate on the
+local SQL connection; callers decide when to call the store’s
+<code>push</code> and <code>pull</code> helpers.</p>
+<h2 data-number="9.6" id="sail"><span
+class="header-section-number">9.6</span> Sail</h2>
+<p><code>grust-sail</code> connects to a Sail Spark Connect server over
+gRPC. It stores graph data in Spark DataFrames backed by Delta tables.
+SQL commands and reads are sent as Spark Connect SQL relation plans, and
+read results are decoded from Arrow IPC streams.</p>
+<p>Bulk writes stage Arrow IPC batches as Spark Connect
+<code>LocalRelation</code> temp views and then merge from those views.
+That avoids building one giant SQL literal per row, keeps user values
+out of SQL text, and gives long-running requests an operation id with
+reattachment enabled. Query filters bind user values through Spark
+Connect named arguments. Delete mutations stage their values as Arrow
+temp views before running argument-free SQL commands, which avoids
+string substitution while matching Sail’s current command-parameter
+behavior. Traversal joins use globally unique node ids; source and
+destination label columns may be empty for single-edge writes where the
+full graph is not in scope.</p>
+<p>Sail’s Arrow boundary is now public too. Applications can stage
+arbitrary Arrow IPC streams as session temp views and query them with
+Spark SQL, collect Spark SQL results as Arrow IPC chunks, or load
+Grust-shaped node and edge IPC streams through the normal graph write
+path. This gives Sail the same data-source role as Ladybug while keeping
+Sail’s internal Arrow 58 dependency separate from Ladybug’s Arrow 55
+dependency.</p>
+<p>When a schema is applied, Sail creates typed Delta tables per node
+and edge label and mirrors writes into them with
+<code>MERGE INTO</code>. The universal Spark tables keep traversal
+simple and portable; the typed tables make declared graph labels
+available as ordinary Spark columns.</p>
+<p>Sail also has reusable graph analytics helpers over the persisted
+generic tables. <code>read_graph</code> collects the generic
+<code>grust_nodes</code> and <code>grust_edges</code> tables back into a
+portable Grust <code>Graph</code>. <code>in_degrees</code>,
+<code>out_degrees</code>, <code>degrees</code>, and
+<code>degree_pairs</code> run Spark SQL over those same tables and
+decode the Arrow results into small Rust row types. These helpers are
+deliberately low-level: they expose common graph measurements without
+making the backend-neutral <code>GraphStore</code> trait depend on
+Spark-specific analytics.</p>
+<p>The Sail crate now also publishes its generic table contract.
+Constants name <code>grust_nodes</code>, <code>grust_edges</code>, and
+the physical node and edge columns, including the persisted generic edge
+<code>edge_key</code> and optional explicit edge <code>id</code>.
+Projection helpers classify requested graph fields as physical columns
+or JSON properties, map edge <code>label</code> to the stored
+<code>edge_type</code>, and check when a typed Sail node or edge table
+can satisfy a graph query directly. This keeps Sail-native graph
+planning and GrustFrames-style distributed lowerings aligned with the
+same backend layout that Grust writes.</p>
+<p>The same contract layer exposes typed table descriptors derived from
+<code>GraphSchema</code> and directional triplet SQL. The triplet
+helpers join generic edges back to their source and destination nodes,
+and can orient rows as outgoing, incoming, or undirected pairs. That is
+the shared primitive needed by distributed triplet filters, motif
+expansion, and aggregate-message style passes without making the
+backend-neutral store trait depend on those higher level algorithms.</p>
+<p>Writable Cypher is not a separate Sail persistence path. The portable
+Cypher/GQL layer (see <em>Cypher and GQL</em>) owns parsing, semantics,
+planning, and the read engine; for the bounded read subset it lowers the
+<code>MATCH</code>/<code>WHERE</code> filter into Spark SQL while the
+<code>RETURN</code> projection runs through the shared reference.
+<code>SailGraphStore</code> executes resolved
+<code>GraphMutationPlan</code>s through
+<code>CypherMutationExecutor</code>, so Cypher writes use the same
+staged-Arrow, <code>MERGE INTO</code>, typed-Delta mirror, and delete
+paths as ordinary Grust writes. The plan and report types are
+backend-neutral — Memory, Sail, and Turso all execute them — while Sail
+adds the SQL read pushdown and typed-table mirrors on top.</p>
+<h2 data-number="9.7" id="falkordb-helixdb-and-surrealdb"><span
+class="header-section-number">9.7</span> FalkorDB, HelixDB, and
+SurrealDB</h2>
+<p>The FalkorDB backend writes through Redis <code>GRAPH.QUERY</code>
+using Cypher-like <code>MERGE</code> statements. It batches nodes by
+label path and edges by relationship type. Schema application creates
+label/property indexes for declared node types.</p>
+<p>The HelixDB backend has HTTP and SDK stores. Both support batched
+writes, node reads, edge reads, and backend-neutral traversal through
+Helix dynamic queries. Edge writes store Grust relationship metadata
+(<code>relationship</code>, <code>from_id</code>, <code>to_id</code>,
+and optional <code>edge_id</code>) so <code>EdgeQuery</code> can
+reconstruct Grust edges from Helix relationship rows. Helix writes
+preserve supported scalar and array properties instead of silently
+dropping non-string values; unsupported JSON object properties return an
+explicit error. The current schema hook validates that labels,
+relationships, and fields can be safely lowered through the
+dynamic-query path; backend-native schema-file generation can build on
+that same <code>GraphSchema</code> contract later.</p>
+<p>The SurrealDB backend also has HTTP and SDK stores. It can bootstrap,
+clear, upsert nodes, relate edges, delete nodes and edges, read nodes
+and edges, and execute traversal hop-by-hop through the
+<code>GraphStore</code> contract. Applying a schema lowers node and edge
+declarations to Surreal <code>DEFINE TABLE</code> and
+<code>DEFINE FIELD</code> statements so the backend can run in
+schemafull mode where the schema calls for it. Reads use configured
+labels and relationships, plus ID-derived table names, to find records
+across Surreal’s label-specific tables. Generic edge reads and node
+deletes require <code>SurrealConfig.relationships</code>; when that list
+is empty, the backend returns a configuration error instead of silently
+scanning no relation tables. Explicit edge-label reads and deletes can
+still target a known relation table directly. Traversal batches
+target-node reads per step through <code>get_nodes</code>, avoiding a
+serial node lookup for every edge in a fan-out. Mutation batches are
+wrapped in SurrealDB transactions.</p>
+<h2 data-number="9.8" id="cocoindex"><span
+class="header-section-number">9.8</span> CocoIndex</h2>
+<p><code>grust-cocoindex</code> is intentionally not an ordinary
+<code>GraphStore</code>. CocoIndex is an incremental target-state
+system, so the Grust integration exports a graph as serializable node
+and relationship state:</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> export <span class="op">=</span> graph<span class="op">.</span>to_cocoindex_export()<span class="op">?;</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> graph <span class="op">=</span> cocoindex_export_to_graph(export)<span class="op">?;</span></span></code></pre></div>
+<p>The export uses Grust node IDs as target keys, converts properties to
+JSON, and requires edge endpoints to exist in the graph so relationship
+source and target labels can be emitted. The import path expects the
+same key shape, validates relationship endpoints against imported nodes,
+and preserves explicit relationship keys as Grust edge IDs.</p>
+<h2 data-number="9.9" id="backend-integration-tests"><span
+class="header-section-number">9.9</span> Backend Integration Tests</h2>
+<p>Unit tests stay self-contained, but live backend tests are explicit.
+They are marked ignored in Cargo so a normal workspace test run does not
+accidentally depend on local services. When a live test is requested,
+however, it must reach the backend; it no longer returns early and
+pretends success when a server is missing.</p>
+<p>The repository provides a launcher for those checks:</p>
+<div class="sourceCode" id="cb6"><pre class="sourceCode sh"><code class="sourceCode bash"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="ex">scripts/integration-test.sh</span> doctor <span class="at">--profile</span> docker <span class="at">--mode</span> docker</span>
+<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="ex">scripts/integration-test.sh</span> <span class="at">--profile</span> docker <span class="at">--mode</span> docker</span></code></pre></div>
+<p>The Docker profile is the contributor path: it starts the
+Docker-backed services and runs local LanceDB and CocoIndex checks. The
+full maintainer profile is still available:</p>
+<div class="sourceCode" id="cb7"><pre class="sourceCode sh"><code class="sourceCode bash"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="ex">scripts/integration-test.sh</span> <span class="at">--profile</span> all</span></code></pre></div>
+<p>The launcher reads <code>integration/backends.conf</code>. In
+<code>auto</code> mode it prefers already-running services, then
+configured local source checkouts such as <code>~/src/sail</code>,
+<code>~/src/SurrealDB</code>, <code>~/src/FalkorDB</code>, and
+<code>~/src/HelixDB</code>, then Docker Compose where a service is
+available. The repository-level <code>docs/INTEGRATION.md</code> guide
+covers profiles, modes, Docker image pins, source-checkout
+configuration, and CI strategy.</p>
+</body>
+</html>

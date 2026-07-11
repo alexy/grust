@@ -6,6 +6,12 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **Unified FirstPair book build:** `book.build.json` now delegates the Grust
+  book to FirstPair's pinned Pandoc/Typst and Mermaid toolchain while retaining
+  `build.mjs`, EPUB repair, and page-label hooks. PDF, EPUB, MOBI, single-file
+  HTML, chapter HTML, manifest links, and rendered layout checks share one
+  publish-complete contract.
+
 - **PostgreSQL joins the executing Cypher conformance set**
   (`docs/GQL_POSTGRES_EXECUTOR_GOAL.md`, complete): `PostgresGraphStore` now
   implements `CypherMutationExecutor` (resolved writes, bounded matched-node

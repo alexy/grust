@@ -41,6 +41,7 @@ Authored inputs live in `docs/book/`:
 - `epub.css`: EPUB and Kindle-facing CSS.
 - `build.mjs`: renders cover placeholders and Mermaid diagrams.
 - `build.sh`: runs the full artifact pipeline.
+- `../../book.build.json`: shared build configuration and source-owned hooks.
 - `fix_epub_layout.sh`: repairs Pandoc's generated EPUB package layout.
 - `check_epub_metadata.py`: validates the generated EPUB package and dist
   files.
@@ -96,6 +97,13 @@ vertical whitespace.
 
 ### Required Tools
 
+`build.sh` is a thin wrapper over
+`~/src/firstpair/publishing/scripts/build-library-book.sh`. FirstPair pins the
+Homebrew and npm rendering tools. The checked-in `book.build.json` retains
+Grust's `build.mjs`, EPUB repair, PDF page-label repair, and metadata validator;
+the `docs/book/python` uv project supplies `pypdf` through the repository's
+asdf-pinned Python 3.14.5.
+
 The full pipeline expects:
 
 - `node`
@@ -103,14 +111,11 @@ The full pipeline expects:
 - `pandoc`
 - `typst`
 - `pdfunite`
-- Python, preferably through `asdf exec python`
-- Python with `pypdf` for PDF page-label repair. `build.sh` uses
-  `PDF_PYTHON` when set, otherwise uses the bundled Codex runtime on this Mac.
+- asdf Python 3.14.5 with the uv-locked `docs/book/python` project
 - Calibre `ebook-convert`
 
-The repository pins Python through the root `.tool-versions`. `build.sh` uses
-`PANDOC_PYTHON` when set, otherwise prefers `asdf exec python`, and falls back
-to `python3`.
+The repository pins Python through the root `.tool-versions`; FirstPair's
+`ensure-python-env.sh` runs `uv sync` and invokes the resulting project Python.
 
 On this Mac, Calibre's converter is available at:
 
@@ -139,11 +144,15 @@ The script should produce:
 - `build/dist/grust.epub`
 - `build/dist/grust (<version>).epub` as an ignored symlink to `grust.epub`
 - `build/dist/grust.mobi`
+- `build/dist/grust.html`
+- `build/dist/grust-chapters/`
 - `build/dist/VERSION.md`
 
-### Full Pipeline
+### Shared Pipeline
 
-The full build performs these stages.
+The shared builder performs the following logical stages. The command excerpts
+below document Grust's format requirements; `build.sh` does not duplicate this
+orchestration locally.
 
 1. Render generated Markdown and diagram assets.
 
@@ -168,7 +177,7 @@ The full build performs these stages.
    Do not pass `metadata.yaml` to the cover-only render. If metadata is passed
    here, Pandoc can add a generated title page before the custom cover.
 
-3. Render the PDF body through Typst.
+3. Render the PDF body through Typst with a generated contents page.
 
    ```sh
    pandoc --from markdown+smart \
@@ -236,14 +245,15 @@ The full build performs these stages.
    `EPUB/content.opf` title/title-sort metadata to the versioned Kindle library
    title.
 
-8. Create distribution names.
+8. Create distribution names and the complete FirstPair manifest.
 
    `build.sh` writes the canonical EPUB directly to `build/dist/grust.epub`,
    removes old `build/dist/grust (*).epub` symlinks, creates
    `build/dist/grust (<version>).epub -> grust.epub`, and writes
    `build/dist/VERSION.md`.
 
-9. Validate the generated EPUB package.
+9. Generate single-file and chapter HTML, then validate the EPUB and all public
+   package forms.
 
    ```sh
    asdf exec python check_epub_metadata.py build/dist/grust.epub
@@ -251,7 +261,7 @@ The full build performs these stages.
 
    The full build runs this after the EPUB is fixed and before MOBI conversion.
 
-10. Convert EPUB to MOBI.
+10. Convert EPUB to MOBI and run mandatory rendered PDF verification.
 
     ```sh
     ebook-convert build/dist/grust.epub build/dist/grust.mobi
