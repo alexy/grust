@@ -42,9 +42,13 @@ backend or integration crates:
 %%{init: {"theme": "base", "themeVariables": {"fontSize": "22px", "fontFamily": "Arial", "primaryBorderColor": "#5b4acb", "lineColor": "#333333"}, "flowchart": {"htmlLabels": false, "nodeSpacing": 55, "rankSpacing": 60, "padding": 18}}}%%
 flowchart TB
   app["Rust application"] --> facade["grust facade crate"]
+  app --> memory["typesec-memory\ncapability-gated vault"]
   facade --> core["grust-core"]
   facade --> stores["Storage backends"]
   facade --> coco["grust-cocoindex"]
+  memory --> qgm["querygraph-memory\nMemoryStore adapter"]
+  qgm --> core
+  qgm --> turso["grust-turso\ndurable local memory"]
   core --> model["Graph, Node, Edge, Props"]
   core --> traits["GraphStore and GraphAdminStore"]
   core --> traversal["Traversal IR"]
@@ -1029,6 +1033,101 @@ from a local path, remote URL, and optional auth token. The `GraphStore` API
 continues to operate on the local SQL connection; callers decide when to call
 the store's `push` and `pull` helpers.
 
+## QueryGraph Memory: TypeSec over Grust
+
+`querygraph-memory` is a concrete application of the Grust backend contract. It
+implements TypeSec's synchronous `MemoryStore` interface over a compatible
+Grust mutation backend without moving authority or plaintext handling into the
+storage layer:
+
+```rust,ignore
+pub struct GraphStoreMemoryStore<G: GraphMutationStore> { /* ... */ }
+
+use querygraph_memory::TursoMemoryStore;
+
+let store = TursoMemoryStore::open("data/querygraph-memory.db")?;
+```
+
+`GraphStoreMemoryStore<G>` is the generic adapter for an already-initialized
+`GraphMutationStore`. The production-oriented v1 alias,
+`TursoMemoryStore`, binds that adapter to `TursoGraphStore`.
+`TursoMemoryStore::open(path)` creates missing parent directories, opens a
+file-backed local database with the stable `querygraph_memory` table prefix,
+and runs Grust's bootstrap before returning. `open_with_config` is the explicit
+form for applications that need another table prefix, batch size, path, or
+journal mode. A default `TursoConfig` still uses `:memory:`, so durable callers
+must supply a file path.
+
+The adapter projects memory into a small property graph:
+
+```text
+(:MemoryRecord {record: <opaque JSON>, space: ...})
+    -[:MENTIONS]->(:MemoryEntity {name, kind})
+(:MemoryEntity)-[:RELATES {rel, fact_id}]->(:MemoryEntity)
+```
+
+The complete TypeSec `StoredRecord` is serialized into one opaque JSON property
+and round-tripped whole. Grust does not open the protected content. TypeSec's
+`MemoryVault` remains the only component that rehydrates it, verifies typed
+capabilities, applies a recall clearance ceiling, excludes quarantined records,
+joins sensitivity labels during consolidation, and emits audit evidence. That
+separation is the security boundary: Grust supplies durable graph mechanics;
+TypeSec decides which subject may learn what.
+
+Queries push only memory-space equality into the graph as
+`Start::NodesByProperty`. The other `StoreQuery` dimensions—kind, time, label,
+entities, text, invalidation state, and ordering—continue through TypeSec's
+shared `StoreQuery::matches` implementation. This is semantically complete and
+conformance-tested, but it is deliberately not advertised as full GQL
+pushdown. A neighborhood traversal may discover record identifiers associated
+with global entity nodes across several spaces; the vault rejects every record
+outside the authorized space before content can be revealed. Tenant isolation
+in v1 is therefore authorization at the vault boundary, not physical graph
+partitioning.
+
+Consolidation uses the mutation boundary rather than a special memory-only
+transaction API. `MemoryStore::apply_batch` converts its puts and invalidations
+into one `GraphMutation` slice and calls `apply_mutations` once. Turso reports
+transactional mutation atomicity, so superseding old records and inserting the
+replacement commits as one unit. TypeSec performs the SecLib label join before
+that batch reaches storage, which means a replacement derived from a Sensitive
+source remains Sensitive after closing and reopening the database. A generic
+backend that reports `OrderedNonAtomic` remains usable for simpler operations
+but cannot promise atomic consolidation.
+
+The adapter also owns the sanctioned bridge between TypeSec's synchronous
+`MemoryStore` and Grust's asynchronous `GraphStore`. A dedicated current-thread
+Tokio runtime carries I/O and time drivers. Calls made outside Tokio drive it
+directly; calls made from an existing Tokio runtime execute on a scoped thread.
+This keeps an MCP or HTTP service from nesting runtimes or panicking, and lets
+the store shut down safely when dropped from asynchronous application code.
+
+Semantic ranking and cognition preserve the same boundary. The reference
+`VectorIndex<E: Embedder>` is an in-process cosine index. An `Embedder` declares
+whether it is local; a remote embedder is never handed Sensitive or Secret
+text, and those records remain available to ordinary authorized recall without
+participating in remote vector ranking. Search returns candidate IDs, with an
+optional bounded entity co-mention boost, but the vault still performs the
+authorization and label checks. Reference deduplication, contradiction, and
+importance analyzers likewise make no writes. They consume already-recalled
+views and emit inert `ConsolidationPlan` values that must return through the
+capability-gated vault.
+
+The durable v1 proof has explicit limits. `MemoryId::next()` uses a process-local
+counter, so a restarted writer can collide with persisted `mem-N` identifiers;
+a hosted or multi-process system needs collision-resistant durable IDs and
+idempotency. `VectorIndex` is not a persistent LanceDB ANN implementation,
+memory predicates beyond space are not fully pushed into GQL, and the reference
+analytics are not distributed Sail cognition. TypeDID request verification is
+present at the QueryGraph service boundary, but durable anti-replay state shared
+across replicas is post-v1. Grust's structural edge identity remains
+`(from, label, to)`, so changing `fact_id` cannot preserve parallel `RELATES`
+assertions between the same endpoints; assertion nodes or a multi-edge identity
+surface are still needed for full lineage. Finally, vault-level tenant checks,
+restart persistence, and an end-to-end local demonstration do not by themselves
+constitute a hosted multi-tenant service with quotas, migrations, backups,
+deletion propagation, and service-level objectives.
+
 ## Sail
 
 `grust-sail` connects to a Sail Spark Connect server over gRPC. It stores graph
@@ -1489,7 +1588,9 @@ ordinary applications that need to apply deltas instead of replacing whole
 graphs. The default `apply_mutations` implementation is ordered but not atomic:
 if a backend uses the default and a later mutation fails, earlier mutations may
 already be committed. Backends with real transaction support can override that
-method. The pgGraph backend wraps mutation batches in PostgreSQL transactions,
+method. The PostgreSQL and pgGraph stores wrap mutation batches in PostgreSQL
+transactions, Turso wraps them in a local SQL transaction (which
+`querygraph-memory` relies on for atomic supersede-and-replace consolidation),
 and the SurrealDB HTTP and SDK stores wrap mutation batches in SurrealDB
 transactions.
 
@@ -1502,7 +1603,9 @@ That is the source of its leverage.
 The project says: build your graph once, keep the domain model in Rust, and let
 the backend translate. Sometimes that translation is a map scan. Sometimes it is
 Arrow and LanceDB. Sometimes it is PostgreSQL, Spark SQL, Redis graph commands,
-SurrealQL, Helix SDK calls, or CocoIndex target state.
+SurrealQL, Helix SDK calls, or CocoIndex target state. And sometimes it is a
+capability-secured agent memory path in which TypeSec guards authority while
+Grust persists opaque records and their entity graph durably in Turso.
 
 The more Grust grows, the more important that center becomes: a stable property
 graph model, a backend-neutral traversal IR, explicit errors, feature-gated

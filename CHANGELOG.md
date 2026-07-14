@@ -6,6 +6,13 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **Grust book covers durable TypeSec Memory:** expanded the architecture tour
+  with the implemented `querygraph-memory` boundary, including opaque record
+  storage, the `MemoryRecord`/`MemoryEntity` graph, space-only pushdown,
+  transactional Turso consolidation, the sanctioned synchronous/asynchronous
+  bridge, privacy-aware reference vector ranking, inert cognition plans, and
+  the explicit post-v1 security, lineage, scale, and hosting limits.
+
 - **First Pair Press image cover:** adapted the live Grust announcement
   headboard into a portrait cover, set Alexy Khrabrov as the sole author,
   added the reusable First Pair Press publisher seal, and wired the same image
