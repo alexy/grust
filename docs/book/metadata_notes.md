@@ -33,7 +33,7 @@ subtitle: Type-Level Security for Agentic AI
 author:
   - Alexy Khrabrov
 lang: en-US
-publisher: Chief Scientist
+publisher: First Pair Press
 rights: Copyright Alexy Khrabrov
 ---
 ```
@@ -121,7 +121,7 @@ build/dist/*
 
 Grust already had the most important piece before the checker was added: its
 stable EPUB metadata lives in `docs/book/metadata.yaml`. That file is the source
-of truth for title, subtitle, author, coauthor credit, language, rights, and TOC
+of truth for title, subtitle, sole author, publisher, language, rights, and TOC
 settings. `docs/book/build.sh` passes the same file to Pandoc for both the Typst
 body render and the EPUB render. The Grust EPUB command also uses
 `--epub-title-page=false`, so Pandoc does not add a generated title page in front
@@ -180,20 +180,19 @@ flattened XML snippets. The script deliberately avoids third-party packages.
 TypeSec's `docs/book/check_epub_metadata.sh` is still a good fit for TypeSec's
 simpler pipeline. It uses shell tools to assert exact TypeSec metadata, spine,
 cover, and Kindle-layout invariants after TypeSec's EPUB layout fixer runs.
-Grust now enforces the same categories: exact Grust title/creator/language/date
-metadata, cover-then-visible-TOC spine order, NCX/nav titles,
-frontmatter cover XHTML, a first custom titlepage section, stable title-stem
-EPUB output, ignored versioned symlink, `VERSION.md` dist marker, no generated
-cover heading, no flexbox on the cover, no fallback metadata, and no generated
-empty title page.
+Grust now enforces the same categories: exact Grust title, sole creator,
+First Pair Press publisher, language/date metadata, image-cover then visible-TOC
+spine order, NCX/nav titles, 1024x1536 cover geometry, packaged-cover byte
+identity, stable title-stem EPUB output, ignored versioned symlink, `VERSION.md`
+dist marker, no fallback metadata, and no generated empty title page.
 
 ## Why `--epub-title-page=false` Matters
 
-When a project already provides a custom cover or title page, Pandoc can also
+When a project already provides a cover image or title page, Pandoc can also
 generate its own title page. In the failing EPUB, that produced an empty
 `EPUB/text/title_page.xhtml` and pushed the real cover into a later chapter file.
 Using `--epub-title-page=false` prevents that extra generated page and keeps the
-custom cover as the first real content.
+image cover as the first real content.
 
 ## Build Invariants
 
@@ -205,7 +204,7 @@ source Markdown. A good metadata gate should fail the build if:
 - `EPUB/content.opf` is missing `dc:language`
 - `EPUB/content.opf` is missing `dc:date`
 - `EPUB/content.opf` is missing `dcterms:modified`
-- the first readable spine item is not the custom cover XHTML
+- the first readable spine item is not Pandoc's image-cover XHTML
 - the navigation document is not visible after the cover and before the preface
 - the Kindle-facing OPF title does not match `<title_stem> (<version>)`
 - the OPF title lacks a matching `file-as` refinement
@@ -219,9 +218,10 @@ source Markdown. A good metadata gate should fail the build if:
 - `VERSION.md` does not include the versioned symlink filename
 - `EPUB/toc.ncx` does not have the real book title
 - `EPUB/nav.xhtml` does not have the real book title
-- the cover XHTML is not frontmatter
-- the cover XHTML contains a generated wrapper heading before the custom cover
-- the cover XHTML uses `display: flex`
+- the cover XHTML is not the expected 1024x1536 image wrapper
+- the packaged cover image is not byte-identical to `cover/grust-cover.png`
+- `dc:creator` is not exactly `Alexy Khrabrov`
+- `dc:publisher` is not exactly `First Pair Press`
 - any OPF, NCX, or nav file contains `UNTITLED` or `Unknown`
 - `EPUB/text/title_page.xhtml` exists only as an empty generated title page
 

@@ -1,122 +1,47 @@
-# Cover Build Notes
+# Raster Cover Build Notes
 
-These notes capture the cover pattern used for the Typesec book so another book,
-such as Grust, can use the same workflow.
+Grust uses the same image-cover pattern as the current TypeSec and LakeCat
+books.
 
-## Files
+## Source and Composition
 
-- Keep the cover in a separate Markdown file, for example `docs/book/cover.md`.
-- Put PDF-specific cover markup in a Typst raw block.
-- Put EPUB/MOBI-specific cover markup in an HTML raw block.
-- Keep the visible text synchronized between the Typst and HTML blocks.
-- On case-insensitive filesystems, avoid placing files such as `COVER.md` next
-  to `cover.md`; use a distinct name such as `cover_notes.md`.
+Keep these assets under the repository-root `cover/` directory:
 
-## Version Subtitle
+- the published blog headboard used as visual source;
+- text-free 2:3 portrait artwork generated from that headboard;
+- the reusable First Pair Press publisher mask;
+- a deterministic Pillow composer for exact title, subtitle, author, and seal;
+- the final 1024x1536 RGB PNG used by every book format;
+- `README.md` with provenance, the image-generation prompt, and rebuild command.
 
-Use a placeholder in the cover source instead of hardcoding the version:
+Generated artwork should contain no lettering. The deterministic composer owns
+the exact text and must keep `Alexy Khrabrov` as the sole author line.
 
-```text
-covers {{KINDLE_NAME}}
-```
+## Format Integration
 
-Then have the build script read the title stem and version from the project
-config and render a temporary cover before calling Pandoc. For a Rust workspace,
-read `title_stem` from `metadata.yaml` and `[workspace.package].version` from
-`Cargo.toml`; for another project, use the equivalent single sources of truth.
+In `book.build.json`, set `pdf.coverImage` and `epub.coverImage` to the same
+final PNG. Set `epub.includeRenderedCover` to `false` so Pandoc does not add a
+second manuscript cover. Keep `docs/book/cover.md` as a small HTML image wrapper
+for the browser readers.
 
-## Typst Cover Spacing
+The EPUB layout fixer must order the spine as Pandoc image cover, navigation
+with `linear="no"`, then the first manuscript chapter. The validator should
+check cover metadata, its 1024x1536 SVG wrapper, exact creator and publisher,
+and byte identity between the packaged image and the canonical PNG.
 
-Typst text boxes include font metrics that can make small gaps look larger than
-expected. For tight title/subtitle spacing, use an absolute vertical adjustment
-instead of only `em` spacing:
+The chapter HTML package must not retain a source-relative `cover/...` URL.
+The shared FirstPair emitter resolves that URL through Pandoc's resource path,
+copies the image to the chapter package's `assets/` directory, and rewrites the
+reference.
 
-```typst
-#text(size: 46pt, weight: "bold", bottom-edge: "bounds")[Grust]
-#v(-24pt)
-#text(size: 12pt)[covers {{KINDLE_NAME}}]
-```
+## Visual Verification
 
-Useful tips:
-
-- `bottom-edge: "bounds"` makes the title box hug the glyph bounds more closely.
-- A negative `#v(...)` can be appropriate for a small subtitle directly under a
-  large title.
-- Inspect the rendered PDF visually; `pdftotext` confirms text, not spacing.
-- Rasterize the first page with `pdftoppm` when tuning layout:
+After the canonical build succeeds, rasterize the first PDF page:
 
 ```sh
-pdftoppm -f 1 -singlefile -png -r 150 docs/book/dist/book.pdf /tmp/book-cover
+pdftoppm -f 1 -l 1 -singlefile -png -r 120 \
+  docs/book/build/dist/grust.pdf /tmp/grust-cover
 ```
 
-## HTML Cover Spacing
-
-For EPUB and MOBI, mirror the Typst layout with inline HTML styles:
-
-```html
-<h1 style="font-size: 3.2em; margin: 0 0 0.05em;">Grust</h1>
-<p style="font-size: 0.85em; margin: 0 0 1.1em;">covers {{KINDLE_NAME}}</p>
-```
-
-Use `&amp;` in HTML when the visible text should be `&`.
-
-## Small Credit Lines
-
-For a compact collaborator credit, make both lines smaller and italic, and keep
-the second line close to the first:
-
-```typst
-#text(size: 11pt, style: "italic")[&]
-#v(0.35em)
-#text(size: 13pt, style: "italic")[Codex with ChatGPT 5.5]
-```
-
-```html
-<p style="font-size: 0.85em; font-style: italic; margin: 0 0 0.35em;">&amp;</p>
-<p style="font-size: 0.95em; font-style: italic; margin: 0;">Codex with ChatGPT 5.5</p>
-```
-
-## Build Shape
-
-Build the cover separately for PDF, then merge it before the body:
-
-```sh
-pandoc "$tmpdir/cover.md" -o "$tmpdir/cover.pdf" --pdf-engine=typst
-pandoc docs/book/manuscript.md -o "$tmpdir/body.pdf" --pdf-engine=typst --toc --number-sections
-pdfunite "$tmpdir/cover.pdf" "$tmpdir/body.pdf" docs/book/dist/book.pdf
-```
-
-For EPUB, pass the rendered cover before the manuscript:
-
-```sh
-pandoc "$tmpdir/cover.md" docs/book/manuscript.md \
-  -o docs/book/dist/book.epub \
-  --toc \
-  --number-sections
-```
-
-Then convert EPUB to MOBI with Calibre:
-
-```sh
-/Applications/calibre.app/Contents/MacOS/ebook-convert docs/book/dist/book.epub docs/book/dist/book.mobi
-```
-
-## Verification
-
-After rebuilding, verify all generated artifacts:
-
-```sh
-pdftotext docs/book/dist/book.pdf - | sed -n '1,12p'
-unzip -p docs/book/dist/book.epub '*.xhtml' | rg 'covers .*|font-style|titlepage'
-```
-
-Also inspect the rendered cover image when spacing matters:
-
-```sh
-pdftoppm -f 1 -singlefile -png -r 150 docs/book/dist/book.pdf /tmp/book-cover
-open /tmp/book-cover.png
-```
-
-Expect occasional `PDFDoc::markDictionary` warnings from `pdfunite`; they are
-not necessarily fatal if the command exits successfully and the generated PDF
-opens and extracts text correctly.
+Inspect that PNG as well as the canonical cover. `pdftotext` cannot validate
+lettering baked into a raster image.

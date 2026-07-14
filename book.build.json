@@ -22,6 +22,16 @@
     "tocDepth": 2,
     "resourcePaths": ["docs/book/build", "docs/book", "${repoRoot}"]
   },
+  "pdf": {
+    "coverImage": "cover/grust-cover.png",
+    "coverWidth": "8.5in",
+    "coverHeight": "11in",
+    "coverFit": "stretch"
+  },
+  "epub": {
+    "coverImage": "cover/grust-cover.png",
+    "includeRenderedCover": false
+  },
   "hooks": {
     "prepare": "node docs/book/build.mjs",
     "postPdf": {

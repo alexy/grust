@@ -4,8 +4,18 @@ body {
 }
 
 .cover-page {
-  padding-top: 8em;
+  margin: 0;
+  padding: 0;
   text-align: center;
+  page-break-after: always;
+}
+
+.image-cover img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 100vh;
+  margin: 0 auto;
 }
 
 #grust > h1.unnumbered {
@@ -37,18 +47,6 @@ body {
 .cover-author-site {
   font-size: 0.95em;
   margin-bottom: 1.5em;
-}
-
-.cover-credit-mark {
-  font-size: 0.85em;
-  font-style: italic;
-  margin-bottom: 0.35em;
-}
-
-.cover-coauthor {
-  font-size: 0.95em;
-  font-style: italic;
-  margin-bottom: 0;
 }
 
 code {

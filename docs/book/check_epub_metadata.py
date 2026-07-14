@@ -140,7 +140,7 @@ def validate(epub_path: Path) -> list[str]:
         opf_source = read_zip_text(epub, "EPUB/content.opf")
         toc_source = read_zip_text(epub, "EPUB/toc.ncx")
         nav_source = read_zip_text(epub, "EPUB/nav.xhtml")
-        cover_source = read_zip_text(epub, "EPUB/text/ch001.xhtml")
+        cover_source = read_zip_text(epub, "EPUB/text/cover.xhtml")
         opf_flat = compact(opf_source)
         toc_flat = compact(toc_source)
 
@@ -154,6 +154,7 @@ def validate(epub_path: Path) -> list[str]:
 
         title = tag_text(opf_source, "dc:title")
         creator = tag_text(opf_source, "dc:creator")
+        publisher = tag_text(opf_source, "dc:publisher")
         language = tag_text(opf_source, "dc:language")
         date = tag_text(opf_source, "dc:date")
         modified = meta_property(opf_source, "dcterms:modified")
@@ -201,6 +202,10 @@ def validate(epub_path: Path) -> list[str]:
         if creator and creator != "Alexy Khrabrov":
             errors.append(
                 f"EPUB/content.opf dc:creator is {creator!r}, expected 'Alexy Khrabrov'"
+            )
+        if publisher != "First Pair Press":
+            errors.append(
+                f"EPUB/content.opf dc:publisher is {publisher!r}, expected 'First Pair Press'"
             )
         if language and language != "en-US":
             errors.append(
@@ -261,9 +266,21 @@ def validate(epub_path: Path) -> list[str]:
 
         require_pattern(
             errors,
-            r'<spine toc="ncx">\s*<itemref idref="ch001_xhtml" />\s*<itemref idref="nav" />\s*<itemref idref="ch002_xhtml" />',
+            r'<meta name="cover" content="[^"]+" />',
             opf_flat,
-            "EPUB/content.opf reading spine is not cover, visible TOC, then preface",
+            "EPUB/content.opf is missing cover metadata",
+        )
+        require_pattern(
+            errors,
+            r'<item properties="cover-image"[^>]*href="media/[^"]+"',
+            opf_flat,
+            "EPUB/content.opf is missing the cover-image manifest item",
+        )
+        require_pattern(
+            errors,
+            r'<spine toc="ncx">\s*<itemref idref="cover_xhtml" />\s*<itemref idref="nav" linear="no" />\s*<itemref idref="ch001_xhtml" />',
+            opf_flat,
+            "EPUB/content.opf reading spine is not image cover, visible TOC, then preface",
         )
         require_pattern(
             errors,
@@ -285,28 +302,43 @@ def validate(epub_path: Path) -> list[str]:
         )
         require_pattern(
             errors,
-            r'<body epub:type="frontmatter">',
+            r'<body id="cover">',
             cover_source,
-            "EPUB/text/ch001.xhtml cover body is not frontmatter",
+            "EPUB/text/cover.xhtml is not the Pandoc image cover",
         )
         require_pattern(
             errors,
-            rf'<section id="{re.escape(visible_slug)}" class="cover-page" epub:type="titlepage"',
+            r'<div id="cover-image">',
             cover_source,
-            "EPUB/text/ch001.xhtml custom cover is not the first titlepage section",
+            "EPUB/text/cover.xhtml is missing its image wrapper",
         )
-        reject_pattern(
+        require_pattern(
             errors,
-            rf'<h1 class="unnumbered">{re.escape(visible_title)}</h1>',
+            r'<svg[^>]*viewBox="0 0 1024 1536"',
             cover_source,
-            "EPUB/text/ch001.xhtml contains a generated top-level cover heading",
+            "EPUB/text/cover.xhtml has the wrong image geometry",
         )
-        reject_pattern(
+        require_pattern(
             errors,
-            r"display:\s*flex",
+            r'<image[^>]*xlink:href="\.\./media/[^"]+"',
             cover_source,
-            "EPUB/text/ch001.xhtml cover uses flexbox, which is fragile on Kindle",
+            "EPUB/text/cover.xhtml does not reference its image",
         )
+
+        cover_item = re.search(
+            r'<item properties="cover-image"[^>]*href="([^"]+)"', opf_source
+        )
+        if cover_item is not None:
+            packaged_cover = f"EPUB/{cover_item.group(1)}"
+            expected_cover = Path(__file__).resolve().parents[2] / "cover" / "grust-cover.png"
+            if packaged_cover not in names:
+                errors.append(f"missing packaged cover image {packaged_cover}")
+            elif not expected_cover.is_file():
+                errors.append(f"missing source cover image {expected_cover}")
+            elif epub.read(packaged_cover) != expected_cover.read_bytes():
+                errors.append(
+                    f"{packaged_cover} differs from {expected_cover}"
+                )
 
         title_page_names = sorted(
             name for name in names if name.startswith("EPUB/text/") and name.endswith("title_page.xhtml")

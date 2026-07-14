@@ -5,8 +5,10 @@ Final distributable artifacts live in `docs/book/build/dist/`:
 
 - `grust.pdf`
 - `grust.epub`
-- `grust (<version>).epub` ignored symlink to `grust.epub`
+- `grust (<version>-<commit>).{pdf,epub,html}` ignored symlinks to stable files
 - `grust.mobi`
+- `grust.html`
+- `grust-chapters/`
 - `VERSION.md`
 
 The sister TypeSec project currently uses `docs/book/dist/` directly for its
@@ -34,9 +36,12 @@ Kindle conversion stages.
 
 Authored inputs live in `docs/book/`:
 
-- `metadata.yaml`: title, title stem, subtitle, author, collaborator credit,
+- `metadata.yaml`: title, title stem, subtitle, sole author, publisher,
   language, rights, and TOC settings.
-- `cover.md`: custom cover source with separate Typst and HTML raw blocks.
+- `../../cover/grust-cover.png`: canonical 1024x1536 raster cover.
+- `../../cover/README.md`: headboard provenance, image-generation prompt, and
+  deterministic composition command.
+- `cover.md`: browser-reader wrapper for the canonical cover image.
 - `manuscript.md`: main manuscript with inline fenced `mermaid` diagrams.
 - `epub.css`: EPUB and Kindle-facing CSS.
 - `build.mjs`: renders cover placeholders and Mermaid diagrams.
@@ -53,39 +58,38 @@ artifacts live under `docs/book/build/dist/`.
 
 The book is typeset through two related but separate surfaces:
 
-- PDF uses the Typst raw block in `cover.md`, then Pandoc-to-Typst for the
-  body, then `typst compile`.
-- EPUB and MOBI use the HTML raw block in `cover.md`, Pandoc EPUB output,
-  `epub.css`, EPUB package post-processing, and Calibre conversion.
+- PDF prepends a full-page image built from `../../cover/grust-cover.png` to
+  the Pandoc-to-Typst body.
+- EPUB and MOBI use that same PNG as the package cover image, then apply EPUB
+  package post-processing and Calibre conversion.
+- Browser HTML uses the image wrapper in `cover.md`; chapter HTML packages a
+  byte-identical copy of the referenced cover in its local assets directory.
 
-Keep the visible cover text synchronized between the Typst and HTML blocks.
-`build.mjs` fills shared placeholders from `metadata.yaml` and the workspace
-version in `../../Cargo.toml`. The current rendered cover text is:
+The current visible cover text is:
 
 - Title: `Grust`
-- Version subtitle: `covers grust (<workspace version>)`
 - Subtitle: `A Rust Property Graph Architecture`
 - Author: `Alexy Khrabrov`
-- Collaborator credit: `&` / `Codex with ChatGPT 5.5`
+- Publisher mark: `First Pair Press`
 
-For PDF cover spacing, tune the Typst block directly. `pdftotext` confirms
-text, not visual spacing. When spacing matters, rasterize the first page:
+Keep lettering out of the generated portrait art. Exact typography and seal
+placement live in `../../cover/make-cover.py`; reproduce the cover with:
+
+```sh
+uv run --no-project --with pillow python cover/make-cover.py
+```
+
+`pdftotext` does not see text baked into the raster cover. Rasterize the first
+PDF page when checking the result visually:
 
 ```sh
 pdftoppm -f 1 -singlefile -png -r 150 \
   docs/book/build/dist/grust.pdf /tmp/grust-cover
 ```
 
-For EPUB and MOBI cover spacing, tune `epub.css` and the HTML block together.
-Avoid `display: flex` on the cover because Kindle rendering is fragile there;
-`check_epub_metadata.py` rejects it. Keep the CSS rule that hides Pandoc's
-generated wrapper heading around the custom cover:
-
-```css
-#grust > h1.unnumbered {
-  display: none;
-}
-```
+The validator checks the EPUB image-cover metadata, 1024x1536 wrapper,
+creator/publisher values, reading order, and byte identity with
+`../../cover/grust-cover.png`.
 
 Keep code blocks compact in EPUB and MOBI through `epub.css`. Pandoc's syntax
 highlighting emits one `<span>` per source line and represents intentional blank
@@ -142,7 +146,8 @@ The script should produce:
 
 - `build/dist/grust.pdf`
 - `build/dist/grust.epub`
-- `build/dist/grust (<version>).epub` as an ignored symlink to `grust.epub`
+- versioned PDF, EPUB, HTML, and chapter-package symlinks using
+  `<version>-<short-commit>`
 - `build/dist/grust.mobi`
 - `build/dist/grust.html`
 - `build/dist/grust-chapters/`
@@ -150,122 +155,28 @@ The script should produce:
 
 ### Shared Pipeline
 
-The shared builder performs the following logical stages. The command excerpts
-below document Grust's format requirements; `build.sh` does not duplicate this
-orchestration locally.
+The shared builder performs these logical stages; `build.sh` remains a thin
+wrapper around the FirstPair implementation.
 
-1. Render generated Markdown and diagram assets.
-
-   ```sh
-   node build.mjs
-   ```
-
-   This reads `[workspace.package].version` from `../../Cargo.toml`, reads
-   cover metadata from `metadata.yaml`, writes `build/cover.rendered.md`,
-   writes `build/manuscript.rendered.md`, and renders inline Mermaid fences to
-   `build/diagrams/diagram-XX.mmd` plus `build/diagrams/diagram-XX.png`.
-
-2. Render the standalone PDF cover.
-
-   ```sh
-   pandoc --from markdown+smart \
-     --pdf-engine=typst \
-     --output "$tmpdir/cover.pdf" \
-     build/cover.rendered.md
-   ```
-
-   Do not pass `metadata.yaml` to the cover-only render. If metadata is passed
-   here, Pandoc can add a generated title page before the custom cover.
-
-3. Render the PDF body through Typst with a generated contents page.
-
-   ```sh
-   pandoc --from markdown+smart \
-     --to typst \
-     --metadata-file metadata.yaml \
-     --toc --toc-depth=2 \
-     --resource-path build \
-     --output build/grust-body.typ \
-     build/manuscript.rendered.md
-
-   {
-     printf '#outline(title: [Contents])\n'
-     printf '#pagebreak()\n\n'
-     cat build/grust-body.typ
-   } > build/grust-body-with-toc.typ
-
-   typst compile build/grust-body-with-toc.typ "$tmpdir/body.pdf"
-   ```
-
-4. Merge cover and body.
-
-   ```sh
-   pdfunite "$tmpdir/cover.pdf" "$tmpdir/body.pdf" build/dist/grust.pdf
-   python fix_pdf_page_labels.py build/dist/grust.pdf
-   ```
-
-   The merged PDF should start with the custom cover, followed by Contents,
-   Preface, and the numbered body. The cover page label is blank; the Contents
-   page starts PDF numbering at 1.
-
-5. Prepare the EPUB cover source.
-
-   ```sh
-   sed '/^```{=typst}$/,/^```$/d' build/cover.rendered.md > "$tmpdir/cover.epub.md"
-   ```
-
-   This removes the Typst-only raw block before Pandoc builds EPUB chapters.
-
-6. Build the EPUB.
-
-   ```sh
-   pandoc --from markdown+smart \
-     --metadata-file metadata.yaml \
-     --metadata date="$pubdate" \
-     --epub-title-page=false \
-     --toc --toc-depth=2 \
-     --css epub.css \
-     --resource-path build \
-     --output build/dist/grust.epub \
-     "$tmpdir/cover.epub.md" build/manuscript.rendered.md
-   ```
-
-   Keep `--epub-title-page=false`; Grust already has a custom cover and should
-   not receive Pandoc's generated title page.
-
-7. Repair Pandoc's EPUB layout.
-
-   ```sh
-   ./fix_epub_layout.sh build/dist/grust.epub "grust ($version)" "Grust"
-   ```
-
-   The fixer moves the custom cover before the nav item in the spine, keeps the
-   nav item visible as the TOC page, marks the cover XHTML as frontmatter,
-   removes the generated wrapper heading around the cover, and rewrites only
-   `EPUB/content.opf` title/title-sort metadata to the versioned Kindle library
-   title.
-
-8. Create distribution names and the complete FirstPair manifest.
-
-   `build.sh` writes the canonical EPUB directly to `build/dist/grust.epub`,
-   removes old `build/dist/grust (*).epub` symlinks, creates
-   `build/dist/grust (<version>).epub -> grust.epub`, and writes
-   `build/dist/VERSION.md`.
-
-9. Generate single-file and chapter HTML, then validate the EPUB and all public
-   package forms.
-
-   ```sh
-   asdf exec python check_epub_metadata.py build/dist/grust.epub
-   ```
-
-   The full build runs this after the EPUB is fixed and before MOBI conversion.
-
-10. Convert EPUB to MOBI and run mandatory rendered PDF verification.
-
-    ```sh
-    ebook-convert build/dist/grust.epub build/dist/grust.mobi
-    ```
+1. Run `node build.mjs` to render the manuscript and its seven Mermaid diagram
+   assets under `build/`. It also renders the browser-cover wrapper consumed by
+   the HTML path.
+2. Build the Typst body PDF with Contents and numbered sections. Separately,
+   build a US-Letter raster-cover page from `../../cover/grust-cover.png`, merge
+   it before the body, and repair the PDF page labels.
+3. Build `build/dist/grust.epub` with
+   `../../cover/grust-cover.png` passed as Pandoc's EPUB cover image and with
+   `--epub-title-page=false`.
+4. Run `fix_epub_layout.sh` so the spine begins with Pandoc's image-cover XHTML,
+   then the visible nav/TOC marked `linear="no"`, then the preface. Rewrite
+   only the OPF title/title-sort fields to the versioned Kindle catalog title.
+5. Write the full `VERSION.md` manifest and stable/versioned PDF, EPUB, HTML,
+   and chapter-package paths.
+6. Generate single-file and chapter HTML. The chapter packager resolves the
+   reader cover through the configured resource path, copies it into `assets/`,
+   and rewrites the chapter reference to that local byte-identical file.
+7. Run `check_epub_metadata.py`, convert the validated EPUB to MOBI, and run the
+   shared rendered-PDF, HTML-resource, artifact, and manifest contracts.
 
 ### EPUB Invariants
 
@@ -275,17 +186,17 @@ if any of these are wrong:
 - `EPUB/content.opf` has the versioned Kindle title
   `<title_stem> (<workspace version>)`.
 - title sort metadata matches that Kindle title.
-- `dc:creator`, `dc:language`, `dc:date`, and `dcterms:modified` exist.
+- `dc:creator` is exactly `Alexy Khrabrov`; `dc:publisher` is exactly
+  `First Pair Press`; language, date, and modified metadata exist.
 - NCX and nav expose the visible book title `Grust`.
 - OPF, NCX, and nav files do not contain fallback labels such as `UNTITLED` or
   `Unknown`.
-- the custom cover is first in the reading spine.
+- the image cover is first in the reading spine.
 - the nav item remains visible after the cover and before the preface.
-- the cover XHTML is marked frontmatter.
-- the cover XHTML starts with the custom titlepage section.
-- Pandoc did not leave a generated top-level cover heading.
+- the cover XHTML is Pandoc's image wrapper with a 1024x1536 view box.
+- the packaged cover image is byte-identical to
+  `../../cover/grust-cover.png`.
 - Pandoc did not leave an empty generated `title_page.xhtml`.
-- the cover does not use flexbox.
 - `grust (<version>).epub` exists as a symlink to `grust.epub`.
 - `VERSION.md` records the Kindle name, EPUB build date, stable EPUB filename,
   and versioned symlink filename.
@@ -333,15 +244,12 @@ If Mermaid rendering fails with a Chromium sandbox launch error such as
 `FATAL:content/browser/sandbox_parameters_mac.mm:67`, treat diagram PNGs as
 incomplete until `mmdc` succeeds and the diagrams are visibly verified.
 
-If the PDF has two title pages, check whether `metadata.yaml` was passed to the
-cover-only PDF render.
+If the PDF has two title pages, confirm `pdf.coverImage` is the only cover-page
+mechanism and that the body render is not generating its own title page.
 
-If the EPUB has duplicate title pages or an extra `Grust` heading before
-the cover, check all three layers:
-
-- The Typst raw block must be stripped from the EPUB cover input.
-- The EPUB Pandoc command must include `--epub-title-page=false`.
-- `epub.css` must keep the wrapper-heading suppression rule.
+If the EPUB has duplicate title pages, confirm `epub.coverImage` points to the
+canonical PNG, `epub.includeRenderedCover` is `false`, and Pandoc still receives
+`--epub-title-page=false`.
 
 ## Why Grust Uses `build/dist`
 
@@ -396,18 +304,18 @@ Grust already implements this shape:
 - `docs/book/build.sh` reads `[workspace.package].version` from `Cargo.toml` and
   derives the Kindle library title as `<title_stem> (<version>)`, such as
   `grust (0.10.0)` for the current workspace version.
-- The EPUB build uses `--epub-title-page=false` because Grust has its own custom
-  cover.
+- The EPUB build uses `--epub-title-page=false` and the canonical PNG as its
+  Pandoc cover image.
 - `docs/book/fix_epub_layout.sh` applies the same post-Pandoc layout repair
-  pattern TypeSec uses: cover first in the spine, nav visible as the TOC page, and the
-  cover XHTML marked as frontmatter. It also rewrites only
+  pattern TypeSec uses: image cover first in the spine, nav visible as the TOC
+  page with `linear="no"`, then the preface. It also rewrites only
   `EPUB/content.opf`'s `dc:title` and title sort metadata to the Kindle library
   title.
 - `docs/book/check_epub_metadata.py` validates `EPUB/content.opf`,
   `EPUB/toc.ncx`, and `EPUB/nav.xhtml` inside the generated EPUB. It reads the
   workspace version with `tomllib`, reads `title_stem` from `metadata.yaml`, and
   expects OPF `dc:title` and title sort metadata to be
-  `grust (<version>)` while NCX/nav/cover titles remain `Grust`.
+  `grust (<version>)` while NCX/nav titles remain `Grust`.
 - The same checker verifies that `build/dist/VERSION.md` records the
   Kindle/catalog name, EPUB build date, stable EPUB name, and versioned symlink,
   and that the version-suffixed Send to Kindle path is a symlink to
@@ -418,14 +326,14 @@ Grust already implements this shape:
   prefers `asdf exec python` for the checker.
 
 The checker fails the build if the EPUB is missing or changes the expected
-versioned Kindle `dc:title`, title sort metadata, `dc:creator`, `dc:language`,
-`dc:date`, or `dcterms:modified`; if the cover is not first in the reading
+versioned Kindle `dc:title`, title sort metadata, exact creator/publisher,
+`dc:language`, `dc:date`, or `dcterms:modified`; if the cover is not first in the reading
 spine; if the nav
 is not visible after the cover; if NCX or nav files do not expose the plain visible book
-title; if the cover XHTML is not frontmatter; if the first cover section is not
-the custom titlepage; if Pandoc left a generated cover heading; if the cover uses
-flexbox; if package/navigation files contain fallback labels such as `UNTITLED`
-or `Unknown`; or if Pandoc generated an empty `EPUB/text/title_page.xhtml`.
+title; if the cover XHTML is not Pandoc's 1024x1536 image wrapper; if the
+packaged cover differs from `cover/grust-cover.png`; if package/navigation files
+contain fallback labels such as `UNTITLED` or `Unknown`; or if Pandoc generated
+an empty `EPUB/text/title_page.xhtml`.
 
 The equivalent TypeSec pipeline already follows the same sequence even though
 its artifact directory remains `docs/book/dist/`: checked-in metadata file,
@@ -436,7 +344,7 @@ after validation passes.
 The two projects do not need identical checker implementations. TypeSec's
 `docs/book/check_epub_metadata.sh` is a shell script because its pipeline is
 flatter and the script asserts exact TypeSec strings, reading-spine placement,
-cover frontmatter, and Kindle-layout constraints after
+image-cover geometry and bytes, and Kindle-layout constraints after
 `docs/book/fix_epub_layout.sh` runs. Grust uses
 `docs/book/check_epub_metadata.py` because Grust already pins a reliable Python
 with asdf and the checker benefits from treating the EPUB as a ZIP package:
