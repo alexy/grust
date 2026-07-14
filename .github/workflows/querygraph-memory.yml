@@ -8,23 +8,33 @@ name: querygraph-memory
 # typesec's own CI, which checks out Grust as a sibling; here we check out
 # typesec as a sibling of Grust so the path resolves.
 #
-# Scoped to `-p querygraph-memory` on purpose: the crate depends only on
-# grust-core + typesec-memory (no heavyweight backends), so this job stays
-# fast and does not require the full Grust workspace to build.
+# Scoped to `-p querygraph-memory` on purpose. Its default production feature
+# now exercises the durable Turso backend, including the shared SQL/Cypher
+# layers that Turso depends on, without building every Grust backend.
 
 on:
   push:
-    branches: [main, fable/querygraph-memory]
+    branches: [main]
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "crates/querygraph-memory/**"
       - "crates/grust-core/**"
+      - "crates/grust-cypher/**"
       - "crates/grust-memory/**"
+      - "crates/grust-sql-core/**"
+      - "crates/grust-turso/**"
       - ".github/workflows/querygraph-memory.yml"
   pull_request:
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
       - "crates/querygraph-memory/**"
       - "crates/grust-core/**"
+      - "crates/grust-cypher/**"
       - "crates/grust-memory/**"
+      - "crates/grust-sql-core/**"
+      - "crates/grust-turso/**"
       - ".github/workflows/querygraph-memory.yml"
 
 env:
@@ -65,8 +75,10 @@ jobs:
 
       - name: clippy
         working-directory: grust
-        run: cargo clippy -p querygraph-memory --all-targets -- -D warnings
+        # Keep this job focused on querygraph-memory. The workspace-wide
+        # Clippy baseline is owned by the general Grust workflows.
+        run: cargo clippy -p querygraph-memory --all-features --all-targets --no-deps -- -D warnings
 
       - name: test
         working-directory: grust
-        run: cargo test -p querygraph-memory
+        run: cargo test -p querygraph-memory --all-features

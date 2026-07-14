@@ -36,40 +36,26 @@ reconstructed from Git history, release commits, and the shipped docs.
   edge columns in the recursive step, `ORDER BY` collation under `DISTINCT`)
   became dialect hooks; the executing set is now Memory/Sail/Turso/Postgres.
 
-- **New crate `querygraph-memory`** (branch `fable/querygraph-memory`):
-  Marciana at scale — typesec-memory's `MemoryStore` implemented over any
-  Grust `GraphMutationStore`. Records and their entity knowledge graph are
-  written incrementally as nodes/edges (`MemoryRecord` -[:MENTIONS]->
-  `MemoryEntity`, `MemoryEntity` -[:RELATES {rel, fact_id}]->
-  `MemoryEntity`); neighborhood recall runs on `traverse`. Owns the one
-  sanctioned sync→async bridge (dedicated current-thread runtime, scoped
-  thread when already inside tokio — MCP-server-safe, tested). Passes
-  typesec-memory's full conformance corpus incl. graph reachability, and an
-  end-to-end capability-gated vault test over the Grust backend. Path-dep on
-  the sibling `../typesec` checkout (mirror of typesec's grust path deps);
-  `publish = false` until typesec-memory is on crates.io. Next iterations
-  per FABLE-MEMORY-1 §5.2: a production sail cognition tier and a
-  lancedb-backed `Embedder`. **Batch analytics** (`analytics`): dedup,
-  contradiction detection, and decay/importance scoring that emit
-  `ConsolidationPlan`s — their *only* output — applied through the
-  capability-gated vault (never a direct store write), so labels/quarantine/
-  audit stay intact at scale; an end-to-end test runs a contradiction plan
-  through the vault. **Multi-tenant isolation** proven: one shared Grust
-  store behind two vaults, typesec policies as the tenancy boundary — tenant
-  A can neither mint a capability for nor point its own capability at tenant
-  B's spaces, despite records sharing one graph.
-  **Vector index** (`VectorIndex<E: Embedder>`) implements typesec-memory's
-  `SemanticIndex` with the embedding-privacy rule enforced by construction:
-  an `Embedder` declares `is_local()`, and above-Internal content is only
-  ever embedded by a local embedder (a remote one declines to index it — the
-  content never egresses). Cosine ranking + an optional bounded hybrid
-  graph re-rank (co-mentioned entities), always a reordering of authorized
-  candidates, never a widening. **Space-filter
-  pushdown** (`query` starts from `NodesByProperty` on the record's `space`
-  prop, so a scoped query never scans other tenants) and **transactional
-  consolidation** (`apply_batch` maps the whole supersede-and-relink plan to
-  one `apply_mutations` call, atomic on transactional backends) are done and
-  tested — including an end-to-end consolidation over the Grust backend.
+- **`querygraph-memory` durable v1:** typesec-memory's `MemoryStore` runs over
+  compatible Grust `GraphMutationStore` backends, with Turso/libSQL as the
+  default and proven persistent path. `TursoMemoryStore::open(path)` creates
+  and bootstraps the database on the store-owned bridge runtime; the advanced
+  `open_with_config` constructor supports table-prefix and journal tuning.
+  The bridge now owns Tokio I/O/time drivers and shuts down safely when the
+  store is dropped inside an async service. File-backed integration tests run
+  the full TypeSec conformance corpus, close/reopen the database, preserve a
+  capability-gated transactional consolidation and its SecLib label join,
+  and exercise construction and use from inside an existing Tokio runtime.
+  Records and their entity graph remain incremental nodes/edges, space scope
+  is pushed into the backend, and all remaining query dimensions use the
+  shared conformance-pinned matcher. The reference `VectorIndex` enforces
+  embedding privacy, analytics emit plans through the vault front door, and
+  the shared-store test proves vault-level tenant authorization. The crate
+  remains `publish = false` while `typesec-memory` is a sibling path
+  dependency. LanceDB ANN, Sail-distributed cognition, fuller GQL pushdown,
+  and a hosted multi-tenant service are explicitly post-v1 work rather than
+  claims of this release. The adapter is consumed by qg-rust's signed-only
+  memory API and its qg-python Pydantic AI v2 restart demonstration.
 
 - **Turso joins the read-pushdown consumers**: `TursoGraphStore::run_read_query`
   now pushes the portable read subset into SQL over the universal tables via a

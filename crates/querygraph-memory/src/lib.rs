@@ -1,10 +1,11 @@
 //! # querygraph-memory
 //!
-//! Marciana at scale: [`typesec-memory`](typesec_memory)'s `MemoryStore`
-//! implemented over **any Grust [`GraphStore`] backend** — records and their
-//! entity knowledge graph written *incrementally* as nodes and edges, so the
-//! same vault semantics run on grust-memory (RAM), Postgres, Falkor,
-//! LanceDB, or Sail.
+//! Marciana's Grust adapter: [`typesec-memory`](typesec_memory)'s `MemoryStore`
+//! implemented over a compatible Grust [`GraphMutationStore`]. Records and
+//! their entity knowledge graph are written *incrementally* as nodes and
+//! edges. The v1 durable production path is [`TursoMemoryStore`], while the
+//! generic adapter remains useful for reference and explicitly integrated
+//! backends.
 //!
 //! ## Graph shape
 //!
@@ -13,10 +14,10 @@
 //! (:MemoryEntity)-[:RELATES {rel, fact_id}]->(:MemoryEntity)
 //! ```
 //!
-//! The full [`StoredRecord`] rides in one JSON property; queryable dimensions
-//! stay in the record and are filtered through the shared
-//! [`StoreQuery::matches`] semantics (pushdown via GQL is the next
-//! iteration — correctness first, the conformance suite pins it).
+//! The full [`StoredRecord`] rides in one JSON property. Space scoping is
+//! pushed into the backend; the remaining dimensions use the shared
+//! [`StoreQuery::matches`] semantics. Fuller GQL pushdown is a post-v1
+//! optimization: correctness is pinned by the conformance suite today.
 //!
 //! ## The sync/async bridge
 //!
@@ -276,32 +277,53 @@ impl<G: GraphMutationStore> MemoryStore for GraphStoreMemoryStore<G> {
 /// The sync→async bridge: a dedicated current-thread runtime, safe to call
 /// from inside or outside another tokio runtime.
 struct Bridge {
-    rt: tokio::runtime::Runtime,
+    rt: Option<tokio::runtime::Runtime>,
 }
 
 impl Bridge {
     fn new() -> Self {
         Self {
-            // No IO/time drivers enabled: the in-memory backend needs none.
-            // Network backends can construct with their own runtime instead.
-            rt: tokio::runtime::Builder::new_current_thread()
-                .build()
-                .expect("bridge runtime builds"),
+            rt: Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("bridge runtime builds"),
+            ),
         }
     }
 
     fn run<T: Send>(&self, fut: impl Future<Output = T> + Send) -> T {
+        let rt = self.rt.as_ref().expect("bridge runtime is available");
         if tokio::runtime::Handle::try_current().is_ok() {
             // Already inside a runtime: block_on here would panic. Drive the
             // bridge runtime from a scoped thread instead.
             std::thread::scope(|scope| {
                 scope
-                    .spawn(|| self.rt.block_on(fut))
+                    .spawn(|| rt.block_on(fut))
                     .join()
                     .expect("bridge thread completes")
             })
         } else {
-            self.rt.block_on(fut)
+            rt.block_on(fut)
+        }
+    }
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        let Some(rt) = self.rt.take() else {
+            return;
+        };
+        if tokio::runtime::Handle::try_current().is_ok() {
+            // Dropping a runtime may block while its workers shut down, which
+            // Tokio rejects inside an async context. Finish shutdown on a
+            // plain thread so a TursoMemoryStore can be owned directly by an
+            // async service without special drop choreography.
+            std::thread::spawn(move || drop(rt))
+                .join()
+                .expect("bridge runtime shutdown completes");
+        } else {
+            drop(rt);
         }
     }
 }
@@ -341,7 +363,11 @@ fn decode_record(node: &Node) -> Result<StoredRecord, StoreError> {
 }
 
 pub mod analytics;
+#[cfg(feature = "turso")]
+pub mod turso;
 pub mod vector;
+#[cfg(feature = "turso")]
+pub use turso::TursoMemoryStore;
 pub use vector::{Embedder, VectorIndex};
 
 #[cfg(test)]

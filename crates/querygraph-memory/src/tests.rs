@@ -29,6 +29,16 @@ async fn bridge_survives_being_called_from_inside_tokio() {
         .expect("conformance inside tokio");
 }
 
+/// The production bridge must own time and I/O drivers, not merely an
+/// executor capable of polling the in-memory backend.
+#[test]
+fn bridge_owns_tokio_drivers() {
+    let bridge = Bridge::new();
+    bridge.run(async {
+        tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    });
+}
+
 /// Consolidation over the Grust backend commits the supersede as one
 /// `apply_mutations` batch, and the superseded fact survives as bi-temporal
 /// history (invalidated, not destroyed).
