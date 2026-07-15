@@ -1040,7 +1040,7 @@ implements TypeSec's synchronous `MemoryStore` interface over a compatible
 Grust mutation backend without moving authority or plaintext handling into the
 storage layer:
 
-```rust,ignore
+```rust
 pub struct GraphStoreMemoryStore<G: GraphMutationStore> { /* ... */ }
 
 use querygraph_memory::TursoMemoryStore;
