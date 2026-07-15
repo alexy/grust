@@ -5,7 +5,7 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
-  <meta name="dcterms.date" content="2026-07-14" />
+  <meta name="dcterms.date" content="2026-07-15" />
   <title>8. Backend Architecture</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
@@ -303,8 +303,105 @@ construct a synced store from a local path, remote URL, and optional
 auth token. The <code>GraphStore</code> API continues to operate on the
 local SQL connection; callers decide when to call the store’s
 <code>push</code> and <code>pull</code> helpers.</p>
-<h2 data-number="9.6" id="sail"><span
-class="header-section-number">9.6</span> Sail</h2>
+<h2 data-number="9.6" id="querygraph-memory-typesec-over-grust"><span
+class="header-section-number">9.6</span> QueryGraph Memory: TypeSec over
+Grust</h2>
+<p><code>querygraph-memory</code> is a concrete application of the Grust
+backend contract. It implements TypeSec’s synchronous
+<code>MemoryStore</code> interface over a compatible Grust mutation
+backend without moving authority or plaintext handling into the storage
+layer:</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">pub</span> <span class="kw">struct</span> GraphStoreMemoryStore<span class="op">&lt;</span>G<span class="op">:</span> GraphMutationStore<span class="op">&gt;</span> <span class="op">{</span> <span class="co">/* ... */</span> <span class="op">}</span></span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="kw">use</span> <span class="pp">querygraph_memory::</span>TursoMemoryStore<span class="op">;</span></span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb5-5"><a href="#cb5-5" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> store <span class="op">=</span> <span class="pp">TursoMemoryStore::</span>open(<span class="st">&quot;data/querygraph-memory.db&quot;</span>)<span class="op">?;</span></span></code></pre></div>
+<p><code>GraphStoreMemoryStore&lt;G&gt;</code> is the generic adapter
+for an already-initialized <code>GraphMutationStore</code>. The
+production-oriented v1 alias, <code>TursoMemoryStore</code>, binds that
+adapter to <code>TursoGraphStore</code>.
+<code>TursoMemoryStore::open(path)</code> creates missing parent
+directories, opens a file-backed local database with the stable
+<code>querygraph_memory</code> table prefix, and runs Grust’s bootstrap
+before returning. <code>open_with_config</code> is the explicit form for
+applications that need another table prefix, batch size, path, or
+journal mode. A default <code>TursoConfig</code> still uses
+<code>:memory:</code>, so durable callers must supply a file path.</p>
+<p>The adapter projects memory into a small property graph:</p>
+<pre class="text"><code>(:MemoryRecord {record: &lt;opaque JSON&gt;, space: ...})
+    -[:MENTIONS]-&gt;(:MemoryEntity {name, kind})
+(:MemoryEntity)-[:RELATES {rel, fact_id}]-&gt;(:MemoryEntity)</code></pre>
+<p>The complete TypeSec <code>StoredRecord</code> is serialized into one
+opaque JSON property and round-tripped whole. Grust does not open the
+protected content. TypeSec’s <code>MemoryVault</code> remains the only
+component that rehydrates it, verifies typed capabilities, applies a
+recall clearance ceiling, excludes quarantined records, joins
+sensitivity labels during consolidation, and emits audit evidence. That
+separation is the security boundary: Grust supplies durable graph
+mechanics; TypeSec decides which subject may learn what.</p>
+<p>Queries push only memory-space equality into the graph as
+<code>Start::NodesByProperty</code>. The other <code>StoreQuery</code>
+dimensions—kind, time, label, entities, text, invalidation state, and
+ordering—continue through TypeSec’s shared
+<code>StoreQuery::matches</code> implementation. This is semantically
+complete and conformance-tested, but it is deliberately not advertised
+as full GQL pushdown. A neighborhood traversal may discover record
+identifiers associated with global entity nodes across several spaces;
+the vault rejects every record outside the authorized space before
+content can be revealed. Tenant isolation in v1 is therefore
+authorization at the vault boundary, not physical graph
+partitioning.</p>
+<p>Consolidation uses the mutation boundary rather than a special
+memory-only transaction API. <code>MemoryStore::apply_batch</code>
+converts its puts and invalidations into one <code>GraphMutation</code>
+slice and calls <code>apply_mutations</code> once. Turso reports
+transactional mutation atomicity, so superseding old records and
+inserting the replacement commits as one unit. TypeSec performs the
+SecLib label join before that batch reaches storage, which means a
+replacement derived from a Sensitive source remains Sensitive after
+closing and reopening the database. A generic backend that reports
+<code>OrderedNonAtomic</code> remains usable for simpler operations but
+cannot promise atomic consolidation.</p>
+<p>The adapter also owns the sanctioned bridge between TypeSec’s
+synchronous <code>MemoryStore</code> and Grust’s asynchronous
+<code>GraphStore</code>. A dedicated current-thread Tokio runtime
+carries I/O and time drivers. Calls made outside Tokio drive it
+directly; calls made from an existing Tokio runtime execute on a scoped
+thread. This keeps an MCP or HTTP service from nesting runtimes or
+panicking, and lets the store shut down safely when dropped from
+asynchronous application code.</p>
+<p>Semantic ranking and cognition preserve the same boundary. The
+reference <code>VectorIndex&lt;E: Embedder&gt;</code> is an in-process
+cosine index. An <code>Embedder</code> declares whether it is local; a
+remote embedder is never handed Sensitive or Secret text, and those
+records remain available to ordinary authorized recall without
+participating in remote vector ranking. Search returns candidate IDs,
+with an optional bounded entity co-mention boost, but the vault still
+performs the authorization and label checks. Reference deduplication,
+contradiction, and importance analyzers likewise make no writes. They
+consume already-recalled views and emit inert
+<code>ConsolidationPlan</code> values that must return through the
+capability-gated vault.</p>
+<p>The durable v1 proof has explicit limits.
+<code>MemoryId::next()</code> uses a process-local counter, so a
+restarted writer can collide with persisted <code>mem-N</code>
+identifiers; a hosted or multi-process system needs collision-resistant
+durable IDs and idempotency. <code>VectorIndex</code> is not a
+persistent LanceDB ANN implementation, memory predicates beyond space
+are not fully pushed into GQL, and the reference analytics are not
+distributed Sail cognition. TypeDID request verification is present at
+the QueryGraph service boundary, but durable anti-replay state shared
+across replicas is post-v1. Grust’s structural edge identity remains
+<code>(from, label, to)</code>, so changing <code>fact_id</code> cannot
+preserve parallel <code>RELATES</code> assertions between the same
+endpoints; assertion nodes or a multi-edge identity surface are still
+needed for full lineage. Finally, vault-level tenant checks, restart
+persistence, and an end-to-end local demonstration do not by themselves
+constitute a hosted multi-tenant service with quotas, migrations,
+backups, deletion propagation, and service-level objectives.</p>
+<h2 data-number="9.7" id="sail"><span
+class="header-section-number">9.7</span> Sail</h2>
 <p><code>grust-sail</code> connects to a Sail Spark Connect server over
 gRPC. It stores graph data in Spark DataFrames backed by Delta tables.
 SQL commands and reads are sent as Spark Connect SQL relation plans, and
@@ -371,8 +468,8 @@ staged-Arrow, <code>MERGE INTO</code>, typed-Delta mirror, and delete
 paths as ordinary Grust writes. The plan and report types are
 backend-neutral — Memory, Sail, and Turso all execute them — while Sail
 adds the SQL read pushdown and typed-table mirrors on top.</p>
-<h2 data-number="9.7" id="falkordb-helixdb-and-surrealdb"><span
-class="header-section-number">9.7</span> FalkorDB, HelixDB, and
+<h2 data-number="9.8" id="falkordb-helixdb-and-surrealdb"><span
+class="header-section-number">9.8</span> FalkorDB, HelixDB, and
 SurrealDB</h2>
 <p>The FalkorDB backend writes through Redis <code>GRAPH.QUERY</code>
 using Cypher-like <code>MERGE</code> statements. It batches nodes by
@@ -406,34 +503,34 @@ still target a known relation table directly. Traversal batches
 target-node reads per step through <code>get_nodes</code>, avoiding a
 serial node lookup for every edge in a fan-out. Mutation batches are
 wrapped in SurrealDB transactions.</p>
-<h2 data-number="9.8" id="cocoindex"><span
-class="header-section-number">9.8</span> CocoIndex</h2>
+<h2 data-number="9.9" id="cocoindex"><span
+class="header-section-number">9.9</span> CocoIndex</h2>
 <p><code>grust-cocoindex</code> is intentionally not an ordinary
 <code>GraphStore</code>. CocoIndex is an incremental target-state
 system, so the Grust integration exports a graph as serializable node
 and relationship state:</p>
-<div class="sourceCode" id="cb5"><pre
-class="sourceCode rust"><code class="sourceCode rust"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> export <span class="op">=</span> graph<span class="op">.</span>to_cocoindex_export()<span class="op">?;</span></span>
-<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> graph <span class="op">=</span> cocoindex_export_to_graph(export)<span class="op">?;</span></span></code></pre></div>
+<div class="sourceCode" id="cb7"><pre
+class="sourceCode rust"><code class="sourceCode rust"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> export <span class="op">=</span> graph<span class="op">.</span>to_cocoindex_export()<span class="op">?;</span></span>
+<span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="kw">let</span> graph <span class="op">=</span> cocoindex_export_to_graph(export)<span class="op">?;</span></span></code></pre></div>
 <p>The export uses Grust node IDs as target keys, converts properties to
 JSON, and requires edge endpoints to exist in the graph so relationship
 source and target labels can be emitted. The import path expects the
 same key shape, validates relationship endpoints against imported nodes,
 and preserves explicit relationship keys as Grust edge IDs.</p>
-<h2 data-number="9.9" id="backend-integration-tests"><span
-class="header-section-number">9.9</span> Backend Integration Tests</h2>
+<h2 data-number="9.10" id="backend-integration-tests"><span
+class="header-section-number">9.10</span> Backend Integration Tests</h2>
 <p>Unit tests stay self-contained, but live backend tests are explicit.
 They are marked ignored in Cargo so a normal workspace test run does not
 accidentally depend on local services. When a live test is requested,
 however, it must reach the backend; it no longer returns early and
 pretends success when a server is missing.</p>
 <p>The repository provides a launcher for those checks:</p>
-<div class="sourceCode" id="cb6"><pre class="sourceCode sh"><code class="sourceCode bash"><span id="cb6-1"><a href="#cb6-1" aria-hidden="true" tabindex="-1"></a><span class="ex">scripts/integration-test.sh</span> doctor <span class="at">--profile</span> docker <span class="at">--mode</span> docker</span>
-<span id="cb6-2"><a href="#cb6-2" aria-hidden="true" tabindex="-1"></a><span class="ex">scripts/integration-test.sh</span> <span class="at">--profile</span> docker <span class="at">--mode</span> docker</span></code></pre></div>
+<div class="sourceCode" id="cb8"><pre class="sourceCode sh"><code class="sourceCode bash"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="ex">scripts/integration-test.sh</span> doctor <span class="at">--profile</span> docker <span class="at">--mode</span> docker</span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="ex">scripts/integration-test.sh</span> <span class="at">--profile</span> docker <span class="at">--mode</span> docker</span></code></pre></div>
 <p>The Docker profile is the contributor path: it starts the
 Docker-backed services and runs local LanceDB and CocoIndex checks. The
 full maintainer profile is still available:</p>
-<div class="sourceCode" id="cb7"><pre class="sourceCode sh"><code class="sourceCode bash"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="ex">scripts/integration-test.sh</span> <span class="at">--profile</span> all</span></code></pre></div>
+<div class="sourceCode" id="cb9"><pre class="sourceCode sh"><code class="sourceCode bash"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="ex">scripts/integration-test.sh</span> <span class="at">--profile</span> all</span></code></pre></div>
 <p>The launcher reads <code>integration/backends.conf</code>. In
 <code>auto</code> mode it prefers already-running services, then
 configured local source checkouts such as <code>~/src/sail</code>,

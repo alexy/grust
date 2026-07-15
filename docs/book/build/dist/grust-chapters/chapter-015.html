@@ -5,7 +5,7 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
-  <meta name="dcterms.date" content="2026-07-14" />
+  <meta name="dcterms.date" content="2026-07-15" />
   <title>12. Where Grust Can Grow</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
@@ -147,8 +147,10 @@ of replacing whole graphs. The default <code>apply_mutations</code>
 implementation is ordered but not atomic: if a backend uses the default
 and a later mutation fails, earlier mutations may already be committed.
 Backends with real transaction support can override that method. The
-pgGraph backend wraps mutation batches in PostgreSQL transactions, and
-the SurrealDB HTTP and SDK stores wrap mutation batches in SurrealDB
-transactions.</p>
+PostgreSQL and pgGraph stores wrap mutation batches in PostgreSQL
+transactions, Turso wraps them in a local SQL transaction (which
+<code>querygraph-memory</code> relies on for atomic
+supersede-and-replace consolidation), and the SurrealDB HTTP and SDK
+stores wrap mutation batches in SurrealDB transactions.</p>
 </body>
 </html>
