@@ -62,7 +62,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   dependency. LanceDB ANN, Sail-distributed cognition, fuller GQL pushdown,
   and a hosted multi-tenant service are explicitly post-v1 work rather than
   claims of this release. The adapter is consumed by qg-rust's signed-only
-  memory API and its qg-python Pydantic AI v2 restart demonstration.
+  memory API and its qg-python Pydantic AI v2 restart demonstration. The
+  workspace lock is aligned with TypeSec `0.13.0` Lido.
 
 - **Turso joins the read-pushdown consumers**: `TursoGraphStore::run_read_query`
   now pushes the portable read subset into SQL over the universal tables via a
