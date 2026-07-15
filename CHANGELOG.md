@@ -57,13 +57,15 @@ reconstructed from Git history, release commits, and the shipped docs.
   is pushed into the backend, and all remaining query dimensions use the
   shared conformance-pinned matcher. The reference `VectorIndex` enforces
   embedding privacy, analytics emit plans through the vault front door, and
-  the shared-store test proves vault-level tenant authorization. The crate
-  remains `publish = false` while `typesec-memory` is a sibling path
-  dependency. LanceDB ANN, Sail-distributed cognition, fuller GQL pushdown,
-  and a hosted multi-tenant service are explicitly post-v1 work rather than
-  claims of this release. The adapter is consumed by qg-rust's signed-only
-  memory API and its qg-python Pydantic AI v2 restart demonstration. The
-  workspace lock is aligned with TypeSec `0.13.0` Lido.
+  the shared-store test proves vault-level tenant authorization. TypeSec
+  Memory is published in `0.13.0` Lido; this adapter remains
+  `publish = false` pending a deliberate Grust release/distribution decision
+  and stays sibling-path linked for integration CI. LanceDB ANN,
+  Sail-distributed cognition, fuller GQL pushdown, and a hosted multi-tenant
+  service are explicitly post-v1 work rather than claims of this release. The
+  adapter is consumed by qg-rust's signed-only memory API and its qg-python
+  Pydantic AI v2 restart demonstration. The workspace lock is aligned with
+  TypeSec `0.13.0` Lido.
 
 - **Turso joins the read-pushdown consumers**: `TursoGraphStore::run_read_query`
   now pushes the portable read subset into SQL over the universal tables via a

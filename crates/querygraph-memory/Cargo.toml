@@ -5,7 +5,8 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Capability-safe TypeSec memory over Grust, with durable Turso storage"
-# Not publishable until typesec-memory itself is on crates.io.
+# Kept private until the next Grust release makes an explicit distribution
+# decision and replaces the sibling TypeSec paths with registry-versioned deps.
 publish = false
 
 [features]
