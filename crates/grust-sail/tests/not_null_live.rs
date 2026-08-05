@@ -1,10 +1,14 @@
 use grust_core::{GraphAdminStore, GraphStore};
-use grust_sail::{SailConfig, SailGraphStore};
+use grust_sail::{SailConfig, SailGraphStore, SailWarehouse};
 
 #[tokio::test]
 #[ignore = "requires a live Sail server on 127.0.0.1:50051"]
 async fn typed_table_rejects_null_structural_identity() {
-    let store = SailGraphStore::connect(SailConfig::default())
+    let config = SailConfig {
+        warehouse: SailWarehouse::LocalSessionScoped,
+        ..SailConfig::default()
+    };
+    let store = SailGraphStore::connect(config)
         .await
         .expect("connect to Sail");
     let schema = grust_core::GraphSchema::builder()

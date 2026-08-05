@@ -23,7 +23,11 @@ async fn store() -> SailGraphStore {
         sail_available(),
         "live Sail integration tests require a Sail server on 127.0.0.1:50051; run scripts/integration-test.sh --backend sail"
     );
-    let store = SailGraphStore::connect(SailConfig::default())
+    let config = SailConfig {
+        warehouse: SailWarehouse::LocalSessionScoped,
+        ..SailConfig::default()
+    };
+    let store = SailGraphStore::connect(config)
         .await
         .expect("connect to Sail");
     store.bootstrap().await.expect("bootstrap Sail tables");

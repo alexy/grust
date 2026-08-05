@@ -45,7 +45,7 @@ use sc::{
 // ── Config ────────────────────────────────────────────────────────────────────
 
 mod config;
-pub use config::SailConfig;
+pub use config::{SailConfig, SailWarehouse};
 
 mod session_config;
 mod temp_view;
@@ -2287,6 +2287,9 @@ pub fn sail_triplets_sql_for_direction(direction: SailGraphPatternDirection) -> 
 }
 
 fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
+    // The pinned Sail revision loses user-facing field names while resolving
+    // Delta MERGE constraints for explicit-schema tables. Zero-row CTAS keeps
+    // those names; constraint properties preserve structural non-null checks.
     let mut statements = Vec::new();
     for node_type in &schema.nodes {
         let mut columns = vec!["CAST(NULL AS STRING) AS id".to_string()];
@@ -3248,6 +3251,8 @@ fn validate_cypher_constraint_registry_name(name: &str) -> Result<()> {
 }
 
 fn create_cypher_constraint_registry_table_sql() -> String {
+    // Use the same CTAS compatibility shape as typed graph tables until Sail
+    // resolves explicit-schema Delta MERGE constraints by user-facing name.
     format!(
         "CREATE TABLE IF NOT EXISTS {} USING delta TBLPROPERTIES ({}) AS \
          SELECT CAST(NULL AS STRING) AS name, \

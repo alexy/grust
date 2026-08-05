@@ -405,11 +405,18 @@ server, lowers traversal IR to Spark SQL joins, and can mirror schema-labeled
 rows into typed Delta tables. SQL filters bind user values through Spark
 Connect named arguments; delete mutations stage their values as Arrow temp views
 before running argument-free SQL commands.
-Connecting also sets and reads back `spark.sql.warehouse.dir` in the same Spark
-Connect session. `SailConfig::default()` chooses a fresh absolute temporary
-warehouse for a co-located development server. Remote or durable deployments
-must set `warehouse_dir` to a stable absolute path visible at the same location
-to the Sail server; a client-local path is not portable across that boundary.
+`SailConfig::default()` leaves `spark.sql.warehouse.dir` under server control,
+so a remote client neither injects a client-local path nor changes the
+server's persistence identity. `SailWarehouse::LocalSessionScoped` explicitly
+chooses a client temporary directory derived from the session ID for a
+co-located development server; Grust does not delete it, so callers own
+cleanup. `SailWarehouse::ExplicitPath` sets and reads back a stable absolute
+path that the server can resolve. Reopening managed tables still depends on
+Sail providing a persistent catalog and warehouse; Grust does not infer that
+server-side lifecycle from a client path. Sail versions whose unconfigured
+warehouse fallback is the relative `spark-warehouse` path must be given an
+absolute server setting or one of the explicit Grust overrides before managed
+Delta tables are created.
 Typed Delta tables retain their declared column names and enforce structural
 identity with Delta constraints.
 It also exposes Sail's Arrow IPC path directly for staging arbitrary Arrow

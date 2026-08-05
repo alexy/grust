@@ -1135,13 +1135,21 @@ data in Spark DataFrames backed by Delta tables. SQL commands and reads are
 sent as Spark Connect SQL relation plans, and read results are decoded from
 Arrow IPC streams.
 
-Connection establishment validates the client configuration, sets
-`spark.sql.warehouse.dir`, and reads it back through the same Spark Connect
-session before exposing the store. The default creates a fresh absolute
-temporary warehouse and is suitable for a co-located development server. A
-remote or durable deployment must explicitly provide a stable absolute
-`warehouse_dir` visible at the same location to the Sail server; a path that
-exists only on the client is not a durable deployment contract.
+Connection establishment validates the client configuration. The default
+`SailWarehouse::ServerManaged` policy does not set
+`spark.sql.warehouse.dir`; Sail's catalog and warehouse configuration remain
+authoritative, which is safe across a remote client boundary and does not
+silently select a new client-local persistence path. Co-located development
+can opt into `SailWarehouse::LocalSessionScoped`, which derives a path beneath
+the client's temporary directory from the session ID. Grust does not delete
+that directory; callers own cleanup, and reusing the session ID reuses the
+path. Durable callers can use `SailWarehouse::ExplicitPath` with a stable
+absolute path visible to the server; Grust sets and reads that override back
+through the same Spark Connect session. Reopening tables across sessions
+additionally requires Sail to provide persistent catalog metadata. If Sail's
+unconfigured warehouse fallback is the relative `spark-warehouse` path, the
+server needs an absolute setting or the client must select one of the explicit
+Grust overrides before creating managed Delta tables.
 
 Bulk writes stage Arrow IPC batches as Spark Connect `LocalRelation` temp views
 and then merge from those views. That avoids building one giant SQL literal per

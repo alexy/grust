@@ -4,7 +4,7 @@ use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use grust_sail::{SailConfig, SailGraphStore};
+use grust_sail::{SailConfig, SailGraphStore, SailWarehouse};
 
 fn one_row_ipc() -> Vec<u8> {
     let schema = Schema::new(vec![Field::new("value", DataType::Utf8, false)]);
@@ -26,7 +26,11 @@ fn one_row_ipc() -> Vec<u8> {
 #[tokio::test]
 #[ignore = "requires a live Sail server on 127.0.0.1:50051"]
 async fn staged_arrow_view_can_be_dropped_idempotently() {
-    let store = SailGraphStore::connect(SailConfig::default())
+    let config = SailConfig {
+        warehouse: SailWarehouse::LocalSessionScoped,
+        ..SailConfig::default()
+    };
+    let store = SailGraphStore::connect(config)
         .await
         .expect("connect to Sail");
     let name = format!("cleanup_{}", uuid::Uuid::new_v4().simple());

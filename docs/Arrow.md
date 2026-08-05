@@ -136,11 +136,28 @@ the Sail Spark Connect session owned by that `SailGraphStore`.
 `drop_arrow_ipc_view` validates the same identifier and is idempotent, so
 cleanup may run after success, failure, or an uncertain response.
 
-`SailGraphStore::connect` configures and verifies the session warehouse before
-returning. The default is a fresh absolute path under the client's temporary
-directory and is intended for a co-located Sail server. A remote or durable
-deployment must provide a stable absolute `SailConfig::warehouse_dir` that the
-server resolves to the intended storage location.
+`SailGraphStore::connect` leaves the warehouse server-managed by default. This
+does not send a client filesystem path to a remote Sail endpoint. A co-located
+development process can opt into an isolated local warehouse explicitly:
+
+```rust
+use grust_sail::{SailConfig, SailWarehouse};
+
+let config = SailConfig {
+    warehouse: SailWarehouse::LocalSessionScoped,
+    ..SailConfig::default()
+};
+```
+
+The local path is derived from `session_id`, is reused when that ID is reused,
+and is not deleted by Grust. For durable storage, use
+`SailWarehouse::ExplicitPath` with a stable absolute path that the server can
+resolve. Grust sets and reads back explicit and local overrides in the same
+Spark Connect session. A server-managed warehouse or explicit path is
+necessary but not sufficient for reopening tables: Sail must also persist the
+corresponding catalog metadata. Sail versions that fall back to a relative
+`spark-warehouse` path need an absolute server setting or one of these explicit
+overrides before Grust creates managed Delta tables.
 
 `SailGraphStore::query_arrow_ipc` runs Spark SQL and returns the Arrow IPC
 streams emitted by Spark Connect. This is the direct query-engine-over-Arrow

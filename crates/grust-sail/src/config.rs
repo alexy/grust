@@ -2,6 +2,23 @@ use std::path::{Path, PathBuf};
 
 use grust_core::{GrustError, Result};
 
+/// Ownership policy for Sail's managed-table warehouse.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum SailWarehouse {
+    /// Leave `spark.sql.warehouse.dir` untouched and use the server's catalog
+    /// and warehouse configuration.
+    #[default]
+    ServerManaged,
+    /// Use a session-scoped directory on the client's local filesystem.
+    ///
+    /// The path is deterministic from `SailConfig::session_id` and is only
+    /// suitable when Sail shares the client's filesystem namespace. Grust does
+    /// not delete it; the caller owns cleanup.
+    LocalSessionScoped,
+    /// Set an absolute path that the Sail server resolves to stable storage.
+    ExplicitPath(PathBuf),
+}
+
 /// Spark Connect session configuration for the Sail graph store.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SailConfig {
@@ -9,8 +26,8 @@ pub struct SailConfig {
     pub user_id: String,
     pub session_id: String,
     pub batch_size: usize,
-    /// Absolute path on the Sail server used for session-managed tables.
-    pub warehouse_dir: PathBuf,
+    /// How the Spark Connect session obtains its managed-table warehouse.
+    pub warehouse: SailWarehouse,
 }
 
 impl SailConfig {
@@ -26,12 +43,17 @@ impl SailConfig {
         if self.batch_size == 0 {
             return Err(invalid_config("batch_size must be greater than zero"));
         }
-        warehouse_path(&self.warehouse_dir)?;
+        self.warehouse_override()?;
         Ok(())
     }
 
-    pub(crate) fn warehouse_value(&self) -> Result<&str> {
-        warehouse_path(&self.warehouse_dir)
+    pub(crate) fn warehouse_override(&self) -> Result<Option<String>> {
+        let path = match &self.warehouse {
+            SailWarehouse::ServerManaged => return Ok(None),
+            SailWarehouse::LocalSessionScoped => local_session_path(&self.session_id),
+            SailWarehouse::ExplicitPath(path) => path.clone(),
+        };
+        Ok(Some(warehouse_path(&path)?.to_string()))
     }
 }
 
@@ -41,14 +63,14 @@ impl Default for SailConfig {
         Self {
             endpoint: "http://127.0.0.1:50051".to_string(),
             user_id: "grust".to_string(),
-            warehouse_dir: default_warehouse_dir(&session_id),
+            warehouse: SailWarehouse::ServerManaged,
             session_id,
             batch_size: 1000,
         }
     }
 }
 
-fn default_warehouse_dir(session_id: &str) -> PathBuf {
+fn local_session_path(session_id: &str) -> PathBuf {
     std::env::temp_dir()
         .join("grust-sail")
         .join(session_id)
@@ -57,11 +79,13 @@ fn default_warehouse_dir(session_id: &str) -> PathBuf {
 
 fn warehouse_path(path: &Path) -> Result<&str> {
     if !path.is_absolute() {
-        return Err(invalid_config("warehouse_dir must be an absolute path"));
+        return Err(invalid_config(
+            "warehouse override must be an absolute path",
+        ));
     }
     path.to_str()
         .filter(|value| !value.contains('\0'))
-        .ok_or_else(|| invalid_config("warehouse_dir must be valid UTF-8 without NUL bytes"))
+        .ok_or_else(|| invalid_config("warehouse override must be valid UTF-8 without NUL bytes"))
 }
 
 fn invalid_config(message: &str) -> GrustError {

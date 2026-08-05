@@ -391,20 +391,30 @@ out of the already broad graph executor.
 ```rust
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SailConfig {
-    pub endpoint: String,          // default "http://127.0.0.1:50051"
-    pub user_id: String,           // default "grust"
-    pub session_id: String,        // UUID generated at construction
-    pub batch_size: usize,         // default 1000
-    pub warehouse_dir: PathBuf,    // absolute server-visible warehouse
+    pub endpoint: String,             // default "http://127.0.0.1:50051"
+    pub user_id: String,              // default "grust"
+    pub session_id: String,           // UUID generated at construction
+    pub batch_size: usize,            // default 1000
+    pub warehouse: SailWarehouse,     // default ServerManaged
+}
+
+pub enum SailWarehouse {
+    ServerManaged,
+    LocalSessionScoped,
+    ExplicitPath(PathBuf),
 }
 ```
 
-The default warehouse is fresh and session-scoped beneath the client's
-temporary directory. It is deliberately convenient for a co-located test or
-development server, not an implied remote-filesystem mapping. Remote and
-durable callers set an absolute stable path that Sail can resolve. Connection
-fails closed unless the Config RPC reads back the exact value in the same
-server session.
+The default leaves warehouse and catalog ownership with Sail. It sends no
+client path, so remote connections do not accidentally redirect persistence
+and a new client does not silently select a different warehouse. A co-located
+test or development server opts into `LocalSessionScoped`; Grust derives its
+absolute path beneath the client's temporary directory from the session ID.
+The path is reused with that ID and caller-managed because Grust does not
+delete it. Durable callers can choose `ExplicitPath` with a stable absolute
+path that Sail can resolve. For either override, connection fails closed unless
+the Config RPC reads back the exact value in the same server session. Reopening
+tables also requires persistent server-side catalog metadata.
 
 The proposal included `table_prefix`, `table_format` (`Delta`/`Iceberg`/
 `Parquet`), `catalog`, and `database`. These were deferred:

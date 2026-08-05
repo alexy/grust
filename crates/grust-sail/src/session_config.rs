@@ -9,12 +9,20 @@ use crate::{CLIENT_TYPE, sail_user_context};
 
 pub(crate) const WAREHOUSE_CONFIG_KEY: &str = "spark.sql.warehouse.dir";
 
+struct WarehouseConfiguration {
+    expected: String,
+    set_request: ConfigRequest,
+}
+
 pub(crate) async fn configure_warehouse(
     client: &mut SparkConnectServiceClient<tonic::transport::Channel>,
     config: &SailConfig,
 ) -> Result<()> {
+    let Some(configuration) = warehouse_configuration(config)? else {
+        return Ok(());
+    };
     let set = client
-        .config(set_request(config)?)
+        .config(configuration.set_request)
         .await
         .map_err(|error| rpc_error("set", error))?
         .into_inner();
@@ -25,21 +33,31 @@ pub(crate) async fn configure_warehouse(
         .await
         .map_err(|error| rpc_error("get", error))?
         .into_inner();
-    verify_warehouse(&get, config, &server_session_id)
+    verify_warehouse(&get, config, &server_session_id, &configuration.expected)
 }
 
-fn set_request(config: &SailConfig) -> Result<ConfigRequest> {
-    Ok(request(
+fn warehouse_configuration(config: &SailConfig) -> Result<Option<WarehouseConfiguration>> {
+    let Some(expected) = config.warehouse_override()? else {
+        return Ok(None);
+    };
+    Ok(Some(WarehouseConfiguration {
+        set_request: set_request(config, &expected),
+        expected,
+    }))
+}
+
+fn set_request(config: &SailConfig, warehouse: &str) -> ConfigRequest {
+    request(
         config,
         None,
         OpType::Set(config_request::Set {
             pairs: vec![KeyValue {
                 key: WAREHOUSE_CONFIG_KEY.to_string(),
-                value: Some(config.warehouse_value()?.to_string()),
+                value: Some(warehouse.to_string()),
             }],
             silent: Some(false),
         }),
-    ))
+    )
 }
 
 fn get_request(config: &SailConfig, server_session_id: String) -> ConfigRequest {
@@ -72,9 +90,9 @@ fn verify_warehouse(
     response: &ConfigResponse,
     config: &SailConfig,
     server_session_id: &str,
+    expected: &str,
 ) -> Result<()> {
     verify_session(response, config, Some(server_session_id))?;
-    let expected = config.warehouse_value()?;
     match response.pairs.as_slice() {
         [KeyValue { key, value }]
             if key == WAREHOUSE_CONFIG_KEY && value.as_deref() == Some(expected) =>
