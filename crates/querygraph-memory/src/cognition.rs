@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use typesec_memory::{CognitionProposal, ConsolidationPlan, Label, MemoryId, RecalledMemory};
 
+#[cfg(feature = "sail")]
+mod sail;
+#[cfg(feature = "sail")]
+pub use sail::LiveSailCognitionExecutor;
+
 use crate::analytics::{contradiction_plan, dedup_plan};
 
 /// Hash-bound proof of the LakeCat snapshot and governed Sail scan used by a job.
@@ -116,17 +121,25 @@ pub enum CognitionError {
 }
 
 /// Engine producing inert proposals, never direct writes.
+#[async_trait::async_trait]
 pub trait CognitionEngine: Send + Sync {
     /// Produce a proposal from an already-authorized request.
-    fn propose(&self, request: CognitionRequest<'_>) -> Result<CognitionProposal, CognitionError>;
+    async fn propose(
+        &self,
+        request: CognitionRequest<'_>,
+    ) -> Result<CognitionProposal, CognitionError>;
 }
 
 /// Deterministic conformance oracle for Sail implementations.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ReferenceCognitionEngine;
 
+#[async_trait::async_trait]
 impl CognitionEngine for ReferenceCognitionEngine {
-    fn propose(&self, request: CognitionRequest<'_>) -> Result<CognitionProposal, CognitionError> {
+    async fn propose(
+        &self,
+        request: CognitionRequest<'_>,
+    ) -> Result<CognitionProposal, CognitionError> {
         let (plan, evidence) = match request.operation {
             CognitionOperation::Deduplicate => (
                 dedup_plan(request.memories),
@@ -155,9 +168,10 @@ pub struct SailCognitionOutput {
 }
 
 /// Narrow seam implemented with `grust-sail` and Spark Connect.
+#[async_trait::async_trait]
 pub trait SailCognitionExecutor: Send + Sync {
     /// Execute only the LakeCat-authorized projection.
-    fn execute(
+    async fn execute(
         &self,
         request: &CognitionRequest<'_>,
     ) -> Result<SailCognitionOutput, CognitionError>;
@@ -175,9 +189,13 @@ impl<E> SailCognitionEngine<E> {
     }
 }
 
+#[async_trait::async_trait]
 impl<E: SailCognitionExecutor> CognitionEngine for SailCognitionEngine<E> {
-    fn propose(&self, request: CognitionRequest<'_>) -> Result<CognitionProposal, CognitionError> {
-        let output = self.executor.execute(&request)?;
+    async fn propose(
+        &self,
+        request: CognitionRequest<'_>,
+    ) -> Result<CognitionProposal, CognitionError> {
+        let output = self.executor.execute(&request).await?;
         build_proposal(
             request,
             output.plan,
@@ -258,8 +276,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn proposal_binds_governed_proof_and_joins_labels() {
+    #[tokio::test]
+    async fn proposal_binds_governed_proof_and_joins_labels() {
         let source = source();
         let memories = vec![
             memory("m1", "Alice likes espresso", Label::Internal),
@@ -272,6 +290,7 @@ mod tests {
                 memories: &memories,
                 operation: CognitionOperation::Deduplicate,
             })
+            .await
             .unwrap();
         assert_eq!(proposal.joined_label, Label::Sensitive);
         assert_eq!(proposal.plan.steps.len(), 1);

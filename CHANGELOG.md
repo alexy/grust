@@ -6,6 +6,16 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+### 2026-08-05
+
+- Added an optional live Spark Connect cognition executor to the private
+  `querygraph-memory` integration crate. Governed memories are staged in a
+  session-local Arrow view under a hashed job name, Sail computes bounded
+  deduplication and reconciliation candidates, and only inert TypeSec plans
+  return; authorization secrets are never staged or logged.
+- Made the cognition engine and Sail executor contracts asynchronous so live
+  Spark Connect execution does not block a runtime worker.
+
 - **QueryGraph-native Marciana cognition boundary:** `querygraph-memory` now
   binds cognition jobs to a hash-verified LakeCat/Iceberg snapshot, governed
   Sail scan projection, verified TypeDID subject, purpose, and authorization

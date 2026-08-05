@@ -12,10 +12,12 @@ publish = false
 [features]
 default = ["turso"]
 turso = ["dep:grust-turso"]
+sail = ["dep:arrow", "dep:grust-sail"]
 
 [dependencies]
 grust-core = { path = "../grust-core", version = "0.12.0" }
 grust-turso = { path = "../grust-turso", version = "0.12.0", optional = true }
+grust-sail = { path = "../grust-sail", version = "0.12.0", optional = true }
 # The security contract this crate implements against. Sibling checkout, the
 # mirror image of typesec's ../grust path deps; CI checks out both repos.
 typesec-memory = { path = "../../../typesec/crates/typesec-memory" }
@@ -26,6 +28,8 @@ sha2 = "0.10"
 thiserror = "2.0"
 tokio = { workspace = true, features = ["net", "time"] }
 tracing = "0.1"
+async-trait = { workspace = true }
+arrow = { version = "58.1.0", optional = true }
 
 [dev-dependencies]
 grust-memory = { path = "../grust-memory", version = "0.12.0" }
