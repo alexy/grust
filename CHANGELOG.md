@@ -8,6 +8,12 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ### 2026-08-05
 
+- Added a domain-neutral guarded graph commit capability and a durable Turso
+  implementation. Exact-node and absence expectations, graph mutations, and a
+  backend-issued commit identity now share one transaction; identical retries
+  return the original receipt, while idempotency-key digest collisions fail
+  closed.
+
 - Added an optional live Spark Connect cognition executor to the private
   `querygraph-memory` integration crate. Governed memories are staged in a
   session-local Arrow view under a hashed job name, Sail computes bounded

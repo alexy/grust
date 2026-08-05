@@ -6,6 +6,11 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
+mod guarded_commit;
+pub use guarded_commit::{
+    GraphCommitReceipt, GraphCommitStore, GraphExpectation, GuardedGraphCommit,
+};
+
 pub type Result<T> = std::result::Result<T, GrustError>;
 pub type Props = BTreeMap<String, Value>;
 
@@ -27,6 +32,10 @@ pub enum GrustError {
     CypherExecution(String),
     #[error("serialization error: {0}")]
     Serialization(String),
+    #[error("guarded graph commit expectation failed: {0}")]
+    GraphExpectationFailed(String),
+    #[error("guarded graph commit idempotency conflict for key: {0}")]
+    GraphIdempotencyConflict(String),
 }
 
 macro_rules! string_newtype {
@@ -4069,16 +4078,17 @@ pub mod prelude {
     pub use crate::{
         CypherMutationExecutor, Decimal, Direction, Duration, Edge, EdgeId, EdgePolicy, EdgeQuery,
         EdgeType, EdgeUniqueness, Field, FieldType, Graph, GraphAdminStore, GraphBuilder,
-        GraphConstraint, GraphConstraintCapability, GraphIndex, GraphMutation,
-        GraphMutationAtomicity, GraphMutationCardinality, GraphMutationPlan, GraphMutationPlanKind,
-        GraphMutationPlanOp, GraphMutationReport, GraphMutationStore,
-        GraphNativeConstraintCapability, GraphNativeConstraintReport, GraphNativeConstraintRequest,
-        GraphNodeMatch, GraphNumericOp, GraphPredicateOp, GraphPropertyPredicate,
-        GraphRelationshipEndpoint, GraphRelationshipMatch, GraphRowEdgeIdPolicy, GraphSchema,
-        GraphSchemaBuilder, GraphStore, GraphValue, GraphWriteCorrelation, GrustError, Label,
-        LoadReport, Node, NodeId, NodeType, PathValue, Props, PutOutcome, Result, RfcDate, Start,
-        Step, Traversal, Value, classify_edge_upsert, classify_node_upsert, edge_key,
-        evaluate_numeric_update, generated_row_edge_id, relationship_type, schema_identifier,
+        GraphCommitReceipt, GraphCommitStore, GraphConstraint, GraphConstraintCapability,
+        GraphExpectation, GraphIndex, GraphMutation, GraphMutationAtomicity,
+        GraphMutationCardinality, GraphMutationPlan, GraphMutationPlanKind, GraphMutationPlanOp,
+        GraphMutationReport, GraphMutationStore, GraphNativeConstraintCapability,
+        GraphNativeConstraintReport, GraphNativeConstraintRequest, GraphNodeMatch, GraphNumericOp,
+        GraphPredicateOp, GraphPropertyPredicate, GraphRelationshipEndpoint,
+        GraphRelationshipMatch, GraphRowEdgeIdPolicy, GraphSchema, GraphSchemaBuilder, GraphStore,
+        GraphValue, GraphWriteCorrelation, GrustError, GuardedGraphCommit, Label, LoadReport, Node,
+        NodeId, NodeType, PathValue, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal,
+        Value, classify_edge_upsert, classify_node_upsert, edge_key, evaluate_numeric_update,
+        generated_row_edge_id, relationship_type, schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

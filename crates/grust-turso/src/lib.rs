@@ -4,6 +4,8 @@ use grust_cypher::pushdown::{NoTypeHints, SqlDialect, StrOp, combine_union, plan
 use grust_cypher::{CypherParameters, CypherResultTable};
 use grust_sql_core::{GraphSqlDialect, UniversalTableRefs};
 
+mod guarded_commit;
+
 /// Journal/concurrency mode for a local Turso database.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TursoJournalMode {
@@ -68,6 +70,10 @@ pub struct TursoGraphStore {
     config: TursoConfig,
     _db: TursoDatabase,
     conn: turso::Connection,
+    /// Serializes all operations on `conn` so an explicit guarded transaction
+    /// cannot accidentally absorb a concurrent read or write on the same
+    /// connection.
+    connection_gate: tokio::sync::Mutex<()>,
 }
 
 impl TursoGraphStore {
@@ -89,6 +95,7 @@ impl TursoGraphStore {
             config,
             _db: TursoDatabase::Local(db),
             conn,
+            connection_gate: tokio::sync::Mutex::new(()),
         };
         store.apply_journal_mode().await?;
         Ok(store)
@@ -118,6 +125,7 @@ impl TursoGraphStore {
 
     /// Run a query expected to yield a single text cell in its first row.
     async fn query_scalar_text(&self, sql: &str) -> Result<Option<String>> {
+        let _gate = self.connection_gate.lock().await;
         let mut rows = self
             .conn
             .query(sql, ())
@@ -163,6 +171,7 @@ impl TursoGraphStore {
             },
             _db: TursoDatabase::Synced(db),
             conn,
+            connection_gate: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -172,6 +181,7 @@ impl TursoGraphStore {
 
     #[cfg(feature = "sync")]
     pub async fn push(&self) -> Result<()> {
+        let _gate = self.connection_gate.lock().await;
         match &self._db {
             TursoDatabase::Synced(db) => db
                 .push()
@@ -185,6 +195,7 @@ impl TursoGraphStore {
 
     #[cfg(feature = "sync")]
     pub async fn pull(&self) -> Result<bool> {
+        let _gate = self.connection_gate.lock().await;
         match &self._db {
             TursoDatabase::Synced(db) => db
                 .pull()
@@ -197,6 +208,11 @@ impl TursoGraphStore {
     }
 
     async fn execute(&self, sql: &str) -> Result<()> {
+        let _gate = self.connection_gate.lock().await;
+        self.execute_unlocked(sql).await
+    }
+
+    async fn execute_unlocked(&self, sql: &str) -> Result<()> {
         self.conn
             .execute_batch(sql)
             .await
@@ -250,6 +266,7 @@ impl TursoGraphStore {
     }
 
     async fn query_nodes(&self, sql: &str) -> Result<Vec<Node>> {
+        let _gate = self.connection_gate.lock().await;
         let mut rows =
             self.conn.query(sql, ()).await.map_err(|err| {
                 GrustError::Backend(format!("Turso node query failed: {err}: {sql}"))
@@ -264,6 +281,7 @@ impl TursoGraphStore {
     }
 
     async fn query_edges(&self, sql: &str) -> Result<Vec<Edge>> {
+        let _gate = self.connection_gate.lock().await;
         let mut rows =
             self.conn.query(sql, ()).await.map_err(|err| {
                 GrustError::Backend(format!("Turso edge query failed: {err}: {sql}"))
@@ -283,6 +301,10 @@ impl TursoGraphStore {
 
     fn edges_table(&self) -> String {
         quote_ident(&format!("{}_edges", self.config.table_prefix))
+    }
+
+    fn commits_table(&self) -> String {
+        quote_ident(&format!("{}_commits", self.config.table_prefix))
     }
 }
 
@@ -371,9 +393,11 @@ impl GraphAdminStore for TursoGraphStore {
     async fn clear(&self) -> Result<()> {
         self.execute(&format!(
             "DELETE FROM {};
+             DELETE FROM {};
              DELETE FROM {};",
             self.edges_table(),
-            self.nodes_table()
+            self.nodes_table(),
+            self.commits_table()
         ))
         .await
     }
@@ -516,7 +540,7 @@ impl CypherMutationExecutor for TursoGraphStore {
 }
 
 pub fn bootstrap_sql(config: &TursoConfig, nodes_table: &str, edges_table: &str) -> Result<String> {
-    Ok(grust_sql_core::universal_bootstrap_sql(
+    let graph_sql = grust_sql_core::universal_bootstrap_sql(
         &TursoDialect,
         &config.table_prefix,
         &UniversalTableRefs {
@@ -525,6 +549,10 @@ pub fn bootstrap_sql(config: &TursoConfig, nodes_table: &str, edges_table: &str)
         },
         Some("PRAGMA foreign_keys = ON"),
         quote_ident,
+    );
+    Ok(format!(
+        "{graph_sql}\n{}",
+        guarded_commit::ledger_bootstrap_sql(config)
     ))
 }
 
@@ -830,6 +858,7 @@ impl TursoGraphStore {
 
     /// Execute pushdown SQL whose result cells decode as optional text.
     async fn run_text_rows(&self, sql: &str, columns: usize) -> Result<Vec<Vec<Option<String>>>> {
+        let _gate = self.connection_gate.lock().await;
         let mut rows = self.conn.query(sql, ()).await.map_err(|err| {
             GrustError::Backend(format!("Turso read pushdown query failed: {err}: {sql}"))
         })?;
@@ -868,23 +897,23 @@ impl TursoGraphStore {
         params: &CypherParameters,
     ) -> Result<CypherResultTable> {
         let dialect = self.read_dialect();
-        if let Some(plan) = plan_read(cypher, params, &NoTypeHints)? {
-            if plan.supported_by(&dialect) {
-                if let Some((arms, distinct)) = plan.union_arms() {
-                    let mut tables = Vec::with_capacity(arms.len());
-                    for arm in arms {
-                        let rows = self
-                            .run_text_rows(&arm.to_sql(&dialect), arm.column_count())
-                            .await?;
-                        tables.push(arm.project_text_rows(&dialect, rows, params)?);
-                    }
-                    return combine_union(tables, distinct);
+        if let Some(plan) = plan_read(cypher, params, &NoTypeHints)?
+            && plan.supported_by(&dialect)
+        {
+            if let Some((arms, distinct)) = plan.union_arms() {
+                let mut tables = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    let rows = self
+                        .run_text_rows(&arm.to_sql(&dialect), arm.column_count())
+                        .await?;
+                    tables.push(arm.project_text_rows(&dialect, rows, params)?);
                 }
-                let rows = self
-                    .run_text_rows(&plan.to_sql(&dialect), plan.column_count())
-                    .await?;
-                return plan.project_text_rows(&dialect, rows, params);
+                return combine_union(tables, distinct);
             }
+            let rows = self
+                .run_text_rows(&plan.to_sql(&dialect), plan.column_count())
+                .await?;
+            return plan.project_text_rows(&dialect, rows, params);
         }
         let graph = self.read_graph().await?;
         grust_cypher::read::run_read_query(&graph, cypher, params)
