@@ -8,6 +8,13 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ### 2026-08-05
 
+- Updated `grust-sail` for current Sail Spark Connect sessions. Each session
+  configures and verifies an absolute warehouse, generated Delta tables retain
+  named columns and structural non-null constraints, registry values are staged
+  through Arrow, and session temp views can be dropped safely and idempotently.
+  Defaults use an ephemeral client-local path; remote or durable deployments
+  must provide a stable absolute path visible to the Sail server.
+
 - Added a domain-neutral guarded graph commit capability and a durable Turso
   implementation. Exact-node and absence expectations, graph mutations, and a
   backend-issued commit identity now share one transaction; identical retries

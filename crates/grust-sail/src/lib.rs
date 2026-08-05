@@ -44,24 +44,13 @@ use sc::{
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug)]
-pub struct SailConfig {
-    pub endpoint: String,
-    pub user_id: String,
-    pub session_id: String,
-    pub batch_size: usize,
-}
+mod config;
+pub use config::SailConfig;
 
-impl Default for SailConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: "http://127.0.0.1:50051".to_string(),
-            user_id: "grust".to_string(),
-            session_id: uuid::Uuid::new_v4().to_string(),
-            batch_size: 1000,
-        }
-    }
-}
+mod session_config;
+mod temp_view;
+
+const CLIENT_TYPE: &str = concat!("grust-sail/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SailDegreeRow {
@@ -95,6 +84,7 @@ pub enum SailGraphPatternDirection {
 /// Session-scoped temp views used to stage Arrow batches before MERGE.
 const NODE_STAGE_VIEW: &str = "grust_stage_nodes";
 const EDGE_STAGE_VIEW: &str = "grust_stage_edges";
+const CONSTRAINT_REGISTRY_STAGE_VIEW: &str = "grust_stage_constraint_registry";
 const DELETE_NODE_STAGE_VIEW: &str = "grust_delete_node_ids";
 const DELETE_EDGE_STAGE_VIEW: &str = "grust_delete_edges";
 pub const GRUST_NODES_TABLE: &str = "grust_nodes";
@@ -300,11 +290,13 @@ pub struct SailGraphStore {
 
 impl SailGraphStore {
     pub async fn connect(config: SailConfig) -> Result<Self> {
-        let client = SparkConnectServiceClient::connect(config.endpoint.clone())
+        config.validate()?;
+        let mut client = SparkConnectServiceClient::connect(config.endpoint.clone())
             .await
             .map_err(|e| {
                 GrustError::Backend(format!("connect to Sail at {}: {e}", config.endpoint))
             })?;
+        session_config::configure_warehouse(&mut client, &config).await?;
         Ok(Self {
             config,
             client,
@@ -322,6 +314,12 @@ impl SailGraphStore {
             Ok(())
         })
         .await
+    }
+
+    /// Drops a session-scoped Arrow view previously created by
+    /// [`Self::stage_arrow_ipc_view`]. Missing views are accepted.
+    pub async fn drop_arrow_ipc_view(&self, name: &str) -> Result<()> {
+        self.run_command(&temp_view::drop_sql(name)?, vec![]).await
     }
 
     /// Executes Spark SQL through Sail and returns result batches as Arrow IPC streams.
@@ -353,11 +351,13 @@ impl SailGraphStore {
         let registry_json = registry.to_json()?;
         self.run_command(&create_cypher_constraint_registry_table_sql(), vec![])
             .await?;
-        self.run_command(
-            &upsert_cypher_constraint_registry_sql(name, &registry_json)?,
-            vec![],
+        self.stage_record_batch(
+            CONSTRAINT_REGISTRY_STAGE_VIEW,
+            cypher_constraint_registry_record_batch(name, &registry_json)?,
         )
-        .await
+        .await?;
+        self.run_command(&upsert_cypher_constraint_registry_sql(), vec![])
+            .await
     }
 
     /// Loads a named Cypher constraint registry JSON blob from Sail.
@@ -1443,11 +1443,7 @@ impl SailGraphStore {
     // ── helpers ───────────────────────────────────────────────────────────────
 
     fn user_context(&self) -> UserContext {
-        UserContext {
-            user_id: self.config.user_id.clone(),
-            user_name: self.config.user_id.clone(),
-            extensions: vec![],
-        }
+        sail_user_context(&self.config)
     }
 
     fn request_with_plan(&self, plan: Plan) -> ExecutePlanRequest {
@@ -1456,7 +1452,7 @@ impl SailGraphStore {
             user_context: Some(self.user_context()),
             operation_id: Some(uuid::Uuid::new_v4().to_string()),
             plan: Some(plan),
-            client_type: Some("grust-sail/0.1.0".to_string()),
+            client_type: Some(CLIENT_TYPE.to_string()),
             request_options: vec![execute_plan_request::RequestOption {
                 request_option: Some(
                     execute_plan_request::request_option::RequestOption::ReattachOptions(
@@ -1719,6 +1715,14 @@ impl SailGraphStore {
             }
         }
         Ok(())
+    }
+}
+
+fn sail_user_context(config: &SailConfig) -> UserContext {
+    UserContext {
+        user_id: config.user_id.clone(),
+        user_name: config.user_id.clone(),
+        extensions: vec![],
     }
 }
 
@@ -2112,6 +2116,26 @@ fn edge_keys_record_batch(keys: &[String]) -> Result<RecordBatch> {
     .map_err(|e| GrustError::Backend(format!("Arrow edge-key delete batch build failed: {e}")))
 }
 
+fn cypher_constraint_registry_record_batch(name: &str, registry_json: &str) -> Result<RecordBatch> {
+    validate_cypher_constraint_registry_name(name)?;
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("name", DataType::Utf8, false),
+        ArrowField::new("registry_json", DataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values([name])),
+            Arc::new(StringArray::from_iter_values([registry_json])),
+        ],
+    )
+    .map_err(|error| {
+        GrustError::Backend(format!(
+            "Arrow Cypher constraint registry batch build failed: {error}"
+        ))
+    })
+}
+
 fn ipc_bytes(batch: &RecordBatch) -> Result<Vec<u8>> {
     let mut data = Vec::new();
     {
@@ -2265,57 +2289,65 @@ pub fn sail_triplets_sql_for_direction(direction: SailGraphPatternDirection) -> 
 fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
     let mut statements = Vec::new();
     for node_type in &schema.nodes {
-        let fields = node_type
-            .fields
-            .iter()
-            .map(|field| {
-                Ok(format!(
-                    "{} {}",
-                    sql_ident(&field.name)?,
-                    sail_sql_type(&field.ty)
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .join(", ");
-        let fields = if fields.is_empty() {
-            String::new()
-        } else {
-            format!(", {fields}")
-        };
+        let mut columns = vec!["CAST(NULL AS STRING) AS id".to_string()];
+        columns.extend(
+            node_type
+                .fields
+                .iter()
+                .map(|field| {
+                    Ok(format!(
+                        "CAST(NULL AS {}) AS {}",
+                        sail_sql_type(&field.ty),
+                        sql_ident(&field.name)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
         statements.push(format!(
-            "CREATE TABLE IF NOT EXISTS {} (id STRING NOT NULL{fields}) USING delta TBLPROPERTIES ({} = {}, {} = {})",
+            "CREATE TABLE IF NOT EXISTS {} USING delta TBLPROPERTIES ({} = {}, {} = {}, {}) AS SELECT {} WHERE FALSE",
             sail_node_table(node_type.label.as_str())?,
             sql_str(GRAPH_TABLE_KIND_PROPERTY),
             sql_str(GRAPH_TABLE_KIND_NODE),
             sql_str(GRAPH_TABLE_LABEL_PROPERTY),
-            sql_str(node_type.label.as_str())
+            sql_str(node_type.label.as_str()),
+            delta_not_null_property("grust_node_id_not_null", NODE_ID_COLUMN),
+            columns.join(", "),
         ));
     }
     for edge_type in &schema.edges {
-        let fields = edge_type
-            .fields
-            .iter()
-            .map(|field| {
-                Ok(format!(
-                    "{} {}",
-                    sql_ident(&field.name)?,
-                    sail_sql_type(&field.ty)
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .join(", ");
-        let fields = if fields.is_empty() {
-            String::new()
-        } else {
-            format!(", {fields}")
-        };
+        let mut columns = vec![
+            "CAST(NULL AS STRING) AS edge_key".to_string(),
+            "CAST(NULL AS STRING) AS id".to_string(),
+            "CAST(NULL AS STRING) AS src_id".to_string(),
+            "CAST(NULL AS STRING) AS dst_id".to_string(),
+        ];
+        columns.extend(
+            edge_type
+                .fields
+                .iter()
+                .map(|field| {
+                    Ok(format!(
+                        "CAST(NULL AS {}) AS {}",
+                        sail_sql_type(&field.ty),
+                        sql_ident(&field.name)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
         statements.push(format!(
-            "CREATE TABLE IF NOT EXISTS {} (edge_key STRING NOT NULL, id STRING, src_id STRING NOT NULL, dst_id STRING NOT NULL{fields}) USING delta TBLPROPERTIES ({} = {}, {} = {})",
+            "CREATE TABLE IF NOT EXISTS {} USING delta TBLPROPERTIES ({} = {}, {} = {}, {}) AS SELECT {} WHERE FALSE",
             sail_edge_table(edge_type.label.as_str())?,
             sql_str(GRAPH_TABLE_KIND_PROPERTY),
             sql_str(GRAPH_TABLE_KIND_EDGE),
             sql_str(GRAPH_TABLE_LABEL_PROPERTY),
-            sql_str(edge_type.label.as_str())
+            sql_str(edge_type.label.as_str()),
+            [
+                delta_not_null_property("grust_edge_key_not_null", EDGE_KEY_COLUMN),
+                delta_not_null_property("grust_edge_src_id_not_null", EDGE_SRC_ID_COLUMN),
+                delta_not_null_property("grust_edge_dst_id_not_null", EDGE_DST_ID_COLUMN),
+            ]
+            .join(", "),
+            columns.join(", "),
         ));
     }
     Ok(statements)
@@ -3198,6 +3230,14 @@ fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
 }
 
+fn delta_not_null_property(name: &str, column: &str) -> String {
+    format!(
+        "{} = {}",
+        sql_str(&format!("delta.constraints.{name}")),
+        sql_str(&format!("`{column}` IS NOT NULL")),
+    )
+}
+
 fn validate_cypher_constraint_registry_name(name: &str) -> Result<()> {
     if name.trim().is_empty() {
         return Err(GrustError::Schema(
@@ -3209,24 +3249,28 @@ fn validate_cypher_constraint_registry_name(name: &str) -> Result<()> {
 
 fn create_cypher_constraint_registry_table_sql() -> String {
     format!(
-        "CREATE TABLE IF NOT EXISTS {} \
-         (name STRING NOT NULL, registry_json STRING NOT NULL) USING delta",
-        CYPHER_CONSTRAINT_REGISTRY_TABLE
+        "CREATE TABLE IF NOT EXISTS {} USING delta TBLPROPERTIES ({}) AS \
+         SELECT CAST(NULL AS STRING) AS name, \
+                CAST(NULL AS STRING) AS registry_json \
+         WHERE FALSE",
+        CYPHER_CONSTRAINT_REGISTRY_TABLE,
+        [
+            delta_not_null_property("grust_registry_name_not_null", "name"),
+            delta_not_null_property("grust_registry_json_not_null", "registry_json"),
+        ]
+        .join(", "),
     )
 }
 
-fn upsert_cypher_constraint_registry_sql(name: &str, registry_json: &str) -> Result<String> {
-    validate_cypher_constraint_registry_name(name)?;
-    Ok(format!(
+fn upsert_cypher_constraint_registry_sql() -> String {
+    format!(
         "MERGE INTO {table} AS t \
-         USING (SELECT {name} AS name, {registry_json} AS registry_json) AS s \
+         USING {CONSTRAINT_REGISTRY_STAGE_VIEW} AS s \
          ON t.name = s.name \
          WHEN MATCHED THEN UPDATE SET t.registry_json = s.registry_json \
          WHEN NOT MATCHED THEN INSERT (name, registry_json) VALUES (s.name, s.registry_json)",
         table = CYPHER_CONSTRAINT_REGISTRY_TABLE,
-        name = sql_str(name),
-        registry_json = sql_str(registry_json),
-    ))
+    )
 }
 
 fn select_cypher_constraint_registry_sql(name: &str) -> Result<String> {

@@ -1135,6 +1135,14 @@ data in Spark DataFrames backed by Delta tables. SQL commands and reads are
 sent as Spark Connect SQL relation plans, and read results are decoded from
 Arrow IPC streams.
 
+Connection establishment validates the client configuration, sets
+`spark.sql.warehouse.dir`, and reads it back through the same Spark Connect
+session before exposing the store. The default creates a fresh absolute
+temporary warehouse and is suitable for a co-located development server. A
+remote or durable deployment must explicitly provide a stable absolute
+`warehouse_dir` visible at the same location to the Sail server; a path that
+exists only on the client is not a durable deployment contract.
+
 Bulk writes stage Arrow IPC batches as Spark Connect `LocalRelation` temp views
 and then merge from those views. That avoids building one giant SQL literal per
 row, keeps user values out of SQL text, and gives long-running requests an
@@ -1151,12 +1159,17 @@ IPC streams as session temp views and query them with Spark SQL, collect Spark
 SQL results as Arrow IPC chunks, or load Grust-shaped node and edge IPC streams
 through the normal graph write path. This gives Sail the same data-source role
 as Ladybug while keeping Sail's internal Arrow 58 dependency separate from
-Ladybug's Arrow 55 dependency.
+Ladybug's Arrow 55 dependency. Staged views can be dropped through a validated,
+idempotent helper, allowing protected batch inputs to be cleaned up on success,
+execution failure, or an uncertain retry.
 
 When a schema is applied, Sail creates typed Delta tables per node and edge
 label and mirrors writes into them with `MERGE INTO`. The universal Spark
 tables keep traversal simple and portable; the typed tables make declared graph
-labels available as ordinary Spark columns.
+labels available as ordinary Spark columns. Their declared names survive table
+creation, while Delta constraints reject null structural node and edge
+identities. Constraint-registry values likewise enter through staged Arrow
+rather than SQL string interpolation.
 
 Sail also has reusable graph analytics helpers over the persisted generic
 tables. `read_graph` collects the generic `grust_nodes` and `grust_edges`

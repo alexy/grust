@@ -112,7 +112,7 @@ Spark Connect. Grust exposes that path directly:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.10.0", features = ["sail"] }
+grust = { package = "grust-graph", version = "0.12.0", features = ["sail"] }
 ```
 
 ### Arbitrary Arrow Sources
@@ -127,10 +127,20 @@ store.stage_arrow_ipc_view("people_arrow", &people_ipc).await?;
 let chunks = store
     .query_arrow_ipc("SELECT id, name FROM people_arrow ORDER BY id")
     .await?;
+
+store.drop_arrow_ipc_view("people_arrow").await?;
 ```
 
 The view name must be a safe lower_snake SQL identifier. The view is scoped to
 the Sail Spark Connect session owned by that `SailGraphStore`.
+`drop_arrow_ipc_view` validates the same identifier and is idempotent, so
+cleanup may run after success, failure, or an uncertain response.
+
+`SailGraphStore::connect` configures and verifies the session warehouse before
+returning. The default is a fresh absolute path under the client's temporary
+directory and is intended for a co-located Sail server. A remote or durable
+deployment must provide a stable absolute `SailConfig::warehouse_dir` that the
+server resolves to the intended storage location.
 
 `SailGraphStore::query_arrow_ipc` runs Spark SQL and returns the Arrow IPC
 streams emitted by Spark Connect. This is the direct query-engine-over-Arrow

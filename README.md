@@ -405,9 +405,18 @@ server, lowers traversal IR to Spark SQL joins, and can mirror schema-labeled
 rows into typed Delta tables. SQL filters bind user values through Spark
 Connect named arguments; delete mutations stage their values as Arrow temp views
 before running argument-free SQL commands.
+Connecting also sets and reads back `spark.sql.warehouse.dir` in the same Spark
+Connect session. `SailConfig::default()` chooses a fresh absolute temporary
+warehouse for a co-located development server. Remote or durable deployments
+must set `warehouse_dir` to a stable absolute path visible at the same location
+to the Sail server; a client-local path is not portable across that boundary.
+Typed Delta tables retain their declared column names and enforce structural
+identity with Delta constraints.
 It also exposes Sail's Arrow IPC path directly for staging arbitrary Arrow
 streams as session temp views, collecting Spark SQL results as IPC chunks, and
 loading Grust-shaped node/edge IPC streams through the graph write path.
+`drop_arrow_ipc_view` removes a staged view idempotently, including on worker
+failure paths that handled protected input.
 For graph analytics over the persisted generic Sail tables, it provides
 `read_graph`, `in_degrees`, `out_degrees`, `degrees`, and `degree_pairs`
 helpers backed by Spark SQL.

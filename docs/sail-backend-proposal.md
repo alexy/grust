@@ -373,26 +373,38 @@ crates/grust-sail/
     build.rs                    -- no-op; proto compilation skipped
     proto/spark/connect/        -- proto files kept for reference
     src/
-        lib.rs                  -- SailConfig, SailGraphStore, all logic
+        lib.rs                  -- SailGraphStore and graph execution
+        config.rs               -- validated public SailConfig
+        session_config.rs       -- Spark Connect session configuration
+        temp_view.rs            -- validated temp-view cleanup SQL
         spark_connect.rs        -- pre-generated protobuf + gRPC client types
         tests.rs
 ```
 
-All SQL building, Arrow parsing, and traversal lowering live in `lib.rs`.
-The proposal's `client.rs` / `sql.rs` / `traversal.rs` split was collapsed
-into private functions in `lib.rs` to keep the crate surface small.
+Graph SQL building, Arrow parsing, and traversal lowering remain private to
+`lib.rs`. Configuration, session negotiation, and temp-view cleanup are focused
+modules with sibling test modules; the split keeps distinct lifecycle concerns
+out of the already broad graph executor.
 
 ### 3.2 SailConfig
 
 ```rust
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SailConfig {
-    pub endpoint: String,    // default "http://127.0.0.1:50051"
-    pub user_id: String,     // default "grust"
-    pub session_id: String,  // UUID generated at construction
-    pub batch_size: usize,   // default 1000
+    pub endpoint: String,          // default "http://127.0.0.1:50051"
+    pub user_id: String,           // default "grust"
+    pub session_id: String,        // UUID generated at construction
+    pub batch_size: usize,         // default 1000
+    pub warehouse_dir: PathBuf,    // absolute server-visible warehouse
 }
 ```
+
+The default warehouse is fresh and session-scoped beneath the client's
+temporary directory. It is deliberately convenient for a co-located test or
+development server, not an implied remote-filesystem mapping. Remote and
+durable callers set an absolute stable path that Sail can resolve. Connection
+fails closed unless the Config RPC reads back the exact value in the same
+server session.
 
 The proposal included `table_prefix`, `table_format` (`Delta`/`Iceberg`/
 `Parquet`), `catalog`, and `database`. These were deferred:
