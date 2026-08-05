@@ -6,6 +6,12 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- **QueryGraph-native Marciana cognition boundary:** `querygraph-memory` now
+  binds cognition jobs to a hash-verified LakeCat/Iceberg snapshot, governed
+  Sail scan projection, verified TypeDID subject, purpose, and authorization
+  receipt. Reference analytics and injectable Sail executors emit inert
+  TypeSec cognition proposals without receiving a store handle.
+
 - **Grust book covers durable TypeSec Memory:** expanded the architecture tour
   with the implemented `querygraph-memory` boundary, including opaque record
   storage, the `MemoryRecord`/`MemoryEntity` graph, space-only pushdown,

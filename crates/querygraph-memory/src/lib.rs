@@ -363,6 +363,7 @@ fn decode_record(node: &Node) -> Result<StoredRecord, StoreError> {
 }
 
 pub mod analytics;
+pub mod cognition;
 #[cfg(feature = "turso")]
 pub mod turso;
 pub mod vector;

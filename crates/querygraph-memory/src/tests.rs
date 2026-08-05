@@ -210,7 +210,14 @@ assignments:
 
     // Graph recall: 1 hop from ACME reaches the Venice record, still gated.
     let (hits, redacted) = vault
-        .recall_neighborhood(&space, &read, "ACME", 1, Label::Internal)
+        .recall_neighborhood(
+            &space,
+            &read,
+            "ACME",
+            1,
+            Label::Internal,
+            &typesec_core::policy::RequestContext::default(),
+        )
         .expect("graph recall");
     assert!(
         hits.iter()
