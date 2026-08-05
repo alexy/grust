@@ -14,6 +14,14 @@ reconstructed from Git history, release commits, and the shipped docs.
   return the original receipt, while idempotency-key digest collisions fail
   closed.
 
+- Added an ignored live-Sail conformance test for Marciana cognition that
+  compares distributed deduplication and reconciliation with the reference
+  engine, proves repeated jobs are deterministic, and rejects governed inputs
+  or source plaintext in audit evidence. The integration launcher now runs it
+  alongside `grust-sail`, accepts an explicit `SAIL_TEST_BIN`, and no longer
+  silently substitutes an unrelated `sail` executable from `PATH` for the
+  configured source checkout.
+
 - Added an optional live Spark Connect cognition executor to the private
   `querygraph-memory` integration crate. Governed memories are staged in a
   session-local Arrow view under a hashed job name, Sail computes bounded

@@ -22,8 +22,11 @@ on:
       - "crates/grust-core/**"
       - "crates/grust-cypher/**"
       - "crates/grust-memory/**"
+      - "crates/grust-sail/**"
       - "crates/grust-sql-core/**"
       - "crates/grust-turso/**"
+      - "integration/backends.conf"
+      - "scripts/integration-test.sh"
       - ".github/workflows/querygraph-memory.yml"
   pull_request:
     paths:
@@ -33,8 +36,11 @@ on:
       - "crates/grust-core/**"
       - "crates/grust-cypher/**"
       - "crates/grust-memory/**"
+      - "crates/grust-sail/**"
       - "crates/grust-sql-core/**"
       - "crates/grust-turso/**"
+      - "integration/backends.conf"
+      - "scripts/integration-test.sh"
       - ".github/workflows/querygraph-memory.yml"
 
 env:
@@ -72,6 +78,10 @@ jobs:
       - name: rustfmt
         working-directory: grust
         run: cargo fmt --check -p querygraph-memory
+
+      - name: integration launcher syntax
+        working-directory: grust
+        run: bash -n scripts/integration-test.sh
 
       - name: clippy
         working-directory: grust

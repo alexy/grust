@@ -179,9 +179,12 @@ SAIL_SOURCE= scripts/integration-test.sh --profile all
 
 ## Backend Notes
 
-Sail currently runs through a local Sail checkout, an installed `sail` binary,
-or `hatch run sail spark server`. Add a Docker Compose service only after a
-pinned Sail image and command have been verified.
+Sail currently runs through the configured checkout's
+`target/release/sail`, through that checkout's Hatch environment, or through
+an explicit absolute `SAIL_TEST_BIN`. The launcher deliberately does not use
+an arbitrary `sail` from `PATH`, because that could silently test a different
+version than `SAIL_SOURCE`. Add a Docker Compose service only after a pinned
+Sail image and command have been verified.
 
 HelixDB currently runs through a local Helix checkout or installed `helix`
 binary. The launcher creates a disposable Helix project under the integration

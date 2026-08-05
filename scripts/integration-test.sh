@@ -234,15 +234,24 @@ start_sail() {
     return
   fi
   [[ "$NO_START" -eq 0 ]] || return
-  if can_use_source && [[ -n "${SAIL_SOURCE:-}" && -d "$SAIL_SOURCE" ]]; then
+  if can_use_source && [[ -n "${SAIL_TEST_BIN:-}" ]]; then
+    if [[ "$SAIL_TEST_BIN" != /* ]]; then
+      echo "SAIL_TEST_BIN must be an absolute path: $SAIL_TEST_BIN" >&2
+      return 1
+    fi
+    if [[ ! -x "$SAIL_TEST_BIN" ]]; then
+      echo "SAIL_TEST_BIN is not executable: $SAIL_TEST_BIN" >&2
+      return 1
+    fi
+    start_process sail "${SAIL_SOURCE:-.}" "$SAIL_TEST_BIN" spark server --ip "$SAIL_HOST" --port "$SAIL_PORT"
+  elif can_use_source && [[ -n "${SAIL_SOURCE:-}" && -d "$SAIL_SOURCE" ]]; then
     if [[ -x "$SAIL_SOURCE/target/release/sail" ]]; then
-      start_process sail "$SAIL_SOURCE" "$SAIL_SOURCE/target/release/sail" spark server --port "$SAIL_PORT"
-    elif command -v sail >/dev/null 2>&1; then
-      start_process sail "$SAIL_SOURCE" sail spark server --port "$SAIL_PORT"
+      start_process sail "$SAIL_SOURCE" "$SAIL_SOURCE/target/release/sail" spark server --ip "$SAIL_HOST" --port "$SAIL_PORT"
     elif command -v hatch >/dev/null 2>&1; then
-      start_process sail "$SAIL_SOURCE" hatch run sail spark server --port "$SAIL_PORT"
+      start_process sail "$SAIL_SOURCE" hatch run sail spark server --ip "$SAIL_HOST" --port "$SAIL_PORT"
     else
-      echo "no Sail launcher found; build / install Sail or start it manually" >&2
+      echo "no current-source Sail launcher found; set SAIL_TEST_BIN, build $SAIL_SOURCE/target/release/sail, or install Hatch" >&2
+      return 1
     fi
   elif [[ "$MODE" == "docker" ]]; then
     echo "sail has no configured Docker Compose service; use --mode auto/source with SAIL_SOURCE or start Sail manually" >&2
@@ -529,7 +538,9 @@ run_backend() {
     sail)
       start_sail
       wait_port sail "$SAIL_HOST" "$SAIL_PORT"
+      export SAIL_ENDPOINT="http://${SAIL_HOST}:${SAIL_PORT}"
       cargo test -p grust-sail -- --ignored --test-threads=1
+      cargo test -p querygraph-memory --features sail --test sail_cognition_live -- --ignored --test-threads=1
       ;;
     surreal)
       start_surreal
