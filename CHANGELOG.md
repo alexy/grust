@@ -8,6 +8,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 - Prepare the `0.12.1` registry release containing the graph commit and Sail
   APIs consumed by the current Marciana memory implementation.
+- Keep optional backend crates on the existing `0.12.0` line so the published
+  `grust-graph` patch release does not require intentionally unpublished
+  adapters.
 
 ### 2026-08-06
 
