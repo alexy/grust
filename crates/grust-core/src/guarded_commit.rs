@@ -90,4 +90,17 @@ pub trait GraphCommitStore: GraphMutationStore {
     /// reject key reuse with a different request digest, and leave no mutation
     /// or idempotency record behind when an expectation or mutation fails.
     async fn commit_guarded(&self, commit: &GuardedGraphCommit) -> Result<GraphCommitReceipt>;
+
+    /// Read an existing guarded-commit receipt without creating ledger state.
+    ///
+    /// Implementations must reject empty idempotency keys and request digests.
+    /// The lookup must perform no writes: repeated lookups of an unknown key
+    /// return `None`. A matching committed key and digest returns the original
+    /// commit identity and timestamp with [`GraphCommitReceipt::replayed`] set
+    /// to `true`; a different digest returns an idempotency conflict.
+    async fn recover_guarded_commit(
+        &self,
+        idempotency_key: &str,
+        request_digest: &str,
+    ) -> Result<Option<GraphCommitReceipt>>;
 }

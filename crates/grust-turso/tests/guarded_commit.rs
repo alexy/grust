@@ -79,6 +79,78 @@ async fn guarded_commit_replays_and_rejects_key_digest_collision() {
 }
 
 #[tokio::test]
+async fn guarded_commit_recovery_is_read_only_and_stable() {
+    let dir = tempfile::tempdir().expect("temporary database directory");
+    let store = open(&dir.path().join("recovery.db"), "guarded_recovery").await;
+
+    for _ in 0..2 {
+        assert_eq!(
+            store
+                .recover_guarded_commit("job-recovery", "sha256:recovery")
+                .await
+                .expect("look up absent guarded commit"),
+            None
+        );
+    }
+
+    let request = GuardedGraphCommit::new(
+        "job-recovery",
+        "sha256:recovery",
+        vec![GraphMutation::UpsertNode(node("recovered", "value"))],
+    );
+    let first = store
+        .commit_guarded(&request)
+        .await
+        .expect("commit after absent recovery lookups");
+    assert!(
+        !first.replayed,
+        "absent recovery lookups must not create a commit receipt"
+    );
+
+    let mut expected = first.clone();
+    expected.replayed = true;
+    for _ in 0..2 {
+        assert_eq!(
+            store
+                .recover_guarded_commit("job-recovery", "sha256:recovery")
+                .await
+                .expect("recover committed receipt"),
+            Some(expected.clone())
+        );
+    }
+
+    assert!(matches!(
+        store
+            .recover_guarded_commit("job-recovery", "sha256:different")
+            .await,
+        Err(GrustError::GraphIdempotencyConflict(key)) if key == "job-recovery"
+    ));
+}
+
+#[tokio::test]
+async fn guarded_commit_recovery_rejects_empty_identity_inputs() {
+    let dir = tempfile::tempdir().expect("temporary database directory");
+    let store = open(
+        &dir.path().join("recovery-validation.db"),
+        "guarded_recovery_validation",
+    )
+    .await;
+
+    assert!(matches!(
+        store
+            .recover_guarded_commit("  ", "sha256:request")
+            .await,
+        Err(GrustError::Schema(message))
+            if message == "guarded commit idempotency key must not be empty"
+    ));
+    assert!(matches!(
+        store.recover_guarded_commit("job-validation", "\t").await,
+        Err(GrustError::Schema(message))
+            if message == "guarded commit request digest must not be empty"
+    ));
+}
+
+#[tokio::test]
 async fn absent_and_exact_expectations_fail_without_partial_writes() {
     let dir = tempfile::tempdir().expect("temporary database directory");
     let store = open(&dir.path().join("expectations.db"), "guarded_expect").await;

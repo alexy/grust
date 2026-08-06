@@ -47,6 +47,26 @@ impl GraphCommitStore for TursoGraphStore {
         }
         unreachable!("the bounded guarded-commit loop always returns")
     }
+
+    async fn recover_guarded_commit(
+        &self,
+        idempotency_key: &str,
+        request_digest: &str,
+    ) -> Result<Option<GraphCommitReceipt>> {
+        validate_commit_identity(idempotency_key, request_digest)?;
+        let _gate = self.connection_gate.lock().await;
+        let Some((stored_digest, mut receipt)) = self.load_commit_receipt(idempotency_key).await?
+        else {
+            return Ok(None);
+        };
+        if stored_digest != request_digest {
+            return Err(GrustError::GraphIdempotencyConflict(
+                idempotency_key.to_owned(),
+            ));
+        }
+        receipt.replayed = true;
+        Ok(Some(receipt))
+    }
 }
 
 impl TursoGraphStore {
@@ -217,12 +237,16 @@ impl TursoGraphStore {
 }
 
 fn validate_commit(commit: &GuardedGraphCommit) -> Result<()> {
-    if commit.idempotency_key.trim().is_empty() {
+    validate_commit_identity(&commit.idempotency_key, &commit.request_digest)
+}
+
+fn validate_commit_identity(idempotency_key: &str, request_digest: &str) -> Result<()> {
+    if idempotency_key.trim().is_empty() {
         return Err(GrustError::Schema(
             "guarded commit idempotency key must not be empty".to_string(),
         ));
     }
-    if commit.request_digest.trim().is_empty() {
+    if request_digest.trim().is_empty() {
         return Err(GrustError::Schema(
             "guarded commit request digest must not be empty".to_string(),
         ));

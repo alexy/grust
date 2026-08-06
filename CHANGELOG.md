@@ -20,7 +20,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   implementation. Exact-node and absence expectations, graph mutations, and a
   backend-issued commit identity now share one transaction; identical retries
   return the original receipt, while idempotency-key digest collisions fail
-  closed.
+  closed. A read-only guarded-receipt lookup recovers an exact prior commit
+  without issuing a probe mutation.
 
 - Added an ignored live-Sail conformance test for Marciana cognition that
   compares distributed deduplication and reconciliation with the reference
