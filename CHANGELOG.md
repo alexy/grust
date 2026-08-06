@@ -16,6 +16,12 @@ reconstructed from Git history, release commits, and the shipped docs.
   non-null constraints, registry values are staged through Arrow, and session
   temp views can be dropped safely and idempotently.
 
+- Added bounded Arrow IPC collection to `grust-sail`. Accepted batches move
+  into the collection without a second copy; inclusive chunk and cumulative
+  byte limits fail before retention. Spark Connect accepts at most a 17 MiB
+  decoded message, reserving 16 MiB for Arrow payload and 1 MiB for protobuf
+  envelope metadata.
+
 - Added a domain-neutral guarded graph commit capability and a durable Turso
   implementation. Exact-node and absence expectations, graph mutations, and a
   backend-issued commit identity now share one transaction; identical retries

@@ -44,10 +44,16 @@ use sc::{
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
+mod arrow_ipc;
 mod config;
 pub use config::{SailConfig, SailWarehouse};
 
 mod session_config;
+mod spark_client;
+pub use spark_client::{
+    MAX_ARROW_IPC_PAYLOAD_BYTES, MAX_SPARK_CONNECT_DECODING_MESSAGE_BYTES,
+    SPARK_CONNECT_PROTOBUF_HEADROOM_BYTES,
+};
 mod temp_view;
 
 const CLIENT_TYPE: &str = concat!("grust-sail/", env!("CARGO_PKG_VERSION"));
@@ -291,11 +297,13 @@ pub struct SailGraphStore {
 impl SailGraphStore {
     pub async fn connect(config: SailConfig) -> Result<Self> {
         config.validate()?;
-        let mut client = SparkConnectServiceClient::connect(config.endpoint.clone())
-            .await
-            .map_err(|e| {
-                GrustError::Backend(format!("connect to Sail at {}: {e}", config.endpoint))
-            })?;
+        let mut client = spark_client::with_decoding_limit(
+            SparkConnectServiceClient::connect(config.endpoint.clone())
+                .await
+                .map_err(|e| {
+                    GrustError::Backend(format!("connect to Sail at {}: {e}", config.endpoint))
+                })?,
+        );
         session_config::configure_warehouse(&mut client, &config).await?;
         Ok(Self {
             config,
@@ -320,20 +328,6 @@ impl SailGraphStore {
     /// [`Self::stage_arrow_ipc_view`]. Missing views are accepted.
     pub async fn drop_arrow_ipc_view(&self, name: &str) -> Result<()> {
         self.run_command(&temp_view::drop_sql(name)?, vec![]).await
-    }
-
-    /// Executes Spark SQL through Sail and returns result batches as Arrow IPC streams.
-    ///
-    /// Each item in the returned vector is the complete IPC stream emitted by
-    /// one Spark Connect `ArrowBatch` response.
-    pub async fn query_arrow_ipc(&self, sql: &str) -> Result<Vec<Vec<u8>>> {
-        let mut chunks = Vec::new();
-        self.run_plan(self.query_request(sql, vec![])?, |data| {
-            chunks.push(data.to_vec());
-            Ok(())
-        })
-        .await?;
-        Ok(chunks)
     }
 
     /// Persists a named Cypher constraint registry JSON blob in Sail.
@@ -1379,7 +1373,7 @@ impl SailGraphStore {
     async fn run_text_query(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>> {
         let mut rows = Vec::new();
         self.run_plan(self.query_request(sql, vec![])?, |data| {
-            rows.extend(parse_text_rows_from_arrow(data)?);
+            rows.extend(parse_text_rows_from_arrow(&data)?);
             Ok(())
         })
         .await?;
@@ -1408,7 +1402,7 @@ impl SailGraphStore {
         self.run_plan(
             self.query_request(sail_degree_pairs_sql(), vec![])?,
             |data| {
-                rows.extend(parse_degree_pairs_from_arrow(data)?);
+                rows.extend(parse_degree_pairs_from_arrow(&data)?);
                 Ok(())
             },
         )
@@ -1432,7 +1426,7 @@ impl SailGraphStore {
         self.run_plan(
             self.query_request(sail_triplets_sql_for_direction(direction), vec![])?,
             |data| {
-                rows.extend(parse_triplets_from_arrow(data)?);
+                rows.extend(parse_triplets_from_arrow(&data)?);
                 Ok(())
             },
         )
@@ -1517,7 +1511,7 @@ impl SailGraphStore {
     async fn run_plan(
         &self,
         req: ExecutePlanRequest,
-        mut on_batch: impl FnMut(&[u8]) -> Result<()> + Send,
+        mut on_batch: impl FnMut(Vec<u8>) -> Result<()> + Send,
     ) -> Result<()> {
         let mut client = self.client.clone();
         let mut stream = client
@@ -1533,7 +1527,7 @@ impl SailGraphStore {
                         resp.response_type
                         && batch.row_count > 0
                     {
-                        on_batch(&batch.data)?;
+                        on_batch(batch.data)?;
                     }
                 }
                 Err(e) => return Err(GrustError::Backend(format!("Sail stream error: {e}"))),
@@ -1555,7 +1549,7 @@ impl SailGraphStore {
     async fn run_query(&self, sql: &str, args: Vec<expression::Literal>) -> Result<Vec<Node>> {
         let mut nodes = Vec::new();
         self.run_plan(self.query_request(sql, args)?, |data| {
-            nodes.extend(parse_nodes_from_arrow(data)?);
+            nodes.extend(parse_nodes_from_arrow(&data)?);
             Ok(())
         })
         .await?;
@@ -1565,7 +1559,7 @@ impl SailGraphStore {
     async fn run_edge_query(&self, sql: &str, args: Vec<expression::Literal>) -> Result<Vec<Edge>> {
         let mut edges = Vec::new();
         self.run_plan(self.query_request(sql, args)?, |data| {
-            edges.extend(parse_edges_from_arrow(data)?);
+            edges.extend(parse_edges_from_arrow(&data)?);
             Ok(())
         })
         .await?;
@@ -1575,7 +1569,7 @@ impl SailGraphStore {
     async fn run_degree_query(&self, sql: &str) -> Result<Vec<SailDegreeRow>> {
         let mut rows = Vec::new();
         self.run_plan(self.query_request(sql, vec![])?, |data| {
-            rows.extend(parse_degrees_from_arrow(data)?);
+            rows.extend(parse_degrees_from_arrow(&data)?);
             Ok(())
         })
         .await?;

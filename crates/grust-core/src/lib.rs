@@ -32,6 +32,12 @@ pub enum GrustError {
     CypherExecution(String),
     #[error("serialization error: {0}")]
     Serialization(String),
+    #[error("resource limit exceeded for {resource}: limit {limit}, observed at least {observed}")]
+    ResourceLimitExceeded {
+        resource: &'static str,
+        limit: usize,
+        observed: usize,
+    },
     #[error("guarded graph commit expectation failed: {0}")]
     GraphExpectationFailed(String),
     #[error("guarded graph commit idempotency conflict for key: {0}")]
