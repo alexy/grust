@@ -8,6 +8,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ### 2026-08-06
 
+- Replaced `querygraph-memory`'s TypeSec sibling paths with the exact reviewed
+  public Git revision, so the governed cognition crate can build and test from
+  a clean Grust checkout.
+
 - Recorded a passing focused live Sail integration gate for the governed
   cognition substrate: 26 Sail adapter tests, two live backend checks, and two
   cognition reference-parity and evidence-secrecy cases. The documentation

@@ -1,7 +1,8 @@
 # QueryGraph Memory Goal
 
 Status: durable memory v1 is consumed by qg-rust. The generic governed
-cognition substrate is implemented in Grust and passed its focused live Sail
+cognition substrate is implemented in Grust, uses an exact reachable TypeSec
+revision rather than a sibling checkout, and passed its focused live Sail
 integration gate on 2026-08-06; standalone Marciana orchestration and a
 clean-clone qg-rust release cutover remain pending.
 
@@ -137,6 +138,13 @@ These are useful scale improvements, not blockers for the durable v1 contract:
 4. **Hosted service:** add operational tenancy, quotas, migrations, deletion
    workflows, and service-level integration tests in the QueryGraph
    application. A vault-isolation test is not itself a hosted product.
+
+## Dependency pin
+
+`querygraph-memory` resolves its TypeSec contracts from exact public Git
+revision `1926f18c`, rather than a relative sibling path. The lockfile records
+the complete revision; no moving branch name is accepted as a compatibility
+baseline.
 
 ## Verification gate
 
