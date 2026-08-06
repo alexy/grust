@@ -27,7 +27,10 @@ reconstructed from Git history, release commits, and the shipped docs.
   backend-issued commit identity now share one transaction; identical retries
   return the original receipt, while idempotency-key digest collisions fail
   closed. A read-only guarded-receipt lookup recovers an exact prior commit
-  without issuing a probe mutation.
+  without issuing a probe mutation. Turso mints its receipt time at nanosecond
+  precision immediately before the ledger insert, persists and replays those
+  exact backend-issued transaction-boundary bytes, and rejects a malformed
+  durable timestamp without disclosing it.
 
 - Added an ignored live-Sail conformance test for Marciana cognition that
   compares distributed deduplication and reconciliation with the reference

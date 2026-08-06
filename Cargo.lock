@@ -3567,6 +3567,7 @@ name = "grust-turso"
 version = "0.12.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "grust-core",
  "grust-cypher",
  "grust-sql-core",

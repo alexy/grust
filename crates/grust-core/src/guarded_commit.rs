@@ -70,7 +70,13 @@ impl GuardedGraphCommit {
 pub struct GraphCommitReceipt {
     /// Backend-issued identity written in the same transaction as the graph.
     pub commit_id: String,
-    /// Backend clock timestamp persisted alongside `commit_id`.
+    /// Canonical RFC 3339 timestamp captured at the backend's transaction
+    /// boundary and persisted alongside `commit_id`.
+    ///
+    /// This is authoritative backend-issued commit evidence, not necessarily a
+    /// wall-clock observation after storage fsync. Consumers must fail closed
+    /// when an implementation returns malformed or phase-regressive time; they
+    /// must not substitute an earlier caller timestamp.
     pub committed_at: String,
     /// Whether this call observed an already-committed idempotent request.
     pub replayed: bool,

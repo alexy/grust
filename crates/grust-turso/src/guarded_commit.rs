@@ -1,9 +1,10 @@
 //! Turso's durable guarded-commit implementation.
 
 use async_trait::async_trait;
+use chrono::{SecondsFormat, Utc};
 use grust_core::prelude::{
     GraphCommitReceipt, GraphCommitStore, GraphExpectation, GrustError, GuardedGraphCommit, Node,
-    NodeId, Result,
+    NodeId, Result, RfcDate,
 };
 
 use crate::{TursoConfig, TursoGraphStore, TursoJournalMode, quote_ident};
@@ -126,8 +127,13 @@ impl TursoGraphStore {
                 GrustError::Backend(format!("Turso guarded graph mutation failed: {error}"))
             })?;
         }
-        self.insert_commit_receipt(&commit.idempotency_key, &commit.request_digest)
-            .await
+        let committed_at = Utc::now().to_rfc3339_opts(SecondsFormat::Nanos, true);
+        self.insert_commit_receipt(
+            &commit.idempotency_key,
+            &commit.request_digest,
+            &committed_at,
+        )
+        .await
     }
 
     async fn load_commit_receipt(
@@ -152,11 +158,13 @@ impl TursoGraphStore {
         else {
             return Ok(None);
         };
+        let committed_at =
+            canonical_stored_commit_time(super::row_text(&row, 2, "commit timestamp")?)?;
         Ok(Some((
             super::row_text(&row, 0, "commit request digest")?,
             GraphCommitReceipt {
                 commit_id: super::row_text(&row, 1, "commit id")?,
-                committed_at: super::row_text(&row, 2, "commit timestamp")?,
+                committed_at,
                 replayed: false,
             },
         )))
@@ -204,17 +212,17 @@ impl TursoGraphStore {
         &self,
         idempotency_key: &str,
         request_digest: &str,
+        committed_at: &str,
     ) -> Result<GraphCommitReceipt> {
         let sql = format!(
             "INSERT INTO {} (idempotency_key, request_digest, commit_id, committed_at) \
-             VALUES (?1, ?2, 'turso:' || lower(hex(randomblob(16))), \
-                     strftime('%Y-%m-%dT%H:%M:%fZ', 'now')) \
+             VALUES (?1, ?2, 'turso:' || lower(hex(randomblob(16))), ?3) \
              RETURNING commit_id, committed_at",
             self.commits_table()
         );
         let mut rows = self
             .conn
-            .query(&sql, (idempotency_key, request_digest))
+            .query(&sql, (idempotency_key, request_digest, committed_at))
             .await
             .map_err(|error| {
                 GrustError::Backend(format!("Turso commit ledger insert failed: {error}"))
@@ -228,12 +236,20 @@ impl TursoGraphStore {
             .ok_or_else(|| {
                 GrustError::Backend("Turso commit ledger returned no receipt".to_string())
             })?;
+        let committed_at =
+            canonical_stored_commit_time(super::row_text(&row, 1, "commit timestamp")?)?;
         Ok(GraphCommitReceipt {
             commit_id: super::row_text(&row, 0, "commit id")?,
-            committed_at: super::row_text(&row, 1, "commit timestamp")?,
+            committed_at,
             replayed: false,
         })
     }
+}
+
+fn canonical_stored_commit_time(value: String) -> Result<String> {
+    RfcDate::parse(value)
+        .map(RfcDate::into_string)
+        .map_err(|_| GrustError::Backend("Turso commit ledger timestamp is invalid".to_owned()))
 }
 
 fn validate_commit(commit: &GuardedGraphCommit) -> Result<()> {

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use chrono::{DateTime, SecondsFormat, Timelike, Utc};
 use grust_core::prelude::{
     Edge, GraphAdminStore, GraphCommitStore, GraphExpectation, GraphMutation, GraphStore,
     GrustError, GuardedGraphCommit, Node, NodeId, Value,
@@ -76,6 +77,46 @@ async fn guarded_commit_replays_and_rejects_key_digest_collision() {
             .expect("read node after collision"),
         Some(node("n1", "first"))
     );
+}
+
+#[tokio::test]
+async fn guarded_commit_receipt_preserves_submillisecond_ordering() {
+    let dir = tempfile::tempdir().expect("temporary database directory");
+    let store = open(&dir.path().join("precision.db"), "guarded_precision").await;
+    let prepared_at = Utc::now();
+    let receipt = store
+        .commit_guarded(&GuardedGraphCommit::new(
+            "job-precision",
+            "sha256:precision",
+            vec![GraphMutation::UpsertNode(node("precision", "value"))],
+        ))
+        .await
+        .expect("guarded commit with precise receipt");
+    let committed_at = DateTime::parse_from_rfc3339(&receipt.committed_at)
+        .expect("canonical receipt timestamp")
+        .with_timezone(&Utc);
+
+    assert!(committed_at >= prepared_at);
+    assert_eq!(
+        receipt.committed_at,
+        committed_at.to_rfc3339_opts(SecondsFormat::Nanos, true)
+    );
+    assert_eq!(
+        receipt
+            .committed_at
+            .split_once('.')
+            .and_then(|(_, suffix)| suffix.strip_suffix('Z'))
+            .map(str::len),
+        Some(9)
+    );
+    if committed_at.nanosecond() % 1_000_000 != 0 {
+        let same_millisecond_preparation = committed_at - chrono::TimeDelta::nanoseconds(1);
+        assert_eq!(
+            same_millisecond_preparation.timestamp_millis(),
+            committed_at.timestamp_millis()
+        );
+        assert!(committed_at >= same_millisecond_preparation);
+    }
 }
 
 #[tokio::test]
@@ -268,6 +309,44 @@ async fn commit_receipt_survives_close_and_reopen() {
     assert!(replay.replayed);
     assert_eq!(replay.commit_id, first.commit_id);
     assert_eq!(replay.committed_at, first.committed_at);
+}
+
+#[tokio::test]
+async fn malformed_commit_receipt_fails_closed_after_reopen() {
+    let dir = tempfile::tempdir().expect("temporary database directory");
+    let path = dir.path().join("malformed-receipt.db");
+    let request = GuardedGraphCommit::new(
+        "job-malformed",
+        "sha256:malformed",
+        vec![GraphMutation::UpsertNode(node("malformed", "value"))],
+    );
+    {
+        let store = open(&path, "guarded_malformed").await;
+        store
+            .commit_guarded(&request)
+            .await
+            .expect("commit before receipt tampering");
+    }
+    let raw = "protected malformed timestamp";
+    rusqlite::Connection::open(&path)
+        .expect("open raw fixture database")
+        .execute(
+            "UPDATE guarded_malformed_commits SET committed_at = ?1 \
+             WHERE idempotency_key = ?2",
+            (raw, "job-malformed"),
+        )
+        .expect("tamper receipt timestamp");
+
+    let reopened = open(&path, "guarded_malformed").await;
+    let error = reopened
+        .recover_guarded_commit("job-malformed", "sha256:malformed")
+        .await
+        .expect_err("malformed durable receipt must fail closed");
+    assert_eq!(
+        error.to_string(),
+        "backend error: Turso commit ledger timestamp is invalid"
+    );
+    assert!(!error.to_string().contains(raw));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
