@@ -1113,20 +1113,117 @@ importance analyzers likewise make no writes. They consume already-recalled
 views and emit inert `ConsolidationPlan` values that must return through the
 capability-gated vault.
 
-The durable v1 proof has explicit limits. `MemoryId::next()` uses a process-local
-counter, so a restarted writer can collide with persisted `mem-N` identifiers;
-a hosted or multi-process system needs collision-resistant durable IDs and
-idempotency. `VectorIndex` is not a persistent LanceDB ANN implementation,
-memory predicates beyond space are not fully pushed into GQL, and the reference
-analytics are not distributed Sail cognition. TypeDID request verification is
-present at the QueryGraph service boundary, but durable anti-replay state shared
-across replicas is post-v1. Grust's structural edge identity remains
-`(from, label, to)`, so changing `fact_id` cannot preserve parallel `RELATES`
-assertions between the same endpoints; assertion nodes or a multi-edge identity
-surface are still needed for full lineage. Finally, vault-level tenant checks,
-restart persistence, and an end-to-end local demonstration do not by themselves
-constitute a hosted multi-tenant service with quotas, migrations, backups,
-deletion propagation, and service-level objectives.
+The governed cognition path extends that rule instead of bypassing it. A
+`CognitionRequest` contains one TypeSec-authorized input, its canonical binding,
+its optional vault-verified governed source scope, the exact LakeCat snapshot
+and policy-narrowed projection, the field mapping used by governed ingestion
+to derive the selected memory records, a durable job
+identity, and either the deduplicate or reconcile operation. The trusted host
+selects a fixed reference or native Sail profile
+before protected input is loaded; public engine implementations cannot report
+their own trusted identity. Both asynchronous engines return a bound
+`CognitionProposal`, never a store handle or direct write.
+
+Every bound proposal uses TypeSec proposal schema version 4. That wire contract
+identifies `input_snapshot` with the canonical immutable snapshot digest,
+keeps the LakeCat grant digest as separate binding evidence, and carries an
+explicit `mutated` or `no_change` effect. Reference and Sail derive that effect
+from the complete proposal: zero drafts and zero plan steps means no-change;
+every nonempty plan is mutating. Earlier bound schema versions fail closed;
+unbound schema version 1 remains only an inert local planning value. This wire
+version is independent of the operation algorithm version below.
+
+Deduplicate and reconcile each own an explicit version-2 semantic contract.
+Reference and Sail profiles bind the same per-operation version because they
+must produce the same canonical plan. Crate, package, and build versions remain
+useful implementation metadata, but never substitute for the algorithm version
+in signed TypeDID authority. Previously signed version-1 or package-bound
+intents are deliberately incompatible and must be authorized again; no native
+profile silently upgrades their authority.
+
+Live Sail does not re-read LakeCat rows or reinterpret the ingestion mapping.
+It derives and stages only authorized IDs, normalized text keys,
+contradiction prefix/tail keys, and validity timestamps under a collision-safe
+session view; it does not stage the raw text column. Planning has independent
+finite operation, abort, and cleanup deadlines, and cleanup is attempted after
+success, failure, timeout, or caller cancellation. The Spark client and
+cognition decoder reuse the same public 16 MiB Arrow IPC payload limit; the
+decoded protobuf message has one additional MiB of bounded envelope headroom.
+Normalized and contradiction keys remain content-derived rather than
+anonymized, so the Sail endpoint belongs inside the processing boundary
+authorized for that protected input.
+Arrow framing, schemas, declared rows, buffers, compressed expansion, result
+counts, and local reconciliation work are checked before Arrow result-array
+allocation and then rechecked against the complete result. The reference and
+Sail engines use the same deterministic planning functions, so input
+permutation and timestamp ties produce canonical output.
+
+Durability is a separate storage capability. `GraphCommitStore` combines exact
+node or absence expectations, a mutation batch, an idempotency digest, and a
+backend receipt in one transaction. Turso mints the receipt's canonical UTC
+RFC 3339 timestamp at nanosecond precision immediately before inserting that
+receipt into the same transaction. It is backend-issued transaction-boundary
+evidence, not a wall-clock observation taken after storage fsync, and recovery
+returns those exact persisted bytes or fails closed on malformed time. The
+cognition scheduler stores only scoped digests, issues bounded renewable bearer
+leases, persists only the canonical
+proposal digest, and survives reopen. During application, TypeSec supplies the
+opaque prepared commit; Grust atomically checks source revisions, applies its
+exact memory operations and ID-only index outbox, writes the audit record,
+persists the outcome, and completes the job. A no-change token has empty
+operations, affected IDs, and outbox, and retains the prior memory version, but
+the exact source guards, job, audit, outcome, and guarded ledger still commit
+as one decision. Recovery is read-only and cross-validates the job, audit,
+outcome, authority scope, optional governed source scope, proposal, effect, and
+backend receipt. Durable outcome schema version 3 requires TypeSec audit schema
+version 2, which carries the same typed effect, distinct grant and snapshot
+digests, and the trusted authority-revalidation and preparation times. Audit
+and commit-envelope digests use version-3 domains so this evidence layout
+cannot be confused with either predecessor. TypeSec owns scope
+selection and authoritative reload checks; Grust preserves that evidence and
+atomically enforces the prepared full-record preconditions. Tests exercise
+concurrent identical decisions and commit-then-response loss and prove that
+retry plus reopen retain exactly one job, audit record, outcome, guarded ledger,
+and the exact mutation/outbox shape required by the effect.
+
+The scheduler's `transitionedAt` is a caller-supplied logical transition time;
+for `Completed` it is explicitly the TypeSec audit's `preparedAt`. It is not a
+backend commit timestamp. A completed job's `completionDigest` is exactly the
+canonical TypeSec prepared digest for either effect, never the resulting memory
+version; this avoids collapsing no-change into an unchanged memory version.
+Recovery checks durable schema versions before deserialization, rejects
+incompatible historical outcome and audit layouts, and requires affected IDs
+to retain TypeSec's strict canonical order. Authoritative
+`committedAt` evidence exists only in the outcome and receipt, must be canonical
+RFC 3339, and cannot predate preparation. Grust rejects malformed or regressive
+backend time on initial return and recovery instead of substituting a timestamp
+from another phase.
+
+The scheduler and outbox APIs are storage primitives behind Marciana's
+authenticated scheduler and trusted worker pool. A worker intentionally need
+not equal the submitter, which lets expired work move safely, but canonical
+owner strings and scoped job keys are not credentials. Once issued, lease and
+claim tokens are bearer credentials for worker transitions. Marciana must
+authorize acquisition and cancellation and keep those tokens confidential;
+only a freshly prepared opaque TypeSec commit can authorize memory mutation.
+
+This is a native Grust, TypeSec, LakeCat, and Sail composition. Cognee supplied
+design inspiration only; no Cognee runtime, adapter, or storage dependency is
+present.
+
+The durable proof still has explicit limits. `MemoryId::next()` uses a
+process-local counter, so a restarted ordinary writer can collide with
+persisted `mem-N` identifiers; a hosted or multi-process service should mint
+collision-resistant IDs at its boundary. `VectorIndex` is not a persistent
+LanceDB ANN implementation, and memory predicates beyond space are not fully
+pushed into GQL. Cognition job idempotency does not replace durable TypeDID
+nonce replay protection shared across gateway replicas. Grust's structural edge
+identity remains `(from, label, to)`, so changing `fact_id` cannot preserve
+parallel `RELATES` assertions between the same endpoints; assertion nodes or a
+multi-edge identity surface are still needed for full lineage. Finally,
+vault-level tenant checks, restart persistence, and running-service conformance
+do not by themselves constitute a hosted multi-tenant service with quotas,
+migrations, backups, deletion propagation, and service-level objectives.
 
 ## Sail
 

@@ -6526,6 +6526,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "static_assertions",
  "tempfile",
  "thiserror",
  "tokio",
@@ -6533,6 +6534,7 @@ dependencies = [
  "typesec-core",
  "typesec-memory",
  "typesec-rbac",
+ "uuid",
 ]
 
 [[package]]
@@ -9199,6 +9201,7 @@ version = "0.13.0"
 dependencies = [
  "chrono",
  "glob",
+ "serde",
  "thiserror",
  "tracing",
  "web-time",

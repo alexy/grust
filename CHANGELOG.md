@@ -22,6 +22,82 @@ reconstructed from Git history, release commits, and the shipped docs.
   decoded message, reserving 16 MiB for Arrow payload and 1 MiB for protobuf
   envelope metadata.
 
+- Added canonical cognition operation parsing and hardened planning around one
+  TypeSec-authorized input and binding. LakeCat evidence, projection, field
+  mapping, source revisions, and label joins are checked before Sail runs;
+  proposals are born bound. Live Sail uses collision-safe temp views and always
+  attempts cleanup under its own bounded deadline, including after caller
+  cancellation; operation and abort time are bounded independently. It
+  requires the complete exact result set under
+  fixed source-count, authorized-input byte, Arrow, result, projection,
+  identity, mutation, and local-work budgets shared with TypeSec and the
+  reference engine. Cognition rejects excessive encoded Arrow collection and
+  declared row, buffer, or decompressed sizes before `StreamReader` allocates
+  result arrays, then rechecks the complete result locally. Native provenance
+  is accepted only for exact bounded operation identities. Deduplicate and
+  reconcile each use an explicit version-2 semantic contract shared by their
+  reference and Sail profiles; package/build versions are implementation
+  metadata and never mutation authority. Legacy version-1 or package-bound
+  intents fail closed and require fresh authorization. Fixed host-selectable
+  profiles let a trusted composition registry bind an engine independently and
+  check signed intent before authorized input is loaded; public engine
+  implementations cannot self-report identity, and Sail executors cannot
+  choose a version after execution. TypeSec canonical proposal validation also
+  rejects an executor's malformed or over-budget output before it leaves the
+  engine wrapper. The adapter exposes only fixed failure categories rather than
+  caller, source, or adapter text.
+  Reference and Sail proposals now share permutation-stable canonical dedup and
+  reconciliation planning, including ID tie-breaking at Sail's staged timestamp
+  precision. Optional TypeSec-governed source scopes are preserved through
+  bound proposals, durable audit evidence, retry, and reopen; explicit local
+  cognition remains scope-free. Bound proposal schema version 4 now binds the
+  immutable snapshot digest separately from the LakeCat grant digest and names
+  an explicit `mutated` or `no_change` effect. Reference and Sail engines derive
+  that effect from the complete canonical plan. Durable outcome schema version
+  3 validates TypeSec audit schema version 2, including the same effect,
+  separate snapshot identity, and authority-revalidation time. Audit and
+  commit-envelope digest domains are version 3, so this evidence epoch cannot
+  collide with either earlier layout.
+
+- Added durable cognition jobs and atomic application to `querygraph-memory`.
+  Renewable bounded leases, cancellation, retry, digest-only proposal state,
+  subject-and-purpose-scoped job identities, and an ID-only leased outbox
+  survive reopen. Every derived job, outcome, audit, outbox, and ledger address
+  includes TypeSec's opaque authority-scope digest. Only TypeSec's opaque
+  prepared token can atomically exact-guard sources, apply the exact memory
+  operations and ID-only outbox, write audit evidence, persist the outcome, and
+  complete the job. A typed no-change decision has no memory or outbox
+  mutations, retains the prior memory version, and still commits its job,
+  audit, outcome, and guarded ledger atomically.
+  Scheduler submission, proposal staging, commit, and recovery bind the same
+  verified TypeDID request digest.
+  Idempotent recovery cross-validates the durable job, authority scope, audit,
+  outcome, and backend receipt; raw bearer, owner, failure, proposal, and
+  plaintext values are never persisted in scheduler metadata. A job's logical
+  transition time is caller-supplied; completed jobs bind it explicitly to
+  TypeSec preparation, and their completion digest is the exact canonical
+  TypeSec prepared digest for either effect, never the resulting memory
+  version. Authoritative backend commit time exists only in the outcome and
+  receipt. Backend commit time must
+  be canonical RFC 3339 and
+  must not predate preparation; malformed or regressive evidence fails closed
+  instead of being relabeled as another phase. Commit-then-response-loss tests
+  prove that retry and reopen retain exactly one mutation, job, audit, outcome,
+  and outbox manifest. Concurrent identical applications recover the original
+  byte-stable evidence even when completion wins between the initial recovery
+  lookup and either the exact-source or staged-job read.
+  Recovery checks durable schema versions before deserialization, rejects
+  checked-in legacy outcome and audit shapes precisely, and requires affected
+  memory IDs to retain TypeSec's strict canonical order.
+  Scheduler and outbox methods are explicitly storage primitives for an
+  authenticated trusted worker pool: submitters and transferable workers may
+  differ, scoped keys and owner strings are not credentials, and active lease
+  or claim tokens are bearer credentials for worker transitions.
+
+- Clarified that these Grust capabilities are the generic governed-cognition
+  substrate; standalone Marciana still owns authenticated orchestration,
+  product receipts, and the pending qg-rust cognition cutover.
+
 - Added a domain-neutral guarded graph commit capability and a durable Turso
   implementation. Exact-node and absence expectations, graph mutations, and a
   backend-issued commit identity now share one transaction; identical retries
@@ -32,19 +108,19 @@ reconstructed from Git history, release commits, and the shipped docs.
   exact backend-issued transaction-boundary bytes, and rejects a malformed
   durable timestamp without disclosing it.
 
-- Added an ignored live-Sail conformance test for Marciana cognition that
-  compares distributed deduplication and reconciliation with the reference
-  engine, proves repeated jobs are deterministic, and rejects governed inputs
-  or source plaintext in audit evidence. The integration launcher now runs it
-  alongside `grust-sail`, accepts an explicit `SAIL_TEST_BIN`, and no longer
-  silently substitutes an unrelated `sail` executable from `PATH` for the
+- Added ignored live-Sail conformance tests for Marciana cognition that
+  separately compare distributed deduplication and reconciliation with the
+  reference engine, prove repeated jobs are deterministic, and reject governed
+  inputs or source plaintext in audit evidence. The integration launcher now
+  runs them alongside `grust-sail`, accepts an explicit `SAIL_TEST_BIN`, and no
+  longer silently substitutes an unrelated `sail` executable from `PATH` for the
   configured source checkout.
 
 - Added an optional live Spark Connect cognition executor to the private
   `querygraph-memory` integration crate. Governed memories are staged in a
-  session-local Arrow view under a hashed job name, Sail computes bounded
-  deduplication and reconciliation candidates, and only inert TypeSec plans
-  return; authorization secrets are never staged or logged.
+  session-local Arrow view under a random collision-safe name. Sail computes
+  bounded deduplication and reconciliation candidates, and only inert TypeSec
+  plans return; authorization secrets are never staged or logged.
 - Made the cognition engine and Sail executor contracts asynchronous so live
   Spark Connect execution does not block a runtime worker.
 

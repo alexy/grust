@@ -1,5 +1,6 @@
 use super::*;
 use chrono::{TimeZone, Utc};
+use typesec_memory::{ConsolidationStep, MemoryContent, Provenance};
 
 fn recalled(id: &str, text: &str, kind: MemoryKind, y: i32) -> RecalledMemory {
     RecalledMemory {

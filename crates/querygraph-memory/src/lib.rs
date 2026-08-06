@@ -29,10 +29,12 @@
 //!
 //! ## Security posture
 //!
-//! This crate is *storage*: it never reads record content (the field is
-//! crate-private in typesec-memory; records round-trip through serde), and
-//! authorization stays where it always was — in the capability-gated vault.
-//! Passing `typesec_memory::conformance` is the compatibility bar.
+//! The store adapter round-trips [`StoredRecord`] as an opaque value; it does
+//! not inspect protected content to make authorization decisions. Cognition
+//! receives only the transient [`typesec_memory::AuthorizedCognitionInput`]
+//! that the capability-gated vault already released, and it returns inert
+//! proposals to that vault. Passing `typesec_memory::conformance` is the
+//! storage compatibility bar.
 
 use std::collections::BTreeMap;
 use std::future::Future;

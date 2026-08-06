@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Capability-safe TypeSec memory over Grust, with durable Turso storage"
+description = "Capability-safe TypeSec memory and governed cognition over Grust"
 # Kept private until the next Grust release makes an explicit distribution
 # decision and replaces the sibling TypeSec paths with registry-versioned deps.
 publish = false
@@ -28,8 +28,9 @@ sha2 = "0.10"
 thiserror = "2.0"
 tokio = { workspace = true, features = ["net", "time"] }
 tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }
 async-trait = { workspace = true }
-arrow = { version = "58.1.0", optional = true }
+arrow = { version = "58.1.0", features = ["ipc_compression"], optional = true }
 
 [dev-dependencies]
 grust-memory = { path = "../grust-memory", version = "0.12.0" }
@@ -37,3 +38,5 @@ tempfile = { workspace = true }
 typesec-memory = { path = "../../../typesec/crates/typesec-memory", features = ["conformance"] }
 typesec-core = { path = "../../../typesec/crates/typesec-core" }
 typesec-rbac = { path = "../../../typesec/crates/typesec-rbac", default-features = false }
+static_assertions = "1"
+tokio = { workspace = true, features = ["test-util"] }

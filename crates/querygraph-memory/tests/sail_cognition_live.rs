@@ -1,18 +1,30 @@
 #![cfg(feature = "sail")]
 
+mod support;
+
 use std::env;
 use std::sync::Arc;
 
 use chrono::{TimeZone, Utc};
 use grust_sail::{SailConfig, SailGraphStore};
 use querygraph_memory::cognition::{
-    CognitionEngine, CognitionOperation, CognitionRequest, GovernedLakeCatSnapshot,
-    LiveSailCognitionExecutor, ReferenceCognitionEngine, SailCognitionEngine,
+    CognitionEngine, CognitionFieldMapping, CognitionOperation, CognitionRequest,
+    GovernedLakeCatSnapshot, LiveSailCognitionExecutor, ReferenceCognitionEngine,
+    SailCognitionEngine,
 };
 use typesec_memory::{
-    CognitionProposal, ConsolidationPlan, ConsolidationStep, Label, MemoryContent, MemoryId,
-    MemoryKind, Provenance, RecalledMemory,
+    CognitionBinding, CognitionProposal, ConsolidationPlan, ConsolidationStep, GovernedSourceScope,
+    Label, MemoryContent, MemoryId, MemoryKind, Provenance, RecalledMemory, StoredRecord,
 };
+
+use support::cognition_input::governed_authorized_input_for;
+
+const LIVE_MEMORY_SPACE_ID: &str = "memory/user:alice/semantic";
+
+fn digest(value: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{:x}", Sha256::digest(value.as_bytes()))
+}
 
 fn governed_source() -> GovernedLakeCatSnapshot {
     GovernedLakeCatSnapshot {
@@ -20,11 +32,13 @@ fn governed_source() -> GovernedLakeCatSnapshot {
         namespace: "tenant_secret".into(),
         table: "private_findings".into(),
         snapshot_id: 9_001,
-        plan_task_digest: "sha256:opaque-plan-secret".into(),
+        governed_scan_digest: digest("opaque-scan-secret"),
+        snapshot_digest: digest("opaque-snapshot-secret"),
+        plan_task_digest: digest("opaque-plan-secret"),
         subject: "did:key:private-researcher".into(),
         purpose: "purpose/private-research".into(),
-        effective_projection: vec!["finding".into()],
-        authorization_receipt_digest: "sha256:opaque-authorization-secret".into(),
+        effective_projection: vec!["id".into(), "finding".into(), "valid_from".into()],
+        authorization_receipt_digest: digest("opaque-authorization-secret"),
     }
 }
 
@@ -69,6 +83,26 @@ fn memories() -> Vec<RecalledMemory> {
     ]
 }
 
+fn stored(memory: &RecalledMemory, governed_source_scope: &GovernedSourceScope) -> StoredRecord {
+    serde_json::from_value(serde_json::json!({
+        "id": memory.id,
+        "space_id": LIVE_MEMORY_SPACE_ID,
+        "kind": memory.kind,
+        "label": memory.label,
+        "quarantined": false,
+        "entities": memory.entities,
+        "provenance": memory.provenance,
+        "governed_source_scope": governed_source_scope,
+        "observed_at": memory.valid_from,
+        "valid_from": memory.valid_from,
+        "invalid_at": null,
+        "expires_at": null,
+        "purposes": ["purpose/private-research"],
+        "content": memory.content,
+    }))
+    .expect("stored live-test source")
+}
+
 fn sail_endpoint() -> String {
     env::var("SAIL_ENDPOINT").unwrap_or_else(|_| {
         let host = env::var("SAIL_HOST").unwrap_or_else(|_| "127.0.0.1".into());
@@ -95,6 +129,7 @@ fn plan_fingerprint(plan: &ConsolidationPlan) -> Vec<(String, Vec<String>)> {
 
 fn assert_stable_proposal(left: &CognitionProposal, right: &CognitionProposal) {
     assert_eq!(left.schema_version, right.schema_version);
+    assert_eq!(left.effect, right.effect);
     assert_eq!(left.job_id, right.job_id);
     assert_eq!(left.input_snapshot, right.input_snapshot);
     assert_eq!(left.source_digest, right.source_digest);
@@ -102,6 +137,7 @@ fn assert_stable_proposal(left: &CognitionProposal, right: &CognitionProposal) {
     assert_eq!(left.algorithm_version, right.algorithm_version);
     assert_eq!(left.source_ids, right.source_ids);
     assert_eq!(left.joined_label, right.joined_label);
+    assert_eq!(left.binding, right.binding);
     assert_eq!(left.evidence, right.evidence);
     assert_eq!(plan_fingerprint(&left.plan), plan_fingerprint(&right.plan));
 }
@@ -135,12 +171,12 @@ fn assert_evidence_is_secret_safe(
     }
 }
 
-#[tokio::test]
-#[ignore = "requires a live Sail Spark Connect endpoint (run scripts/integration-test.sh --backend sail)"]
-async fn live_sail_cognition_matches_reference_and_keeps_evidence_secret() {
-    let mut config = SailConfig::default();
-    config.endpoint = sail_endpoint();
-    config.user_id = "marciana-live-test".into();
+async fn assert_live_operation_matches_reference(operation: CognitionOperation, job_id: &str) {
+    let config = SailConfig {
+        endpoint: sail_endpoint(),
+        user_id: "marciana-live-test".into(),
+        ..SailConfig::default()
+    };
     let store = Arc::new(
         SailGraphStore::connect(config)
             .await
@@ -150,46 +186,106 @@ async fn live_sail_cognition_matches_reference_and_keeps_evidence_secret() {
     let reference = ReferenceCognitionEngine;
     let source = governed_source();
     let memories = memories();
+    let governed_source_scope = GovernedSourceScope::from_digest(digest("lakecat-source-scope"))
+        .expect("canonical governed source scope");
+    let input = governed_authorized_input_for(
+        memories
+            .iter()
+            .map(|memory| stored(memory, &governed_source_scope))
+            .collect(),
+        "purpose/private-research",
+        &governed_source_scope,
+    );
+    let binding = CognitionBinding {
+        space_id: LIVE_MEMORY_SPACE_ID.into(),
+        subject: source.subject.clone(),
+        purpose: source.purpose.clone(),
+        governed_source_scope: input.governed_source_scope().cloned(),
+        governed_scan_digest: source.governed_scan_digest.clone(),
+        snapshot_digest: source.snapshot_digest.clone(),
+        plan_task_digest: source.plan_task_digest.clone(),
+        authorization_receipt_digest: source.authorization_receipt_digest.clone(),
+        effective_projection: source.effective_projection.clone(),
+        source_manifest_digest: input.manifest().digest.clone(),
+        typedid_request_digest: digest("typedid-request"),
+    };
+    let field_mapping = CognitionFieldMapping {
+        id: "id".into(),
+        text: "finding".into(),
+        valid_from: "valid_from".into(),
+    };
 
-    for (operation, job_id) in [
-        (CognitionOperation::Deduplicate, "tenant-secret/deduplicate"),
-        (CognitionOperation::Reconcile, "tenant-secret/reconcile"),
-    ] {
-        let expected = reference
-            .propose(CognitionRequest {
-                job_id,
-                source: &source,
-                memories: &memories,
-                operation,
-            })
-            .await
-            .expect("reference cognition proposal");
-        let actual = live
-            .propose(CognitionRequest {
-                job_id,
-                source: &source,
-                memories: &memories,
-                operation,
-            })
-            .await
-            .expect("live Sail cognition proposal");
-        let repeated = live
-            .propose(CognitionRequest {
-                job_id,
-                source: &source,
-                memories: &memories,
-                operation,
-            })
-            .await
-            .expect("idempotent live Sail cognition proposal");
+    let expected = reference
+        .propose(CognitionRequest {
+            job_id,
+            source: &source,
+            binding: &binding,
+            input: &input,
+            field_mapping: &field_mapping,
+            operation,
+        })
+        .await
+        .expect("reference cognition proposal");
+    let actual = live
+        .propose(CognitionRequest {
+            job_id,
+            source: &source,
+            binding: &binding,
+            input: &input,
+            field_mapping: &field_mapping,
+            operation,
+        })
+        .await
+        .expect("live Sail cognition proposal");
+    let repeated = live
+        .propose(CognitionRequest {
+            job_id,
+            source: &source,
+            binding: &binding,
+            input: &input,
+            field_mapping: &field_mapping,
+            operation,
+        })
+        .await
+        .expect("idempotent live Sail cognition proposal");
 
+    assert_eq!(
+        plan_fingerprint(&actual.plan),
+        plan_fingerprint(&expected.plan),
+        "live Sail plan must match the reference oracle"
+    );
+    assert_eq!(actual.effect, expected.effect);
+    assert_eq!(actual.joined_label, Label::Secret);
+    for proposal in [&expected, &actual, &repeated] {
+        assert_eq!(proposal.schema_version, CognitionProposal::SCHEMA_VERSION);
         assert_eq!(
-            plan_fingerprint(&actual.plan),
-            plan_fingerprint(&expected.plan),
-            "live Sail plan must match the reference oracle"
+            proposal
+                .binding
+                .as_ref()
+                .and_then(|binding| binding.governed_source_scope.as_ref()),
+            Some(&governed_source_scope)
         );
-        assert_eq!(actual.joined_label, Label::Secret);
-        assert_stable_proposal(&actual, &repeated);
-        assert_evidence_is_secret_safe(&actual, &source, &memories);
     }
+    assert_stable_proposal(&actual, &repeated);
+    assert_evidence_is_secret_safe(&actual, &source, &memories);
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail Spark Connect endpoint (run scripts/integration-test.sh --backend sail)"]
+async fn live_sail_deduplication_matches_reference_and_keeps_evidence_secret() {
+    assert_live_operation_matches_reference(
+        CognitionOperation::Deduplicate,
+        "tenant-secret/deduplicate",
+    )
+    .await;
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail Spark Connect endpoint (run scripts/integration-test.sh --backend sail)"]
+async fn live_sail_reconciliation_matches_reference_and_keeps_evidence_secret() {
+    assert_live_operation_matches_reference(
+        CognitionOperation::Reconcile,
+        "tenant-secret/reconcile",
+    )
+    .await;
 }
