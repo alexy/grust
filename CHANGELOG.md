@@ -8,6 +8,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ### 2026-08-06
 
+- Bounded each Sail integration command with a configurable timeout. A stalled
+  live phase now fails the harness instead of leaving the release gate running
+  indefinitely.
+
 - Replaced `querygraph-memory`'s TypeSec sibling paths with the exact reviewed
   public Git revision, so the governed cognition crate can build and test from
   a clean Grust checkout.

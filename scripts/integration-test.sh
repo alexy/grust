@@ -19,6 +19,7 @@ NO_START=0
 KEEP_RUNNING=0
 MODE="${GRUST_INTEGRATION_MODE:-auto}"
 PROFILE="${GRUST_INTEGRATION_PROFILE:-}"
+SAIL_TEST_TIMEOUT_SECONDS="${GRUST_SAIL_TEST_TIMEOUT_SECONDS:-120}"
 
 ALL_BACKENDS=(sail surreal falkor helix ladybug lancedb cocoindex pggraph postgres-pgq)
 DOCKER_BACKENDS=(surreal falkor ladybug lancedb cocoindex pggraph)
@@ -165,6 +166,18 @@ wait_port() {
     fi
     sleep 1
   done
+}
+
+run_sail_test() {
+  if ! [[ "$SAIL_TEST_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "GRUST_SAIL_TEST_TIMEOUT_SECONDS must be a positive integer" >&2
+    return 2
+  fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "the Sail integration gate requires a timeout command" >&2
+    return 2
+  fi
+  timeout "$SAIL_TEST_TIMEOUT_SECONDS" "$@"
 }
 
 wait_pggraph() {
@@ -539,8 +552,8 @@ run_backend() {
       start_sail
       wait_port sail "$SAIL_HOST" "$SAIL_PORT"
       export SAIL_ENDPOINT="http://${SAIL_HOST}:${SAIL_PORT}"
-      cargo test -p grust-sail -- --ignored --test-threads=1
-      cargo test -p querygraph-memory --features sail --test sail_cognition_live -- --ignored --test-threads=1
+      run_sail_test cargo test -p grust-sail -- --ignored --test-threads=1
+      run_sail_test cargo test -p querygraph-memory --features sail --test sail_cognition_live -- --ignored --test-threads=1
       ;;
     surreal)
       start_surreal
