@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Prepare the `0.12.1` registry release containing the graph commit and Sail
+  APIs consumed by the current Marciana memory implementation.
+
 ### 2026-08-06
 
 - Bounded each Sail integration command with a configurable timeout. A stalled
