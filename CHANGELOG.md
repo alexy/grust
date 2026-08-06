@@ -6,6 +6,14 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+### 2026-08-06
+
+- Recorded a passing focused live Sail integration gate for the governed
+  cognition substrate: 26 Sail adapter tests, two live backend checks, and two
+  cognition reference-parity and evidence-secrecy cases. The documentation
+  keeps this explicitly local-source verification separate from Marciana's
+  remote-reachable Sail compatibility baseline.
+
 ### 2026-08-05
 
 - Updated `grust-sail` for current Sail Spark Connect sessions. Each session

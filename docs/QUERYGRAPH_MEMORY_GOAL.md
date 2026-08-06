@@ -1,9 +1,9 @@
 # QueryGraph Memory Goal
 
 Status: durable memory v1 is consumed by qg-rust. The generic governed
-cognition substrate is implemented in Grust and under final local verification
-as of 2026-08-05; standalone Marciana orchestration and the qg-rust cognition
-cutover remain pending.
+cognition substrate is implemented in Grust and passed its focused live Sail
+integration gate on 2026-08-06; standalone Marciana orchestration and a
+clean-clone qg-rust release cutover remain pending.
 
 This document is the Grust-side source of truth for `querygraph-memory`. It
 separates the TypeSec storage contract and delivered application wiring from
@@ -43,7 +43,7 @@ batch size, or journal mode explicitly.
 | Governed cognition planning substrate | Implemented in Grust | Host-selected reference or live Sail engines accept only TypeSec-authorized input bound by proposal schema v4 to its optional governed source scope, distinct LakeCat grant and snapshot identities, projection, TypeDID evidence, and a deterministic typed effect; both implement the explicit per-operation v2 semantic contract |
 | Durable cognition application substrate | Implemented on guarded Turso | Leased digest-only jobs, exact source CAS, typed memory effect, exact ID-only index outbox, versioned audit and outcome evidence, and job completion share one transaction; no-change commits durable evidence without fabricating a mutation or outbox row |
 | Cognition retry and recovery substrate | Implemented in Grust | Concurrent apply, commit-response-loss, retry, and reopen tests recover one cross-validated byte-stable outcome without a probe write or duplicate mutation |
-| Bounded Spark execution | Implemented in Grust | Shared 16 MiB Arrow payload/17 MiB Spark message limit, row/work limits, finite operation/abort/cleanup deadlines, and preflight before Arrow allocation |
+| Bounded Spark execution | Locally live-verified in Grust | The explicit local Sail binary passed all 26 `grust-sail` tests, 2 live backend checks, and 2 live cognition reference-parity/secret-handling cases; shared 16 MiB Arrow payload/17 MiB Spark message limit, row/work limits, finite operation/abort/cleanup deadlines, and preflight before Arrow allocation remain enforced |
 | QueryGraph runtime/API wiring | Memory v1 complete; cognition cutover pending | Signed-only remember/recall/forget routes, exact `did:key` RBAC, body-subject spoof test, and server reopen proof are present; native `improve` moves through standalone Marciana after extraction |
 
 The sibling qg-rust application opens this store behind TypeSec's
@@ -147,8 +147,14 @@ cargo fmt --check -p querygraph-memory
 cargo clippy -p querygraph-memory --all-features --all-targets --no-deps -- -D warnings
 cargo test -p querygraph-memory --all-features
 cargo test -p grust-turso --test transaction_atomic --test turso_read_query
+SAIL_TEST_BIN=/absolute/path/to/sail scripts/integration-test.sh --backend sail --mode source
 git diff --check
 ```
+
+The Sail command is a local integration gate. It must name the exact binary
+under test and does not establish a released compatibility baseline until that
+Sail revision is reachable from its configured upstream and recorded by
+Marciana.
 
 The focused Clippy gate uses `--no-deps`: Turso brings in publishable Grust
 SQL/Cypher crates whose workspace-wide lint baseline is maintained separately.
