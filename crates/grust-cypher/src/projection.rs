@@ -2336,33 +2336,41 @@ where
 }
 
 pub fn check_strict_create_plan_conflicts(plan: &GraphMutationPlan) -> Result<()> {
-    let mut nodes = Vec::new();
-    let mut edges = Vec::new();
+    let mut node_ids = HashSet::with_capacity(plan.operations.len());
+    let mut edge_ids = HashSet::with_capacity(plan.operations.len());
+    let mut structural_edges = HashSet::with_capacity(plan.operations.len());
     for operation in &plan.operations {
         match operation {
             GraphMutationPlanOp::UpsertNode {
                 kind: GraphMutationPlanKind::Create,
                 node,
             } => {
-                if nodes.iter().any(|id| id == &node.id) {
+                if !node_ids.insert(node.id.clone()) {
                     return Err(GrustError::Unsupported(format!(
                         "Cypher CREATE batch contains duplicate node '{}'",
                         node.id.as_str()
                     )));
                 }
-                nodes.push(node.id.clone());
             }
             GraphMutationPlanOp::UpsertEdge {
                 kind: GraphMutationPlanKind::Create,
                 edge,
             } => {
-                if strict_create_edge_conflicts(edge, &edges) {
+                let duplicate_id = edge
+                    .id
+                    .as_ref()
+                    .is_some_and(|id| !edge_ids.insert(id.clone()));
+                let duplicate_structure = !structural_edges.insert((
+                    edge.from.clone(),
+                    edge.label.clone(),
+                    edge.to.clone(),
+                ));
+                if duplicate_id || duplicate_structure {
                     return Err(GrustError::Unsupported(format!(
                         "Cypher CREATE batch contains duplicate edge '{}'",
                         edge_key(edge)
                     )));
                 }
-                edges.push(edge.clone());
             }
             _ => {}
         }
