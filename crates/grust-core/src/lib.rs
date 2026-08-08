@@ -11,7 +11,7 @@ mod unique_values;
 pub use guarded_commit::{
     GraphCommitReceipt, GraphCommitStore, GraphExpectation, GuardedGraphCommit,
 };
-use unique_values::UniqueValues;
+pub use unique_values::UniqueValueIndex;
 
 pub type Result<T> = std::result::Result<T, GrustError>;
 pub type Props = BTreeMap<String, Value>;
@@ -2203,7 +2203,7 @@ impl GraphSchema {
         for constraint in &self.constraints {
             match constraint {
                 GraphConstraint::NodePropertyUnique { label, key } => {
-                    let mut seen = UniqueValues::with_capacity(graph.nodes.len());
+                    let mut seen = UniqueValueIndex::with_capacity(graph.nodes.len());
                     for node in graph.nodes.iter().filter(|node| &node.label == label) {
                         let Some(value) = node.props.get(key) else {
                             continue;
@@ -2220,7 +2220,7 @@ impl GraphSchema {
                     }
                 }
                 GraphConstraint::EdgePropertyUnique { label, key } => {
-                    let mut seen = UniqueValues::with_capacity(graph.edges.len());
+                    let mut seen = UniqueValueIndex::with_capacity(graph.edges.len());
                     for edge in graph.edges.iter().filter(|edge| &edge.label == label) {
                         let Some(value) = edge.props.get(key) else {
                             continue;

@@ -316,6 +316,19 @@ fn memory_reports_constraint_capabilities_and_validates_constraints() {
             .to_string()
             .contains("duplicates unique constrained property 'email'")
     );
+
+    let moved = Node::new(
+        "Person",
+        "person-1",
+        Props::from([("email".to_string(), Value::from("grace@example.com"))]),
+    );
+    futures_executor::block_on(store.put_node(&moved)).unwrap();
+    futures_executor::block_on(store.put_node(&Node::new(
+        "Person",
+        "person-2",
+        Props::from([("email".to_string(), Value::from("ada@example.com"))]),
+    )))
+    .expect("replacing a unique value releases its previous index entry");
 }
 
 #[test]
@@ -420,6 +433,77 @@ fn memory_validates_unique_edge_constraints_before_writes() {
             .to_string()
             .contains("duplicates unique constrained property 'role'")
     );
+
+    let moved = Edge::new(
+        "WORKS_ON",
+        "person-1",
+        "project-1",
+        Props::from([("role".to_string(), Value::from("reviewer"))]),
+    );
+    futures_executor::block_on(store.put_edge(&moved)).unwrap();
+    futures_executor::block_on(store.put_edge(&Edge::new(
+        "WORKS_ON",
+        "person-2",
+        "project-2",
+        Props::from([("role".to_string(), Value::from("maintainer"))]),
+    )))
+    .expect("replacing a unique edge value releases its previous index entry");
+}
+
+#[test]
+fn memory_edge_uniqueness_uses_directed_and_undirected_endpoint_semantics() {
+    let nodes = vec![
+        Node::new("Person", "a", Props::new()),
+        Node::new("Person", "b", Props::new()),
+    ];
+
+    let directed_schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .edge(
+            "KNOWS",
+            vec![Label::new("Person")],
+            vec![Label::new("Person")],
+            Vec::<Field>::new(),
+        )
+        .build();
+    let directed = MemoryGraphStore::new();
+    futures_executor::block_on(directed.apply_schema(&directed_schema)).unwrap();
+    futures_executor::block_on(directed.put_graph(&Graph::new(nodes.clone(), Vec::new()))).unwrap();
+    futures_executor::block_on(
+        directed.put_edge(&Edge::new("KNOWS", "a", "b", Props::new()).with_id("first")),
+    )
+    .unwrap();
+    futures_executor::block_on(
+        directed.put_edge(&Edge::new("KNOWS", "b", "a", Props::new()).with_id("reverse")),
+    )
+    .expect("directed reverse endpoints are distinct");
+    futures_executor::block_on(
+        directed.put_edge(&Edge::new("KNOWS", "a", "b", Props::new()).with_id("duplicate")),
+    )
+    .expect_err("directed parallel endpoints must remain unique");
+
+    let undirected_schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .edge_type(EdgeType {
+            label: Label::new("KNOWS"),
+            from: vec![Label::new("Person")],
+            to: vec![Label::new("Person")],
+            fields: Vec::new(),
+            directed: false,
+            uniqueness: EdgeUniqueness::FromLabelTo,
+        })
+        .build();
+    let undirected = MemoryGraphStore::new();
+    futures_executor::block_on(undirected.apply_schema(&undirected_schema)).unwrap();
+    futures_executor::block_on(undirected.put_graph(&Graph::new(nodes, Vec::new()))).unwrap();
+    futures_executor::block_on(
+        undirected.put_edge(&Edge::new("KNOWS", "a", "b", Props::new()).with_id("first")),
+    )
+    .unwrap();
+    futures_executor::block_on(
+        undirected.put_edge(&Edge::new("KNOWS", "b", "a", Props::new()).with_id("reverse")),
+    )
+    .expect_err("undirected reverse endpoints must conflict");
 }
 
 #[test]

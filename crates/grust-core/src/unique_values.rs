@@ -6,34 +6,100 @@
 //! affect performance, never uniqueness semantics.
 
 use std::{
+    borrow::Borrow,
     collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
 };
 
 use crate::Value;
 
-pub(crate) struct UniqueValues<'value, Owner> {
-    buckets: HashMap<u64, Vec<(Owner, &'value Value)>>,
+/// Collision-safe owner index for graph [`Value`]s.
+///
+/// `Value` deliberately cannot implement `Eq + Hash` because floats and JSON
+/// retain their native equality semantics. This index uses an
+/// equality-compatible fingerprint only to select a small bucket, then always
+/// confirms uniqueness with full `Value::eq`. `StoredValue` may be either an
+/// owned [`Value`] for a persistent index or `&Value` for one validation pass.
+#[derive(Clone, Debug)]
+pub struct UniqueValueIndex<Owner, StoredValue> {
+    buckets: HashMap<u64, Vec<(Owner, StoredValue)>>,
 }
 
-impl<'value, Owner> UniqueValues<'value, Owner> {
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+impl<Owner, StoredValue> UniqueValueIndex<Owner, StoredValue>
+where
+    StoredValue: Borrow<Value>,
+{
+    /// Create an empty index sized for approximately `capacity` distinct
+    /// values.
+    pub fn with_capacity(capacity: usize) -> Self {
         Self {
             buckets: HashMap::with_capacity(capacity),
         }
     }
 
-    pub(crate) fn insert<'set>(
-        &'set mut self,
-        owner: Owner,
-        value: &'value Value,
-    ) -> Option<&'set Owner> {
-        let bucket = self.buckets.entry(value_fingerprint(value)).or_default();
-        if let Some(index) = bucket.iter().position(|(_, existing)| *existing == value) {
-            return Some(&bucket[index].0);
-        }
+    /// Return the owner of an equal value, if one is already indexed.
+    pub fn get(&self, value: &Value) -> Option<&Owner> {
+        self.buckets
+            .get(&value_fingerprint(value))?
+            .iter()
+            .find_map(|(owner, existing)| (existing.borrow() == value).then_some(owner))
+    }
+
+    /// Index one owner/value pair and return a previously indexed owner of an
+    /// equal value, if any.
+    ///
+    /// The new pair is retained even when a conflict exists. Keeping the index
+    /// structurally complete lets mutable stores recover correctly after one
+    /// owner of a temporarily duplicated value is replaced or removed.
+    pub fn insert(&mut self, owner: Owner, value: StoredValue) -> Option<&Owner> {
+        let bucket = self
+            .buckets
+            .entry(value_fingerprint(value.borrow()))
+            .or_default();
+        let existing = bucket
+            .iter()
+            .position(|(_, existing)| existing.borrow() == value.borrow());
         bucket.push((owner, value));
-        None
+        existing.map(|index| &bucket[index].0)
+    }
+}
+
+impl<Owner, StoredValue> UniqueValueIndex<Owner, StoredValue>
+where
+    Owner: PartialEq,
+    StoredValue: Borrow<Value>,
+{
+    /// Return an equal value's owner other than `owner`, if one is indexed.
+    pub fn conflicting_owner(&self, owner: &Owner, value: &Value) -> Option<&Owner> {
+        self.buckets
+            .get(&value_fingerprint(value))?
+            .iter()
+            .find_map(|(existing_owner, existing)| {
+                (existing_owner != owner && existing.borrow() == value).then_some(existing_owner)
+            })
+    }
+
+    /// Remove `owner` from the fingerprint bucket for `value`.
+    ///
+    /// An owner represents at most one value in a set. Matching the owner is
+    /// intentional: IEEE NaNs are not equal to themselves but must still be
+    /// removable when an indexed record is replaced or deleted.
+    pub fn remove(&mut self, owner: &Owner, value: &Value) -> bool {
+        let fingerprint = value_fingerprint(value);
+        let Some(bucket) = self.buckets.get_mut(&fingerprint) else {
+            return false;
+        };
+        let Some(index) = bucket
+            .iter()
+            .position(|(existing_owner, _)| existing_owner == owner)
+        else {
+            return false;
+        };
+        bucket.swap_remove(index);
+        if bucket.is_empty() {
+            self.buckets.remove(&fingerprint);
+        }
+        true
     }
 }
 
@@ -143,9 +209,20 @@ mod tests {
 
     #[test]
     fn collisions_still_use_full_value_equality() {
-        let mut values = UniqueValues::with_capacity(2);
+        let mut values = UniqueValueIndex::with_capacity(2);
         assert_eq!(values.insert("first", &Value::Int(1)), None);
         assert_eq!(values.insert("second", &Value::Int(2)), None);
         assert_eq!(values.insert("duplicate", &Value::Int(1)), Some(&"first"));
+        assert!(values.remove(&"first", &Value::Int(1)));
+        assert_eq!(values.get(&Value::Int(1)), Some(&"duplicate"));
+    }
+
+    #[test]
+    fn owned_values_can_be_removed_by_owner_even_when_not_self_equal() {
+        let nan = Value::Float(f64::NAN);
+        let mut values = UniqueValueIndex::with_capacity(1);
+        assert_eq!(values.insert("owner", nan.clone()), None);
+        assert!(values.remove(&"owner", &nan));
+        assert_eq!(values.insert("replacement", nan), None);
     }
 }
