@@ -1,8 +1,9 @@
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
 use grust_core::{
-    Edge, GraphMutationPlan, GraphMutationPlanKind, GraphMutationPlanOp, Node, Props, Value,
+    Edge, Graph, GraphMutationPlan, GraphMutationPlanKind, GraphMutationPlanOp, Node, Props, Value,
 };
 use grust_cypher::pushdown::{NoTypeHints, SparkDialect, plan_read};
+use grust_cypher::read::execute_read_query;
 use grust_cypher::{
     CypherMutationOptions, CypherParameters, check_strict_create_plan_conflicts, cypher_ddl,
     cypher_mutation_plan_with_options, parser, unique_edge_conflict,
@@ -12,6 +13,38 @@ const SIMPLE_READ: &str = "MATCH (n:Person) WHERE n.email = 'ada@example.com' RE
 const SEGMENT_READ: &str = "MATCH (a:Person)-[:KNOWS]->()-[:KNOWS]->(c:Person) \
                             WHERE a.age >= 21 AND c.active = true \
                             RETURN a.name, c.name";
+
+fn ring_graph(vertices: usize) -> Graph {
+    let nodes = (0..vertices)
+        .map(|index| {
+            Node::new(
+                "Vertex",
+                index.to_string(),
+                Props::from([("rank".to_owned(), Value::Int(index as i64))]),
+            )
+        })
+        .collect();
+    let edges = (0..vertices)
+        .map(|index| {
+            Edge::new(
+                "next",
+                index.to_string(),
+                ((index + 1) % vertices).to_string(),
+                Props::new(),
+            )
+        })
+        .collect();
+    Graph::new(nodes, edges)
+}
+
+fn fixed_path_query(hops: usize) -> String {
+    let mut query = String::from("MATCH (n0:Vertex {rank: 0})");
+    for index in 1..=hops {
+        query.push_str(&format!("-[:next]->(n{index}:Vertex)"));
+    }
+    query.push_str(&format!(" RETURN n{hops}.rank"));
+    query
+}
 
 fn create_batch(statements: usize) -> String {
     (0..statements)
@@ -115,6 +148,49 @@ fn bench_read_planning(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_reference_execution(c: &mut Criterion) {
+    const GRAPH_SIZE: usize = 10_000;
+    let graph = ring_graph(GRAPH_SIZE);
+    let parameters = CypherParameters::new();
+    let node_query = parser::parse_query("MATCH (n:Vertex {rank: 9999}) RETURN n.rank")
+        .expect("valid node query");
+    let one_hop_query = parser::parse_query(&fixed_path_query(1)).expect("valid path query");
+    let hundred_hop_query = parser::parse_query(&fixed_path_query(100)).expect("valid path query");
+
+    let mut group = c.benchmark_group("cypher_reference_execution_10k");
+    group.sample_size(20);
+    group.throughput(Throughput::Elements(GRAPH_SIZE as u64));
+    group.bench_function("inline_property_scan", |b| {
+        b.iter(|| {
+            black_box(
+                execute_read_query(black_box(&graph), black_box(&node_query), &parameters)
+                    .expect("execute node query"),
+            )
+        })
+    });
+    group.bench_function("ring_one_hop", |b| {
+        b.iter(|| {
+            black_box(
+                execute_read_query(black_box(&graph), black_box(&one_hop_query), &parameters)
+                    .expect("execute one-hop query"),
+            )
+        })
+    });
+    group.bench_function("ring_100_hops", |b| {
+        b.iter(|| {
+            black_box(
+                execute_read_query(
+                    black_box(&graph),
+                    black_box(&hundred_hop_query),
+                    &parameters,
+                )
+                .expect("execute 100-hop query"),
+            )
+        })
+    });
+    group.finish();
+}
+
 fn bench_mutation_planning(c: &mut Criterion) {
     let batch = create_batch(128);
     let mut group = c.benchmark_group("cypher_mutation_planning");
@@ -194,6 +270,7 @@ criterion_group!(
     benches,
     bench_parser,
     bench_read_planning,
+    bench_reference_execution,
     bench_mutation_planning,
     bench_ddl,
     bench_strict_create_validation,
