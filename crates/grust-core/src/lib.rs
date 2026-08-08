@@ -1,6 +1,9 @@
 use std::{
+    borrow::Borrow,
     collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
+    ops::Deref,
+    sync::Arc,
 };
 
 use async_trait::async_trait;
@@ -49,12 +52,12 @@ pub enum GrustError {
 macro_rules! string_newtype {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
-        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
-        pub struct $name(String);
+        #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+        pub struct $name(Arc<str>);
 
         impl $name {
             pub fn new(value: impl Into<String>) -> Self {
-                Self(value.into())
+                Self::from(value.into())
             }
 
             pub fn as_str(&self) -> &str {
@@ -62,7 +65,27 @@ macro_rules! string_newtype {
             }
 
             pub fn into_string(self) -> String {
-                self.0
+                self.0.as_ref().to_owned()
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl Borrow<str> for $name {
+            fn borrow(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl Deref for $name {
+            type Target = str;
+
+            fn deref(&self) -> &Self::Target {
+                self.as_str()
             }
         }
 
@@ -74,25 +97,43 @@ macro_rules! string_newtype {
 
         impl From<String> for $name {
             fn from(value: String) -> Self {
-                Self::new(value)
+                Self(Arc::from(value))
             }
         }
 
         impl From<&str> for $name {
             fn from(value: &str) -> Self {
-                Self::new(value)
+                Self(Arc::from(value))
             }
         }
 
         impl From<&String> for $name {
             fn from(value: &String) -> Self {
-                Self::new(value.clone())
+                Self(Arc::from(value.as_str()))
             }
         }
 
         impl From<&$name> for $name {
             fn from(value: &$name) -> Self {
                 value.clone()
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+            where
+                S: Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+            where
+                D: Deserializer<'de>,
+            {
+                String::deserialize(deserializer).map(Self::from)
             }
         }
     };
