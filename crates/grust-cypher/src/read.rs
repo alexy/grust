@@ -1105,14 +1105,14 @@ pub(crate) fn project_correlated_procedure_pipeline(
 // ---------------------------------------------------------------------------
 
 struct NodeIndex {
-    by_id: HashMap<String, usize>,
+    by_id: HashMap<NodeId, usize>,
 }
 
 impl NodeIndex {
     fn build(graph: &Graph) -> Self {
-        let mut by_id = HashMap::new();
+        let mut by_id = HashMap::with_capacity(graph.nodes.len());
         for (i, node) in graph.nodes.iter().enumerate() {
-            by_id.insert(node.id.as_str().to_string(), i);
+            by_id.insert(node.id.clone(), i);
         }
         NodeIndex { by_id }
     }
