@@ -79,11 +79,30 @@ impl MemoryGraph {
         Some(removed)
     }
 
-    fn remove_edges_where(&mut self, mut predicate: impl FnMut(&MemoryEdgeKey) -> bool) -> usize {
+    fn incident_edge_keys(&self, node: &NodeId) -> Vec<MemoryEdgeKey> {
+        match (self.outgoing_edges.get(node), self.incoming_edges.get(node)) {
+            (Some(outgoing), Some(incoming)) => outgoing.union(incoming).cloned().collect(),
+            (Some(keys), None) | (None, Some(keys)) => keys.iter().cloned().collect(),
+            (None, None) => Vec::new(),
+        }
+    }
+
+    fn remove_incident_edges(&mut self, node: &NodeId) -> usize {
+        let keys = self.incident_edge_keys(node);
+        let removed = keys.len();
+        for key in keys {
+            self.remove_edge_by_key(&key);
+        }
+        removed
+    }
+
+    fn remove_edges_between(&mut self, from: &NodeId, label: &Label, to: &NodeId) -> usize {
         let keys = self
-            .edges
-            .keys()
-            .filter(|key| predicate(key))
+            .outgoing_edges
+            .get(from)
+            .into_iter()
+            .flatten()
+            .filter(|key| &key.label == label && &key.to == to)
             .cloned()
             .collect::<Vec<_>>();
         let removed = keys.len();
@@ -753,13 +772,13 @@ impl GraphMutationStore for MemoryGraphStore {
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
         inner.nodes.remove(id);
-        inner.remove_edges_where(|key| key.from == *id || key.to == *id);
+        inner.remove_incident_edges(id);
         Ok(())
     }
 
     async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
         let mut inner = self.inner.write().expect("memory graph lock poisoned");
-        inner.remove_edges_where(|key| key.from == *from && key.label == *label && key.to == *to);
+        inner.remove_edges_between(from, label, to);
         Ok(())
     }
 }
@@ -878,9 +897,10 @@ impl CypherMutationExecutor for MemoryGraphStore {
                 } => {
                     let mut inner = self.inner.write().expect("memory graph lock poisoned");
                     let ids = Self::matching_node_ids(&inner, label.as_ref(), props, predicates);
-                    let incident_edges = inner.remove_edges_where(|key| {
-                        ids.iter().any(|id| id == &key.from || id == &key.to)
-                    });
+                    let incident_edges = ids
+                        .iter()
+                        .map(|id| inner.remove_incident_edges(id))
+                        .sum::<usize>();
 
                     report.matched_rows += ids.len();
                     report.node_deletes += ids.len();
@@ -1016,13 +1036,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     } else {
                         Vec::new()
                     };
-                    edge_keys.extend(
-                        inner
-                            .edges
-                            .keys()
-                            .filter(|key| ids.iter().any(|id| id == &key.from || id == &key.to))
-                            .cloned(),
-                    );
+                    edge_keys.extend(ids.iter().flat_map(|id| inner.incident_edge_keys(id)));
                     edge_keys.sort();
                     edge_keys.dedup();
 

@@ -20,6 +20,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added maintained incoming and outgoing adjacency indexes to the in-memory
   backend. Endpoint-filtered reads and traversals now inspect only incident
   edges, while all mutation paths update the indexes through shared helpers.
+- In-memory node, endpoint-edge, and Cypher relationship deletion now resolve
+  incident keys through those adjacency indexes instead of scanning the full
+  edge map. At 10,000 edges, deleting a node with two incident edges improves
+  from about 42.1 microseconds to 100 nanoseconds, and deleting one matched
+  edge from 52.1 microseconds to 63 nanoseconds.
 - Replaced constrained point-write graph snapshots with focused node, edge,
   uniqueness, native-constraint, and incident-endpoint validation. Bulk writes
   still validate one complete staged graph so cross-item constraints remain
