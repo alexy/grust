@@ -420,20 +420,17 @@ impl MemoryGraphStore {
         next: &mut Vec<Node>,
     ) {
         for key in keys {
-            let Some(edge) = inner.edges.get(key) else {
-                continue;
-            };
-            if step.edge.as_ref().is_some_and(|label| label != &edge.label) {
+            if step.edge.as_ref().is_some_and(|label| label != &key.label) {
                 continue;
             }
             let out_matches =
-                matches!(&step.direction, Direction::Out | Direction::Both) && edge.from == node.id;
+                matches!(&step.direction, Direction::Out | Direction::Both) && key.from == node.id;
             let in_matches =
-                matches!(&step.direction, Direction::In | Direction::Both) && edge.to == node.id;
+                matches!(&step.direction, Direction::In | Direction::Both) && key.to == node.id;
             let target_id = if out_matches {
-                &edge.to
+                &key.to
             } else if in_matches {
-                &edge.from
+                &key.from
             } else {
                 continue;
             };
