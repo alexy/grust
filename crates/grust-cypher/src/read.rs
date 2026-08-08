@@ -120,7 +120,7 @@ fn execute_single(
     query: &SingleQuery,
     params: &CypherParameters,
 ) -> Result<CypherResultTable> {
-    let index = NodeIndex::build(graph);
+    let index = NodeIndex::build(graph, query_adjacency_requirements(query));
     let mut rows: Vec<Row> = vec![Row::new()];
     // Columns produced by a trailing CALL with no RETURN (standalone `CALL …`),
     // so the procedure's YIELD shape becomes the result table.
@@ -347,7 +347,7 @@ fn run_subquery_single(
     seed: &Row,
     params: &CypherParameters,
 ) -> Result<(Vec<String>, Vec<Row>)> {
-    let index = NodeIndex::build(graph);
+    let index = NodeIndex::build(graph, query_adjacency_requirements(query));
     let mut rows = vec![seed.clone()];
     for clause in &query.clauses {
         if let Clause::Return(r) = clause {
@@ -1106,20 +1106,175 @@ pub(crate) fn project_correlated_procedure_pipeline(
 
 struct NodeIndex {
     by_id: HashMap<NodeId, usize>,
+    outgoing_by_vertex: Option<CompressedAdjacency>,
+    incoming_by_vertex: Option<CompressedAdjacency>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct AdjacencyRequirements {
+    outgoing: bool,
+    incoming: bool,
+}
+
+struct CompressedAdjacency {
+    offsets: Vec<usize>,
+    edge_indexes: Vec<usize>,
+}
+
+impl CompressedAdjacency {
+    fn edges_for(&self, vertex: usize) -> &[usize] {
+        &self.edge_indexes[self.offsets[vertex]..self.offsets[vertex + 1]]
+    }
 }
 
 impl NodeIndex {
-    fn build(graph: &Graph) -> Self {
+    fn build(graph: &Graph, requirements: AdjacencyRequirements) -> Self {
         let mut by_id = HashMap::with_capacity(graph.nodes.len());
         for (i, node) in graph.nodes.iter().enumerate() {
             by_id.insert(node.id.clone(), i);
         }
-        NodeIndex { by_id }
+        let outgoing_by_vertex = requirements
+            .outgoing
+            .then(|| build_compressed_adjacency(graph, &by_id, |edge| &edge.from));
+        let incoming_by_vertex = requirements
+            .incoming
+            .then(|| build_compressed_adjacency(graph, &by_id, |edge| &edge.to));
+        NodeIndex {
+            by_id,
+            outgoing_by_vertex,
+            incoming_by_vertex,
+        }
     }
 
     fn get<'g>(&self, graph: &'g Graph, id: &str) -> Option<&'g Node> {
         self.by_id.get(id).map(|&i| &graph.nodes[i])
     }
+
+    fn indexed_edges<'a>(
+        &'a self,
+        graph: &'a Graph,
+        node: &Node,
+        direction: ast::Direction,
+    ) -> Option<IndexedEdges<'a>> {
+        let Some(&vertex) = self.by_id.get(node.id.as_str()) else {
+            return None;
+        };
+        let (first, second, skip_second_self_loops) = match direction {
+            ast::Direction::Outgoing => (
+                self.outgoing_by_vertex.as_ref()?.edges_for(vertex).iter(),
+                None,
+                false,
+            ),
+            ast::Direction::Incoming => (
+                self.incoming_by_vertex.as_ref()?.edges_for(vertex).iter(),
+                None,
+                false,
+            ),
+            ast::Direction::Undirected => (
+                self.outgoing_by_vertex.as_ref()?.edges_for(vertex).iter(),
+                Some(self.incoming_by_vertex.as_ref()?.edges_for(vertex).iter()),
+                true,
+            ),
+        };
+        Some(IndexedEdges {
+            graph,
+            first,
+            second,
+            skip_second_self_loops,
+        })
+    }
+}
+
+fn build_compressed_adjacency(
+    graph: &Graph,
+    by_id: &HashMap<NodeId, usize>,
+    endpoint: impl Fn(&Edge) -> &NodeId,
+) -> CompressedAdjacency {
+    let mut endpoints = Vec::with_capacity(graph.edges.len());
+    let mut offsets = vec![0; graph.nodes.len() + 1];
+    for (edge_index, edge) in graph.edges.iter().enumerate() {
+        let Some(&vertex) = by_id.get(endpoint(edge).as_str()) else {
+            continue;
+        };
+        endpoints.push((edge_index, vertex));
+        offsets[vertex + 1] += 1;
+    }
+    for vertex in 1..offsets.len() {
+        offsets[vertex] += offsets[vertex - 1];
+    }
+    let mut cursor = offsets[..graph.nodes.len()].to_vec();
+    let mut edge_indexes = vec![0; endpoints.len()];
+    for (edge_index, vertex) in endpoints {
+        edge_indexes[cursor[vertex]] = edge_index;
+        cursor[vertex] += 1;
+    }
+    CompressedAdjacency {
+        offsets,
+        edge_indexes,
+    }
+}
+
+struct IndexedEdges<'a> {
+    graph: &'a Graph,
+    first: std::slice::Iter<'a, usize>,
+    second: Option<std::slice::Iter<'a, usize>>,
+    skip_second_self_loops: bool,
+}
+
+impl<'a> Iterator for IndexedEdges<'a> {
+    type Item = &'a Edge;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(index) = self.first.next() {
+            return Some(&self.graph.edges[*index]);
+        }
+        let second = self.second.as_mut()?;
+        loop {
+            let edge = &self.graph.edges[*second.next()?];
+            if !self.skip_second_self_loops || edge.from != edge.to {
+                return Some(edge);
+            }
+        }
+    }
+}
+
+const FIXED_SEGMENT_ADJACENCY_THRESHOLD: usize = 64;
+
+fn query_adjacency_requirements(query: &SingleQuery) -> AdjacencyRequirements {
+    let mut segment_count = 0;
+    let mut needs_adjacency = false;
+    let mut requirements = AdjacencyRequirements::default();
+    for clause in &query.clauses {
+        let Clause::Match(pattern_match) = clause else {
+            continue;
+        };
+        for pattern in &pattern_match.patterns {
+            needs_adjacency |= pattern.shortest.is_some();
+            if !pattern.segments.is_empty() && pattern.start.properties.is_none() {
+                needs_adjacency = true;
+            }
+            for segment in &pattern.segments {
+                segment_count += 1;
+                needs_adjacency |= segment.relationship.length.is_some();
+                match segment.relationship.direction {
+                    ast::Direction::Outgoing => requirements.outgoing = true,
+                    ast::Direction::Incoming => requirements.incoming = true,
+                    ast::Direction::Undirected => {
+                        requirements.outgoing = true;
+                        requirements.incoming = true;
+                    }
+                }
+            }
+        }
+    }
+    // A selective fixed path can scan the contiguous edge vector cheaply. Pay
+    // to build adjacency only after enough repeated hops to amortize that
+    // one-time index, while unbounded starts and variable-length paths opt in
+    // above regardless of their syntactic segment count.
+    if !needs_adjacency && segment_count < FIXED_SEGMENT_ADJACENCY_THRESHOLD {
+        return AdjacencyRequirements::default();
+    }
+    requirements
 }
 
 /// All variables introduced by a set of path patterns (path, node, and
@@ -1438,7 +1593,46 @@ fn expand_segments(
         return Ok(());
     }
 
-    for edge in &graph.edges {
+    if let Some(edges) = index.indexed_edges(graph, current, rel.direction) {
+        return expand_fixed_edges(
+            edges, graph, index, segments, idx, current, &row, params, path_var, &acc_nodes,
+            &acc_edges, out,
+        );
+    }
+    expand_fixed_edges(
+        graph.edges.iter(),
+        graph,
+        index,
+        segments,
+        idx,
+        current,
+        &row,
+        params,
+        path_var,
+        &acc_nodes,
+        &acc_edges,
+        out,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn expand_fixed_edges<'a>(
+    edges: impl Iterator<Item = &'a Edge>,
+    graph: &Graph,
+    index: &NodeIndex,
+    segments: &[PathSegment],
+    idx: usize,
+    current: &Node,
+    row: &Row,
+    params: &CypherParameters,
+    path_var: Option<&str>,
+    acc_nodes: &[Node],
+    acc_edges: &[Edge],
+    out: &mut Vec<Row>,
+) -> Result<()> {
+    let segment = &segments[idx];
+    let rel = &segment.relationship;
+    for edge in edges {
         let Some(next_id) = edge_other_endpoint(edge, current, rel.direction) else {
             continue;
         };
@@ -1470,9 +1664,9 @@ fn expand_segments(
             next_row.insert(var.clone(), Bound::Node(next_node.clone()));
         }
         let (na, ea) = if path_var.is_some() {
-            let mut na = acc_nodes.clone();
+            let mut na = acc_nodes.to_vec();
             na.push(next_node.clone());
-            let mut ea = acc_edges.clone();
+            let mut ea = acc_edges.to_vec();
             ea.push(edge.clone());
             (na, ea)
         } else {
@@ -1518,7 +1712,51 @@ fn collect_var_length_paths(
     if max.is_some_and(|m| depth >= m) {
         return Ok(());
     }
-    for edge in &graph.edges {
+    if let Some(edges) = index.indexed_edges(graph, node, rel.direction) {
+        return collect_var_length_edges(
+            edges,
+            graph,
+            index,
+            rel,
+            node,
+            min,
+            max,
+            edges_so_far,
+            visited,
+            params,
+            results,
+        );
+    }
+    collect_var_length_edges(
+        graph.edges.iter(),
+        graph,
+        index,
+        rel,
+        node,
+        min,
+        max,
+        edges_so_far,
+        visited,
+        params,
+        results,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_var_length_edges<'a>(
+    edges: impl Iterator<Item = &'a Edge>,
+    graph: &Graph,
+    index: &NodeIndex,
+    rel: &RelationshipPattern,
+    node: &Node,
+    min: usize,
+    max: Option<usize>,
+    edges_so_far: &mut Vec<Edge>,
+    visited: &mut std::collections::HashSet<String>,
+    params: &CypherParameters,
+    results: &mut Vec<(Node, Vec<Edge>)>,
+) -> Result<()> {
+    for edge in edges {
         let Some(next_id) = edge_other_endpoint(edge, node, rel.direction) else {
             continue;
         };
@@ -2958,6 +3196,43 @@ mod tests {
     fn two_hop_path() {
         let t = run("MATCH (a:Person {name:'Ada'})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN c.name");
         assert_eq!(t.rows, vec![vec![Value::from("Grace")]]);
+    }
+
+    #[test]
+    fn indexed_undirected_traversal_visits_self_loops_once() {
+        let graph = Graph::new(
+            vec![
+                node("Person", "p1", &[("name", Value::from("Ada"))]),
+                node("Person", "p2", &[("name", Value::from("Alan"))]),
+            ],
+            vec![
+                Edge::new("SELF", "p1", "p1", Props::new()),
+                Edge::new("KNOWS", "p1", "p2", Props::new()),
+            ],
+        );
+        let table = run_read_query(
+            &graph,
+            "MATCH (a:Person {name:'Ada'})-[:SELF]-(b)-[:KNOWS]->(c) RETURN c.name",
+            &CypherParameters::new(),
+        )
+        .expect("indexed traversal");
+        assert_eq!(table.rows, vec![vec![Value::from("Alan")]]);
+    }
+
+    #[test]
+    fn adjacency_planning_keeps_short_selective_paths_on_contiguous_scans() {
+        let query =
+            parse_query("MATCH (a:Person {name:'Ada'})-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN c.name")
+                .expect("selective path");
+        let selective = query_adjacency_requirements(&query.parts[0].query);
+        assert!(!selective.outgoing);
+        assert!(!selective.incoming);
+
+        let query =
+            parse_query("MATCH (a:Person)-[:KNOWS]->(b) RETURN b.name").expect("broad path");
+        let broad = query_adjacency_requirements(&query.parts[0].query);
+        assert!(broad.outgoing);
+        assert!(!broad.incoming);
     }
 
     #[test]
