@@ -6,6 +6,23 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added statistically sampled Criterion coverage for graph index construction,
+  edge-key materialization, unique-property validation, and in-memory graph
+  point writes, filtered reads, traversal, and bulk upserts at realistic graph
+  sizes.
+- Replaced quadratic graph property-uniqueness scans with hash-bucketed,
+  collision-checked value tracking that preserves floating-point and JSON
+  equality semantics.
+- Removed full-graph cloning and validation staging from schemaless in-memory
+  point writes and bulk upserts; constrained stores retain the same pre-write
+  validation path.
+- Added maintained incoming and outgoing adjacency indexes to the in-memory
+  backend. Endpoint-filtered reads and traversals now inspect only incident
+  edges, while all mutation paths update the indexes through shared helpers.
+- Replaced constrained point-write graph snapshots with focused node, edge,
+  uniqueness, native-constraint, and incident-endpoint validation. Bulk writes
+  still validate one complete staged graph so cross-item constraints remain
+  atomic and fail before mutation.
 - Prepare the `0.12.1` registry release containing the graph commit and Sail
   APIs consumed by the current Marciana memory implementation.
 - Keep optional backend crates on the existing `0.12.0` line so the published

@@ -53,3 +53,4 @@ futures-executor = "0.3.31"
 garde = "0.23.0"
 tempfile = "3.24.0"
 zod-rs = { version = "1.0.1", default-features = false }
+criterion = "0.5.1"

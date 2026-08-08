@@ -14,7 +14,12 @@ async-trait.workspace = true
 grust-core = { version = "0.12.1", path = "../grust-core" }
 
 [dev-dependencies]
+criterion.workspace = true
 futures-executor.workspace = true
 grust-core = { version = "0.12.1", path = "../grust-core", features = ["typed-garde"] }
 garde = { workspace = true, features = ["derive"] }
 serde.workspace = true
+
+[[bench]]
+name = "memory_store"
+harness = false
