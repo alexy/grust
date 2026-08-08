@@ -111,11 +111,25 @@ fn bench_schema_validation(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_graph_clone(c: &mut Criterion) {
+    let graph = ring_graph(10_000);
+    let mut group = c.benchmark_group("graph_clone");
+    group.sample_size(20);
+    group.throughput(Throughput::Elements(
+        (graph.nodes.len() + graph.edges.len()) as u64,
+    ));
+    group.bench_function("ring-10k", |b| {
+        b.iter(|| black_box(black_box(&graph).clone()))
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_graph_index,
     bench_edge_keys,
-    bench_schema_validation
+    bench_schema_validation,
+    bench_graph_clone
 );
 criterion_main!(benches);
 
