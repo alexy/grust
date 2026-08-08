@@ -141,6 +141,28 @@ fn strict_create_edge_conflicts_on_sail_write_identity() {
 }
 
 #[test]
+fn unique_edge_conflicts_ignore_updates_to_the_same_stable_key() {
+    let props = Props::from([("role".to_owned(), Value::from("admin"))]);
+    let candidate = Edge::new("MEMBER_OF", "ada", "group-1", props.clone());
+    let same_key = Edge::new("MEMBER_OF", "ada", "group-1", props.clone());
+    assert_eq!(
+        unique_edge_conflict(&[same_key], &candidate, &candidate.label, "role"),
+        None
+    );
+
+    let conflicting = Edge::new("MEMBER_OF", "bob", "group-1", props);
+    assert_eq!(
+        unique_edge_conflict(
+            std::slice::from_ref(&conflicting),
+            &candidate,
+            &candidate.label,
+            "role",
+        ),
+        Some(edge_key(&conflicting))
+    );
+}
+
+#[test]
 fn strict_create_plan_conflicts_reject_duplicate_concrete_create_targets() {
     let duplicate_nodes = GraphMutationPlan::new(vec![
         GraphMutationPlanOp::UpsertNode {

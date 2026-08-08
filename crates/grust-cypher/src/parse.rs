@@ -397,13 +397,12 @@ pub fn unique_edge_conflict(
         return None;
     }
     let value = candidate.props.get(key)?;
-    let candidate_key = edge_key(candidate);
     existing
         .iter()
         .find(|edge| {
             &edge.label == label
-                && edge_key(edge) != candidate_key
                 && edge.props.get(key) == Some(value)
+                && !edge_keys_equal(edge, candidate)
         })
         .map(edge_key)
 }

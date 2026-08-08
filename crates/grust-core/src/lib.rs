@@ -1498,6 +1498,30 @@ pub fn edge_key(edge: &Edge) -> String {
         })
 }
 
+/// Tests whether `key` is the stable key for `edge` without materializing an
+/// intermediate [`String`].
+pub fn edge_key_matches(edge: &Edge, key: &str) -> bool {
+    if let Some(id) = &edge.id {
+        return id.as_str() == key;
+    }
+    key.strip_prefix(edge.from.as_str())
+        .and_then(|rest| rest.strip_prefix('\u{1f}'))
+        .and_then(|rest| rest.strip_prefix(edge.label.as_str()))
+        .and_then(|rest| rest.strip_prefix('\u{1f}'))
+        .is_some_and(|rest| rest == edge.to.as_str())
+}
+
+/// Tests whether two edges have the same stable [`edge_key`] without
+/// allocating either key.
+pub fn edge_keys_equal(left: &Edge, right: &Edge) -> bool {
+    match (&left.id, &right.id) {
+        (Some(left), Some(right)) => left == right,
+        (Some(left), None) => edge_key_matches(right, left.as_str()),
+        (None, Some(right)) => edge_key_matches(left, right.as_str()),
+        (None, None) => left.from == right.from && left.label == right.label && left.to == right.to,
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Graph {
     pub nodes: Vec<Node>,
@@ -4130,8 +4154,9 @@ pub mod prelude {
         GraphRelationshipMatch, GraphRowEdgeIdPolicy, GraphSchema, GraphSchemaBuilder, GraphStore,
         GraphValue, GraphWriteCorrelation, GrustError, GuardedGraphCommit, Label, LoadReport, Node,
         NodeId, NodeType, PathValue, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal,
-        Value, classify_edge_upsert, classify_node_upsert, edge_key, evaluate_numeric_update,
-        generated_row_edge_id, relationship_type, schema_identifier,
+        Value, classify_edge_upsert, classify_node_upsert, edge_key, edge_key_matches,
+        edge_keys_equal, evaluate_numeric_update, generated_row_edge_id, relationship_type,
+        schema_identifier,
     };
 
     #[cfg(feature = "typed-garde")]

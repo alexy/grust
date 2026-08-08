@@ -86,9 +86,18 @@ fn normalizes_schema_identifiers() {
 fn edge_key_prefers_explicit_id_then_structural_identity() {
     let edge = Edge::new("KNOWS", "a", "b", Props::new()).with_id("edge-1");
     assert_eq!(edge_key(&edge), "edge-1");
+    assert!(edge_key_matches(&edge, "edge-1"));
 
     let edge = Edge::new("KNOWS", "a", "b", Props::new());
     assert_eq!(edge_key(&edge), "a\u{1f}KNOWS\u{1f}b");
+    assert!(edge_key_matches(&edge, "a\u{1f}KNOWS\u{1f}b"));
+    assert!(!edge_key_matches(&edge, "a\u{1f}KNOWS\u{1f}c"));
+
+    let same = Edge::new("KNOWS", "a", "b", Props::new());
+    let explicit_same_key =
+        Edge::new("OTHER", "x", "y", Props::new()).with_id("a\u{1f}KNOWS\u{1f}b");
+    assert!(edge_keys_equal(&edge, &same));
+    assert!(edge_keys_equal(&edge, &explicit_same_key));
 }
 
 #[test]

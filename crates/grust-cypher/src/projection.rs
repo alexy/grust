@@ -1886,7 +1886,7 @@ where
         })
         .await?
     {
-        if edge_key(&edge) == key {
+        if edge_key_matches(&edge, key) {
             return Ok(Some(edge));
         }
     }
