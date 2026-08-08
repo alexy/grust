@@ -17,5 +17,10 @@ serde_json = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
+criterion.workspace = true
 futures-executor.workspace = true
 grust-memory = { version = "0.12.1", path = "../grust-memory" }
+
+[[bench]]
+name = "cypher_pipeline"
+harness = false
