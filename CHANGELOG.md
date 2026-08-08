@@ -9,7 +9,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added statistically sampled Criterion coverage for graph index construction,
   edge-key materialization, unique-property validation, and in-memory graph
   point writes, filtered reads, traversal, and bulk upserts at realistic graph
-  sizes.
+  sizes. Coverage now also isolates constrained edge writes, deep and
+  high-fanout traversal, and adjacency-sensitive node and edge deletion.
 - Replaced quadratic graph property-uniqueness scans with hash-bucketed,
   collision-checked value tracking that preserves floating-point and JSON
   equality semantics.
