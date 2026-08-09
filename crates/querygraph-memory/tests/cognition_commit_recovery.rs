@@ -4,8 +4,8 @@ mod support;
 
 use grust_core::prelude::{GraphAdminStore, GraphCommitStore, Start, Traversal, Value};
 use grust_turso::TursoGraphStore;
-use querygraph_memory::GraphStoreMemoryStore;
 use querygraph_memory::cognition::CognitionJobStatus;
+use querygraph_memory::{GraphStoreMemoryStore, TursoMemoryStore};
 use typesec_memory::{
     CognitionCommitOutcome, CognitionCommitStatus, GovernedSourceScope, MemoryId, MemoryStore,
 };
