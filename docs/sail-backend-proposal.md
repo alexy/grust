@@ -70,6 +70,13 @@ external Grust clients do not drift:
   generic edge-to-source/destination node join needed by GrustFrames triplet
   filters, motifs, and aggregate-message lowerings
 
+A node schema may declare `id` as a required string property because
+`Node::new` exposes structural identity through that property map. Typed Sail
+tables materialize that declaration once: the schema property reuses the
+physical structural `id` column in descriptors, Delta DDL, and staged MERGE
+statements. It is never extracted into a second column from `props`; a
+non-string `id` declaration fails before SQL reaches Sail.
+
 ### 1.2 Props Serialization
 
 `grust_core::Value` is serialized as JSON via `serde_json::to_string` and

@@ -10,6 +10,11 @@ reconstructed from Git history, release commits, and the shipped docs.
   The property now reuses the one structural identity column throughout table
   descriptors, Delta DDL, and staged merges; incompatible non-string identity
   declarations fail before SQL reaches Sail.
+- Verified the QueryGraph stack against the exact optimized graph-enabled Sail
+  `c5309365` artifact: 26 adapter tests, the dedicated non-null and temp-view
+  gates, and both governed cognition parity/secrecy tests pass. The same
+  artifact also accepts Typesec's 5-node, 4-edge typed company schema that
+  exposed the duplicate-identity-column defect.
 - Added statistically sampled Criterion coverage for graph index construction,
   edge-key materialization, unique-property validation, and in-memory graph
   point writes, filtered reads, traversal, and bulk upserts at realistic graph
