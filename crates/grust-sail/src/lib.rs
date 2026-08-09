@@ -172,10 +172,31 @@ pub fn sail_edge_table(label: &str) -> Result<String> {
     Ok(format!("grust_edge_{}", schema_identifier(label)?))
 }
 
-pub fn sail_typed_node_columns(node_type: &NodeType) -> Result<Vec<String>> {
-    let mut columns = vec![NODE_ID_COLUMN.to_string()];
+/// Returns the schema fields that need their own typed-node columns.
+///
+/// [`Node::new`] exposes structural identity through the `id` property too.
+/// A typed Sail table therefore stores a declared `id` field in its existing
+/// physical identity column rather than materializing a duplicate column from
+/// JSON properties.
+fn typed_node_property_fields(node_type: &NodeType) -> Result<impl Iterator<Item = &Field>> {
     for field in &node_type.fields {
         sql_ident(&field.name)?;
+        if field.name == NODE_ID_COLUMN && field.ty != FieldType::String {
+            return Err(GrustError::Schema(format!(
+                "typed Sail node identity field '{}' must use FieldType::String",
+                NODE_ID_COLUMN
+            )));
+        }
+    }
+    Ok(node_type
+        .fields
+        .iter()
+        .filter(|field| field.name != NODE_ID_COLUMN))
+}
+
+pub fn sail_typed_node_columns(node_type: &NodeType) -> Result<Vec<String>> {
+    let mut columns = vec![NODE_ID_COLUMN.to_string()];
+    for field in typed_node_property_fields(node_type)? {
         columns.push(field.name.clone());
     }
     Ok(columns)
@@ -2288,9 +2309,7 @@ fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
     for node_type in &schema.nodes {
         let mut columns = vec!["CAST(NULL AS STRING) AS id".to_string()];
         columns.extend(
-            node_type
-                .fields
-                .iter()
+            typed_node_property_fields(node_type)?
                 .map(|field| {
                     Ok(format!(
                         "CAST(NULL AS {}) AS {}",
@@ -2368,7 +2387,7 @@ fn props_field_expr(props_column: &str, field: &Field) -> Result<String> {
 fn typed_node_merge_from_view_sql(node_type: &NodeType) -> Result<String> {
     let mut select_columns = vec!["s.id AS id".to_string()];
     let mut insert_columns = vec!["id".to_string()];
-    for field in &node_type.fields {
+    for field in typed_node_property_fields(node_type)? {
         let column = sql_ident(&field.name)?;
         select_columns.push(format!(
             "{} AS {column}",

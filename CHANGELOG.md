@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Fixed typed Sail schemas that explicitly declare the node `id` property.
+  The property now reuses the one structural identity column throughout table
+  descriptors, Delta DDL, and staged merges; incompatible non-string identity
+  declarations fail before SQL reaches Sail.
 - Added statistically sampled Criterion coverage for graph index construction,
   edge-key materialization, unique-property validation, and in-memory graph
   point writes, filtered reads, traversal, and bulk upserts at realistic graph

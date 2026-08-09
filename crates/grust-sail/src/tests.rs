@@ -131,6 +131,18 @@ fn person_schema() -> GraphSchema {
         .build()
 }
 
+fn person_schema_with_declared_identity() -> GraphSchema {
+    GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::required("id", FieldType::String),
+                Field::required("name", FieldType::String),
+            ],
+        )
+        .build()
+}
+
 #[test]
 fn schema_sql_creates_typed_delta_tables() {
     let sql = sail_schema_sql(&person_schema()).unwrap();
@@ -205,6 +217,44 @@ fn typed_node_merge_extracts_fields_from_staged_json() {
     assert!(sql.contains("FROM grust_stage_nodes s WHERE s.label = 'Person'"));
     assert!(sql.contains("GET_JSON_OBJECT(s.props, '$.name') AS `name`"));
     assert!(sql.contains("CAST(GET_JSON_OBJECT(s.props, '$.age') AS BIGINT) AS `age`"));
+}
+
+#[test]
+fn typed_node_identity_field_reuses_the_structural_column() {
+    let schema = person_schema_with_declared_identity();
+    let node_type = schema.node_type(&Label::new("Person")).unwrap();
+
+    assert_eq!(sail_typed_node_columns(node_type).unwrap(), ["id", "name"]);
+
+    let schema_sql = sail_schema_sql(&schema).unwrap();
+    let node_sql = schema_sql
+        .iter()
+        .find(|statement| statement.contains("grust_node_person"))
+        .unwrap();
+    assert_eq!(node_sql.matches("CAST(NULL AS STRING) AS id").count(), 1);
+    assert!(!node_sql.contains("AS `id`"));
+
+    let merge_sql = typed_node_merge_from_view_sql(node_type).unwrap();
+    assert_eq!(merge_sql.matches("s.id AS id").count(), 1);
+    assert!(!merge_sql.contains("GET_JSON_OBJECT(s.props, '$.id')"));
+    assert!(merge_sql.contains("INSERT (id, `name`) VALUES (s.id, s.`name`)"));
+}
+
+#[test]
+fn typed_node_identity_field_requires_string_type() {
+    let schema = GraphSchema::builder()
+        .node("Person", vec![Field::required("id", FieldType::Int)])
+        .build();
+    let node_type = schema.node_type(&Label::new("Person")).unwrap();
+
+    let error = sail_typed_node_columns(node_type).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("typed Sail node identity field 'id' must use FieldType::String")
+    );
+    assert!(sail_schema_sql(&schema).is_err());
+    assert!(typed_node_merge_from_view_sql(node_type).is_err());
 }
 
 #[test]
