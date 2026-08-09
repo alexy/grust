@@ -127,7 +127,7 @@ fn strict_create_edge_conflicts_on_sail_write_identity() {
 
     assert!(strict_create_edge_conflicts(
         &structural,
-        &[same_structural_different_id.clone()]
+        std::slice::from_ref(&same_structural_different_id)
     ));
     assert!(strict_create_edge_conflicts(
         &explicit,

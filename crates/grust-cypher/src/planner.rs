@@ -130,12 +130,14 @@ pub fn cypher_mutation_plan_with_return_options(
     }
     let return_clause = parse_cypher_return_clause(
         return_clause,
-        &planner.node_bindings,
-        &planner.edge_bindings,
-        &planner.row_node_bindings,
-        &planner.row_edge_match_bindings,
-        &planner.row_edge_bindings,
-        &planner.row_path_bindings,
+        &CypherReturnScope {
+            node_bindings: &planner.node_bindings,
+            edge_bindings: &planner.edge_bindings,
+            row_node_bindings: &planner.row_node_bindings,
+            row_edge_match_bindings: &planner.row_edge_match_bindings,
+            row_edge_bindings: &planner.row_edge_bindings,
+            row_path_bindings: &planner.row_path_bindings,
+        },
         &planner.parameters,
     )?;
     Ok(CypherPlannedMutationWithReturn {

@@ -893,10 +893,10 @@ mod tests {
     #[test]
     fn numeric_families() {
         assert_eq!(
-            toks("42 3.14 .5 1e10 2.5E-3 100"),
+            toks("42 3.125 .5 1e10 2.5E-3 100"),
             vec![
                 Token::Integer(42),
-                Token::Float(3.14),
+                Token::Float(3.125),
                 Token::Float(0.5),
                 Token::Float(1e10),
                 Token::Float(2.5e-3),

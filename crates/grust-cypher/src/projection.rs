@@ -255,15 +255,8 @@ pub(crate) fn return_row_key(values: &[Value], context: &str) -> Result<String> 
     })
 }
 
-pub(crate) async fn evaluate_return_aggregate<'a, S>(
-    store: &S,
-    node_bindings: &HashMap<String, NodeId>,
-    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
-    row_node_values: &HashMap<String, Vec<Node>>,
-    row_edge_values: &HashMap<String, Vec<Edge>>,
-    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
-    nodes: &'a mut HashMap<String, Node>,
-    edges: &'a mut HashMap<String, Edge>,
+pub(crate) async fn evaluate_return_aggregate<S>(
+    evaluation: &mut CypherReturnEvaluation<'_, S>,
     projection: &CypherReturnProjection,
     row_count: usize,
 ) -> Result<Value>
@@ -274,47 +267,17 @@ where
         cypher_unsupported_cardinality("RETURN aggregate projection is missing aggregate kind")
     })?;
     if aggregate == CypherReturnAggregate::Count {
-        return count_return_projection(
-            store,
-            node_bindings,
-            edge_bindings,
-            row_node_values,
-            row_edge_values,
-            row_path_bindings,
-            nodes,
-            edges,
-            projection,
-            row_count,
-        )
-        .await
-        .and_then(count_value);
+        return count_return_projection(evaluation, projection, row_count)
+            .await
+            .and_then(count_value);
     }
-    let values = materialize_return_aggregate_values(
-        store,
-        node_bindings,
-        edge_bindings,
-        row_node_values,
-        row_edge_values,
-        row_path_bindings,
-        nodes,
-        edges,
-        projection,
-        aggregate,
-        row_count,
-    )
-    .await?;
+    let values =
+        materialize_return_aggregate_values(evaluation, projection, aggregate, row_count).await?;
     evaluate_non_count_aggregate(aggregate, values)
 }
 
-pub(crate) async fn count_return_projection<'a, S>(
-    store: &S,
-    node_bindings: &HashMap<String, NodeId>,
-    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
-    row_node_values: &HashMap<String, Vec<Node>>,
-    row_edge_values: &HashMap<String, Vec<Edge>>,
-    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
-    nodes: &'a mut HashMap<String, Node>,
-    edges: &'a mut HashMap<String, Edge>,
+pub(crate) async fn count_return_projection<S>(
+    evaluation: &mut CypherReturnEvaluation<'_, S>,
     projection: &CypherReturnProjection,
     row_count: usize,
 ) -> Result<usize>
@@ -324,14 +287,14 @@ where
     match classify_return_target_materialization(&projection.target) {
         CypherReturnTargetMaterialization::PathFunction => {
             let values = materialize_return_path_function_values(
-                store,
-                node_bindings,
-                edge_bindings,
-                row_node_values,
-                row_edge_values,
-                row_path_bindings,
-                nodes,
-                edges,
+                evaluation.store,
+                evaluation.node_bindings,
+                evaluation.edge_bindings,
+                evaluation.row_node_values,
+                evaluation.row_edge_values,
+                evaluation.row_path_bindings,
+                &mut *evaluation.nodes,
+                &mut *evaluation.edges,
                 projection,
                 row_count,
             )
@@ -341,14 +304,14 @@ where
         CypherReturnTargetMaterialization::ScalarProjection
         | CypherReturnTargetMaterialization::ElementFunction => {
             let values = materialize_return_projection_values(
-                store,
-                node_bindings,
-                edge_bindings,
-                row_node_values,
-                row_edge_values,
-                row_path_bindings,
-                nodes,
-                edges,
+                evaluation.store,
+                evaluation.node_bindings,
+                evaluation.edge_bindings,
+                evaluation.row_node_values,
+                evaluation.row_edge_values,
+                evaluation.row_path_bindings,
+                &mut *evaluation.nodes,
+                &mut *evaluation.edges,
                 projection,
                 row_count,
             )
@@ -361,16 +324,19 @@ where
     }
     let CypherReturnTarget::Property(key) = &projection.target else {
         if projection.distinct {
-            if row_path_bindings.contains_key(&projection.variable) {
+            if evaluation
+                .row_path_bindings
+                .contains_key(&projection.variable)
+            {
                 let values = materialize_return_path_values(
-                    store,
-                    node_bindings,
-                    edge_bindings,
-                    row_node_values,
-                    row_edge_values,
-                    row_path_bindings,
-                    nodes,
-                    edges,
+                    evaluation.store,
+                    evaluation.node_bindings,
+                    evaluation.edge_bindings,
+                    evaluation.row_node_values,
+                    evaluation.row_edge_values,
+                    evaluation.row_path_bindings,
+                    &mut *evaluation.nodes,
+                    &mut *evaluation.edges,
                     &projection.variable,
                     row_count,
                 )
@@ -378,42 +344,57 @@ where
                 return Ok(distinct_return_values(values)?.len());
             }
             return count_distinct_elements(
-                node_bindings,
-                edge_bindings,
-                row_node_values,
-                row_edge_values,
-                row_path_bindings,
+                evaluation.node_bindings,
+                evaluation.edge_bindings,
+                evaluation.row_node_values,
+                evaluation.row_edge_values,
+                evaluation.row_path_bindings,
                 projection,
                 row_count,
             );
         }
         return Ok(row_count);
     };
-    if row_path_bindings.contains_key(&projection.variable) {
+    if evaluation
+        .row_path_bindings
+        .contains_key(&projection.variable)
+    {
         return Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN path properties are not supported",
         ));
     }
-    if let Some(id) = node_bindings.get(&projection.variable) {
+    if let Some(id) = evaluation.node_bindings.get(&projection.variable) {
         if key == "id" {
             return Ok(1);
         }
-        let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+        let node = resolve_bound_node(
+            evaluation.store,
+            &mut *evaluation.nodes,
+            &projection.variable,
+            id,
+        )
+        .await?;
         let value = project_node_value(node, key);
         return Ok(usize::from(value != Value::Null));
     }
-    if let Some(identity) = edge_bindings.get(&projection.variable) {
+    if let Some(identity) = evaluation.edge_bindings.get(&projection.variable) {
         if key == "id" {
             return Ok(usize::from(identity.id.is_some()));
         }
         if key == "label" {
             return Ok(1);
         }
-        let edge = resolve_bound_edge_cached(store, edges, identity, &projection.variable).await?;
+        let edge = resolve_bound_edge_cached(
+            evaluation.store,
+            &mut *evaluation.edges,
+            identity,
+            &projection.variable,
+        )
+        .await?;
         let value = project_edge_value(edge, key);
         return Ok(usize::from(value != Value::Null));
     }
-    if let Some(row_nodes) = row_node_values.get(&projection.variable) {
+    if let Some(row_nodes) = evaluation.row_node_values.get(&projection.variable) {
         if projection.distinct {
             return count_distinct_values(row_nodes.iter().filter_map(|node| {
                 if key == "id" {
@@ -434,7 +415,7 @@ where
             })
             .count());
     }
-    if let Some(row_edges) = row_edge_values.get(&projection.variable) {
+    if let Some(row_edges) = evaluation.row_edge_values.get(&projection.variable) {
         if projection.distinct {
             return count_distinct_values(row_edges.iter().filter_map(|edge| {
                 if key == "id" {
@@ -476,15 +457,8 @@ pub(crate) fn count_materialized_return_values(
     }
 }
 
-pub(crate) async fn materialize_return_aggregate_values<'a, S>(
-    store: &S,
-    node_bindings: &HashMap<String, NodeId>,
-    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
-    row_node_values: &HashMap<String, Vec<Node>>,
-    row_edge_values: &HashMap<String, Vec<Edge>>,
-    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
-    nodes: &'a mut HashMap<String, Node>,
-    edges: &'a mut HashMap<String, Edge>,
+pub(crate) async fn materialize_return_aggregate_values<S>(
+    evaluation: &mut CypherReturnEvaluation<'_, S>,
     projection: &CypherReturnProjection,
     aggregate: CypherReturnAggregate,
     row_count: usize,
@@ -498,14 +472,14 @@ where
             for row_index in 0..row_count {
                 values.push(
                     materialize_return_star_row_value(
-                        store,
-                        node_bindings,
-                        edge_bindings,
-                        row_node_values,
-                        row_edge_values,
-                        row_path_bindings,
-                        nodes,
-                        edges,
+                        evaluation.store,
+                        evaluation.node_bindings,
+                        evaluation.edge_bindings,
+                        evaluation.row_node_values,
+                        evaluation.row_edge_values,
+                        evaluation.row_path_bindings,
+                        &mut *evaluation.nodes,
+                        &mut *evaluation.edges,
                         row_index,
                     )
                     .await?,
@@ -521,18 +495,7 @@ where
         CypherReturnTargetMaterialization::Element
             if aggregate == CypherReturnAggregate::Collect =>
         {
-            materialize_return_element_values(
-                store,
-                node_bindings,
-                edge_bindings,
-                row_node_values,
-                row_edge_values,
-                row_path_bindings,
-                nodes,
-                edges,
-                projection,
-            )
-            .await?
+            materialize_return_element_values(evaluation, projection).await?
         }
         CypherReturnTargetMaterialization::Element => {
             return Err(cypher_unsupported_cardinality(
@@ -543,30 +506,18 @@ where
             let CypherReturnTarget::Property(key) = &projection.target else {
                 unreachable!("direct property classification requires property target");
             };
-            materialize_return_property_values(
-                store,
-                node_bindings,
-                edge_bindings,
-                row_node_values,
-                row_edge_values,
-                row_path_bindings,
-                nodes,
-                edges,
-                projection,
-                key,
-            )
-            .await?
+            materialize_return_property_values(evaluation, projection, key).await?
         }
         CypherReturnTargetMaterialization::PathFunction => {
             materialize_return_path_function_values(
-                store,
-                node_bindings,
-                edge_bindings,
-                row_node_values,
-                row_edge_values,
-                row_path_bindings,
-                nodes,
-                edges,
+                evaluation.store,
+                evaluation.node_bindings,
+                evaluation.edge_bindings,
+                evaluation.row_node_values,
+                evaluation.row_edge_values,
+                evaluation.row_path_bindings,
+                &mut *evaluation.nodes,
+                &mut *evaluation.edges,
                 projection,
                 row_count,
             )
@@ -575,14 +526,14 @@ where
         CypherReturnTargetMaterialization::ScalarProjection
         | CypherReturnTargetMaterialization::ElementFunction => {
             materialize_return_projection_values(
-                store,
-                node_bindings,
-                edge_bindings,
-                row_node_values,
-                row_edge_values,
-                row_path_bindings,
-                nodes,
-                edges,
+                evaluation.store,
+                evaluation.node_bindings,
+                evaluation.edge_bindings,
+                evaluation.row_node_values,
+                evaluation.row_edge_values,
+                evaluation.row_path_bindings,
+                &mut *evaluation.nodes,
+                &mut *evaluation.edges,
                 projection,
                 row_count,
             )
@@ -832,36 +783,38 @@ pub(crate) fn scalar_return_ast(target: &CypherReturnTarget) -> CypherReturnScal
     }
 }
 
-pub(crate) async fn materialize_return_property_values<'a, S>(
-    store: &S,
-    node_bindings: &HashMap<String, NodeId>,
-    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
-    row_node_values: &HashMap<String, Vec<Node>>,
-    row_edge_values: &HashMap<String, Vec<Edge>>,
-    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
-    nodes: &'a mut HashMap<String, Node>,
-    edges: &'a mut HashMap<String, Edge>,
+pub(crate) async fn materialize_return_property_values<S>(
+    evaluation: &mut CypherReturnEvaluation<'_, S>,
     projection: &CypherReturnProjection,
     key: &str,
 ) -> Result<Vec<Value>>
 where
     S: GraphStore + Sync,
 {
-    if row_path_bindings.contains_key(&projection.variable) {
+    if evaluation
+        .row_path_bindings
+        .contains_key(&projection.variable)
+    {
         return Err(cypher_unsupported_cardinality(
             "writable Cypher RETURN path properties are not supported",
         ));
     }
-    if let Some(id) = node_bindings.get(&projection.variable) {
+    if let Some(id) = evaluation.node_bindings.get(&projection.variable) {
         Ok(if key == "id" {
             vec![Value::from(id.as_str())]
         } else {
-            let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+            let node = resolve_bound_node(
+                evaluation.store,
+                &mut *evaluation.nodes,
+                &projection.variable,
+                id,
+            )
+            .await?;
             non_null_return_value(project_node_value(node, key))
                 .into_iter()
                 .collect()
         })
-    } else if let Some(identity) = edge_bindings.get(&projection.variable) {
+    } else if let Some(identity) = evaluation.edge_bindings.get(&projection.variable) {
         Ok(if key == "id" {
             identity
                 .id
@@ -872,13 +825,18 @@ where
         } else if key == "label" {
             vec![Value::from(identity.label.as_str())]
         } else {
-            let edge =
-                resolve_bound_edge_cached(store, edges, identity, &projection.variable).await?;
+            let edge = resolve_bound_edge_cached(
+                evaluation.store,
+                &mut *evaluation.edges,
+                identity,
+                &projection.variable,
+            )
+            .await?;
             non_null_return_value(project_edge_value(edge, key))
                 .into_iter()
                 .collect()
         })
-    } else if let Some(row_nodes) = row_node_values.get(&projection.variable) {
+    } else if let Some(row_nodes) = evaluation.row_node_values.get(&projection.variable) {
         Ok(row_nodes
             .iter()
             .filter_map(|node| {
@@ -889,7 +847,7 @@ where
                 }
             })
             .collect())
-    } else if let Some(row_edges) = row_edge_values.get(&projection.variable) {
+    } else if let Some(row_edges) = evaluation.row_edge_values.get(&projection.variable) {
         Ok(row_edges
             .iter()
             .filter_map(|edge| {
@@ -942,7 +900,7 @@ where
             graph_edge_value(edge)?
         } else {
             match write_rows.binding_kind(&variable) {
-                Some(CypherWriteResultBindingKind::RowNode) => {
+                Some(CypherWriteResultBindingKind::Node) => {
                     let row_nodes = write_rows.row_nodes(&variable).ok_or_else(|| {
                         cypher_unsupported_cardinality(format!(
                             "writable Cypher RETURN cannot materialize matched node variable '{variable}'"
@@ -955,7 +913,7 @@ where
                     })?;
                     graph_node_value(node)?
                 }
-                Some(CypherWriteResultBindingKind::RowEdge) => {
+                Some(CypherWriteResultBindingKind::Edge) => {
                     let row_edges = write_rows.row_edges(&variable).ok_or_else(|| {
                         cypher_unsupported_cardinality(format!(
                             "writable Cypher RETURN cannot materialize row-producing relationship variable '{variable}'"
@@ -968,7 +926,7 @@ where
                     })?;
                     graph_edge_value(edge)?
                 }
-                Some(CypherWriteResultBindingKind::RowPath) => {
+                Some(CypherWriteResultBindingKind::Path) => {
                     materialize_return_path_value_at(
                         store,
                         node_bindings,
@@ -995,43 +953,54 @@ where
     Ok(Value::Json(serde_json::Value::Object(row)))
 }
 
-pub(crate) async fn materialize_return_element_values<'a, S>(
-    store: &S,
-    node_bindings: &HashMap<String, NodeId>,
-    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
-    row_node_values: &HashMap<String, Vec<Node>>,
-    row_edge_values: &HashMap<String, Vec<Edge>>,
-    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
-    nodes: &'a mut HashMap<String, Node>,
-    edges: &'a mut HashMap<String, Edge>,
+pub(crate) async fn materialize_return_element_values<S>(
+    evaluation: &mut CypherReturnEvaluation<'_, S>,
     projection: &CypherReturnProjection,
 ) -> Result<Vec<Value>>
 where
     S: GraphStore + Sync,
 {
-    if let Some(id) = node_bindings.get(&projection.variable) {
-        let node = resolve_bound_node(store, nodes, &projection.variable, id).await?;
+    if let Some(id) = evaluation.node_bindings.get(&projection.variable) {
+        let node = resolve_bound_node(
+            evaluation.store,
+            &mut *evaluation.nodes,
+            &projection.variable,
+            id,
+        )
+        .await?;
         Ok(vec![graph_node_value(node)?])
-    } else if let Some(identity) = edge_bindings.get(&projection.variable) {
-        let edge = resolve_bound_edge_cached(store, edges, identity, &projection.variable).await?;
+    } else if let Some(identity) = evaluation.edge_bindings.get(&projection.variable) {
+        let edge = resolve_bound_edge_cached(
+            evaluation.store,
+            &mut *evaluation.edges,
+            identity,
+            &projection.variable,
+        )
+        .await?;
         Ok(vec![graph_edge_value(edge)?])
-    } else if let Some(row_nodes) = row_node_values.get(&projection.variable) {
+    } else if let Some(row_nodes) = evaluation.row_node_values.get(&projection.variable) {
         row_nodes.iter().map(graph_node_value).collect()
-    } else if let Some(row_edges) = row_edge_values.get(&projection.variable) {
+    } else if let Some(row_edges) = evaluation.row_edge_values.get(&projection.variable) {
         row_edges.iter().map(graph_edge_value).collect()
-    } else if row_path_bindings.contains_key(&projection.variable) {
-        let write_rows =
-            CypherWriteResultRows::new(row_node_values, row_edge_values, row_path_bindings);
+    } else if evaluation
+        .row_path_bindings
+        .contains_key(&projection.variable)
+    {
+        let write_rows = CypherWriteResultRows::new(
+            evaluation.row_node_values,
+            evaluation.row_edge_values,
+            evaluation.row_path_bindings,
+        );
         let row_count = write_rows.path_row_count(&projection.variable)?;
         materialize_return_path_values(
-            store,
-            node_bindings,
-            edge_bindings,
-            row_node_values,
-            row_edge_values,
-            row_path_bindings,
-            nodes,
-            edges,
+            evaluation.store,
+            evaluation.node_bindings,
+            evaluation.edge_bindings,
+            evaluation.row_node_values,
+            evaluation.row_edge_values,
+            evaluation.row_path_bindings,
+            &mut *evaluation.nodes,
+            &mut *evaluation.edges,
             &projection.variable,
             row_count,
         )

@@ -745,7 +745,7 @@ fn dedup_bindings(rows: Vec<Row>) -> Result<Vec<Row>> {
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
         let mut values: Vec<Value> = Vec::with_capacity(row.len());
-        for (_, bound) in &row {
+        for bound in row.values() {
             values.push(bound_value(bound)?);
         }
         if seen.insert(return_row_key(&values, "WITH DISTINCT")?) {
@@ -820,6 +820,13 @@ pub enum PushedBinding {
     /// reference's null-padding (`b.key` then evaluates to `null`).
     Null,
 }
+
+/// Reconstructed backend bindings for one pushed row.
+pub(crate) type PushedBindingRow = Vec<(String, PushedBinding)>;
+/// One outer binding row and the inner nodes joined to it.
+pub(crate) type PushedNodeGroup = (PushedBindingRow, Vec<Node>);
+/// One outer binding row and the procedure values joined to it.
+pub(crate) type PushedValueRow = (PushedBindingRow, Vec<Value>);
 
 /// Deduplicate result rows by value identity, preserving first-seen order — the
 /// shared `UNION` (distinct) dedup, reused by backend pushdown's union combine.
@@ -1028,7 +1035,7 @@ fn run_subquery_tail(
 /// row, and finish with the outer tail. Byte-identical to [`run_read_query`]'s
 /// subquery path by construction.
 pub(crate) fn project_subquery_join_pipeline(
-    groups: Vec<(Vec<(String, PushedBinding)>, Vec<Node>)>,
+    groups: Vec<PushedNodeGroup>,
     inner_var: &str,
     inner_tail: &[Clause],
     outer_tail: &[Clause],
@@ -1073,7 +1080,7 @@ pub(crate) fn project_subquery_join_pipeline(
 /// (pre-`YIELD`) row; apply `YIELD`/`WHERE` like the reference and run the
 /// remaining pipeline (or shape the standalone-`CALL` table).
 pub(crate) fn project_correlated_procedure_pipeline(
-    rows_in: Vec<(Vec<(String, PushedBinding)>, Vec<Value>)>,
+    rows_in: Vec<PushedValueRow>,
     call: &CallClause,
     full_cols: &[String],
     tail: &[Clause],
@@ -1156,9 +1163,7 @@ impl NodeIndex {
         node: &Node,
         direction: ast::Direction,
     ) -> Option<IndexedEdges<'a>> {
-        let Some(&vertex) = self.by_id.get(node.id.as_str()) else {
-            return None;
-        };
+        let &vertex = self.by_id.get(node.id.as_str())?;
         let (first, second, skip_second_self_loops) = match direction {
             ast::Direction::Outgoing => (
                 self.outgoing_by_vertex.as_ref()?.edges_for(vertex).iter(),
@@ -1282,10 +1287,10 @@ fn query_adjacency_requirements(query: &SingleQuery) -> AdjacencyRequirements {
 fn pattern_variables(patterns: &[PathPattern]) -> Vec<String> {
     let mut vars: Vec<String> = Vec::new();
     let add = |opt: &Option<String>, vars: &mut Vec<String>| {
-        if let Some(name) = opt {
-            if !vars.iter().any(|v| v == name) {
-                vars.push(name.clone());
-            }
+        if let Some(name) = opt
+            && !vars.iter().any(|v| v == name)
+        {
+            vars.push(name.clone());
         }
     };
     for pattern in patterns {
@@ -1423,12 +1428,11 @@ fn expand_shortest(
                     if !node_matches(&end, &segment.node, params)? {
                         continue;
                     }
-                    if let Some(var) = &segment.node.variable {
-                        if let Some(Bound::Node(bound)) = row.get(var) {
-                            if bound.id != end.id {
-                                continue;
-                            }
-                        }
+                    if let Some(var) = &segment.node.variable
+                        && let Some(Bound::Node(bound)) = row.get(var)
+                        && bound.id != end.id
+                    {
+                        continue;
                     }
                     found.entry(end_id).or_default().push(edges);
                 }
@@ -1554,12 +1558,11 @@ fn expand_segments(
             if !node_matches(&end_node, &segment.node, params)? {
                 continue;
             }
-            if let Some(var) = &segment.node.variable {
-                if let Some(Bound::Node(bound)) = row.get(var) {
-                    if bound.id != end_node.id {
-                        continue;
-                    }
-                }
+            if let Some(var) = &segment.node.variable
+                && let Some(Bound::Node(bound)) = row.get(var)
+                && bound.id != end_node.id
+            {
+                continue;
             }
             let mut next_row = row.clone();
             if let Some(var) = &rel.variable {
@@ -1649,12 +1652,11 @@ fn expand_fixed_edges<'a>(
             continue;
         }
         // consistency with an already-bound next-node variable
-        if let Some(var) = &segment.node.variable {
-            if let Some(Bound::Node(bound)) = row.get(var) {
-                if bound.id != next_node.id {
-                    continue;
-                }
-            }
+        if let Some(var) = &segment.node.variable
+            && let Some(Bound::Node(bound)) = row.get(var)
+            && bound.id != next_node.id
+        {
+            continue;
         }
         let mut next_row = row.clone();
         if let Some(var) = &rel.variable {
@@ -1824,14 +1826,14 @@ fn node_candidates(
     params: &CypherParameters,
 ) -> Result<Vec<Node>> {
     // Already bound? Filter to the bound node if it still matches.
-    if let Some(var) = &np.variable {
-        if let Some(Bound::Node(bound)) = row.get(var) {
-            return Ok(if node_matches(bound, np, params)? {
-                vec![bound.clone()]
-            } else {
-                vec![]
-            });
-        }
+    if let Some(var) = &np.variable
+        && let Some(Bound::Node(bound)) = row.get(var)
+    {
+        return Ok(if node_matches(bound, np, params)? {
+            vec![bound.clone()]
+        } else {
+            vec![]
+        });
     }
     let mut out = Vec::new();
     for node in &graph.nodes {
@@ -2940,10 +2942,10 @@ fn arithmetic(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
         return Ok(Value::Null);
     }
     // String concatenation with `+`.
-    if op == BinaryOp::Add {
-        if let (Value::String(x), Value::String(y)) = (&a, &b) {
-            return Ok(Value::String(format!("{x}{y}")));
-        }
+    if op == BinaryOp::Add
+        && let (Value::String(x), Value::String(y)) = (&a, &b)
+    {
+        return Ok(Value::String(format!("{x}{y}")));
     }
 
     // Duration arithmetic: `+`/`-` over two durations stay a duration.
@@ -2969,18 +2971,17 @@ fn arithmetic(op: BinaryOp, a: Value, b: Value) -> Result<Value> {
         && (matches!(a, Value::Decimal(_)) || matches!(b, Value::Decimal(_)))
         && !matches!(a, Value::Float(_))
         && !matches!(b, Value::Float(_))
+        && let (Some(x), Some(y)) = (as_decimal_operand(&a), as_decimal_operand(&b))
     {
-        if let (Some(x), Some(y)) = (as_decimal_operand(&a), as_decimal_operand(&b)) {
-            let r = match op {
-                BinaryOp::Add => x.checked_add(&y),
-                BinaryOp::Subtract => x.checked_sub(&y),
-                BinaryOp::Multiply => x.checked_mul(&y),
-                _ => unreachable!(),
-            };
-            return r
-                .map(Value::Decimal)
-                .ok_or_else(|| gql_execution("decimal arithmetic overflow"));
-        }
+        let r = match op {
+            BinaryOp::Add => x.checked_add(&y),
+            BinaryOp::Subtract => x.checked_sub(&y),
+            BinaryOp::Multiply => x.checked_mul(&y),
+            _ => unreachable!(),
+        };
+        return r
+            .map(Value::Decimal)
+            .ok_or_else(|| gql_execution("decimal arithmetic overflow"));
     }
 
     match (numeric(&a), numeric(&b)) {

@@ -564,9 +564,11 @@ pub fn turso_schema_sql(
 ) -> Result<String> {
     grust_sql_core::schema_sql(
         &TursoDialect,
-        &config.table_prefix,
-        nodes_table,
-        edges_table,
+        grust_sql_core::GraphSqlSchemaLayout {
+            table_prefix: &config.table_prefix,
+            nodes_table,
+            edges_table,
+        },
         schema,
         quote_ident,
         quote_ident,

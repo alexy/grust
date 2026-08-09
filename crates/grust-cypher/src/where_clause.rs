@@ -608,31 +608,27 @@ pub(crate) fn merge_where_order_pair(
             }
             true
         }
-        (Some(OrderBoundKind::Lower), Some(OrderBoundKind::Upper)) => {
+        (Some(OrderBoundKind::Lower), Some(OrderBoundKind::Upper))
             if order_bounds_are_contradictory(
                 existing.predicate.op,
                 &existing.predicate.value,
                 incoming.predicate.op,
                 &incoming.predicate.value,
-            ) {
-                set_where_no_match(existing);
-                true
-            } else {
-                false
-            }
+            ) =>
+        {
+            set_where_no_match(existing);
+            true
         }
-        (Some(OrderBoundKind::Upper), Some(OrderBoundKind::Lower)) => {
+        (Some(OrderBoundKind::Upper), Some(OrderBoundKind::Lower))
             if order_bounds_are_contradictory(
                 incoming.predicate.op,
                 &incoming.predicate.value,
                 existing.predicate.op,
                 &existing.predicate.value,
-            ) {
-                set_where_no_match(existing);
-                true
-            } else {
-                false
-            }
+            ) =>
+        {
+            set_where_no_match(existing);
+            true
         }
         _ => false,
     }
@@ -1388,18 +1384,16 @@ pub(crate) fn lower_negated_null_mixed_string_or_terms(
 
     let mut has_not_null_guard = false;
     for predicate in parsed {
-        if where_predicate_implies_is_null(&predicate)? {
-            if !has_not_null_guard {
-                predicates.push(ParsedWherePredicate {
-                    target: predicate.target,
-                    predicate: GraphPropertyPredicate {
-                        key: predicate.predicate.key,
-                        op: GraphPredicateOp::IsNotNull,
-                        value: Value::Null,
-                    },
-                });
-                has_not_null_guard = true;
-            }
+        if where_predicate_implies_is_null(&predicate)? && !has_not_null_guard {
+            predicates.push(ParsedWherePredicate {
+                target: predicate.target,
+                predicate: GraphPropertyPredicate {
+                    key: predicate.predicate.key,
+                    op: GraphPredicateOp::IsNotNull,
+                    value: Value::Null,
+                },
+            });
+            has_not_null_guard = true;
         }
     }
     canonicalize_where_predicates(&mut predicates)?;

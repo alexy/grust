@@ -200,7 +200,6 @@ async fn live_postgres_put_read_traverse_and_schema() {
         schema: format!("grust_integration_{suffix}"),
         table_prefix: "grust_live".to_string(),
         batch_size: 2,
-        ..PostgresGraphConfig::default()
     })
     .await
     .expect("connect PostgreSQL store");

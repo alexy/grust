@@ -6,6 +6,13 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Removed the Rust 1.96 strict-Clippy debt from the Cypher and Sail execution
+  paths without adding lint suppressions. Writable `RETURN` parsing and
+  evaluation now use named scope, aggregate, and cache contexts; Sail mutation
+  execution uses typed capture/output objects and operation views instead of
+  parallel optional tuples and long argument lists. Shared schema SQL now takes
+  an explicit table layout, and the remaining first-party workspace findings
+  in PostgreSQL control flow and test/benchmark code are resolved.
 - Fixed typed Sail schemas that explicitly declare the node `id` property.
   The property now reuses the one structural identity column throughout table
   descriptors, Delta DDL, and staged merges; incompatible non-string identity

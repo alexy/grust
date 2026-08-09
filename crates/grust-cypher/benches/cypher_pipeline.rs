@@ -230,18 +230,12 @@ fn bench_strict_create_validation(c: &mut Criterion) {
     group.throughput(Throughput::Elements(OPERATIONS as u64));
     group.bench_function("nodes", |b| {
         b.iter(|| {
-            black_box(
-                check_strict_create_plan_conflicts(black_box(&node_plan))
-                    .expect("conflict-free plan"),
-            )
+            check_strict_create_plan_conflicts(black_box(&node_plan)).expect("conflict-free plan")
         })
     });
     group.bench_function("edges", |b| {
         b.iter(|| {
-            black_box(
-                check_strict_create_plan_conflicts(black_box(&edge_plan))
-                    .expect("conflict-free plan"),
-            )
+            check_strict_create_plan_conflicts(black_box(&edge_plan)).expect("conflict-free plan")
         })
     });
     group.finish();

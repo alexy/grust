@@ -319,17 +319,31 @@ pub fn traversal_sql(
     ))
 }
 
+/// Physical names used while rendering graph-schema views and indexes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GraphSqlSchemaLayout<'a> {
+    /// Prefix for generated views and indexes.
+    pub table_prefix: &'a str,
+    /// SQL reference to the universal node table.
+    pub nodes_table: &'a str,
+    /// SQL reference to the universal edge table.
+    pub edges_table: &'a str,
+}
+
 pub fn schema_sql(
     dialect: &impl GraphSqlDialect,
-    table_prefix: &str,
-    nodes_table: &str,
-    edges_table: &str,
+    layout: GraphSqlSchemaLayout<'_>,
     schema: &GraphSchema,
     view_ref: impl Fn(&str) -> String,
     quote_ident: impl Fn(&str) -> String + Copy,
     sql_str: impl Fn(&str) -> String + Copy,
     typed_expr: impl Fn(&Field) -> String + Copy,
 ) -> Result<String> {
+    let GraphSqlSchemaLayout {
+        table_prefix,
+        nodes_table,
+        edges_table,
+    } = layout;
     let mut statements = Vec::new();
 
     for node_type in &schema.nodes {

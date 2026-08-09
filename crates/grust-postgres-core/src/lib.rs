@@ -276,23 +276,23 @@ impl PostgresGraphStore {
         params: &CypherParameters,
     ) -> Result<CypherResultTable> {
         let dialect = self.read_dialect();
-        if let Some(plan) = plan_read(cypher, params, &NoTypeHints)? {
-            if plan.supported_by(&dialect) {
-                if let Some((arms, distinct)) = plan.union_arms() {
-                    let mut tables = Vec::with_capacity(arms.len());
-                    for arm in arms {
-                        let rows = self
-                            .run_text_rows(&arm.to_sql(&dialect), arm.column_count())
-                            .await?;
-                        tables.push(arm.project_text_rows(&dialect, rows, params)?);
-                    }
-                    return combine_union(tables, distinct);
+        if let Some(plan) = plan_read(cypher, params, &NoTypeHints)?
+            && plan.supported_by(&dialect)
+        {
+            if let Some((arms, distinct)) = plan.union_arms() {
+                let mut tables = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    let rows = self
+                        .run_text_rows(&arm.to_sql(&dialect), arm.column_count())
+                        .await?;
+                    tables.push(arm.project_text_rows(&dialect, rows, params)?);
                 }
-                let rows = self
-                    .run_text_rows(&plan.to_sql(&dialect), plan.column_count())
-                    .await?;
-                return plan.project_text_rows(&dialect, rows, params);
+                return combine_union(tables, distinct);
             }
+            let rows = self
+                .run_text_rows(&plan.to_sql(&dialect), plan.column_count())
+                .await?;
+            return plan.project_text_rows(&dialect, rows, params);
         }
         let graph = self.read_graph().await?;
         grust_cypher::read::run_read_query(&graph, cypher, params)
@@ -532,9 +532,11 @@ pub fn postgres_schema_sql(
 ) -> Result<String> {
     grust_sql_core::schema_sql(
         &PostgresDialect,
-        &config.table_prefix,
-        nodes_table,
-        edges_table,
+        grust_sql_core::GraphSqlSchemaLayout {
+            table_prefix: &config.table_prefix,
+            nodes_table,
+            edges_table,
+        },
         schema,
         |view| qualified_table(&config.schema, view),
         quote_ident,

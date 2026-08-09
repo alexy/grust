@@ -858,23 +858,23 @@ fn lower_predicate(
                 }
             }
             // `prop <op> literal` / `literal <op> prop`.
-            if let Some(prop) = lower_prop_ref(lhs, var) {
-                if let Some(value) = lower_scalar(rhs, params) {
-                    return Some(Predicate::Compare {
-                        prop,
-                        op: cmp,
-                        value,
-                    });
-                }
+            if let Some(prop) = lower_prop_ref(lhs, var)
+                && let Some(value) = lower_scalar(rhs, params)
+            {
+                return Some(Predicate::Compare {
+                    prop,
+                    op: cmp,
+                    value,
+                });
             }
-            if let Some(prop) = lower_prop_ref(rhs, var) {
-                if let Some(value) = lower_scalar(lhs, params) {
-                    return Some(Predicate::Compare {
-                        prop,
-                        op: cmp.flipped(),
-                        value,
-                    });
-                }
+            if let Some(prop) = lower_prop_ref(rhs, var)
+                && let Some(value) = lower_scalar(lhs, params)
+            {
+                return Some(Predicate::Compare {
+                    prop,
+                    op: cmp.flipped(),
+                    value,
+                });
             }
             // Arithmetic comparison (`+`/`-`/`*` over typed numeric properties).
             let l = lower_arith(lhs, var, label, params, hints)?;
@@ -1351,7 +1351,7 @@ fn render_float(f: f64) -> String {
 // shared reference projection — so the result is identical to
 // [`crate::read::run_read_query`] by construction.
 
-use crate::read::PushedBinding;
+use crate::read::{PushedBinding, PushedNodeGroup};
 use grust_core::{Edge, EdgeId, Label, NodeId, Props};
 
 /// The role a pattern variable plays: a node at position `i`, or an edge at
@@ -1566,17 +1566,17 @@ fn lower_segment_single(
     // join stays unambiguous; the reference would equate them, we fall back.
     let mut roles: std::collections::HashMap<String, Role> = std::collections::HashMap::new();
     for (i, np) in node_patterns.iter().enumerate() {
-        if let Some(v) = &np.variable {
-            if roles.insert(v.clone(), Role::Node(i)).is_some() {
-                return None;
-            }
+        if let Some(v) = &np.variable
+            && roles.insert(v.clone(), Role::Node(i)).is_some()
+        {
+            return None;
         }
     }
     for (j, seg) in pattern.segments.iter().enumerate() {
-        if let Some(v) = &seg.relationship.variable {
-            if roles.insert(v.clone(), Role::Edge(j)).is_some() {
-                return None;
-            }
+        if let Some(v) = &seg.relationship.variable
+            && roles.insert(v.clone(), Role::Edge(j)).is_some()
+        {
+            return None;
         }
     }
 
@@ -1837,23 +1837,23 @@ fn lower_seg_predicate(
                     });
                 }
             }
-            if let Some(operand) = lower_seg_operand(lhs, ctx.roles) {
-                if let Some(value) = lower_scalar(rhs, params) {
-                    return Some(SegPredicate::Compare {
-                        operand,
-                        op: cmp,
-                        value,
-                    });
-                }
+            if let Some(operand) = lower_seg_operand(lhs, ctx.roles)
+                && let Some(value) = lower_scalar(rhs, params)
+            {
+                return Some(SegPredicate::Compare {
+                    operand,
+                    op: cmp,
+                    value,
+                });
             }
-            if let Some(operand) = lower_seg_operand(rhs, ctx.roles) {
-                if let Some(value) = lower_scalar(lhs, params) {
-                    return Some(SegPredicate::Compare {
-                        operand,
-                        op: cmp.flipped(),
-                        value,
-                    });
-                }
+            if let Some(operand) = lower_seg_operand(rhs, ctx.roles)
+                && let Some(value) = lower_scalar(lhs, params)
+            {
+                return Some(SegPredicate::Compare {
+                    operand,
+                    op: cmp.flipped(),
+                    value,
+                });
             }
             // Arithmetic comparison (`+`/`-`/`*` over typed numeric properties).
             let l = lower_seg_arith(lhs, ctx, params)?;
@@ -2389,10 +2389,10 @@ fn lower_var_length_single(
     }
     let a_var = a.variable.clone();
     let b_var = b.variable.clone();
-    if let (Some(av), Some(bv)) = (&a_var, &b_var) {
-        if av == bv {
-            return None;
-        }
+    if let (Some(av), Some(bv)) = (&a_var, &b_var)
+        && av == bv
+    {
+        return None;
     }
     let direction = match rel.direction {
         Direction::Outgoing => SegDirection::Outgoing,
@@ -2408,10 +2408,10 @@ fn lower_var_length_single(
     if let Some(v) = &a_var {
         roles.insert(v.clone(), Role::Node(0));
     }
-    if let Some(v) = &b_var {
-        if roles.insert(v.clone(), Role::Node(1)).is_some() {
-            return None;
-        }
+    if let Some(v) = &b_var
+        && roles.insert(v.clone(), Role::Node(1)).is_some()
+    {
+        return None;
     }
 
     // Filter: inline props on a/b, then WHERE (over a/b only).
@@ -2697,10 +2697,10 @@ fn lower_optional_single(
             return None;
         }
     }
-    if let (Some(rv), Some(bv)) = (&r_var, &b_var) {
-        if rv == bv {
-            return None;
-        }
+    if let (Some(rv), Some(bv)) = (&r_var, &b_var)
+        && rv == bv
+    {
+        return None;
     }
 
     let a_label = a_node.labels.first().cloned();
@@ -3014,13 +3014,13 @@ fn lower_multi_pattern_single(
                             selected: &mut Vec<SelectedBinding>,
                             filter: &mut Option<SegPredicate>|
      -> Option<usize> {
-        if let Some(v) = &np.variable {
-            if let Some(&idx) = var_node.get(v) {
-                if !np.labels.is_empty() || np.properties.is_some() {
-                    return None; // re-reference must be bare
-                }
-                return Some(idx);
+        if let Some(v) = &np.variable
+            && let Some(&idx) = var_node.get(v)
+        {
+            if !np.labels.is_empty() || np.properties.is_some() {
+                return None; // re-reference must be bare
             }
+            return Some(idx);
         }
         if np.labels.len() > 1 {
             return None;
@@ -3339,7 +3339,7 @@ impl PipelineReadPushdown {
 fn parse_props(text: Option<&str>) -> Result<Props> {
     match text {
         None => Ok(Props::new()),
-        Some(s) if s.is_empty() => Ok(Props::new()),
+        Some("") => Ok(Props::new()),
         Some(s) => {
             let map: serde_json::Map<String, serde_json::Value> =
                 serde_json::from_str(s).map_err(|e| {
@@ -3683,7 +3683,7 @@ impl SubqueryReadPushdown {
         params: &CypherParameters,
     ) -> Result<CypherResultTable> {
         let inner_var = self.inner.0.as_str();
-        let groups: Vec<(Vec<(String, PushedBinding)>, Vec<Node>)> = match &self.outer {
+        let groups: Vec<PushedNodeGroup> = match &self.outer {
             None => {
                 let inner_nodes = rows
                     .iter()
@@ -3772,10 +3772,10 @@ fn lower_subquery_single(
     // reference seeds carry the outer bindings, and a correlated inner WHERE
     // renders into the JOIN ON); *rebinds* of the outer name — including a
     // same-name inner scan (a consistency binding) — fall back.
-    if let Some((outer_var, _, _)) = &outer {
-        if inner.0 == *outer_var || clauses_rebind_var(inner_clauses, outer_var) {
-            return None;
-        }
+    if let Some((outer_var, _, _)) = &outer
+        && (inner.0 == *outer_var || clauses_rebind_var(inner_clauses, outer_var))
+    {
+        return None;
     }
     // Route the inner MATCH's WHERE: single-scope predicates fold into the
     // inner scan; cross-scope predicates become the JOIN ON (P4b).
