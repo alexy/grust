@@ -6,6 +6,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Added a parser-backed bounded read policy for applications that expose
+  GQL/Cypher to untrusted clients. It rejects updating clauses, graph selection,
+  procedures, unbounded paths, non-literal limits, and oversized result sets
+  from the typed AST instead of relying on keyword scans.
+
 - Removed the Rust 1.96 strict-Clippy debt from the Cypher and Sail execution
   paths without adding lint suppressions. Writable `RETURN` parsing and
   evaluation now use named scope, aggregate, and cache contexts; Sail mutation
