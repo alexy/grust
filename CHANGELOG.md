@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Add a backend-neutral semantic graph taxonomy for versioned models,
+  datasets, fields, relationships, and metrics with stable replay identities.
+
 - Added a parser-backed bounded read policy for applications that expose
   GQL/Cypher to untrusted clients. It rejects updating clauses, graph selection,
   procedures, unbounded paths, non-literal limits, and oversized result sets

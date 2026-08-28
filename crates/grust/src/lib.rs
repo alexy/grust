@@ -1,10 +1,15 @@
 pub use grust_core::*;
 
 pub mod lakecat;
+pub mod semantic;
 pub use lakecat::{
     LakeCatCatalogEvent, LakeCatCatalogGraph, LakeCatTableRef, lakecat_catalog_event_graph,
     lakecat_catalog_graph_from_json_value, lakecat_event_id, lakecat_namespace_id,
     lakecat_warehouse_id,
+};
+pub use semantic::{
+    SemanticDataset, SemanticField, SemanticMetric, SemanticModelProjection, SemanticRelationship,
+    semantic_model_graph,
 };
 
 #[cfg(feature = "cocoindex")]
