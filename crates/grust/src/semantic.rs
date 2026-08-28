@@ -168,4 +168,62 @@ mod tests {
         changed.relationships[0].to_dataset = "missing".into();
         assert!(semantic_model_graph(&changed).is_err());
     }
+
+    #[test]
+    fn pinned_ossie_tpcds_projection_is_complete_and_replay_stable() {
+        let dataset_names = ["store_sales", "date_dim", "customer", "item", "store"];
+        let field_counts = [9, 5, 5, 6, 6];
+        let datasets = dataset_names
+            .iter()
+            .zip(field_counts)
+            .map(|(name, count)| SemanticDataset {
+                name: (*name).into(),
+                physical_source: format!("local.tpcds.{name}"),
+                fields: (0..count)
+                    .map(|index| SemanticField {
+                        name: format!("{name}_field_{index}"),
+                        data_type: Some("pinned-ossie-logical-type".into()),
+                        nullable: Some(true),
+                    })
+                    .collect(),
+            })
+            .collect();
+        let projection = SemanticModelProjection {
+            model_id: "tpcds_retail_model".into(),
+            version: 1,
+            artifact_hash:
+                "sha256:438372de9b8ca0f074aed72806f92ac9b84047851a0385423f004748efe5a316".into(),
+            datasets,
+            metrics: [
+                "total_sales",
+                "total_profit",
+                "customer_lifetime_value",
+                "sales_by_brand",
+                "store_productivity",
+            ]
+            .into_iter()
+            .map(|name| SemanticMetric {
+                name: name.into(),
+                expression_hash: format!("sha256:pinned-{name}"),
+            })
+            .collect(),
+            relationships: [
+                ("sales_date", "store_sales", "date_dim"),
+                ("sales_customer", "store_sales", "customer"),
+                ("sales_item", "store_sales", "item"),
+                ("sales_store", "store_sales", "store"),
+            ]
+            .into_iter()
+            .map(|(name, from_dataset, to_dataset)| SemanticRelationship {
+                name: name.into(),
+                from_dataset: from_dataset.into(),
+                to_dataset: to_dataset.into(),
+            })
+            .collect(),
+        };
+        let graph = semantic_model_graph(&projection).unwrap();
+        assert_eq!(graph, semantic_model_graph(&projection).unwrap());
+        assert_eq!(graph.nodes.len(), 42);
+        assert_eq!(graph.edges.len(), 45);
+    }
 }

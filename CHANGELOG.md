@@ -8,6 +8,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 - Add a backend-neutral semantic graph taxonomy for versioned models,
   datasets, fields, relationships, and metrics with stable replay identities.
+- Prove complete, replay-stable projection counts for the checksum-pinned
+  Apache Ossie TPC-DS model: five datasets, 31 fields, five metrics, and four
+  relationships.
 
 - Added a parser-backed bounded read policy for applications that expose
   GQL/Cypher to untrusted clients. It rejects updating clauses, graph selection,
