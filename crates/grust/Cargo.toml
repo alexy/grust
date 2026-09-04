@@ -1,6 +1,6 @@
 [package]
 name = "grust-graph"
-version = "0.12.1"
+version = "0.13.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -34,23 +34,25 @@ typed-garde = ["grust-core/typed-garde"]
 typed-zod-rs = ["typed-garde", "grust-core/typed-zod-rs"]
 
 [dependencies]
-grust-core = { version = "0.12.1", path = "../grust-core" }
-grust-cocoindex = { version = "0.12.0", path = "../grust-cocoindex", optional = true }
-grust-cypher = { version = "0.12.1", path = "../grust-cypher", optional = true }
-grust-falkor = { version = "0.12.0", path = "../grust-falkor", optional = true }
-grust-lancedb = { version = "0.12.0", path = "../grust-lancedb", optional = true }
-grust-memory = { version = "0.12.1", path = "../grust-memory", optional = true }
-grust-postgres = { version = "0.12.0", path = "../grust-postgres", optional = true }
-grust-postgres-pgq = { version = "0.12.0", path = "../grust-postgres-pgq", optional = true }
-grust-pggraph = { version = "0.12.0", path = "../grust-pggraph", optional = true }
-grust-sail = { version = "0.12.1", path = "../grust-sail", optional = true }
-grust-surreal = { version = "0.12.0", path = "../grust-surreal", optional = true }
-grust-turso = { version = "0.12.1", path = "../grust-turso", optional = true }
+grust-core = { version = "0.13.0", path = "../grust-core" }
+grust-cocoindex = { version = "0.13.0", path = "../grust-cocoindex", optional = true }
+grust-cypher = { version = "0.13.0", path = "../grust-cypher", optional = true }
+grust-falkor = { version = "0.13.0", path = "../grust-falkor", optional = true }
+grust-lancedb = { version = "0.13.0", path = "../grust-lancedb", optional = true }
+grust-memory = { version = "0.13.0", path = "../grust-memory", optional = true }
+grust-postgres = { version = "0.13.0", path = "../grust-postgres", optional = true }
+grust-postgres-pgq = { version = "0.13.0", path = "../grust-postgres-pgq", optional = true }
+grust-pggraph = { version = "0.13.0", path = "../grust-pggraph", optional = true }
+grust-sail = { version = "0.13.0", path = "../grust-sail", optional = true }
+grust-surreal = { version = "0.13.0", path = "../grust-surreal", optional = true }
+grust-turso = { version = "0.13.0", path = "../grust-turso", optional = true }
 serde_json.workspace = true
 
 [dev-dependencies]
 garde = { workspace = true, features = ["derive"] }
 serde.workspace = true
+serde_yaml.workspace = true
+sha2 = "0.10"
 zod-rs.workspace = true
 
 [[example]]

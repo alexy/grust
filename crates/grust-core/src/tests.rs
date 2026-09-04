@@ -83,6 +83,39 @@ fn normalizes_schema_identifiers() {
 }
 
 #[test]
+fn rejects_physical_identifier_claim_collisions_within_a_namespace() {
+    validate_physical_identifier_claims(
+        "test backend",
+        [
+            ("node table", "node_person", "node type 'Person'"),
+            ("edge table", "node_person", "edge type 'Person'"),
+        ],
+    )
+    .expect("separate physical namespaces may reuse a name");
+
+    let error = validate_physical_identifier_claims(
+        "test backend",
+        [
+            ("table", "node_a_b", "node type 'a-b'"),
+            ("table", "node_a_b", "node type 'a_b'"),
+        ],
+    )
+    .expect_err("same-namespace collision must fail");
+    assert!(error.to_string().contains("test backend"));
+    assert!(error.to_string().contains("node_a_b"));
+
+    let error = validate_physical_identifier_claims(
+        "test backend",
+        [
+            ("table", "node_person", "node type 'Person'"),
+            ("table", "node_person", "node type 'Person'"),
+        ],
+    )
+    .expect_err("repeated logical declarations must not claim one physical object twice");
+    assert!(error.to_string().contains("node type 'Person'"));
+}
+
+#[test]
 fn edge_key_prefers_explicit_id_then_structural_identity() {
     let edge = Edge::new("KNOWS", "a", "b", Props::new()).with_id("edge-1");
     assert_eq!(edge_key(&edge), "edge-1");
@@ -94,10 +127,44 @@ fn edge_key_prefers_explicit_id_then_structural_identity() {
     assert!(!edge_key_matches(&edge, "a\u{1f}KNOWS\u{1f}c"));
 
     let same = Edge::new("KNOWS", "a", "b", Props::new());
-    let explicit_same_key =
+    let explicit_same_owner =
+        Edge::new("KNOWS", "a", "b", Props::new()).with_id("a\u{1f}KNOWS\u{1f}b");
+    let explicit_same_key_wrong_owner =
         Edge::new("OTHER", "x", "y", Props::new()).with_id("a\u{1f}KNOWS\u{1f}b");
     assert!(edge_keys_equal(&edge, &same));
-    assert!(edge_keys_equal(&edge, &explicit_same_key));
+    assert!(edge_keys_equal(&edge, &explicit_same_owner));
+    assert!(!edge_keys_equal(&edge, &explicit_same_key_wrong_owner));
+}
+
+#[test]
+fn checked_edge_key_rejects_ambiguous_structural_and_explicit_keys() {
+    let left = Edge::new("b\u{1f}c", "a", "d", Props::new());
+    let right = Edge::new("c", "a\u{1f}b", "d", Props::new());
+    assert_ne!(left, right);
+    assert_eq!(edge_key(&left), edge_key(&right));
+    assert!(
+        checked_edge_key(&left)
+            .unwrap_err()
+            .to_string()
+            .contains("relationship label")
+    );
+    assert!(
+        checked_edge_key(&right)
+            .unwrap_err()
+            .to_string()
+            .contains("source node id")
+    );
+
+    let structural = Edge::new("KNOWS", "a", "b", Props::new());
+    let explicit = Edge::new("OTHER", "x", "y", Props::new()).with_id(edge_key(&structural));
+    assert_eq!(edge_key(&structural), edge_key(&explicit));
+    assert!(!edge_keys_equal(&structural, &explicit));
+    assert!(
+        checked_edge_key(&explicit)
+            .unwrap_err()
+            .to_string()
+            .contains("explicit edge id")
+    );
 }
 
 #[test]
@@ -1778,6 +1845,24 @@ fn graph_value_deduplicates_and_serializes() {
     let tagged = serde_json::to_value(&value).unwrap();
     assert_eq!(tagged["type"], "graph");
     assert_eq!(Value::from_json(tagged), value);
+}
+
+#[test]
+fn graph_value_relationship_identity_length_frames_components() {
+    let left = Edge::new("b|c", "a", "d", Props::new());
+    let right = Edge::new("c", "a|b", "d", Props::new());
+    let duplicate = left.clone();
+    let explicit = Edge::new("OTHER", "x", "y", Props::new()).with_id("a|b|c");
+    let structural = Edge::new("b", "id:a", "c", Props::new());
+
+    let graph_value =
+        GraphValue::from_graph_parts(&[], &[left, right, duplicate, explicit, structural]);
+
+    assert_eq!(
+        graph_value.relationships.len(),
+        4,
+        "delimiter placement and explicit-id namespaces must not collapse distinct relationships"
+    );
 }
 
 #[test]

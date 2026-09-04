@@ -78,8 +78,8 @@ For the current Grust release line, that means Kindle should see a package
 title shaped like this:
 
 ```xml
-<dc:title id="epub-title-1">grust (0.10.0)</dc:title>
-<meta refines="#epub-title-1" property="file-as">grust (0.10.0)</meta>
+<dc:title id="epub-title-1">grust (&lt;version&gt;)</dc:title>
+<meta refines="#epub-title-1" property="file-as">grust (&lt;version&gt;)</meta>
 ```
 
 while `EPUB/nav.xhtml`, `EPUB/toc.ncx`, and the cover XHTML still display the

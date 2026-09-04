@@ -235,6 +235,145 @@ async fn cypher_mutation_executor_patches_matching_nodes() {
 }
 
 #[tokio::test]
+async fn cypher_mutation_plan_rejects_before_writing_any_operation() {
+    let store = TursoGraphStore::in_memory()
+        .await
+        .expect("open Turso store");
+    store.bootstrap().await.expect("bootstrap Turso tables");
+
+    let inserted = Node::new("Person", "must-not-commit", Props::new());
+    let error = store
+        .execute_cypher_mutation_plan(&GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::UpsertNode {
+                kind: GraphMutationPlanKind::Create,
+                node: inserted.clone(),
+            },
+            GraphMutationPlanOp::DeleteMatchingNodes {
+                label: Some(Label::new("Person")),
+                props: Props::new(),
+                predicates: Vec::new(),
+                cardinality: GraphMutationCardinality::UnboundedMany,
+            },
+        ]))
+        .await
+        .expect_err("unsupported trailing operation must reject the whole plan");
+
+    assert!(error.to_string().contains("matched node deletes"));
+    assert!(
+        store
+            .get_node(&inserted.id)
+            .await
+            .expect("read after rejected plan")
+            .is_none(),
+        "a rejected transactional Cypher plan must not commit its prefix"
+    );
+}
+
+#[tokio::test]
+async fn cypher_mutation_plan_preserves_order_inside_transaction() {
+    let store = TursoGraphStore::in_memory()
+        .await
+        .expect("open Turso store");
+    store.bootstrap().await.expect("bootstrap Turso tables");
+
+    let inserted = Node::new("Person", "ordered-person", Props::new());
+    let report = store
+        .execute_cypher_mutation_plan(&GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::UpsertNode {
+                kind: GraphMutationPlanKind::Create,
+                node: inserted.clone(),
+            },
+            GraphMutationPlanOp::PatchMatchingNodes {
+                label: Some(Label::new("Person")),
+                props: Props::from([("id".to_string(), Value::from("ordered-person"))]),
+                predicates: Vec::new(),
+                patch: Props::from([("ready".to_string(), Value::from(true))]),
+                cardinality: GraphMutationCardinality::SingleIdentity,
+            },
+        ]))
+        .await
+        .expect("execute ordered mutation plan");
+
+    assert_eq!(report.matched_rows, 1);
+    let stored = store
+        .get_node(&inserted.id)
+        .await
+        .expect("read ordered node")
+        .expect("ordered node missing");
+    assert_eq!(stored.props.get("ready"), Some(&Value::from(true)));
+
+    let rollback_node = Node::new("Person", "must-roll-back", Props::new());
+    let failed = store
+        .execute_cypher_mutation_plan(&GraphMutationPlan::new(vec![
+            GraphMutationPlanOp::UpsertNode {
+                kind: GraphMutationPlanKind::Create,
+                node: rollback_node.clone(),
+            },
+            GraphMutationPlanOp::UpsertEdge {
+                kind: GraphMutationPlanKind::Create,
+                edge: Edge::new(
+                    "PRESENTS",
+                    rollback_node.id.clone(),
+                    "missing-endpoint",
+                    Props::new(),
+                ),
+            },
+        ]))
+        .await;
+    assert!(failed.is_err(), "the missing endpoint must reject the plan");
+    assert!(
+        store
+            .get_node(&rollback_node.id)
+            .await
+            .expect("read after rollback")
+            .is_none(),
+        "a failed plan must roll back its valid prefix"
+    );
+}
+
+#[tokio::test]
+async fn next_call_rolls_back_an_abandoned_transaction() {
+    let store = TursoGraphStore::in_memory()
+        .await
+        .expect("open Turso store");
+    store.bootstrap().await.expect("bootstrap Turso tables");
+    let cancelled_node = Node::new("Person", "cancelled-plan", Props::new());
+
+    {
+        let _gate = store.lock_connection().await.expect("lock connection");
+        store
+            .transaction_needs_rollback
+            .store(true, Ordering::Release);
+        store
+            .execute_unlocked("BEGIN")
+            .await
+            .expect("begin simulated cancelled plan");
+        store
+            .execute_unlocked(
+                &upsert_nodes_sql(&store.nodes_table(), std::slice::from_ref(&cancelled_node))
+                    .expect("lower simulated cancelled write"),
+            )
+            .await
+            .expect("write simulated cancelled prefix");
+        // Dropping the gate while the recovery marker remains set simulates a
+        // future being aborted after a successful statement but before COMMIT.
+    }
+
+    assert!(
+        store
+            .get_node(&cancelled_node.id)
+            .await
+            .expect("read after cancellation recovery")
+            .is_none(),
+        "the next caller must roll back an abandoned transaction"
+    );
+    assert!(
+        !store.transaction_needs_rollback.load(Ordering::Acquire),
+        "successful recovery must clear the transaction marker"
+    );
+}
+
+#[tokio::test]
 async fn mvcc_journal_mode_enables_concurrent_writes_and_round_trips() {
     // Unit: TursoJournalMode::Mvcc enables MVCC on a fresh database via
     // `PRAGMA journal_mode = mvcc` and supports `BEGIN CONCURRENT` writers.

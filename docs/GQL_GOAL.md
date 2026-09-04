@@ -1,17 +1,18 @@
 # Grust GQL/Cypher Completion — Executable Goal
 
-Status: active goal. Derived from `docs/GrustCypherFull.md` after an adversarial
-multi-agent review (2026-06-25) that pressure-tested the plan against the actual
-codebase. The plan's architecture is sound and its baseline claims are accurate;
-this document is the **executable contract** that makes it safe to run, fixes the
-ordering contradictions the plan layered, and decomposes the load-bearing units.
+Status: **COMPLETE (2026-07-03) and merged.** This is the historical execution
+record derived from `docs/GrustCypherFull.md` after an adversarial multi-agent
+review. Its branch names, stop points, test counts, and temporary no-release
+guardrails describe that completed effort; they do not override the current
+repository rules in `AGENTS.md` or the current profile statement in
+`docs/GQL_PROFILE_STATEMENT.md`.
 
 Read `docs/GrustCypherFull.md` for the full rationale of each Unit/Phase. This
 file is the order of operations, the gates, and the guardrails.
 
 ---
 
-## Guardrails (apply to EVERY task — non-negotiable)
+## Historical guardrails (applied to every task in this completed goal)
 
 1. **PUBLISH OVERRIDE.** Do **not** `cargo publish`, `cargo package` for release,
    `cargo info` registry verification, tag/date a release, or convert

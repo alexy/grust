@@ -172,6 +172,75 @@ pub fn sail_edge_table(label: &str) -> Result<String> {
     Ok(format!("grust_edge_{}", schema_identifier(label)?))
 }
 
+fn validate_sail_schema_identifiers(schema: &GraphSchema) -> Result<()> {
+    let mut claims = Vec::new();
+    for node_type in &schema.nodes {
+        let table = sail_node_table(node_type.label.as_str())?;
+        claims.push((
+            "table".to_string(),
+            table.clone(),
+            format!("node type '{}'", node_type.label.as_str()),
+        ));
+        let namespace = format!("column in table '{table}'");
+        claims.push((
+            namespace.clone(),
+            NODE_ID_COLUMN.to_string(),
+            format!("structural node column '{NODE_ID_COLUMN}'"),
+        ));
+        let logical_field_namespace = format!(
+            "field declaration in node type '{}'",
+            node_type.label.as_str()
+        );
+        for field in &node_type.fields {
+            claims.push((
+                logical_field_namespace.clone(),
+                field.name.clone(),
+                format!("node field '{}.{}'", node_type.label.as_str(), field.name),
+            ));
+        }
+        for field in node_type
+            .fields
+            .iter()
+            .filter(|field| field.name != NODE_ID_COLUMN)
+        {
+            claims.push((
+                namespace.clone(),
+                schema_identifier(&field.name)?,
+                format!("node field '{}.{}'", node_type.label.as_str(), field.name),
+            ));
+        }
+    }
+    for edge_type in &schema.edges {
+        let table = sail_edge_table(edge_type.label.as_str())?;
+        claims.push((
+            "table".to_string(),
+            table.clone(),
+            format!("edge type '{}'", edge_type.label.as_str()),
+        ));
+        let namespace = format!("column in table '{table}'");
+        for column in [
+            EDGE_KEY_COLUMN,
+            EDGE_ID_COLUMN,
+            EDGE_SRC_ID_COLUMN,
+            EDGE_DST_ID_COLUMN,
+        ] {
+            claims.push((
+                namespace.clone(),
+                column.to_string(),
+                format!("structural edge column '{column}'"),
+            ));
+        }
+        for field in &edge_type.fields {
+            claims.push((
+                namespace.clone(),
+                schema_identifier(&field.name)?,
+                format!("edge field '{}.{}'", edge_type.label.as_str(), field.name),
+            ));
+        }
+    }
+    validate_physical_identifier_claims("Sail", claims)
+}
+
 /// Returns the schema fields that need their own typed-node columns.
 ///
 /// [`Node::new`] exposes structural identity through the `id` property too.
@@ -217,6 +286,7 @@ pub fn sail_typed_edge_columns(edge_type: &EdgeType) -> Result<Vec<String>> {
 }
 
 pub fn sail_graph_schema_typed_tables(schema: &GraphSchema) -> Result<Vec<SailGraphTypedTable>> {
+    validate_sail_schema_identifiers(schema)?;
     let mut tables = Vec::new();
     for node_type in &schema.nodes {
         tables.push(SailGraphTypedTable {
@@ -889,6 +959,7 @@ impl SailGraphStore {
     }
 
     async fn strict_create_edge_exists(&self, edge: &Edge) -> Result<bool> {
+        validate_edge_key_components(edge)?;
         let mut existing = self
             .get_edges(EdgeQuery {
                 from: Some(edge.from.clone()),
@@ -901,6 +972,10 @@ impl SailGraphStore {
             let sql = "SELECT id, src_id, src_label, dst_id, dst_label, edge_type, props \
                        FROM grust_edges WHERE id = ? LIMIT 1";
             existing.extend(self.run_edge_query(sql, vec![lit_str(id.as_str())]).await?);
+        }
+
+        for existing_edge in &existing {
+            validate_edge_key_components(existing_edge)?;
         }
 
         Ok(strict_create_edge_conflicts(edge, &existing))
@@ -1218,6 +1293,9 @@ impl SailGraphStore {
     }
 
     async fn validate_and_load_edges(&self, edges: &[Edge]) -> Result<()> {
+        for edge in edges {
+            validate_edge_key_components(edge)?;
+        }
         let schema = self.current_schema();
         let endpoint_ids = edges
             .iter()
@@ -1285,7 +1363,10 @@ impl SailGraphStore {
         ids.dedup();
 
         let mut edge_keys = if delete_edges {
-            edges.iter().map(edge_key).collect::<Vec<_>>()
+            edges
+                .iter()
+                .map(checked_edge_key)
+                .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
@@ -1295,7 +1376,8 @@ impl SailGraphStore {
                 all_edges
                     .iter()
                     .filter(|edge| ids.iter().any(|id| id == &edge.from || id == &edge.to))
-                    .map(edge_key),
+                    .map(checked_edge_key)
+                    .collect::<Result<Vec<_>>>()?,
             );
         }
         edge_keys.sort();
@@ -1336,10 +1418,11 @@ impl SailGraphStore {
                     kind: GraphMutationPlanKind::Create,
                     edge,
                 } => {
+                    validate_edge_key_components(edge)?;
                     if self.strict_create_edge_exists(edge).await? {
                         return Err(GrustError::Unsupported(format!(
                             "Cypher CREATE would overwrite existing edge '{}'",
-                            edge_key(edge)
+                            checked_edge_key(edge)?
                         )));
                     }
                 }
@@ -1363,10 +1446,13 @@ impl SailGraphStore {
                         })
                         .await?;
                     for edge in &edges {
+                        validate_edge_key_components(edge)?;
+                    }
+                    for edge in &edges {
                         if self.strict_create_edge_exists(edge).await? {
                             return Err(GrustError::Unsupported(format!(
                                 "Cypher CREATE would overwrite existing edge '{}'",
-                                edge_key(edge)
+                                checked_edge_key(edge)?
                             )));
                         }
                     }
@@ -1799,6 +1885,9 @@ impl SailGraphStore {
         constraints: &[GraphConstraint],
         edges: &[Edge],
     ) -> Result<()> {
+        for edge in edges {
+            validate_edge_key_components(edge)?;
+        }
         for constraint in constraints {
             let GraphConstraint::EdgePropertyUnique { label, key } = constraint else {
                 continue;
@@ -1815,11 +1904,14 @@ impl SailGraphStore {
                     ..EdgeQuery::default()
                 })
                 .await?;
+            for existing_edge in &existing {
+                validate_edge_key_components(existing_edge)?;
+            }
             for edge in edges {
                 if let Some(conflict) = unique_edge_conflict(&existing, edge, label, key) {
                     return Err(GrustError::Schema(format!(
                         "edge '{}' violates unique constraint on property '{}' of label '{}' (conflicts with persisted edge '{}')",
-                        edge_key(edge),
+                        checked_edge_key(edge)?,
                         key,
                         label.as_str(),
                         conflict
@@ -1844,6 +1936,7 @@ fn sail_user_context(config: &SailConfig) -> UserContext {
 #[async_trait]
 impl GraphStore for SailGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        validate_sail_schema_identifiers(schema)?;
         self.bootstrap().await?;
         for statement in sail_schema_sql(schema)? {
             self.run_command(&statement, vec![]).await?;
@@ -1880,6 +1973,7 @@ impl GraphStore for SailGraphStore {
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
+        validate_edge_key_components(edge)?;
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {
             schema.validate_edge_props(edge)?;
@@ -1896,6 +1990,11 @@ impl GraphStore for SailGraphStore {
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        // Reject a late ambiguous identity before constraint reads or the first
+        // staged node batch, preventing a partially loaded graph.
+        for edge in &graph.edges {
+            validate_edge_key_components(edge)?;
+        }
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {
             schema.validate_graph(graph)?;
@@ -2140,6 +2239,10 @@ fn edges_record_batch(
         .iter()
         .map(|edge| props_to_json(&edge.props))
         .collect::<Result<Vec<_>>>()?;
+    let edge_keys = edges
+        .iter()
+        .map(checked_edge_key)
+        .collect::<Result<Vec<_>>>()?;
     let label_of = |id: &NodeId| {
         node_labels
             .get(id)
@@ -2167,7 +2270,9 @@ fn edges_record_batch(
             Arc::new(StringArray::from_iter_values(
                 props.iter().map(String::as_str),
             )),
-            Arc::new(StringArray::from_iter_values(edges.iter().map(edge_key))),
+            Arc::new(StringArray::from_iter_values(
+                edge_keys.iter().map(String::as_str),
+            )),
             Arc::new(StringArray::from(
                 edges
                     .iter()
@@ -2403,6 +2508,7 @@ pub fn sail_triplets_sql_for_direction(direction: SailGraphPatternDirection) -> 
 }
 
 fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
+    validate_sail_schema_identifiers(schema)?;
     // The pinned Sail revision loses user-facing field names while resolving
     // Delta MERGE constraints for explicit-schema tables. Zero-row CTAS keeps
     // those names; constraint properties preserve structural non-null checks.

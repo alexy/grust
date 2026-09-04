@@ -1,4 +1,6 @@
-use grust_core::{Graph, GrustError, Result};
+use std::collections::BTreeSet;
+
+use grust_core::{EdgePolicy, Graph, GrustError, Result};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticField {
@@ -38,16 +40,17 @@ pub struct SemanticModelProjection {
 }
 
 pub fn semantic_model_graph(model: &SemanticModelProjection) -> Result<Graph> {
-    if model.model_id.trim().is_empty() || model.version == 0 {
-        return Err(GrustError::Serialization(
-            "semantic model identity and positive version are required".into(),
-        ));
-    }
+    validate_projection(model)?;
     let model_node = format!(
         "semantic:model:{}:v{}:{}",
-        model.model_id, model.version, model.artifact_hash
+        id_component(&model.model_id),
+        model.version,
+        id_component(&model.artifact_hash)
     );
-    let mut builder = Graph::builder();
+    // Relationship names are part of semantic identity. The default graph
+    // builder intentionally collapses parallel (from, label, to) edges, so use
+    // explicit edge ids and retain parallel semantic relationships here.
+    let mut builder = Graph::builder().edge_policy(EdgePolicy::AllowDuplicates);
     let _ = builder
         .node("SemanticModel", model_node.clone())
         .prop("model_id", model.model_id.clone())
@@ -55,7 +58,7 @@ pub fn semantic_model_graph(model: &SemanticModelProjection) -> Result<Graph> {
         .prop("artifact_hash", model.artifact_hash.clone())
         .finish();
     for dataset in &model.datasets {
-        let dataset_id = format!("{model_node}:dataset:{}", dataset.name);
+        let dataset_id = format!("{model_node}:dataset:{}", id_component(&dataset.name));
         let _ = builder
             .node("SemanticDataset", dataset_id.clone())
             .prop("name", dataset.name.clone())
@@ -63,9 +66,13 @@ pub fn semantic_model_graph(model: &SemanticModelProjection) -> Result<Graph> {
             .finish();
         let _ = builder
             .edge("CONTAINS_DATASET", model_node.clone(), dataset_id.clone())
+            .id(format!(
+                "{model_node}:contains-dataset:{}",
+                id_component(&dataset.name)
+            ))
             .finish();
         for field in &dataset.fields {
-            let field_id = format!("{dataset_id}:field:{}", field.name);
+            let field_id = format!("{dataset_id}:field:{}", id_component(&field.name));
             let mut node = builder
                 .node("SemanticField", field_id.clone())
                 .prop("name", field.name.clone());
@@ -78,11 +85,15 @@ pub fn semantic_model_graph(model: &SemanticModelProjection) -> Result<Graph> {
             let _ = node.finish();
             let _ = builder
                 .edge("CONTAINS_FIELD", dataset_id.clone(), field_id)
+                .id(format!(
+                    "{dataset_id}:contains-field:{}",
+                    id_component(&field.name)
+                ))
                 .finish();
         }
     }
     for metric in &model.metrics {
-        let metric_id = format!("{model_node}:metric:{}", metric.name);
+        let metric_id = format!("{model_node}:metric:{}", id_component(&metric.name));
         let _ = builder
             .node("SemanticMetric", metric_id.clone())
             .prop("name", metric.name.clone())
@@ -90,40 +101,153 @@ pub fn semantic_model_graph(model: &SemanticModelProjection) -> Result<Graph> {
             .finish();
         let _ = builder
             .edge("CONTAINS_METRIC", model_node.clone(), metric_id)
+            .id(format!(
+                "{model_node}:contains-metric:{}",
+                id_component(&metric.name)
+            ))
             .finish();
     }
     for relationship in &model.relationships {
-        let from = format!("{model_node}:dataset:{}", relationship.from_dataset);
-        let to = format!("{model_node}:dataset:{}", relationship.to_dataset);
-        let known = model
-            .datasets
-            .iter()
-            .map(|dataset| dataset.name.as_str())
-            .collect::<Vec<_>>();
-        if !known.contains(&relationship.from_dataset.as_str())
-            || !known.contains(&relationship.to_dataset.as_str())
-        {
-            return Err(GrustError::Serialization(format!(
-                "semantic relationship {} references an unknown dataset",
-                relationship.name
-            )));
-        }
+        let from = format!(
+            "{model_node}:dataset:{}",
+            id_component(&relationship.from_dataset)
+        );
+        let to = format!(
+            "{model_node}:dataset:{}",
+            id_component(&relationship.to_dataset)
+        );
         let _ = builder
             .edge("RELATES_DATASET", from, to)
+            .id(format!(
+                "{model_node}:relationship:{}",
+                id_component(&relationship.name)
+            ))
             .prop("name", relationship.name.clone())
             .finish();
     }
     Ok(builder.build())
 }
 
+fn id_component(value: &str) -> String {
+    // A byte length prefix makes the concatenation injective even when names
+    // contain colons or strings that resemble the structural separators.
+    format!("{}:{value}", value.len())
+}
+
+fn serialization_error(message: impl Into<String>) -> GrustError {
+    GrustError::Serialization(message.into())
+}
+
+fn validate_text(kind: &str, value: &str) -> Result<()> {
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return Err(serialization_error(format!(
+            "semantic {kind} must be non-empty, trimmed, and contain no control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_sha256(kind: &str, value: &str) -> Result<()> {
+    let Some(digest) = value.strip_prefix("sha256:") else {
+        return Err(serialization_error(format!(
+            "semantic {kind} must use sha256:<64 hex digits>"
+        )));
+    };
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(serialization_error(format!(
+            "semantic {kind} must use sha256:<64 hex digits>"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_projection(model: &SemanticModelProjection) -> Result<()> {
+    validate_text("model id", &model.model_id)?;
+    if model.version == 0 || model.version > i64::MAX as u64 {
+        return Err(serialization_error(
+            "semantic model version must be in 1..=i64::MAX",
+        ));
+    }
+    validate_sha256("artifact hash", &model.artifact_hash)?;
+
+    let mut dataset_names = BTreeSet::new();
+    for dataset in &model.datasets {
+        validate_text("dataset name", &dataset.name)?;
+        validate_text("dataset physical source", &dataset.physical_source)?;
+        if !dataset_names.insert(dataset.name.as_str()) {
+            return Err(serialization_error(format!(
+                "duplicate semantic dataset name `{}`",
+                dataset.name
+            )));
+        }
+        let mut field_names = BTreeSet::new();
+        for field in &dataset.fields {
+            validate_text("field name", &field.name)?;
+            if !field_names.insert(field.name.as_str()) {
+                return Err(serialization_error(format!(
+                    "duplicate semantic field name `{}` in dataset `{}`",
+                    field.name, dataset.name
+                )));
+            }
+            if let Some(data_type) = &field.data_type {
+                validate_text("field data type", data_type)?;
+            }
+        }
+    }
+
+    let mut metric_names = BTreeSet::new();
+    for metric in &model.metrics {
+        validate_text("metric name", &metric.name)?;
+        if !metric_names.insert(metric.name.as_str()) {
+            return Err(serialization_error(format!(
+                "duplicate semantic metric name `{}`",
+                metric.name
+            )));
+        }
+        validate_sha256(
+            &format!("metric `{}` expression hash", metric.name),
+            &metric.expression_hash,
+        )?;
+    }
+
+    let mut relationship_names = BTreeSet::new();
+    for relationship in &model.relationships {
+        validate_text("relationship name", &relationship.name)?;
+        if !relationship_names.insert(relationship.name.as_str()) {
+            return Err(serialization_error(format!(
+                "duplicate semantic relationship name `{}`",
+                relationship.name
+            )));
+        }
+        if !dataset_names.contains(relationship.from_dataset.as_str())
+            || !dataset_names.contains(relationship.to_dataset.as_str())
+        {
+            return Err(serialization_error(format!(
+                "semantic relationship {} references an unknown dataset",
+                relationship.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sha256(value: &str) -> String {
+        format!("sha256:{}", value.repeat(64))
+    }
+
     fn model() -> SemanticModelProjection {
         SemanticModelProjection {
             model_id: "tpcds".into(),
             version: 1,
-            artifact_hash: "sha256:abc".into(),
+            artifact_hash: sha256("a"),
             datasets: vec![
                 SemanticDataset {
                     name: "sales".into(),
@@ -142,7 +266,7 @@ mod tests {
             ],
             metrics: vec![SemanticMetric {
                 name: "revenue".into(),
-                expression_hash: "sha256:def".into(),
+                expression_hash: sha256("d"),
             }],
             relationships: vec![SemanticRelationship {
                 name: "sales_date".into(),
@@ -170,56 +294,203 @@ mod tests {
     }
 
     #[test]
-    fn pinned_ossie_tpcds_projection_is_complete_and_replay_stable() {
-        let dataset_names = ["store_sales", "date_dim", "customer", "item", "store"];
-        let field_counts = [9, 5, 5, 6, 6];
-        let datasets = dataset_names
+    fn parallel_relationships_keep_distinct_stable_identities() {
+        let mut projection = model();
+        projection.relationships.push(SemanticRelationship {
+            name: "sales_date_fallback".into(),
+            from_dataset: "sales".into(),
+            to_dataset: "date".into(),
+        });
+        let graph = semantic_model_graph(&projection).unwrap();
+        let relationships = graph
+            .edges
             .iter()
-            .zip(field_counts)
-            .map(|(name, count)| SemanticDataset {
-                name: (*name).into(),
-                physical_source: format!("local.tpcds.{name}"),
-                fields: (0..count)
-                    .map(|index| SemanticField {
-                        name: format!("{name}_field_{index}"),
-                        data_type: Some("pinned-ossie-logical-type".into()),
-                        nullable: Some(true),
+            .filter(|edge| edge.label.as_str() == "RELATES_DATASET")
+            .collect::<Vec<_>>();
+        assert_eq!(relationships.len(), 2);
+        assert_ne!(relationships[0].id, relationships[1].id);
+    }
+
+    #[test]
+    fn duplicate_names_invalid_hashes_and_ambiguous_text_are_rejected() {
+        let mut projection = model();
+        projection.datasets.push(projection.datasets[0].clone());
+        assert!(
+            semantic_model_graph(&projection)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate semantic dataset")
+        );
+
+        let mut projection = model();
+        let duplicate_field = projection.datasets[0].fields[0].clone();
+        projection.datasets[0].fields.push(duplicate_field);
+        assert!(
+            semantic_model_graph(&projection)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicate semantic field")
+        );
+
+        let mut projection = model();
+        projection.artifact_hash = "sha256:not-a-digest".into();
+        assert!(semantic_model_graph(&projection).is_err());
+
+        let mut projection = model();
+        let duplicate_metric = projection.metrics[0].clone();
+        projection.metrics.push(duplicate_metric);
+        assert!(semantic_model_graph(&projection).is_err());
+
+        let mut projection = model();
+        let duplicate_relationship = projection.relationships[0].clone();
+        projection.relationships.push(duplicate_relationship);
+        assert!(semantic_model_graph(&projection).is_err());
+
+        let mut projection = model();
+        projection.metrics[0].name = " revenue".into();
+        assert!(semantic_model_graph(&projection).is_err());
+    }
+
+    #[test]
+    fn length_prefixed_ids_do_not_collide_on_structural_delimiters() {
+        let mut projection = model();
+        projection.datasets.push(SemanticDataset {
+            name: "sales:field:amount".into(),
+            physical_source: "lake.encoded".into(),
+            fields: vec![],
+        });
+        let graph = semantic_model_graph(&projection).unwrap();
+        let ids = graph
+            .nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), graph.nodes.len());
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OssieDocument {
+        version: String,
+        semantic_model: Vec<OssieModel>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OssieModel {
+        name: String,
+        datasets: Vec<OssieDataset>,
+        relationships: Vec<OssieRelationship>,
+        metrics: Vec<OssieMetric>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OssieDataset {
+        name: String,
+        source: String,
+        fields: Vec<OssieField>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OssieField {
+        name: String,
+        datatype: Option<String>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OssieRelationship {
+        name: String,
+        from: String,
+        to: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OssieMetric {
+        name: String,
+        expression: OssieExpression,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OssieExpression {
+        dialects: Vec<OssieDialectExpression>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct OssieDialectExpression {
+        expression: String,
+    }
+
+    fn digest(bytes: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn pinned_apache_ossie_tpcds_fixture_parses_hashes_and_replays() {
+        // Exact upstream bytes from apache/ossie commit
+        // ddb19f1b135a61c65603f4823a3526e2fab00cf1,
+        // examples/tpcds_semantic_model.yaml. The digest makes an accidental
+        // fixture edit visible before projection behavior is considered.
+        let bytes = include_bytes!("../tests/fixtures/apache-ossie-tpcds-ddb19f1b.yaml");
+        let artifact_hash = digest(bytes);
+        assert_eq!(
+            artifact_hash,
+            "sha256:bafbdc9d0e304ab22a40592f2b6bdfd45cc399c566533cd71343d33380c0d6e1"
+        );
+        let document: OssieDocument = serde_yaml::from_slice(bytes).unwrap();
+        assert_eq!(document.version, "0.2.0.dev0");
+        let [source] = document.semantic_model.as_slice() else {
+            panic!("pinned Ossie fixture must contain exactly one semantic model");
+        };
+
+        let datasets = source
+            .datasets
+            .iter()
+            .map(|dataset| SemanticDataset {
+                name: dataset.name.clone(),
+                physical_source: dataset.source.clone(),
+                fields: dataset
+                    .fields
+                    .iter()
+                    .map(|field| SemanticField {
+                        name: field.name.clone(),
+                        data_type: field.datatype.clone(),
+                        nullable: None,
                     })
                     .collect(),
             })
             .collect();
+        let metrics = source
+            .metrics
+            .iter()
+            .map(|metric| SemanticMetric {
+                name: metric.name.clone(),
+                expression_hash: digest(
+                    metric
+                        .expression
+                        .dialects
+                        .first()
+                        .expect("metric has an expression dialect")
+                        .expression
+                        .as_bytes(),
+                ),
+            })
+            .collect();
+        let relationships = source
+            .relationships
+            .iter()
+            .map(|relationship| SemanticRelationship {
+                name: relationship.name.clone(),
+                from_dataset: relationship.from.clone(),
+                to_dataset: relationship.to.clone(),
+            })
+            .collect();
         let projection = SemanticModelProjection {
-            model_id: "tpcds_retail_model".into(),
+            model_id: source.name.clone(),
             version: 1,
-            artifact_hash:
-                "sha256:438372de9b8ca0f074aed72806f92ac9b84047851a0385423f004748efe5a316".into(),
+            artifact_hash,
             datasets,
-            metrics: [
-                "total_sales",
-                "total_profit",
-                "customer_lifetime_value",
-                "sales_by_brand",
-                "store_productivity",
-            ]
-            .into_iter()
-            .map(|name| SemanticMetric {
-                name: name.into(),
-                expression_hash: format!("sha256:pinned-{name}"),
-            })
-            .collect(),
-            relationships: [
-                ("sales_date", "store_sales", "date_dim"),
-                ("sales_customer", "store_sales", "customer"),
-                ("sales_item", "store_sales", "item"),
-                ("sales_store", "store_sales", "store"),
-            ]
-            .into_iter()
-            .map(|(name, from_dataset, to_dataset)| SemanticRelationship {
-                name: name.into(),
-                from_dataset: from_dataset.into(),
-                to_dataset: to_dataset.into(),
-            })
-            .collect(),
+            metrics,
+            relationships,
         };
         let graph = semantic_model_graph(&projection).unwrap();
         assert_eq!(graph, semantic_model_graph(&projection).unwrap());

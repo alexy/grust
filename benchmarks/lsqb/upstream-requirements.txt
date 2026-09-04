@@ -1,0 +1,8 @@
+# CPython 3.12 manylinux wheels published for LSQB's pinned Ladybug version.
+# aarch64:
+#   9f5333857dbfd871b6fc611ff9e08b98c9b2f09d6ddcf1ae53061de85837bd65
+# x86_64:
+#   8c4d00d5cc55e13524eff56e3295732a3c1b8d272d001b30748c2cc348581827
+ladybug==0.19.0 \
+    --hash=sha256:9f5333857dbfd871b6fc611ff9e08b98c9b2f09d6ddcf1ae53061de85837bd65 \
+    --hash=sha256:8c4d00d5cc55e13524eff56e3295732a3c1b8d272d001b30748c2cc348581827

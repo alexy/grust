@@ -462,6 +462,44 @@ fn var_length_pushdown_matches_reference() {
     }
 }
 
+#[test]
+fn recursive_walk_pushdown_handles_unit_separator_node_ids() {
+    // The raw delimiter-framed representation of `a\u{1f}b` contains the
+    // token for `b`. Without encoding each id before framing, the first hop is
+    // incorrectly treated as a repeated node and both queries return no rows.
+    let graph = Graph::new(
+        vec![
+            node("N", "a\u{1f}b", &[("name", Value::from("Start"))]),
+            node("N", "b", &[("name", Value::from("Mid"))]),
+            node("N", "z", &[("name", Value::from("End"))]),
+        ],
+        vec![
+            Edge::new("R", "a\u{1f}b", "b", Props::new()),
+            Edge::new("R", "b", "z", Props::new()),
+        ],
+    );
+    let conn = embed_sqlite(&graph);
+    let params = CypherParameters::new();
+
+    let variable = "MATCH (a:N {name:'Start'})-[:R*1..2]->(b) RETURN b.name";
+    let plan = plan_var_length_read(variable, &params)
+        .unwrap()
+        .expect("variable-length query should push down");
+    let actual = run_leaf_sqlite(&conn, &ReadPushdown::VarLength(plan), &params);
+    let expected = run_read_query(&graph, variable, &params).unwrap();
+    assert_same(variable, &actual, &expected);
+
+    let shortest =
+        "MATCH shortestPath((a:N {name:'Start'})-[:R*]->(b:N {name:'End'})) RETURN b.name";
+    let plan = plan_read(shortest, &params, &OracleHints)
+        .unwrap()
+        .expect("shortest-path query should push down");
+    assert!(plan.supported_by(&SqliteDialect));
+    let actual = run_leaf_sqlite(&conn, &plan, &params);
+    let expected = run_read_query(&graph, shortest, &params).unwrap();
+    assert_same(shortest, &actual, &expected);
+}
+
 /// Build a real in-memory SQLite database (rusqlite) populated from the graph.
 fn embed_sqlite(graph: &Graph) -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();

@@ -1,5 +1,6 @@
 use super::*;
 use chrono::{TimeZone, Utc};
+use grust_core::GraphStore;
 use grust_memory::MemoryGraphStore;
 use typesec_core::policy::{MintOptions, RequestContext, mint_capability_for_id};
 use typesec_core::{CanRead, CanWrite, Capability, Resource};
@@ -224,6 +225,116 @@ assignments:
             .any(|h| h.content.text.contains("works at ACME"))
     );
     assert_eq!(redacted.len(), 1, "the sensitive neighbor stays sealed");
+
+    // A durable store may straddle the 0.13 migration boundary. This chain is
+    // new assertion-node shape (ACME -> Venice) followed by the legacy direct
+    // edge shape (Venice -> Rome); two logical hops must compose both forms.
+    let rome = vault
+        .remember(
+            &space,
+            &write,
+            MemoryDraft::new(
+                MemoryKind::Semantic,
+                MemoryContent::text("The Rome office is active"),
+                Provenance::Operator,
+            )
+            .with_entities([EntityRef::new("Rome", "place")]),
+        )
+        .expect("remember legacy-chain endpoint");
+    let mut legacy_props = BTreeMap::new();
+    legacy_props.insert(
+        "fact_id".to_string(),
+        Value::String(rome.as_str().to_string()),
+    );
+    vault
+        .store()
+        .run(vault.store().graph().put_edge(&Edge::new(
+            RELATES,
+            entity_node_id("Venice"),
+            entity_node_id("Rome"),
+            legacy_props,
+        )))
+        .expect("write legacy relationship edge");
+    let mixed = vault
+        .store()
+        .neighborhood("ACME", 2)
+        .expect("read mixed-shape neighborhood");
+    assert!(
+        mixed.contains(&rome),
+        "logical hops must cross new and legacy relationship shapes"
+    );
+}
+
+/// Two facts may assert the same relationship without overwriting each
+/// other's lineage. Removing the newer assertion must leave the older fact's
+/// path intact.
+#[test]
+fn duplicate_relationship_assertions_survive_independent_tombstones() {
+    const POLICY: &str = r#"
+roles:
+  - name: keeper
+    permissions: [read, write]
+    resources: ["memory/**"]
+assignments:
+  - subject: "agent:keeper"
+    roles: [keeper]
+"#;
+    let engine = typesec_rbac::RbacEngine::from_yaml(POLICY).expect("policy parses");
+    let space = MemorySpace::new("user:alice", "semantic");
+    let write: Capability<CanWrite, _> = mint_capability_for_id(
+        &engine,
+        "agent:keeper",
+        space.resource_id(),
+        &MintOptions::default(),
+    )
+    .expect("mint write");
+
+    let vault = MemoryVault::new(store());
+    let remember_venice = |text: &str| {
+        vault
+            .remember(
+                &space,
+                &write,
+                MemoryDraft::new(
+                    MemoryKind::Semantic,
+                    MemoryContent::text(text),
+                    Provenance::Operator,
+                )
+                .with_entities([EntityRef::new("Venice", "place")]),
+            )
+            .expect("remember relationship fact")
+    };
+    let older = remember_venice("ACME was founded in Venice");
+    let newer = remember_venice("ACME maintains an office in Venice");
+    vault
+        .store()
+        .link("ACME", "based_in", "Venice", &older)
+        .expect("link older assertion");
+    vault
+        .store()
+        .link("ACME", "based_in", "Venice", &newer)
+        .expect("link newer assertion");
+
+    assert!(
+        vault
+            .store()
+            .tombstone(&newer)
+            .expect("tombstone newer assertion")
+    );
+    let remaining = vault
+        .store()
+        .neighborhood("ACME", 1)
+        .expect("read remaining neighborhood");
+    assert!(remaining.contains(&older));
+    assert!(!remaining.contains(&newer));
+}
+
+#[test]
+fn relationship_assertion_id_has_fixed_width_length_prefixes() {
+    assert_eq!(
+        relation_node_id("a", "r", "b", &MemoryId::from_string("fact")),
+        NodeId::new("rel:1ba4133c65833ebc1fcff480ed4cc769d1ac02c9bba244266d702ed0a296d4f7")
+    );
 }
 
 /// Analytics propose a plan; the vault applies it. The invariant is that

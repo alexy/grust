@@ -18,27 +18,22 @@ Arrow has two different compatibility stories:
   `RecordBatch` from Arrow 55 is not the same Rust type as a `RecordBatch` from
   Arrow 58, even though both represent Arrow data.
 
-That matters in Grust today because the embedded LadybugDB crate (`lbug`) uses
-Arrow 55 for its native Arrow API, while Sail currently uses Arrow 58 through
-Spark Connect. An exact type-version match would make users coordinate those
-versions by hand. Arrow IPC avoids that. Each backend decodes IPC into the
-Arrow version it needs internally and emits IPC for callers to decode with
-their own Arrow runtime.
+That matters in Grust today because the embedded LadybugDB crate (`lbug`
+0.20.2) uses Arrow 55 for its native Arrow API, while Sail currently uses Arrow
+58 through Spark Connect. An exact type-version match would make users
+coordinate those versions by hand. Arrow IPC avoids that. Each backend decodes
+IPC into the Arrow version it needs internally and emits IPC for callers to
+decode with their own Arrow runtime.
 
-## LadybugDB
+## LadybugDB (workspace-only)
 
-Enable the Arrow API through the facade:
-
-```toml
-[dependencies]
-grust = { package = "grust-graph", version = "0.10.0", features = ["ladybug-arrow"] }
-```
-
-Or depend on the backend crate directly:
+`grust-ladybug` is currently an internal `publish = false` workspace crate. It
+is not a `grust-graph` facade feature and is not installable from crates.io.
+Repository experiments can enable its Arrow API with a path dependency:
 
 ```toml
 [dependencies]
-grust-ladybug = { version = "0.10.0", features = ["arrow"] }
+grust-ladybug = { path = "crates/grust-ladybug", features = ["arrow"] }
 ```
 
 The Ladybug support is built on the embedded Rust `lbug` crate directly. No
@@ -112,7 +107,7 @@ Spark Connect. Grust exposes that path directly:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.12.0", features = ["sail"] }
+grust = { package = "grust-graph", version = "0.13.0", features = ["sail"] }
 ```
 
 ### Arbitrary Arrow Sources

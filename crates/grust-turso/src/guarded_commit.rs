@@ -33,12 +33,15 @@ impl GraphCommitStore for TursoGraphStore {
             .map(|mutation| super::mutation_sql(&self.nodes_table(), &self.edges_table(), mutation))
             .collect::<Result<Vec<_>>>()?;
 
-        let _gate = self.connection_gate.lock().await;
+        let _gate = self.lock_connection().await?;
         for attempt in 1..=MAX_TRANSACTION_ATTEMPTS {
             match self.commit_guarded_once(commit, &statements).await {
                 Ok(receipt) => return Ok(receipt),
                 Err(error)
                     if attempt < MAX_TRANSACTION_ATTEMPTS
+                        && !self
+                            .transaction_needs_rollback
+                            .load(std::sync::atomic::Ordering::Acquire)
                         && is_retryable_guarded_conflict(&error) =>
                 {
                     tokio::task::yield_now().await;
@@ -55,7 +58,7 @@ impl GraphCommitStore for TursoGraphStore {
         request_digest: &str,
     ) -> Result<Option<GraphCommitReceipt>> {
         validate_commit_identity(idempotency_key, request_digest)?;
-        let _gate = self.connection_gate.lock().await;
+        let _gate = self.lock_connection().await?;
         let Some((stored_digest, mut receipt)) = self.load_commit_receipt(idempotency_key).await?
         else {
             return Ok(None);
@@ -80,25 +83,45 @@ impl TursoGraphStore {
             TursoJournalMode::Wal => "BEGIN IMMEDIATE",
             TursoJournalMode::Mvcc => "BEGIN CONCURRENT",
         };
-        self.conn.execute(begin, ()).await.map_err(|error| {
-            GrustError::Backend(format!("Turso guarded transaction begin failed: {error}"))
-        })?;
+        self.transaction_needs_rollback
+            .store(true, std::sync::atomic::Ordering::Release);
+        if let Err(error) = self.conn.execute(begin, ()).await {
+            let error =
+                GrustError::Backend(format!("Turso guarded transaction begin failed: {error}"));
+            return match self.recover_transaction_unlocked().await {
+                Ok(()) => Err(error),
+                Err(recovery_error) => Err(GrustError::Backend(format!(
+                    "{error}; Turso transaction recovery failed: {recovery_error}"
+                ))),
+            };
+        }
 
         let result = self.commit_guarded_in_transaction(commit, statements).await;
         match result {
             Ok(receipt) => match self.conn.execute("COMMIT", ()).await {
-                Ok(_) => Ok(receipt),
+                Ok(_) => {
+                    self.transaction_needs_rollback
+                        .store(false, std::sync::atomic::Ordering::Release);
+                    Ok(receipt)
+                }
                 Err(error) => {
-                    let _ = self.conn.execute("ROLLBACK", ()).await;
-                    Err(GrustError::Backend(format!(
+                    let error = GrustError::Backend(format!(
                         "Turso guarded transaction commit failed: {error}"
-                    )))
+                    ));
+                    match self.recover_transaction_unlocked().await {
+                        Ok(()) => Err(error),
+                        Err(recovery_error) => Err(GrustError::Backend(format!(
+                            "{error}; Turso transaction recovery failed: {recovery_error}"
+                        ))),
+                    }
                 }
             },
-            Err(error) => {
-                let _ = self.conn.execute("ROLLBACK", ()).await;
-                Err(error)
-            }
+            Err(error) => match self.recover_transaction_unlocked().await {
+                Ok(()) => Err(error),
+                Err(recovery_error) => Err(GrustError::Backend(format!(
+                    "{error}; Turso transaction recovery failed: {recovery_error}"
+                ))),
+            },
         }
     }
 

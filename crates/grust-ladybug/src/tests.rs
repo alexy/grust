@@ -108,6 +108,161 @@ async fn applies_schema_before_typed_graph_write() -> Result<()> {
 }
 
 #[tokio::test]
+async fn apply_schema_rejects_generated_table_name_collisions() -> Result<()> {
+    let store = LadybugGraphStore::new(LadybugConfig::typed())?;
+    let node_collision = GraphSchema::builder()
+        .node("a-b", Vec::new())
+        .node("a_b", Vec::new())
+        .build();
+    let error = store
+        .apply_schema(&node_collision)
+        .await
+        .expect_err("colliding node table names must fail");
+    assert!(error.to_string().contains("grust_node_a_b"));
+
+    let relationship_collision = GraphSchema::builder()
+        .edge(
+            "a-b",
+            vec![Label::from("c")],
+            vec![Label::from("d")],
+            Vec::new(),
+        )
+        .edge(
+            "a",
+            vec![Label::from("b-c")],
+            vec![Label::from("d")],
+            Vec::new(),
+        )
+        .build();
+    let error = store
+        .apply_schema(&relationship_collision)
+        .await
+        .expect_err("colliding composed relationship table names must fail");
+    assert!(error.to_string().contains("grust_rel_a_b_c_d"));
+
+    let metadata_collision = GraphSchema::builder().node("index", Vec::new()).build();
+    let error = store
+        .apply_schema(&metadata_collision)
+        .await
+        .expect_err("typed table must not shadow metadata");
+    assert!(error.to_string().contains("grust_node_index"));
+
+    let duplicate_field = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::optional("name", FieldType::String),
+                Field::optional("name", FieldType::String),
+            ],
+        )
+        .build();
+    assert!(store.apply_schema(&duplicate_field).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn writes_reject_ambiguous_edge_keys_before_mutation() -> Result<()> {
+    let first = Edge::new("b\u{1f}c", "a", "d", Props::new());
+    let second = Edge::new("c", "a\u{1f}b", "d", Props::new());
+    assert_eq!(edge_key(&first), edge_key(&second));
+
+    let store = LadybugGraphStore::in_memory()?;
+    let graph = Graph::new(
+        vec![
+            Node::new("Node", "a", Props::new()),
+            Node::new("Node", "a\u{1f}b", Props::new()),
+            Node::new("Node", "d", Props::new()),
+        ],
+        vec![first, second],
+    );
+    let error = store
+        .put_graph(&graph)
+        .await
+        .expect_err("ambiguous structural edge keys must fail");
+    assert!(error.to_string().contains("U+001F"));
+    assert!(store.get_node(&NodeId::new("a")).await?.is_none());
+
+    let explicit = Edge::new("KNOWS", "a", "d", Props::new()).with_id("edge\u{1f}one");
+    assert!(store.put_edge(&explicit).await.is_err());
+    assert!(store.get_edges(EdgeQuery::default()).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn writes_reject_node_ids_that_alias_metadata_before_mutation() -> Result<()> {
+    let store = LadybugGraphStore::in_memory()?;
+    let reserved = Node::new("Person", "table\u{1f}Person", Props::new());
+    let error = store
+        .put_node(&reserved)
+        .await
+        .expect_err("metadata-shaped node ids must fail before writing");
+    assert!(error.to_string().contains("U+001F"));
+
+    let valid = Node::new("Person", "person-1", Props::new());
+    let graph = Graph::new(vec![valid.clone(), reserved], Vec::new());
+    let error = store
+        .put_graph(&graph)
+        .await
+        .expect_err("the complete graph must reject metadata-shaped node ids");
+    assert!(error.to_string().contains("U+001F"));
+    assert!(store.get_node(&valid.id).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn idless_edges_round_trip_and_can_be_updated() -> Result<()> {
+    let store = LadybugGraphStore::in_memory()?;
+    store
+        .put_graph(&Graph::new(
+            vec![
+                Node::new("Person", "person:ada", Props::new()),
+                Node::new("Talk", "talk:grust", Props::new()),
+            ],
+            vec![Edge::new(
+                "Presented By",
+                "person:ada",
+                "talk:grust",
+                props(&[("year", Value::from(2025_i64))]),
+            )],
+        ))
+        .await?;
+
+    let mut edges = store
+        .get_edges(EdgeQuery {
+            from: Some(NodeId::from("person:ada")),
+            to: Some(NodeId::from("talk:grust")),
+            label: Some(Label::from("Presented By")),
+        })
+        .await?;
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].id, None);
+
+    let mut edge = edges.pop().expect("edge should be readable");
+    edge.props.insert("year".to_string(), Value::from(2026_i64));
+    assert_eq!(store.put_edge(&edge).await?, PutOutcome::Upserted);
+
+    let edges = store.get_edges(EdgeQuery::default()).await?;
+    assert_eq!(edges.len(), 1);
+    assert_eq!(edges[0].id, None);
+    assert_eq!(edges[0].props.get("year"), Some(&Value::from(2026_i64)));
+
+    let explicit =
+        Edge::new("Attended", "person:ada", "talk:grust", Props::new()).with_id("edge:explicit");
+    store.put_edge(&explicit).await?;
+    let explicit = store
+        .get_edges(EdgeQuery {
+            from: None,
+            to: None,
+            label: Some(Label::from("Attended")),
+        })
+        .await?
+        .pop()
+        .expect("explicit edge should be readable");
+    assert_eq!(explicit.id, Some(EdgeId::from("edge:explicit")));
+    Ok(())
+}
+
+#[tokio::test]
 async fn typed_mode_requires_schema_before_writes() -> Result<()> {
     let store = LadybugGraphStore::new(LadybugConfig::typed())?;
     let err = store

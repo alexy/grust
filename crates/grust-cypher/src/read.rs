@@ -27,12 +27,13 @@ use std::collections::{BTreeMap, HashMap};
 use crate::ast;
 use crate::ast::*;
 use crate::parser::parse_query;
+use crate::read_budget;
 use crate::session::ensure_query_uses_graph;
 use crate::*;
 
 /// A value bound to a variable in a candidate row. Pattern matching binds
 /// `Node`/`Edge`; `WITH`/`UNWIND` projections bind computed `Value`s.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum Bound {
     Node(Node),
     Edge(Edge),
@@ -41,6 +42,107 @@ enum Bound {
 
 /// One candidate solution: pattern variable -> bound graph element.
 type Row = BTreeMap<String, Bound>;
+
+fn charge_intermediate_copy(context: &str, measure: impl FnOnce() -> usize) -> Result<()> {
+    if read_budget::intermediate_accounting_active() {
+        read_budget::charge_intermediate_bytes(measure(), context)?;
+    }
+    Ok(())
+}
+
+fn bound_copy_bytes(bound: &Bound) -> usize {
+    let nested = match bound {
+        Bound::Node(node) => read_budget::node_copy_bytes(node),
+        Bound::Edge(edge) => read_budget::edge_copy_bytes(edge),
+        Bound::Value(value) => read_budget::value_copy_bytes(value),
+    };
+    std::mem::size_of::<Bound>().saturating_add(nested)
+}
+
+fn row_copy_bytes(row: &Row) -> usize {
+    row.iter()
+        .fold(std::mem::size_of::<Row>(), |bytes, (name, bound)| {
+            bytes
+                .saturating_add(std::mem::size_of::<(String, Bound)>())
+                .saturating_add(name.len())
+                .saturating_add(bound_copy_bytes(bound))
+        })
+}
+
+fn clone_bound_unaccounted(bound: &Bound) -> Bound {
+    match bound {
+        Bound::Node(node) => Bound::Node(node.clone()),
+        Bound::Edge(edge) => Bound::Edge(edge.clone()),
+        Bound::Value(value) => Bound::Value(value.clone()),
+    }
+}
+
+fn clone_bound(bound: &Bound, context: &str) -> Result<Bound> {
+    charge_intermediate_copy(context, || bound_copy_bytes(bound))?;
+    Ok(clone_bound_unaccounted(bound))
+}
+
+fn clone_row(row: &Row, context: &str) -> Result<Row> {
+    charge_intermediate_copy(context, || row_copy_bytes(row))?;
+    Ok(row
+        .iter()
+        .map(|(name, bound)| (name.clone(), clone_bound_unaccounted(bound)))
+        .collect())
+}
+
+fn clone_value(value: &Value, context: &str) -> Result<Value> {
+    charge_intermediate_copy(context, || read_budget::value_copy_bytes(value))?;
+    Ok(value.clone())
+}
+
+fn materialize_node_value(node: &Node, context: &str) -> Result<Value> {
+    charge_intermediate_copy(context, || read_budget::node_copy_bytes(node))?;
+    graph_node_value(node)
+}
+
+fn materialize_edge_value(edge: &Edge, context: &str) -> Result<Value> {
+    charge_intermediate_copy(context, || read_budget::edge_copy_bytes(edge))?;
+    graph_edge_value(edge)
+}
+
+fn materialize_edge_json(edge: &Edge, context: &str) -> Result<serde_json::Value> {
+    Ok(value_into_json(materialize_edge_value(edge, context)?))
+}
+
+fn clone_json_value(value: &serde_json::Value, context: &str) -> Result<Value> {
+    charge_intermediate_copy(context, || read_budget::json_copy_bytes(value))?;
+    Ok(Value::from_json(value.clone()))
+}
+
+fn clone_node(node: &Node, context: &str) -> Result<Node> {
+    charge_intermediate_copy(context, || read_budget::node_copy_bytes(node))?;
+    Ok(node.clone())
+}
+
+fn clone_edge(edge: &Edge, context: &str) -> Result<Edge> {
+    charge_intermediate_copy(context, || read_budget::edge_copy_bytes(edge))?;
+    Ok(edge.clone())
+}
+
+fn clone_nodes(nodes: &[Node], context: &str) -> Result<Vec<Node>> {
+    charge_intermediate_copy(context, || {
+        nodes.iter().fold(
+            nodes.len().saturating_mul(std::mem::size_of::<Node>()),
+            |bytes, node| bytes.saturating_add(read_budget::node_copy_bytes(node)),
+        )
+    })?;
+    Ok(nodes.to_vec())
+}
+
+fn clone_edges(edges: &[Edge], context: &str) -> Result<Vec<Edge>> {
+    charge_intermediate_copy(context, || {
+        edges.iter().fold(
+            edges.len().saturating_mul(std::mem::size_of::<Edge>()),
+            |bytes, edge| bytes.saturating_add(read_budget::edge_copy_bytes(edge)),
+        )
+    })?;
+    Ok(edges.to_vec())
+}
 
 /// Parse, analyze, and execute a read-only query against an in-memory graph.
 ///
@@ -77,6 +179,7 @@ pub fn execute_read_query(
     query: &Query,
     params: &CypherParameters,
 ) -> Result<CypherResultTable> {
+    read_budget::checkpoint()?;
     let mut combined: Option<CypherResultTable> = None;
     // `UNION` (without ALL) deduplicates the whole result; `UNION ALL` keeps
     // duplicates. A mixed chain dedups if any boundary is a distinct UNION.
@@ -120,7 +223,13 @@ fn execute_single(
     query: &SingleQuery,
     params: &CypherParameters,
 ) -> Result<CypherResultTable> {
-    let index = NodeIndex::build(graph, query_adjacency_requirements(query));
+    let requirements = query_adjacency_requirements(query);
+    read_budget::charge_candidate_work(graph.nodes.len(), "building the node index")?;
+    if requirements.outgoing || requirements.incoming {
+        read_budget::charge_candidate_work(graph.edges.len(), "building adjacency indexes")?;
+    }
+    let index = NodeIndex::build(graph, requirements)?;
+    read_budget::checkpoint()?;
     let mut rows: Vec<Row> = vec![Row::new()];
     // Columns produced by a trailing CALL with no RETURN (standalone `CALL …`),
     // so the procedure's YIELD shape becomes the result table.
@@ -147,7 +256,9 @@ fn execute_single(
             let mut vals = Vec::with_capacity(columns.len());
             for col in &columns {
                 match row.get(col) {
-                    Some(Bound::Value(v)) => vals.push(v.clone()),
+                    Some(Bound::Value(value)) => {
+                        vals.push(clone_value(value, "shaping standalone procedure output")?)
+                    }
                     _ => vals.push(Value::Null),
                 }
             }
@@ -190,7 +301,7 @@ fn advance_rows(
             let new_vars = pattern_variables(&m.patterns);
             let mut out = Vec::new();
             for row in rows {
-                let mut matched = vec![row.clone()];
+                let mut matched = vec![clone_row(&row, "starting OPTIONAL MATCH expansion")?];
                 for pattern in &m.patterns {
                     matched = expand_pattern(graph, index, pattern, matched, params)?;
                 }
@@ -204,6 +315,7 @@ fn advance_rows(
                             .entry(var.clone())
                             .or_insert(Bound::Value(Value::Null));
                     }
+                    read_budget::charge_candidate_work(1, "producing OPTIONAL MATCH rows")?;
                     out.push(padded);
                 } else {
                     out.extend(matched);
@@ -236,10 +348,14 @@ fn advance_rows(
             for row in &rows {
                 // Arguments are evaluated per incoming row (correlated TVF).
                 for vals in procedure_rows(graph, &name_lower, &c.args, row, params)? {
-                    let mut nr = row.clone();
+                    let mut nr = clone_row(row, "producing procedure rows")?;
                     for (col, &i) in out_cols.iter().zip(indices.iter()) {
-                        nr.insert(col.clone(), Bound::Value(vals[i].clone()));
+                        nr.insert(
+                            col.clone(),
+                            Bound::Value(clone_value(&vals[i], "binding procedure result values")?),
+                        );
                     }
+                    read_budget::charge_candidate_work(1, "producing procedure rows")?;
                     next.push(nr);
                 }
             }
@@ -282,11 +398,15 @@ fn execute_subquery_clause(
             }
         }
         for inner in inner_rows {
-            let mut next = row.clone();
+            let mut next = clone_row(&row, "joining subquery rows")?;
             for col in &columns {
-                let bound = inner.get(col).cloned().unwrap_or(Bound::Value(Value::Null));
+                let bound = match inner.get(col) {
+                    Some(bound) => clone_bound(bound, "joining subquery bindings")?,
+                    None => Bound::Value(Value::Null),
+                };
                 next.insert(col.clone(), bound);
             }
+            read_budget::charge_candidate_work(1, "joining subquery rows")?;
             out.push(next);
         }
     }
@@ -347,8 +467,17 @@ fn run_subquery_single(
     seed: &Row,
     params: &CypherParameters,
 ) -> Result<(Vec<String>, Vec<Row>)> {
-    let index = NodeIndex::build(graph, query_adjacency_requirements(query));
-    let mut rows = vec![seed.clone()];
+    let requirements = query_adjacency_requirements(query);
+    read_budget::charge_candidate_work(graph.nodes.len(), "building a subquery node index")?;
+    if requirements.outgoing || requirements.incoming {
+        read_budget::charge_candidate_work(
+            graph.edges.len(),
+            "building subquery adjacency indexes",
+        )?;
+    }
+    let index = NodeIndex::build(graph, requirements)?;
+    read_budget::checkpoint()?;
+    let mut rows = vec![clone_row(seed, "seeding a correlated subquery")?];
     for clause in &query.clauses {
         if let Clause::Return(r) = clause {
             return project_subquery_return(&r.projection, rows, params);
@@ -470,6 +599,26 @@ fn procedure_rows(
                     "procedure `{name_lower}` expects no arguments"
                 )));
             }
+            match name_lower {
+                "db.labels" => read_budget::charge_candidate_work(
+                    graph.nodes.len(),
+                    "scanning nodes for db.labels()",
+                )?,
+                "db.relationshiptypes" => read_budget::charge_candidate_work(
+                    graph.edges.len(),
+                    "scanning edges for db.relationshipTypes()",
+                )?,
+                _ => {
+                    read_budget::charge_candidate_work(
+                        graph.nodes.len(),
+                        "scanning nodes for db.propertyKeys()",
+                    )?;
+                    read_budget::charge_candidate_work(
+                        graph.edges.len(),
+                        "scanning edges for db.propertyKeys()",
+                    )?;
+                }
+            }
             Ok(match name_lower {
                 "db.labels" => string_rows(
                     graph
@@ -552,6 +701,7 @@ fn procedure_rows(
 fn filter_rows(rows: Vec<Row>, where_expr: &Expr, params: &CypherParameters) -> Result<Vec<Row>> {
     let mut kept = Vec::with_capacity(rows.len());
     for row in rows {
+        read_budget::charge_candidate_work(1, "filtering candidate rows")?;
         if matches!(eval(where_expr, &row, params)?, Value::Bool(true)) {
             kept.push(row);
         }
@@ -582,13 +732,14 @@ fn unwind_rows(
                 Value::IntArray(xs) => xs.into_iter().map(Value::Int).collect(),
                 Value::FloatArray(xs) => xs.into_iter().map(Value::Float).collect(),
                 Value::Json(serde_json::Value::Array(arr)) => {
-                    arr.iter().map(json_to_value).collect()
+                    arr.into_iter().map(Value::from_json).collect()
                 }
                 other => return Err(gql_type(format!("UNWIND expects a list, got {other:?}"))),
             }
         };
         for element in elements {
-            let mut next = row.clone();
+            read_budget::charge_candidate_work(1, "expanding UNWIND rows")?;
+            let mut next = clone_row(&row, "expanding UNWIND rows")?;
             next.insert(unwind.alias.clone(), Bound::Value(element));
             out.push(next);
         }
@@ -633,8 +784,9 @@ fn project_to_bindings(
     } else {
         let mut produced = Vec::with_capacity(rows.len());
         for row in &rows {
+            read_budget::charge_candidate_work(1, "projecting WITH rows")?;
             let mut next = if projection.star {
-                row.clone()
+                clone_row(row, "projecting WITH star rows")?
             } else {
                 Row::new()
             };
@@ -665,7 +817,10 @@ fn binding_for_item(
 ) -> Result<(String, Bound)> {
     match &item.expr {
         Expr::Variable(v) => {
-            let bound = row.get(v).cloned().unwrap_or(Bound::Value(Value::Null));
+            let bound = match row.get(v) {
+                Some(bound) => clone_bound(bound, "projecting WITH variable bindings")?,
+                None => Bound::Value(Value::Null),
+            };
             Ok((item.alias.clone().unwrap_or_else(|| v.clone()), bound))
         }
         other => {
@@ -697,14 +852,22 @@ fn grouped_bindings(
             .map(|i| eval(&i.expr, row, params))
             .collect::<Result<_>>()?;
         let key = return_row_key(&key_values, "WITH GROUP BY")?;
-        groups
-            .entry(key.clone())
-            .or_insert_with(|| {
-                order.push(key);
-                (row.clone(), Vec::new())
-            })
-            .1
-            .push(idx);
+        match groups.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().1.push(idx);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                read_budget::charge_intermediate_bytes(
+                    entry.key().len(),
+                    "recording WITH grouping order",
+                )?;
+                order.push(entry.key().clone());
+                entry.insert((
+                    clone_row(row, "retaining WITH group representatives")?,
+                    vec![idx],
+                ));
+            }
+        }
     }
     if key_items.is_empty() && rows.is_empty() {
         order.push(String::new());
@@ -730,6 +893,7 @@ fn grouped_bindings(
                 next.insert(name, bound);
             }
         }
+        read_budget::charge_candidate_work(1, "producing grouped WITH rows")?;
         out.push(next);
     }
     Ok(out)
@@ -749,6 +913,7 @@ fn dedup_bindings(rows: Vec<Row>) -> Result<Vec<Row>> {
             values.push(bound_value(bound)?);
         }
         if seen.insert(return_row_key(&values, "WITH DISTINCT")?) {
+            read_budget::charge_candidate_work(1, "deduplicating WITH rows")?;
             out.push(row);
         }
     }
@@ -756,7 +921,7 @@ fn dedup_bindings(rows: Vec<Row>) -> Result<Vec<Row>> {
 }
 
 fn order_bindings(
-    rows: &mut [Row],
+    rows: &mut Vec<Row>,
     order_by: &[OrderItem],
     params: &CypherParameters,
 ) -> Result<()> {
@@ -782,8 +947,18 @@ fn order_bindings(
         }
         std::cmp::Ordering::Equal
     });
-    let reordered: Vec<Row> = order.iter().map(|&i| rows[i].clone()).collect();
-    rows.clone_from_slice(&reordered);
+    read_budget::charge_intermediate_bytes(
+        rows.len().saturating_mul(std::mem::size_of::<Row>()),
+        "reordering WITH rows",
+    )?;
+    let mut original = std::mem::take(rows)
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    *rows = order
+        .into_iter()
+        .map(|index| original[index].take().expect("ORDER BY index is unique"))
+        .collect();
     Ok(())
 }
 
@@ -805,9 +980,9 @@ fn skip_limit_bindings(
 
 fn bound_value(bound: &Bound) -> Result<Value> {
     match bound {
-        Bound::Node(node) => graph_node_value(node),
-        Bound::Edge(edge) => graph_edge_value(edge),
-        Bound::Value(value) => Ok(value.clone()),
+        Bound::Node(node) => materialize_node_value(node, "materializing bound nodes"),
+        Bound::Edge(edge) => materialize_edge_value(edge, "materializing bound relationships"),
+        Bound::Value(value) => clone_value(value, "materializing bound values"),
     }
 }
 
@@ -963,7 +1138,10 @@ pub(crate) fn project_procedure_pipeline(
     for vals in &full_rows {
         let mut row = Row::new();
         for (col, &i) in out_cols.iter().zip(indices.iter()) {
-            row.insert(col.clone(), Bound::Value(vals[i].clone()));
+            row.insert(
+                col.clone(),
+                Bound::Value(clone_value(&vals[i], "binding pushed procedure values")?),
+            );
         }
         rows.push(row);
     }
@@ -972,29 +1150,28 @@ pub(crate) fn project_procedure_pipeline(
     }
     if tail.is_empty() {
         // Standalone `CALL …`: the YIELD shape is the result table.
-        return Ok(standalone_call_table(&rows, out_cols));
+        return standalone_call_table(&rows, out_cols);
     }
     run_tail_pipeline(rows, tail, params)
 }
 
 /// Shape the standalone-`CALL` result table from the yielded columns.
-fn standalone_call_table(rows: &[Row], out_cols: Vec<String>) -> CypherResultTable {
-    let out_rows = rows
-        .iter()
-        .map(|row| {
-            out_cols
-                .iter()
-                .map(|col| match row.get(col) {
-                    Some(Bound::Value(v)) => v.clone(),
-                    _ => Value::Null,
-                })
-                .collect()
-        })
-        .collect();
-    CypherResultTable {
+fn standalone_call_table(rows: &[Row], out_cols: Vec<String>) -> Result<CypherResultTable> {
+    let mut out_rows = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut values = Vec::with_capacity(out_cols.len());
+        for col in &out_cols {
+            values.push(match row.get(col) {
+                Some(Bound::Value(value)) => clone_value(value, "shaping pushed procedure output")?,
+                _ => Value::Null,
+            });
+        }
+        out_rows.push(values);
+    }
+    Ok(CypherResultTable {
         columns: out_cols,
         rows: out_rows,
-    }
+    })
 }
 
 /// Run a subquery's inner clause tail (`WITH`/`UNWIND` steps ending in the
@@ -1049,12 +1226,12 @@ pub(crate) fn project_subquery_join_pipeline(
         }
         let seeds: Vec<Row> = inner_nodes
             .into_iter()
-            .map(|node| {
-                let mut row = outer_row.clone();
+            .map(|node| -> Result<Row> {
+                let mut row = clone_row(&outer_row, "seeding pushed subquery rows")?;
                 row.insert(inner_var.to_string(), Bound::Node(node));
-                row
+                Ok(row)
             })
-            .collect();
+            .collect::<Result<_>>()?;
         let (columns, produced) = run_subquery_tail(seeds, inner_tail, params)?;
         for col in &columns {
             if outer_row.contains_key(col) {
@@ -1064,11 +1241,15 @@ pub(crate) fn project_subquery_join_pipeline(
             }
         }
         for prow in produced {
-            let mut next = outer_row.clone();
+            let mut next = clone_row(&outer_row, "joining pushed subquery rows")?;
             for col in &columns {
-                let bound = prow.get(col).cloned().unwrap_or(Bound::Value(Value::Null));
+                let bound = match prow.get(col) {
+                    Some(bound) => clone_bound(bound, "joining pushed subquery bindings")?,
+                    None => Bound::Value(Value::Null),
+                };
                 next.insert(col.clone(), bound);
             }
+            read_budget::charge_candidate_work(1, "joining pushed subquery rows")?;
             joined.push(next);
         }
     }
@@ -1094,7 +1275,13 @@ pub(crate) fn project_correlated_procedure_pipeline(
             row.insert(var, bound_from_pushed(binding));
         }
         for (col, &i) in out_cols.iter().zip(indices.iter()) {
-            row.insert(col.clone(), Bound::Value(vals[i].clone()));
+            row.insert(
+                col.clone(),
+                Bound::Value(clone_value(
+                    &vals[i],
+                    "binding correlated procedure values",
+                )?),
+            );
         }
         rows.push(row);
     }
@@ -1102,7 +1289,7 @@ pub(crate) fn project_correlated_procedure_pipeline(
         rows = filter_rows(rows, where_expr, params)?;
     }
     if tail.is_empty() {
-        return Ok(standalone_call_table(&rows, out_cols));
+        return standalone_call_table(&rows, out_cols);
     }
     run_tail_pipeline(rows, tail, params)
 }
@@ -1135,7 +1322,33 @@ impl CompressedAdjacency {
 }
 
 impl NodeIndex {
-    fn build(graph: &Graph, requirements: AdjacencyRequirements) -> Self {
+    fn build(graph: &Graph, requirements: AdjacencyRequirements) -> Result<Self> {
+        charge_intermediate_copy("building graph indexes", || {
+            let id_index_bytes = graph.nodes.iter().fold(
+                graph
+                    .nodes
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(NodeId, usize)>()),
+                |bytes, node| bytes.saturating_add(node.id.as_str().len()),
+            );
+            let adjacency_count = usize::from(requirements.outgoing)
+                .saturating_add(usize::from(requirements.incoming));
+            let adjacency_bytes = adjacency_count.saturating_mul(
+                graph
+                    .edges
+                    .len()
+                    .saturating_mul(
+                        std::mem::size_of::<(usize, usize)>() + std::mem::size_of::<usize>(),
+                    )
+                    .saturating_add(
+                        graph
+                            .nodes
+                            .len()
+                            .saturating_mul(2 * std::mem::size_of::<usize>()),
+                    ),
+            );
+            id_index_bytes.saturating_add(adjacency_bytes)
+        })?;
         let mut by_id = HashMap::with_capacity(graph.nodes.len());
         for (i, node) in graph.nodes.iter().enumerate() {
             by_id.insert(node.id.clone(), i);
@@ -1146,11 +1359,11 @@ impl NodeIndex {
         let incoming_by_vertex = requirements
             .incoming
             .then(|| build_compressed_adjacency(graph, &by_id, |edge| &edge.to));
-        NodeIndex {
+        Ok(NodeIndex {
             by_id,
             outgoing_by_vertex,
             incoming_by_vertex,
-        }
+        })
     }
 
     fn get<'g>(&self, graph: &'g Graph, id: &str) -> Option<&'g Node> {
@@ -1330,12 +1543,15 @@ fn expand_pattern(
     let mut out = Vec::new();
     for row in base_rows {
         for start in node_candidates(graph, &pattern.start, &row, params)? {
-            let mut next_row = row.clone();
+            let mut next_row = clone_row(&row, "expanding MATCH patterns")?;
             if let Some(var) = &pattern.start.variable {
-                next_row.insert(var.clone(), Bound::Node(start.clone()));
+                next_row.insert(
+                    var.clone(),
+                    Bound::Node(clone_node(&start, "binding MATCH start nodes")?),
+                );
             }
             let acc_nodes = if path_var.is_some() {
-                vec![start.clone()]
+                vec![clone_node(&start, "starting path-node accumulation")?]
             } else {
                 Vec::new()
             };
@@ -1448,17 +1664,26 @@ fn expand_shortest(
                     ShortestKind::All => edge_lists.iter().collect(),
                 };
                 for edges in picked {
-                    let mut next_row = row.clone();
+                    let mut next_row = clone_row(&row, "producing shortest-path rows")?;
                     if let Some(var) = &pattern.start.variable {
-                        next_row.insert(var.clone(), Bound::Node(start.clone()));
+                        next_row.insert(
+                            var.clone(),
+                            Bound::Node(clone_node(&start, "binding shortest-path start nodes")?),
+                        );
                     }
                     if let Some(var) = &segment.node.variable {
-                        next_row.insert(var.clone(), Bound::Node(end_node.clone()));
+                        next_row.insert(
+                            var.clone(),
+                            Bound::Node(clone_node(end_node, "binding shortest-path end nodes")?),
+                        );
                     }
                     if let Some(var) = &rel.variable {
                         let mut arr = Vec::with_capacity(edges.len());
                         for edge in edges {
-                            arr.push(value_to_json(&graph_edge_value(edge)?));
+                            arr.push(materialize_edge_json(
+                                edge,
+                                "materializing shortest-path relationships",
+                            )?);
                         }
                         next_row.insert(
                             var.clone(),
@@ -1469,6 +1694,7 @@ fn expand_shortest(
                         let nodes = walk_path_nodes(graph, index, &start, edges, rel.direction)?;
                         next_row.insert(path_var.clone(), Bound::Value(path_value(&nodes, edges)?));
                     }
+                    read_budget::charge_candidate_work(1, "producing shortest-path rows")?;
                     out.push(next_row);
                 }
             }
@@ -1485,16 +1711,16 @@ fn walk_path_nodes(
     edges: &[Edge],
     direction: ast::Direction,
 ) -> Result<Vec<Node>> {
-    let mut nodes = vec![start.clone()];
-    let mut current = start.clone();
+    let mut nodes = vec![clone_node(start, "reconstructing shortest-path nodes")?];
+    let mut current = clone_node(start, "tracking shortest-path endpoints")?;
     for edge in edges {
         let next_id = edge_other_endpoint(edge, &current, direction)
             .ok_or_else(|| gql_execution("shortest path edge does not connect to the path"))?;
         let next = index
             .get(graph, next_id)
             .ok_or_else(|| gql_execution("shortest path endpoint node not found"))?;
-        nodes.push(next.clone());
-        current = next.clone();
+        nodes.push(clone_node(next, "reconstructing shortest-path nodes")?);
+        current = clone_node(next, "tracking shortest-path endpoints")?;
     }
     Ok(nodes)
 }
@@ -1502,6 +1728,16 @@ fn walk_path_nodes(
 /// A bound first-class path value. `Value::to_json` preserves the historical
 /// `{ "nodes": [...], "relationships": [...] }` serialization shape.
 fn path_value(nodes: &[Node], edges: &[Edge]) -> Result<Value> {
+    charge_intermediate_copy("materializing path values", || {
+        nodes
+            .iter()
+            .fold(0usize, |bytes, node| {
+                bytes.saturating_add(read_budget::node_copy_bytes(node))
+            })
+            .saturating_add(edges.iter().fold(0usize, |bytes, edge| {
+                bytes.saturating_add(read_budget::edge_copy_bytes(edge))
+            }))
+    })?;
     Ok(Value::Path(PathValue::from_graph_parts(nodes, edges)))
 }
 
@@ -1527,6 +1763,7 @@ fn expand_segments(
                 Bound::Value(path_value(&acc_nodes, &acc_edges)?),
             );
         }
+        read_budget::charge_candidate_work(1, "producing MATCH rows")?;
         out.push(row);
         return Ok(());
     }
@@ -1564,11 +1801,14 @@ fn expand_segments(
             {
                 continue;
             }
-            let mut next_row = row.clone();
+            let mut next_row = clone_row(&row, "expanding variable-length paths")?;
             if let Some(var) = &rel.variable {
                 let mut arr = Vec::with_capacity(edges.len());
                 for edge in &edges {
-                    arr.push(value_to_json(&graph_edge_value(edge)?));
+                    arr.push(materialize_edge_json(
+                        edge,
+                        "materializing variable-length relationships",
+                    )?);
                 }
                 next_row.insert(
                     var.clone(),
@@ -1576,7 +1816,13 @@ fn expand_segments(
                 );
             }
             if let Some(var) = &segment.node.variable {
-                next_row.insert(var.clone(), Bound::Node(end_node.clone()));
+                next_row.insert(
+                    var.clone(),
+                    Bound::Node(clone_node(
+                        &end_node,
+                        "binding variable-length path endpoints",
+                    )?),
+                );
             }
             // path_var is guaranteed None here (rejected with variable-length).
             expand_segments(
@@ -1588,8 +1834,8 @@ fn expand_segments(
                 next_row,
                 params,
                 path_var,
-                acc_nodes.clone(),
-                acc_edges.clone(),
+                clone_nodes(&acc_nodes, "carrying path-node accumulators")?,
+                clone_edges(&acc_edges, "carrying path-edge accumulators")?,
                 out,
             )?;
         }
@@ -1636,6 +1882,7 @@ fn expand_fixed_edges<'a>(
     let segment = &segments[idx];
     let rel = &segment.relationship;
     for edge in edges {
+        read_budget::charge_candidate_work(1, "scanning relationship candidates")?;
         let Some(next_id) = edge_other_endpoint(edge, current, rel.direction) else {
             continue;
         };
@@ -1658,18 +1905,24 @@ fn expand_fixed_edges<'a>(
         {
             continue;
         }
-        let mut next_row = row.clone();
+        let mut next_row = clone_row(row, "expanding fixed relationship segments")?;
         if let Some(var) = &rel.variable {
-            next_row.insert(var.clone(), Bound::Edge(edge.clone()));
+            next_row.insert(
+                var.clone(),
+                Bound::Edge(clone_edge(edge, "binding matched relationships")?),
+            );
         }
         if let Some(var) = &segment.node.variable {
-            next_row.insert(var.clone(), Bound::Node(next_node.clone()));
+            next_row.insert(
+                var.clone(),
+                Bound::Node(clone_node(next_node, "binding matched nodes")?),
+            );
         }
         let (na, ea) = if path_var.is_some() {
-            let mut na = acc_nodes.to_vec();
-            na.push(next_node.clone());
-            let mut ea = acc_edges.to_vec();
-            ea.push(edge.clone());
+            let mut na = clone_nodes(acc_nodes, "carrying path-node accumulators")?;
+            na.push(clone_node(next_node, "extending path-node accumulators")?);
+            let mut ea = clone_edges(acc_edges, "carrying path-edge accumulators")?;
+            ea.push(clone_edge(edge, "extending path-edge accumulators")?);
             (na, ea)
         } else {
             (Vec::new(), Vec::new())
@@ -1709,7 +1962,11 @@ fn collect_var_length_paths(
 ) -> Result<()> {
     let depth = edges_so_far.len();
     if depth >= min {
-        results.push((node.clone(), edges_so_far.clone()));
+        read_budget::charge_candidate_work(1, "collecting variable-length paths")?;
+        results.push((
+            clone_node(node, "collecting variable-length path endpoints")?,
+            clone_edges(edges_so_far, "collecting variable-length path edges")?,
+        ));
     }
     if max.is_some_and(|m| depth >= m) {
         return Ok(());
@@ -1759,6 +2016,7 @@ fn collect_var_length_edges<'a>(
     results: &mut Vec<(Node, Vec<Edge>)>,
 ) -> Result<()> {
     for edge in edges {
+        read_budget::charge_candidate_work(1, "searching variable-length paths")?;
         let Some(next_id) = edge_other_endpoint(edge, node, rel.direction) else {
             continue;
         };
@@ -1774,7 +2032,7 @@ fn collect_var_length_edges<'a>(
         let Some(next_node) = index.get(graph, next_id) else {
             continue;
         };
-        edges_so_far.push(edge.clone());
+        edges_so_far.push(clone_edge(edge, "searching variable-length paths")?);
         visited.insert(next_id.to_string());
         collect_var_length_paths(
             graph,
@@ -1829,16 +2087,18 @@ fn node_candidates(
     if let Some(var) = &np.variable
         && let Some(Bound::Node(bound)) = row.get(var)
     {
+        read_budget::charge_candidate_work(1, "checking a bound node candidate")?;
         return Ok(if node_matches(bound, np, params)? {
-            vec![bound.clone()]
+            vec![clone_node(bound, "retaining bound node candidates")?]
         } else {
             vec![]
         });
     }
     let mut out = Vec::new();
     for node in &graph.nodes {
+        read_budget::charge_candidate_work(1, "scanning node candidates")?;
         if node_matches(node, np, params)? {
-            out.push(node.clone());
+            out.push(clone_node(node, "collecting matched node candidates")?);
         }
     }
     Ok(out)
@@ -1926,6 +2186,7 @@ fn project(
     } else {
         let mut rs = Vec::with_capacity(rows.len());
         for row in rows {
+            read_budget::charge_candidate_work(1, "projecting RETURN rows")?;
             let mut values = Vec::with_capacity(exprs.len());
             for expr in &exprs {
                 values.push(eval(expr, row, params)?);
@@ -2044,19 +2305,25 @@ fn grouped_project(
     let mut order: Vec<String> = Vec::new();
     let mut groups: HashMap<String, (Vec<Value>, Vec<&Row>)> = HashMap::new();
     for row in rows {
+        read_budget::charge_candidate_work(1, "grouping RETURN rows")?;
         let key_values: Vec<Value> = key_exprs
             .iter()
             .map(|e| eval(e, row, params))
             .collect::<Result<_>>()?;
         let key = return_row_key(&key_values, "GROUP BY")?;
-        groups
-            .entry(key.clone())
-            .or_insert_with(|| {
-                order.push(key);
-                (key_values, Vec::new())
-            })
-            .1
-            .push(row);
+        match groups.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                entry.get_mut().1.push(row);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                read_budget::charge_intermediate_bytes(
+                    entry.key().len(),
+                    "recording RETURN grouping order",
+                )?;
+                order.push(entry.key().clone());
+                entry.insert((key_values, vec![row]));
+            }
+        }
     }
 
     // A pure aggregate with no grouping keys yields exactly one row even over an
@@ -2068,15 +2335,18 @@ fn grouped_project(
 
     let mut out_rows = Vec::with_capacity(order.len());
     for key in &order {
-        let (key_values, group_rows) = &groups[key];
-        let mut key_iter = key_values.iter();
+        let (key_values, group_rows) = groups
+            .remove(key)
+            .expect("RETURN grouping order references an existing group");
+        let mut key_iter = key_values.into_iter();
         let mut values = Vec::with_capacity(kinds.len());
         for kind in &kinds {
             match kind {
-                Kind::Key(_) => values.push(key_iter.next().cloned().unwrap_or(Value::Null)),
-                Kind::Aggregate(expr) => values.push(eval_aggregate(expr, group_rows, params)?),
+                Kind::Key(_) => values.push(key_iter.next().unwrap_or(Value::Null)),
+                Kind::Aggregate(expr) => values.push(eval_aggregate(expr, &group_rows, params)?),
             }
         }
+        read_budget::charge_candidate_work(1, "producing grouped RETURN rows")?;
         out_rows.push(values);
     }
     Ok(out_rows)
@@ -2095,7 +2365,11 @@ fn eval_aggregate(expr: &Expr, group_rows: &[&Row], params: &CypherParameters) -
     let name = name.to_ascii_lowercase();
 
     if name == "count" && *star {
-        return count_value(group_rows.len());
+        let value = count_value(group_rows.len())?;
+        charge_intermediate_copy("materializing aggregate results", || {
+            read_budget::value_copy_bytes(&value)
+        })?;
+        return Ok(value);
     }
     if args.len() != 1 {
         return Err(gql_type(format!(
@@ -2115,12 +2389,18 @@ fn eval_aggregate(expr: &Expr, group_rows: &[&Row], params: &CypherParameters) -
         values = distinct_return_values(values)?;
     }
 
-    match name.as_str() {
+    let value = match name.as_str() {
         "count" => count_value(values.len()),
         "sum" => sum_return_values(&values),
         "avg" => avg_return_values(&values),
         "collect" => {
-            let json: Vec<serde_json::Value> = values.iter().map(value_to_json).collect();
+            read_budget::check_intermediate_bytes_available(
+                values
+                    .len()
+                    .saturating_mul(std::mem::size_of::<serde_json::Value>()),
+                "materializing collect()",
+            )?;
+            let json: Vec<serde_json::Value> = values.into_iter().map(value_into_json).collect();
             Ok(Value::Json(serde_json::Value::Array(json)))
         }
         "min" | "max" => {
@@ -2139,7 +2419,11 @@ fn eval_aggregate(expr: &Expr, group_rows: &[&Row], params: &CypherParameters) -
             Ok(best.unwrap_or(Value::Null))
         }
         _ => unreachable!("is_aggregate_name gates the set"),
-    }
+    }?;
+    charge_intermediate_copy("materializing aggregate results", || {
+        read_budget::value_copy_bytes(&value)
+    })?;
+    Ok(value)
 }
 
 /// ORDER BY for the aggregate path: keys must reference output columns by name.
@@ -2230,7 +2514,7 @@ fn order_after_distinct(
 }
 
 fn apply_order_by(
-    out_rows: &mut [Vec<Value>],
+    out_rows: &mut Vec<Vec<Value>>,
     order_by: &[OrderItem],
     rows: &[Row],
     aliases: &HashMap<String, Expr>,
@@ -2270,8 +2554,20 @@ fn apply_order_by(
         }
         std::cmp::Ordering::Equal
     });
-    let reordered: Vec<Vec<Value>> = order.iter().map(|&i| out_rows[i].clone()).collect();
-    out_rows.clone_from_slice(&reordered);
+    read_budget::charge_intermediate_bytes(
+        out_rows
+            .len()
+            .saturating_mul(std::mem::size_of::<Vec<Value>>()),
+        "reordering RETURN rows",
+    )?;
+    let mut original = std::mem::take(out_rows)
+        .into_iter()
+        .map(Some)
+        .collect::<Vec<_>>();
+    *out_rows = order
+        .into_iter()
+        .map(|index| original[index].take().expect("ORDER BY index is unique"))
+        .collect();
     Ok(())
 }
 
@@ -2320,27 +2616,26 @@ fn eval_usize(expr: &Expr, params: &CypherParameters, what: &str) -> Result<usiz
 }
 
 fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
-    match expr {
+    read_budget::checkpoint()?;
+    let value = match expr {
         Expr::Null => Ok(Value::Null),
         Expr::Boolean(b) => Ok(Value::Bool(*b)),
         Expr::Integer(n) => Ok(Value::Int(*n)),
         Expr::Float(f) => Ok(Value::Float(*f)),
         Expr::String(s) => Ok(Value::String(s.clone())),
-        Expr::Parameter(name) => params
-            .get(name)
-            .cloned()
-            .ok_or_else(|| gql_name(format!("parameter ${name} was not provided"))),
-        Expr::Variable(name) => match row.get(name) {
-            Some(Bound::Node(node)) => graph_node_value(node),
-            Some(Bound::Edge(edge)) => graph_edge_value(edge),
-            Some(Bound::Value(value)) => Ok(value.clone()),
-            None => Err(gql_name(format!("variable `{name}` is not bound"))),
+        Expr::Parameter(name) => match params.get(name) {
+            Some(value) => clone_value(value, "reading query parameters"),
+            None => Err(gql_name(format!("parameter ${name} was not provided"))),
         },
+        Expr::Variable(name) => row
+            .get(name)
+            .ok_or_else(|| gql_name(format!("variable `{name}` is not bound")))
+            .and_then(bound_value),
         Expr::Property { base, key } => eval_property(base, key, row, params),
         Expr::List(items) => {
             let mut out = Vec::new();
             for item in items {
-                out.push(value_to_json(&eval(item, row, params)?));
+                out.push(value_into_json(eval(item, row, params)?));
             }
             Ok(Value::Json(serde_json::Value::Array(out)))
         }
@@ -2384,7 +2679,7 @@ fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
         Expr::Map(entries) => {
             let mut out = serde_json::Map::new();
             for (key, expr) in entries {
-                out.insert(key.clone(), value_to_json(&eval(expr, row, params)?));
+                out.insert(key.clone(), value_into_json(eval(expr, row, params)?));
             }
             Ok(Value::Json(serde_json::Value::Object(out)))
         }
@@ -2393,35 +2688,43 @@ fn eval(expr: &Expr, row: &Row, params: &CypherParameters) -> Result<Value> {
             let index = eval(index, row, params)?;
             eval_index(base, index)
         }
-    }
+    }?;
+    charge_intermediate_copy("materializing expression results", || {
+        read_budget::value_copy_bytes(&value)
+    })?;
+    Ok(value)
 }
 
 /// `base[index]`: list indexing (0-based, negative counts from the end, out of
 /// range → NULL) and map key lookup (missing key → NULL). NULL base or index
 /// propagates NULL.
 fn eval_index(base: Value, index: Value) -> Result<Value> {
-    match (&base, &index) {
+    match (base, index) {
         (Value::Null, _) | (_, Value::Null) => Ok(Value::Null),
-        (Value::Json(serde_json::Value::Object(map)), Value::String(key)) => {
-            Ok(map.get(key).map(json_to_value).unwrap_or(Value::Null))
-        }
+        (Value::Json(serde_json::Value::Object(mut map)), Value::String(key)) => Ok(map
+            .remove(&key)
+            .map(Value::from_json)
+            .unwrap_or(Value::Null)),
         (
-            Value::StringArray(_)
+            base @ (Value::StringArray(_)
             | Value::IntArray(_)
             | Value::FloatArray(_)
-            | Value::Json(serde_json::Value::Array(_)),
+            | Value::Json(serde_json::Value::Array(_))),
             Value::Int(i),
         ) => {
-            let items = list_elements(base.clone());
+            let items = list_elements(base);
             let len = items.len() as i64;
-            let idx = if *i < 0 { i + len } else { *i };
+            let idx = if i < 0 { i + len } else { i };
             if idx < 0 || idx >= len {
                 Ok(Value::Null)
             } else {
-                Ok(items[idx as usize].clone())
+                Ok(items
+                    .into_iter()
+                    .nth(idx as usize)
+                    .expect("list index was bounds checked"))
             }
         }
-        _ => Err(gql_type(format!(
+        (base, index) => Err(gql_type(format!(
             "indexing expects list[integer] or map[string], got {base:?}[{index:?}]"
         ))),
     }
@@ -2433,7 +2736,9 @@ fn list_elements(value: Value) -> Vec<Value> {
         Value::StringArray(xs) => xs.into_iter().map(Value::String).collect(),
         Value::IntArray(xs) => xs.into_iter().map(Value::Int).collect(),
         Value::FloatArray(xs) => xs.into_iter().map(Value::Float).collect(),
-        Value::Json(serde_json::Value::Array(arr)) => arr.iter().map(json_to_value).collect(),
+        Value::Json(serde_json::Value::Array(arr)) => {
+            arr.into_iter().map(Value::from_json).collect()
+        }
         _ => Vec::new(),
     }
 }
@@ -2461,18 +2766,33 @@ fn eval_range(args: &[Expr], row: &Row, params: &CypherParameters) -> Result<Val
     if step == 0 {
         return Err(gql_execution("range() step must not be zero"));
     }
-    let mut out = Vec::new();
-    let mut i = start;
-    if step > 0 {
-        while i <= end {
-            out.push(i);
-            i += step;
-        }
+    let progresses = (step > 0 && start <= end) || (step < 0 && start >= end);
+    if !progresses {
+        return Ok(Value::IntArray(Vec::new()));
+    }
+
+    // Widen before subtraction/multiplication so both i64 extrema and a step
+    // of i64::MIN are handled without debug panics or release-mode wrapping.
+    let distance = if step > 0 {
+        i128::from(end) - i128::from(start)
     } else {
-        while i >= end {
-            out.push(i);
-            i += step;
-        }
+        i128::from(start) - i128::from(end)
+    };
+    let step_magnitude = i128::from(step).abs();
+    let count_i128 = distance / step_magnitude + 1;
+    let count = usize::try_from(count_i128).unwrap_or(usize::MAX);
+    read_budget::check_range_items(count)?;
+    read_budget::check_intermediate_bytes_available(
+        count.saturating_mul(std::mem::size_of::<i64>()),
+        "allocating range()",
+    )?;
+
+    let mut out = Vec::with_capacity(count);
+    for offset in 0..count {
+        let value = i128::from(start) + i128::from(step) * offset as i128;
+        let value = i64::try_from(value)
+            .map_err(|_| gql_execution("range() value exceeded the integer domain"))?;
+        out.push(value);
     }
     Ok(Value::IntArray(out))
 }
@@ -2515,14 +2835,20 @@ fn eval_element_function(
     // Fallback: evaluate to the element's JSON and read its fields.
     match eval(arg, row, params)? {
         Value::Null => Ok(Value::Null),
-        Value::Json(serde_json::Value::Object(map)) => match name {
+        Value::Json(serde_json::Value::Object(mut map)) => match name {
             "labels" => Ok(map
                 .get("label")
                 .and_then(|v| v.as_str())
                 .map(|s| Value::StringArray(vec![s.to_string()]))
                 .unwrap_or(Value::Null)),
-            "type" => Ok(map.get("label").map(json_to_value).unwrap_or(Value::Null)),
-            "id" => Ok(map.get("id").map(json_to_value).unwrap_or(Value::Null)),
+            "type" => Ok(map
+                .remove("label")
+                .map(Value::from_json)
+                .unwrap_or(Value::Null)),
+            "id" => Ok(map
+                .remove("id")
+                .map(Value::from_json)
+                .unwrap_or(Value::Null)),
             _ => Err(gql_type(format!("{name}() expects a node or relationship"))),
         },
         other => Err(gql_type(format!(
@@ -2712,8 +3038,14 @@ fn eval_scalar_function(
         },
         "nodes" => path_component(value, "nodes"),
         "relationships" | "rels" => path_component(value, "relationships"),
-        "head" => Ok(list_elements(value).first().cloned().unwrap_or(Value::Null)),
-        "last" => Ok(list_elements(value).last().cloned().unwrap_or(Value::Null)),
+        "head" => Ok(list_elements(value)
+            .into_iter()
+            .next()
+            .unwrap_or(Value::Null)),
+        "last" => Ok(list_elements(value)
+            .into_iter()
+            .last()
+            .unwrap_or(Value::Null)),
         "isempty" => restricted_is_empty_value(value),
         // Temporal/decimal constructors (Unit T). `duration` takes an ISO 8601
         // string; `decimal` accepts a numeral string or coerces an int/float.
@@ -2756,19 +3088,33 @@ fn unary_float_fn(value: Value, name: &str, f: fn(f64) -> f64) -> Result<Value> 
 fn eval_property(base: &Expr, key: &str, row: &Row, params: &CypherParameters) -> Result<Value> {
     if let Expr::Variable(name) = base {
         return match row.get(name) {
-            Some(Bound::Node(node)) => Ok(project_node_value(node, key)),
-            Some(Bound::Edge(edge)) => Ok(project_edge_value(edge, key)),
-            Some(Bound::Value(Value::Json(serde_json::Value::Object(map)))) => {
-                Ok(map.get(key).map(json_to_value).unwrap_or(Value::Null))
+            Some(Bound::Node(node)) if key == "label" => {
+                read_budget::charge_intermediate_bytes(
+                    node.label.as_str().len(),
+                    "projecting node labels",
+                )?;
+                Ok(Value::from(node.label.as_str()))
             }
+            Some(Bound::Node(node)) => match node.props.get(key) {
+                Some(value) => clone_value(value, "projecting node properties"),
+                None => Ok(Value::Null),
+            },
+            Some(Bound::Edge(edge)) => match edge.props.get(key) {
+                Some(value) => clone_value(value, "projecting relationship properties"),
+                None => Ok(Value::Null),
+            },
+            Some(Bound::Value(Value::Json(serde_json::Value::Object(map)))) => match map.get(key) {
+                Some(value) => clone_json_value(value, "projecting map properties"),
+                None => Ok(Value::Null),
+            },
             Some(Bound::Value(_)) => Ok(Value::Null),
             None => Err(gql_name(format!("variable `{name}` is not bound"))),
         };
     }
     // Nested access: evaluate the base to a JSON object and index it.
     match eval(base, row, params)? {
-        Value::Json(serde_json::Value::Object(map)) => {
-            Ok(map.get(key).map(json_to_value).unwrap_or(Value::Null))
+        Value::Json(serde_json::Value::Object(mut map)) => {
+            Ok(map.remove(key).map(Value::from_json).unwrap_or(Value::Null))
         }
         _ => Ok(Value::Null),
     }
@@ -2899,7 +3245,9 @@ fn membership(a: &Value, list_expr: &Expr, row: &Row, params: &CypherParameters)
             Value::StringArray(xs) => xs.into_iter().map(Value::String).collect(),
             Value::IntArray(xs) => xs.into_iter().map(Value::Int).collect(),
             Value::FloatArray(xs) => xs.into_iter().map(Value::Float).collect(),
-            Value::Json(serde_json::Value::Array(arr)) => arr.iter().map(json_to_value).collect(),
+            Value::Json(serde_json::Value::Array(arr)) => {
+                arr.into_iter().map(Value::from_json).collect()
+            }
             Value::Null => return Ok(Value::Null),
             other => return Err(gql_type(format!("IN expects a list, got {other:?}"))),
         },
@@ -3086,11 +3434,35 @@ fn value_to_json(value: &Value) -> serde_json::Value {
     value.to_json()
 }
 
-fn json_to_value(json: &serde_json::Value) -> Value {
-    // `from_json` inverts the adjacently-tagged encoding that `value_to_json`
-    // produces (and falls back to a plain mapping for untagged JSON), so values
-    // round-trip losslessly through list/collect/path materialization.
-    Value::from_json(json.clone())
+fn value_into_json(value: Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(value) => serde_json::Value::Bool(value),
+        Value::Int(value) => serde_json::Value::from(value),
+        Value::Float(value) => serde_json::Value::from(value),
+        Value::String(value) => serde_json::Value::String(value),
+        Value::DateTime(value) => serde_json::Value::String(value.as_str().to_string()),
+        Value::Decimal(value) => serde_json::Value::String(value.to_canonical_string()),
+        Value::Duration(value) => serde_json::Value::String(value.to_iso_string()),
+        Value::StringArray(values) => serde_json::Value::from(values),
+        Value::IntArray(values) => serde_json::Value::from(values),
+        Value::FloatArray(values) => serde_json::Value::from(values),
+        Value::Path(path) => serde_json::Value::Object(serde_json::Map::from_iter([
+            ("nodes".to_string(), serde_json::Value::Array(path.nodes)),
+            (
+                "relationships".to_string(),
+                serde_json::Value::Array(path.relationships),
+            ),
+        ])),
+        Value::Graph(graph) => serde_json::Value::Object(serde_json::Map::from_iter([
+            ("nodes".to_string(), serde_json::Value::Array(graph.nodes)),
+            (
+                "relationships".to_string(),
+                serde_json::Value::Array(graph.relationships),
+            ),
+        ])),
+        Value::Json(value) => value,
+    }
 }
 
 #[cfg(test)]
@@ -3939,6 +4311,27 @@ mod tests {
                 vec![Value::Int(3)]
             ]
         );
+    }
+
+    #[test]
+    fn scalar_range_handles_integer_max_without_overflow() {
+        let t =
+            run("MATCH (n:City) RETURN range(9223372036854775806, 9223372036854775807) AS values");
+        assert_eq!(
+            t.rows,
+            vec![vec![Value::IntArray(vec![i64::MAX - 1, i64::MAX])]]
+        );
+    }
+
+    #[test]
+    fn scalar_range_rejects_unbounded_allocation_without_a_policy() {
+        let error = run_read_query(
+            &graph(),
+            "MATCH (n:City) RETURN range(0, 9223372036854775807) AS values",
+            &CypherParameters::new(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("executor maximum"));
     }
 
     #[test]

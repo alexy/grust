@@ -14,6 +14,11 @@ if [[ -f "$CONFIG" ]]; then
   source "$CONFIG"
 fi
 
+# Keep the pgGraph readiness helpers safe even when a caller supplies a
+# minimal alternate config instead of the repository default.
+PGGRAPH_HOST="${PGGRAPH_HOST:-127.0.0.1}"
+PGGRAPH_PORT="${PGGRAPH_PORT:-55432}"
+
 BACKENDS=()
 NO_START=0
 KEEP_RUNNING=0

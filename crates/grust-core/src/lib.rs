@@ -628,7 +628,7 @@ fn graph_node_key(node: &serde_json::Value) -> String {
 /// otherwise the `(from, label, to)` endpoint triple.
 fn graph_relationship_key(edge: &serde_json::Value) -> String {
     if let Some(id) = edge.get("id").and_then(|id| id.as_str()) {
-        return format!("id:{id}");
+        return format!("id:{}:{id}", id.len());
     }
     let field = |key: &str| {
         edge.get(key)
@@ -636,7 +636,15 @@ fn graph_relationship_key(edge: &serde_json::Value) -> String {
             .unwrap_or_default()
             .to_string()
     };
-    format!("{}|{}|{}", field("from"), field("label"), field("to"))
+    let from = field("from");
+    let label = field("label");
+    let to = field("to");
+    format!(
+        "struct:{}:{from}{}:{label}{}:{to}",
+        from.len(),
+        label.len(),
+        to.len()
+    )
 }
 
 fn dedup_graph_elements(
@@ -1474,6 +1482,36 @@ pub fn schema_identifier(value: &str) -> Result<String> {
     Ok(identifier)
 }
 
+/// Rejects multiple schema-object claims for the same backend name.
+///
+/// Backends pass `(namespace, physical_identifier, logical_description)`
+/// triples after applying their own identifier and name-composition rules.
+/// Names may repeat across different namespaces (for example, a node table and
+/// an edge table), but every claim in one physical namespace must be unique.
+/// Callers validating graph instances should deduplicate intentional references
+/// to one already-declared object before invoking this schema-oriented helper.
+pub fn validate_physical_identifier_claims<I, N, P, L>(backend: &str, claims: I) -> Result<()>
+where
+    I: IntoIterator<Item = (N, P, L)>,
+    N: Into<String>,
+    P: Into<String>,
+    L: Into<String>,
+{
+    let mut claimed = std::collections::BTreeMap::new();
+    for (namespace, physical, logical) in claims {
+        let namespace = namespace.into();
+        let physical = physical.into();
+        let logical = logical.into();
+        let key = (namespace.clone(), physical.clone());
+        if let Some(existing) = claimed.insert(key, logical.clone()) {
+            return Err(GrustError::Schema(format!(
+                "{backend} schema objects '{existing}' and '{logical}' both resolve to {namespace} identifier '{physical}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Returns the stable key used by tabular/export backends for an edge.
 ///
 /// Explicit edge IDs win. Otherwise the structural key joins `from`, `label`,
@@ -1498,6 +1536,47 @@ pub fn edge_key(edge: &Edge) -> String {
         })
 }
 
+/// Validates that an edge can use the stable [`edge_key`] encoding safely.
+///
+/// The persisted compatibility encoding reserves U+001F (Unit Separator) as
+/// its structural delimiter. Backends and adapters that materialize an
+/// `edge_key` as identity must call this before using the key; otherwise two
+/// distinct structural edges can encode to the same string. Explicit IDs share
+/// the same key namespace, so they must not contain the delimiter either.
+pub fn validate_edge_key_components(edge: &Edge) -> Result<()> {
+    const EDGE_KEY_SEPARATOR: char = '\u{1f}';
+
+    for (component, value) in [
+        ("source node id", edge.from.as_str()),
+        ("relationship label", edge.label.as_str()),
+        ("target node id", edge.to.as_str()),
+    ] {
+        if value.contains(EDGE_KEY_SEPARATOR) {
+            return Err(GrustError::Schema(format!(
+                "edge {component} contains reserved U+001F used by the stable edge-key encoding"
+            )));
+        }
+    }
+    if edge
+        .id
+        .as_ref()
+        .is_some_and(|id| id.as_str().contains(EDGE_KEY_SEPARATOR))
+    {
+        return Err(GrustError::Schema(
+            "explicit edge id contains reserved U+001F used by the stable edge-key encoding"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Returns [`edge_key`] after verifying that its delimiter-based encoding is
+/// unambiguous for this edge.
+pub fn checked_edge_key(edge: &Edge) -> Result<String> {
+    validate_edge_key_components(edge)?;
+    Ok(edge_key(edge))
+}
+
 /// Tests whether `key` is the stable key for `edge` without materializing an
 /// intermediate [`String`].
 pub fn edge_key_matches(edge: &Edge, key: &str) -> bool {
@@ -1511,13 +1590,28 @@ pub fn edge_key_matches(edge: &Edge, key: &str) -> bool {
         .is_some_and(|rest| rest == edge.to.as_str())
 }
 
-/// Tests whether two edges have the same stable [`edge_key`] without
-/// allocating either key.
+/// Tests whether two edges have the same stable [`edge_key`] and structural
+/// owner without allocating either key.
+///
+/// The structural-owner check on mixed explicit/idless pairs prevents a
+/// legacy explicit ID that merely resembles another edge's structural key
+/// from aliasing that unrelated edge. It still recognizes backends that
+/// materialize an idless edge's structural key as its stored explicit ID.
 pub fn edge_keys_equal(left: &Edge, right: &Edge) -> bool {
     match (&left.id, &right.id) {
         (Some(left), Some(right)) => left == right,
-        (Some(left), None) => edge_key_matches(right, left.as_str()),
-        (None, Some(right)) => edge_key_matches(left, right.as_str()),
+        (Some(left_id), None) => {
+            left.from == right.from
+                && left.label == right.label
+                && left.to == right.to
+                && edge_key_matches(right, left_id.as_str())
+        }
+        (None, Some(right_id)) => {
+            left.from == right.from
+                && left.label == right.label
+                && left.to == right.to
+                && edge_key_matches(left, right_id.as_str())
+        }
         (None, None) => left.from == right.from && left.label == right.label && left.to == right.to,
     }
 }
@@ -4154,9 +4248,10 @@ pub mod prelude {
         GraphRelationshipMatch, GraphRowEdgeIdPolicy, GraphSchema, GraphSchemaBuilder, GraphStore,
         GraphValue, GraphWriteCorrelation, GrustError, GuardedGraphCommit, Label, LoadReport, Node,
         NodeId, NodeType, PathValue, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal,
-        Value, classify_edge_upsert, classify_node_upsert, edge_key, edge_key_matches,
-        edge_keys_equal, evaluate_numeric_update, generated_row_edge_id, relationship_type,
-        schema_identifier,
+        Value, checked_edge_key, classify_edge_upsert, classify_node_upsert, edge_key,
+        edge_key_matches, edge_keys_equal, evaluate_numeric_update, generated_row_edge_id,
+        relationship_type, schema_identifier, validate_edge_key_components,
+        validate_physical_identifier_claims,
     };
 
     #[cfg(feature = "typed-garde")]

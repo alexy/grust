@@ -3,8 +3,13 @@
 Status: durable memory v1 is consumed by qg-rust. The generic governed
 cognition substrate is implemented in Grust, uses an exact reachable TypeSec
 revision rather than a sibling checkout, and passed its focused live Sail
-integration gate on 2026-08-06; standalone Marciana orchestration and a
-clean-clone qg-rust release cutover remain pending.
+integration gate on 2026-08-06. Per-record relationship assertion nodes now
+preserve same-endpoint fact lineage while retaining legacy direct-edge read
+compatibility. Transactional stores atomically delete the assertion and legacy
+elements found by tombstone preflight with the selected record; discovery
+occurs before that batch, so callers must synchronize concurrent link and
+tombstone operations. Standalone Marciana orchestration and a clean-clone
+qg-rust release cutover remain pending.
 
 This document is the Grust-side source of truth for `querygraph-memory`. It
 separates the TypeSec storage contract and delivered application wiring from
@@ -36,6 +41,7 @@ batch size, or journal mode explicitly.
 | TypeSec `MemoryStore` compatibility | Complete | Full versioned TypeSec conformance corpus, including graph reachability |
 | Durable local persistence | Complete | File-backed Turso close/reopen integration test |
 | Database initialization | Complete | `TursoMemoryStore` creates parent directories, connects, and calls Grust `bootstrap` before returning |
+| Relationship assertion lineage | Complete with caller synchronization | Hash-stable per-record `MemoryRelation` nodes preserve duplicate endpoint/name assertions; neighborhood reads accept the legacy direct-edge shape. A transactional tombstone atomically deletes the record and the assertion/legacy elements discovered by preflight, but callers must synchronize concurrent links because discovery precedes the mutation batch. |
 | Transactional consolidation | Complete on Turso | Turso reports `Transactional`; supersede-and-replace persists as one mutation batch |
 | Sync/async bridge | Complete for v1 | Dedicated runtime has I/O/time drivers; nested-runtime calls and async-context drop are tested |
 | Tenant authorization | Complete at the vault boundary | One shared store/two vaults test proves capabilities cannot cross spaces |
@@ -105,10 +111,10 @@ pushdown.
   physical per-tenant graph partitioning. Global entity nodes can cause a
   neighborhood traversal to discover record IDs from several spaces; the
   vault rejects records outside the authorized space before revealing them.
-- Grust's universal edge identity is `(from, label, to)`. Repeated facts with
-  the same endpoints and label cannot yet retain distinct relationship
-  lineage merely by changing `fact_id`. Full lineage needs assertion nodes or
-  a future multi-edge identity surface.
+- Tombstone discovery of assertion nodes and legacy fact edges precedes the
+  deletion batch. Transactional stores make deletion of that discovered set
+  atomic, but callers must synchronize concurrent link and tombstone operations
+  for the same record.
 - `TursoConfig::default()` uses `:memory:`. Durable applications should use
   `TursoMemoryStore::open(path)` or pass a file path to `open_with_config`.
 
@@ -133,9 +139,7 @@ These are useful scale improvements, not blockers for the durable v1 contract:
    ordering, and limit predicates without changing `StoreQuery::matches`
    semantics. Space pushdown already prevents a scoped query from scanning
    other spaces.
-3. **Lineage model:** preserve multiple assertions of the same relationship
-   and make tombstoning one fact leave other assertions intact.
-4. **Hosted service:** add operational tenancy, quotas, migrations, deletion
+3. **Hosted service:** add operational tenancy, quotas, migrations, deletion
    workflows, and service-level integration tests in the QueryGraph
    application. A vault-isolation test is not itself a hosted product.
 
@@ -148,7 +152,8 @@ baseline.
 
 ## Verification gate
 
-Run from the Grust repository root with the sibling TypeSec checkout present:
+Run from the Grust repository root. Cargo fetches the exact TypeSec Git revision
+recorded above; no sibling checkout is required:
 
 ```sh
 cargo fmt --check -p querygraph-memory

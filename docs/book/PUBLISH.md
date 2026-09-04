@@ -197,9 +197,11 @@ if any of these are wrong:
 - the packaged cover image is byte-identical to
   `../../cover/grust-cover.png`.
 - Pandoc did not leave an empty generated `title_page.xhtml`.
-- `grust (<version>).epub` exists as a symlink to `grust.epub`.
-- `VERSION.md` records the Kindle name, EPUB build date, stable EPUB filename,
-  and versioned symlink filename.
+- both `grust (<version>).epub` (the Kindle catalog link) and
+  `grust (<version>-<short-commit>).epub` (the provenance-stamped handoff link)
+  exist as symlinks to `grust.epub`.
+- `VERSION.md` records the Kindle name, EPUB build date, source commit, stable
+  EPUB filename, Kindle link, and provenance-stamped EPUB link.
 
 Do not bypass the checker for a release artifact. Fix the source, metadata,
 CSS, layout fixer, or build script instead.
@@ -217,7 +219,9 @@ PY
 unzip -p build/dist/grust.epub EPUB/content.opf | head -80
 unzip -p build/dist/grust.epub EPUB/nav.xhtml | head -80
 version="$(awk -F\" '/^version = / { print $2; exit }' ../../Cargo.toml)"
+version_stamp="$(awk -F': ' '$1 == "version_stamp" { print $2; exit }' build/dist/VERSION.md)"
 test "$(readlink "build/dist/grust (${version}).epub")" = "grust.epub"
+test "$(readlink "build/dist/grust (${version_stamp}).epub")" = "grust.epub"
 cat build/dist/VERSION.md
 ```
 
@@ -303,7 +307,7 @@ Grust already implements this shape:
   surfaces.
 - `docs/book/build.sh` reads `[workspace.package].version` from `Cargo.toml` and
   derives the Kindle library title as `<title_stem> (<version>)`, such as
-  `grust (0.10.0)` for the current workspace version.
+  `grust (0.13.0)` for the current workspace version.
 - The EPUB build uses `--epub-title-page=false` and the canonical PNG as its
   Pandoc cover image.
 - `docs/book/fix_epub_layout.sh` applies the same post-Pandoc layout repair
@@ -317,8 +321,8 @@ Grust already implements this shape:
   expects OPF `dc:title` and title sort metadata to be
   `grust (<version>)` while NCX/nav titles remain `Grust`.
 - The same checker verifies that `build/dist/VERSION.md` records the
-  Kindle/catalog name, EPUB build date, stable EPUB name, and versioned symlink,
-  and that the version-suffixed Send to Kindle path is a symlink to
+  Kindle/catalog name, EPUB build date, source commit, stable EPUB name, and
+  versioned symlink, and that the version-and-source-suffixed Send to Kindle path is a symlink to
   `grust.epub`.
 - The layout fix and check run immediately after `build/dist/grust.epub` is
   created and before `ebook-convert` creates `build/dist/grust.mobi`.

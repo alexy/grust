@@ -421,6 +421,15 @@ pub trait SqlDialect {
         true
     }
 
+    /// Encode an arbitrary text node-id expression as a delimiter-free token
+    /// for recursive-walk visited sets. Implementations should return a stable
+    /// ASCII encoding (hex is preferred), or `None` to gate recursive walk
+    /// pushdown off and preserve correctness for unrestricted
+    /// [`grust_core::NodeId`] values.
+    fn recursive_walk_id_token(&self, _expr: &str) -> Option<String> {
+        None
+    }
+
     /// Render "position of `needle` in `haystack`" (1-based, 0 when absent) —
     /// SQLite `instr`; PostgreSQL overrides with `position(… in …)`. Used by
     /// the recursive walk CTEs' visited-set membership check.
@@ -490,6 +499,9 @@ impl SqlDialect for SparkDialect {
         } else {
             "'false'".to_string()
         }
+    }
+    fn recursive_walk_id_token(&self, expr: &str) -> Option<String> {
+        Some(format!("hex(encode({expr}, 'UTF-8'))"))
     }
 }
 
@@ -561,6 +573,10 @@ impl SqlDialect for SqliteDialect {
 
     fn shortest_walk_supported(&self) -> bool {
         true
+    }
+
+    fn recursive_walk_id_token(&self, expr: &str) -> Option<String> {
+        Some(format!("hex(CAST({expr} AS BLOB))"))
     }
 
     fn integer_series_sql(&self, start: i64, end: i64, step: i64) -> Option<String> {
@@ -2486,6 +2502,10 @@ fn lower_var_length_single(
 }
 
 impl VarLengthReadPushdown {
+    pub fn supported_by(&self, dialect: &dyn SqlDialect) -> bool {
+        dialect.recursive_cte_supported() && dialect.recursive_walk_id_token("id").is_some()
+    }
+
     pub fn pushes_ordering(&self, dialect: &dyn SqlDialect) -> bool {
         match &self.ordering {
             None => false,
@@ -2516,10 +2536,16 @@ impl VarLengthReadPushdown {
     pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
         let nodes = dialect.quote_ident(dialect.nodes_table());
         let edges = dialect.quote_ident(dialect.edges_table());
-        // U+001F (unit separator) is the delimiter Grust already reserves in keys,
-        // so wrapping ids with it makes the visited-set membership unambiguous.
+        // IDs are hex-encoded before framing, so U+001F remains unambiguous even
+        // when an unrestricted NodeId contains the separator itself.
         let sep = dialect.string_literal("\u{1f}");
         let (next, incident) = self.step(dialect);
+        let anchor_token = dialect
+            .recursive_walk_id_token("id")
+            .expect("recursive walk SQL requires a delimiter-free node-id token");
+        let next_token = dialect
+            .recursive_walk_id_token(&next)
+            .expect("recursive walk SQL requires a delimiter-free node-id token");
 
         // Recursion edge-type filter.
         let tcol = dialect.edge_type_col();
@@ -2539,13 +2565,14 @@ impl VarLengthReadPushdown {
             Some(m) => format!(" AND w.depth + 1 <= {m}"),
             None => String::new(),
         };
-        let visited_check = dialect.strpos_sql("w.visited", &format!("{sep} || {next} || {sep}"));
+        let visited_check =
+            dialect.strpos_sql("w.visited", &format!("{sep} || {next_token} || {sep}"));
 
         let mut cte = format!(
             "WITH RECURSIVE walk(s, e, depth, visited) AS (\
-             SELECT id, id, 0, {sep} || id || {sep} FROM {nodes} \
+             SELECT id, id, 0, {sep} || {anchor_token} || {sep} FROM {nodes} \
              UNION ALL \
-             SELECT w.s, {next}, w.depth + 1, w.visited || {next} || {sep} \
+             SELECT w.s, {next}, w.depth + 1, w.visited || {next_token} || {sep} \
              FROM walk w JOIN {edges} ed ON {incident} \
              WHERE {visited_check} = 0{edge_filter}{depth_cap}) ",
         );
@@ -3947,7 +3974,7 @@ fn endpoint_scan_sql(
 
 impl ShortestReadPushdown {
     pub fn supported_by(&self, dialect: &dyn SqlDialect) -> bool {
-        dialect.shortest_walk_supported()
+        dialect.shortest_walk_supported() && dialect.recursive_walk_id_token("id").is_some()
     }
 
     /// The walk step, mirroring the var-length leaf's direction handling.
@@ -3968,6 +3995,12 @@ impl ShortestReadPushdown {
         let edges = dialect.quote_ident(dialect.edges_table());
         let sep = dialect.string_literal("\u{1f}");
         let (next, incident) = self.step(dialect);
+        let anchor_token = dialect
+            .recursive_walk_id_token("id")
+            .expect("recursive walk SQL requires a delimiter-free node-id token");
+        let next_token = dialect
+            .recursive_walk_id_token(&next)
+            .expect("recursive walk SQL requires a delimiter-free node-id token");
         let a_scan = endpoint_scan_sql(&self.a.1, &self.a.2, dialect);
         let b_scan = endpoint_scan_sql(&self.b.1, &self.b.2, dialect);
 
@@ -3992,12 +4025,12 @@ impl ShortestReadPushdown {
 
         let mut sql = format!(
             "WITH RECURSIVE walk(s, e, depth, visited, ekey) AS (\
-             SELECT id, id, 0, {sep} || id || {sep}, '' FROM ({a_scan}) \
+             SELECT id, id, 0, {sep} || {anchor_token} || {sep}, '' FROM ({a_scan}) \
              UNION ALL \
-             SELECT w.s, {next}, w.depth + 1, w.visited || {next} || {sep}, \
+             SELECT w.s, {next}, w.depth + 1, w.visited || {next_token} || {sep}, \
              w.ekey || printf('%012d', ed.rowid) \
              FROM walk w JOIN {edges} ed ON {incident} \
-             WHERE instr(w.visited, {sep} || {next} || {sep}) = 0{edge_filter}{depth_cap}), \
+             WHERE instr(w.visited, {sep} || {next_token} || {sep}) = 0{edge_filter}{depth_cap}), \
              cand AS (\
              SELECT w.s, w.e, w.depth, w.ekey FROM walk w \
              JOIN ({b_scan}) nb ON nb.id = w.e WHERE w.depth >= {min}) \
@@ -4169,7 +4202,7 @@ impl ReadPushdown {
             ReadPushdown::Subquery(p) => p.supported_by(dialect),
             ReadPushdown::CorrelatedKeys(p) => p.supported_by(dialect),
             ReadPushdown::Shortest(p) => p.supported_by(dialect),
-            ReadPushdown::VarLength(_) => dialect.recursive_cte_supported(),
+            ReadPushdown::VarLength(p) => p.supported_by(dialect),
             ReadPushdown::Union { arms, .. } => arms.iter().all(|a| a.supported_by(dialect)),
             _ => true,
         }
@@ -5461,6 +5494,8 @@ mod tests {
             "{sql}"
         );
         assert!(sql.contains("WHERE instr(w.visited,"), "{sql}");
+        assert!(sql.contains("hex(CAST(id AS BLOB))"), "{sql}");
+        assert!(sql.contains("hex(CAST(ed.dst_id AS BLOB))"), "{sql}");
         assert!(sql.contains("AND ed.edge_type = 'KNOWS'"), "{sql}");
         assert!(sql.contains("AND w.depth + 1 <= 2"), "{sql}");
         assert!(sql.contains(" WHERE w.depth >= 1"), "{sql}");
@@ -5496,6 +5531,8 @@ mod tests {
             spark.contains("GET_JSON_OBJECT(n0.props, '$.name') = 'Ada'"),
             "{spark}"
         );
+        assert!(spark.contains("hex(encode(id, 'UTF-8'))"), "{spark}");
+        assert!(spark.contains("hex(encode(ed.dst_id, 'UTF-8'))"), "{spark}");
     }
 
     #[test]

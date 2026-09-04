@@ -1,0 +1,6 @@
+/target/
+/out/
+/data/
+/upstream/
+*.log
+

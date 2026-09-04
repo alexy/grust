@@ -1,0 +1,9 @@
+.git
+.DS_Store
+target
+**/target
+docs/book/build
+benchmarks/lsqb/out
+benchmarks/lsqb/data
+benchmarks/lsqb/upstream
+

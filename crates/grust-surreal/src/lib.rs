@@ -1,3 +1,5 @@
+mod identifiers;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     time::Duration,
@@ -9,6 +11,14 @@ use surrealdb::{
     Surreal,
     engine::remote::ws::{Client as WsClient, Ws},
     opt::auth::Root,
+};
+
+use identifiers::{
+    surreal_identifier, surreal_table_name, validate_edge_batch, validate_edge_delete,
+    validate_edge_read, validate_edge_write, validate_graph_write, validate_mutations_write,
+    validate_node_batch, validate_node_ids, validate_node_patch, validate_node_start,
+    validate_node_write, validate_resolved_edge_batch, validate_schema, validate_schema_for_config,
+    validate_surreal_config, validated_surreal_url,
 };
 
 #[derive(Clone, Debug)]
@@ -46,6 +56,7 @@ pub struct SurrealHttpGraphStore {
 
 impl SurrealHttpGraphStore {
     pub fn connect(config: SurrealConfig) -> Result<Self> {
+        validate_surreal_config(&config)?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(60))
             .build()
@@ -68,10 +79,7 @@ impl SurrealHttpGraphStore {
             .send()
             .await
             .map_err(|err| {
-                GrustError::Backend(format!(
-                    "failed to POST SurrealQL to {}: {err}",
-                    self.config.url
-                ))
+                GrustError::Backend(format!("failed to POST SurrealQL: {}", err.without_url()))
             })?;
         check_surreal_http_response(response, "SurrealDB query").await
     }
@@ -88,8 +96,8 @@ impl SurrealHttpGraphStore {
             .await
             .map_err(|err| {
                 GrustError::Backend(format!(
-                    "failed to bootstrap SurrealDB at {}: {err}",
-                    self.config.url
+                    "failed to bootstrap SurrealDB: {}",
+                    err.without_url()
                 ))
             })?;
         check_surreal_http_bootstrap_response(response).await
@@ -109,8 +117,8 @@ impl SurrealHttpGraphStore {
             .await
             .map_err(|err| {
                 GrustError::Backend(format!(
-                    "failed to clear SurrealDB tables at {}: {err}",
-                    self.config.url
+                    "failed to clear SurrealDB tables: {}",
+                    err.without_url()
                 ))
             })?;
         check_surreal_http_clear_response(response).await
@@ -129,10 +137,7 @@ impl SurrealHttpGraphStore {
             .send()
             .await
             .map_err(|err| {
-                GrustError::Backend(format!(
-                    "failed to POST SurrealQL to {}: {err}",
-                    self.config.url
-                ))
+                GrustError::Backend(format!("failed to POST SurrealQL: {}", err.without_url()))
             })?;
         read_surreal_http_response(response, "SurrealDB read").await
     }
@@ -165,53 +170,61 @@ impl SurrealHttpGraphStore {
 #[async_trait]
 impl GraphStore for SurrealHttpGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
-        self.post_bootstrap(&surreal_bootstrap_query(&self.config))
-            .await?;
-        self.post(&surreal_schema_query(schema)?).await
+        validate_schema_for_config(&self.config, schema)?;
+        let bootstrap = surreal_bootstrap_query(&self.config)?;
+        let schema_query = surreal_schema_query(schema)?;
+        self.post_bootstrap(&bootstrap).await?;
+        self.post(&schema_query).await
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
-        self.post(&surreal_upsert_nodes_query(std::slice::from_ref(node))?)
-            .await?;
+        validate_node_write(&self.config, node)?;
+        let query = surreal_upsert_nodes_query(std::slice::from_ref(node))?;
+        self.post(&query).await?;
         Ok(PutOutcome::Upserted)
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
-        let id_tables = edge_id_tables(edge);
-        self.post(&surreal_relate_edges_query(
-            std::slice::from_ref(edge),
-            &id_tables,
-        )?)
-        .await?;
+        validate_edge_write(&self.config, edge)?;
+        let query =
+            surreal_relate_edges_query(std::slice::from_ref(edge), &BTreeMap::new(), &self.config)?;
+        self.post(&query).await?;
         Ok(PutOutcome::Upserted)
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        validate_graph_write(&self.config, graph)?;
         let id_tables = surreal_id_tables(&graph.nodes)?;
+        let node_queries = graph
+            .nodes
+            .chunks(self.config.batch_size.max(1))
+            .map(surreal_upsert_nodes_query)
+            .collect::<Result<Vec<_>>>()?;
+        let edge_queries = graph
+            .edges
+            .chunks(self.config.batch_size.max(1))
+            .map(|chunk| surreal_relate_edges_query(chunk, &id_tables, &self.config))
+            .collect::<Result<Vec<_>>>()?;
         let mut report = LoadReport::default();
-        for chunk in graph.nodes.chunks(self.config.batch_size.max(1)) {
-            self.post(&surreal_upsert_nodes_query(chunk)?).await?;
-            report.nodes += chunk.len();
+        for query in node_queries {
+            self.post(&query).await?;
         }
-        for chunk in graph.edges.chunks(self.config.batch_size.max(1)) {
-            self.post(&surreal_relate_edges_query(chunk, &id_tables)?)
-                .await?;
-            report.edges += chunk.len();
+        report.nodes = graph.nodes.len();
+        for query in edge_queries {
+            self.post(&query).await?;
         }
+        report.edges = graph.edges.len();
         Ok(report)
     }
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
-        Ok(self
-            .read_nodes(&surreal_get_node_query(id, &self.config))
-            .await?
-            .into_iter()
-            .next())
+        let query = surreal_get_node_query(id, &self.config)?;
+        Ok(self.read_nodes(&query).await?.into_iter().next())
     }
 
     async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
-        self.read_nodes(&surreal_get_nodes_query(ids, &self.config))
-            .await
+        let query = surreal_get_nodes_query(ids, &self.config)?;
+        self.read_nodes(&query).await
     }
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
@@ -223,9 +236,8 @@ impl GraphStore for SurrealHttpGraphStore {
     }
 
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
-        let current = self
-            .read_nodes(&surreal_start_nodes_query(&traversal.start, &self.config))
-            .await?;
+        let query = surreal_start_nodes_query(&traversal.start, &self.config)?;
+        let current = self.read_nodes(&query).await?;
         traverse_steps_with_store(self, current, traversal.steps, traversal.limit).await
     }
 }
@@ -233,13 +245,13 @@ impl GraphStore for SurrealHttpGraphStore {
 #[async_trait]
 impl GraphAdminStore for SurrealHttpGraphStore {
     async fn bootstrap(&self) -> Result<()> {
-        self.post_bootstrap(&surreal_bootstrap_query(&self.config))
-            .await
+        let query = surreal_bootstrap_query(&self.config)?;
+        self.post_bootstrap(&query).await
     }
 
     async fn clear(&self) -> Result<()> {
-        self.post_clear(&surreal_delete_tables_query(&self.config))
-            .await
+        let query = surreal_delete_tables_query(&self.config)?;
+        self.post_clear(&query).await
     }
 }
 
@@ -255,8 +267,8 @@ impl GraphMutationStore for SurrealHttpGraphStore {
     }
 
     async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
-        self.post(&surreal_delete_edge_query(from, label, to, &self.config))
-            .await
+        let query = surreal_delete_edge_query(from, label, to, &self.config)?;
+        self.post(&query).await
     }
 
     async fn apply_mutations(&self, mutations: &[GraphMutation]) -> Result<()> {
@@ -276,6 +288,7 @@ pub struct SurrealSdkGraphStore {
 
 impl SurrealSdkGraphStore {
     pub async fn connect(config: SurrealConfig) -> Result<Self> {
+        validate_surreal_config(&config)?;
         let address = surreal_ws_address(&config.url)?;
         let db = Surreal::new::<Ws>(&address).await.map_err(|err| {
             GrustError::Backend(format!(
@@ -308,6 +321,16 @@ impl SurrealSdkGraphStore {
             .await
             .map(|_| ())
             .map_err(|err| GrustError::Backend(format!("SurrealDB SDK query failed: {err}")))
+    }
+
+    async fn query_bootstrap(&self, query: &str) -> Result<()> {
+        match self.db.query(query).await {
+            Ok(_) => Ok(()),
+            Err(err) if err.to_string().contains("already exists") => Ok(()),
+            Err(err) => Err(GrustError::Backend(format!(
+                "SurrealDB SDK bootstrap failed: {err}"
+            ))),
+        }
     }
 
     async fn read(&self, query: &str) -> Result<Vec<serde_json::Value>> {
@@ -350,52 +373,61 @@ impl SurrealSdkGraphStore {
 #[async_trait]
 impl GraphStore for SurrealSdkGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
-        self.bootstrap().await?;
-        self.query(&surreal_schema_query(schema)?).await
+        validate_schema_for_config(&self.config, schema)?;
+        let bootstrap = surreal_bootstrap_query(&self.config)?;
+        let schema_query = surreal_schema_query(schema)?;
+        self.query_bootstrap(&bootstrap).await?;
+        self.query(&schema_query).await
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
-        self.query(&surreal_upsert_nodes_query(std::slice::from_ref(node))?)
-            .await?;
+        validate_node_write(&self.config, node)?;
+        let query = surreal_upsert_nodes_query(std::slice::from_ref(node))?;
+        self.query(&query).await?;
         Ok(PutOutcome::Upserted)
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
-        let id_tables = edge_id_tables(edge);
-        self.query(&surreal_relate_edges_query(
-            std::slice::from_ref(edge),
-            &id_tables,
-        )?)
-        .await?;
+        validate_edge_write(&self.config, edge)?;
+        let query =
+            surreal_relate_edges_query(std::slice::from_ref(edge), &BTreeMap::new(), &self.config)?;
+        self.query(&query).await?;
         Ok(PutOutcome::Upserted)
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        validate_graph_write(&self.config, graph)?;
         let id_tables = surreal_id_tables(&graph.nodes)?;
+        let node_queries = graph
+            .nodes
+            .chunks(self.config.batch_size.max(1))
+            .map(surreal_upsert_nodes_query)
+            .collect::<Result<Vec<_>>>()?;
+        let edge_queries = graph
+            .edges
+            .chunks(self.config.batch_size.max(1))
+            .map(|chunk| surreal_relate_edges_query(chunk, &id_tables, &self.config))
+            .collect::<Result<Vec<_>>>()?;
         let mut report = LoadReport::default();
-        for chunk in graph.nodes.chunks(self.config.batch_size.max(1)) {
-            self.query(&surreal_upsert_nodes_query(chunk)?).await?;
-            report.nodes += chunk.len();
+        for query in node_queries {
+            self.query(&query).await?;
         }
-        for chunk in graph.edges.chunks(self.config.batch_size.max(1)) {
-            self.query(&surreal_relate_edges_query(chunk, &id_tables)?)
-                .await?;
-            report.edges += chunk.len();
+        report.nodes = graph.nodes.len();
+        for query in edge_queries {
+            self.query(&query).await?;
         }
+        report.edges = graph.edges.len();
         Ok(report)
     }
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
-        Ok(self
-            .read_nodes(&surreal_get_node_query(id, &self.config))
-            .await?
-            .into_iter()
-            .next())
+        let query = surreal_get_node_query(id, &self.config)?;
+        Ok(self.read_nodes(&query).await?.into_iter().next())
     }
 
     async fn get_nodes(&self, ids: &[NodeId]) -> Result<Vec<Node>> {
-        self.read_nodes(&surreal_get_nodes_query(ids, &self.config))
-            .await
+        let query = surreal_get_nodes_query(ids, &self.config)?;
+        self.read_nodes(&query).await
     }
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
@@ -407,9 +439,8 @@ impl GraphStore for SurrealSdkGraphStore {
     }
 
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
-        let current = self
-            .read_nodes(&surreal_start_nodes_query(&traversal.start, &self.config))
-            .await?;
+        let query = surreal_start_nodes_query(&traversal.start, &self.config)?;
+        let current = self.read_nodes(&query).await?;
         traverse_steps_with_store(self, current, traversal.steps, traversal.limit).await
     }
 }
@@ -417,17 +448,13 @@ impl GraphStore for SurrealSdkGraphStore {
 #[async_trait]
 impl GraphAdminStore for SurrealSdkGraphStore {
     async fn bootstrap(&self) -> Result<()> {
-        match self.db.query(surreal_bootstrap_query(&self.config)).await {
-            Ok(_) => Ok(()),
-            Err(err) if err.to_string().contains("already exists") => Ok(()),
-            Err(err) => Err(GrustError::Backend(format!(
-                "SurrealDB SDK bootstrap failed: {err}"
-            ))),
-        }
+        let query = surreal_bootstrap_query(&self.config)?;
+        self.query_bootstrap(&query).await
     }
 
     async fn clear(&self) -> Result<()> {
-        self.query(&surreal_delete_tables_query(&self.config)).await
+        let query = surreal_delete_tables_query(&self.config)?;
+        self.query(&query).await
     }
 }
 
@@ -443,8 +470,8 @@ impl GraphMutationStore for SurrealSdkGraphStore {
     }
 
     async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
-        self.query(&surreal_delete_edge_query(from, label, to, &self.config))
-            .await
+        let query = surreal_delete_edge_query(from, label, to, &self.config)?;
+        self.query(&query).await
     }
 
     async fn apply_mutations(&self, mutations: &[GraphMutation]) -> Result<()> {
@@ -589,17 +616,20 @@ fn surreal_error_is_missing_table(item: &serde_json::Value) -> bool {
             == Some("Table")
 }
 
-fn surreal_bootstrap_query(config: &SurrealConfig) -> String {
-    format!(
-        "DEFINE NAMESPACE {}; USE NS {}; DEFINE DATABASE {}; USE DB {}; DEFINE TABLE IF NOT EXISTS record;",
+fn surreal_bootstrap_query(config: &SurrealConfig) -> Result<String> {
+    validate_surreal_config(config)?;
+    Ok(format!(
+        "DEFINE NAMESPACE {}; USE NS {}; DEFINE DATABASE {}; USE DB {}; DEFINE TABLE IF NOT EXISTS {};",
         surreal_identifier(&config.namespace),
         surreal_identifier(&config.namespace),
         surreal_identifier(&config.database),
-        surreal_identifier(&config.database)
-    )
+        surreal_identifier(&config.database),
+        surreal_identifier("record")
+    ))
 }
 
-fn surreal_delete_tables_query(config: &SurrealConfig) -> String {
+fn surreal_delete_tables_query(config: &SurrealConfig) -> Result<String> {
+    validate_surreal_config(config)?;
     let mut tables = config
         .labels
         .iter()
@@ -612,14 +642,15 @@ fn surreal_delete_tables_query(config: &SurrealConfig) -> String {
             .map(|relationship| surreal_table_name(&relationship_type(relationship))),
     );
     tables.insert("record".to_string());
-    tables
+    Ok(tables
         .into_iter()
-        .map(|table| format!("DELETE {table};"))
+        .map(|table| format!("DELETE {};", surreal_identifier(&table)))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n"))
 }
 
-fn surreal_get_node_query(id: &NodeId, config: &SurrealConfig) -> String {
+fn surreal_get_node_query(id: &NodeId, config: &SurrealConfig) -> Result<String> {
+    validate_node_ids(config, std::slice::from_ref(id))?;
     let tables = surreal_node_tables_for_id(id, config);
     let where_clause = tables
         .iter()
@@ -632,15 +663,20 @@ fn surreal_get_node_query(id: &NodeId, config: &SurrealConfig) -> String {
         })
         .collect::<Vec<_>>()
         .join(" OR ");
-    format!(
+    Ok(format!(
         "SELECT *, meta::tb(id) AS __grust_label FROM {} WHERE {where_clause};",
-        tables.join(", ")
-    )
+        tables
+            .iter()
+            .map(|table| surreal_identifier(table))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
-fn surreal_get_nodes_query(ids: &[NodeId], config: &SurrealConfig) -> String {
+fn surreal_get_nodes_query(ids: &[NodeId], config: &SurrealConfig) -> Result<String> {
+    validate_node_ids(config, ids)?;
     if ids.is_empty() {
-        return "RETURN [];".to_string();
+        return Ok("RETURN [];".to_string());
     }
     let tables = ids
         .iter()
@@ -663,13 +699,18 @@ fn surreal_get_nodes_query(ids: &[NodeId], config: &SurrealConfig) -> String {
         })
         .collect::<Vec<_>>()
         .join(" OR ");
-    format!(
+    Ok(format!(
         "SELECT *, meta::tb(id) AS __grust_label FROM {} WHERE {where_clause};",
-        tables.join(", ")
-    )
+        tables
+            .iter()
+            .map(|table| surreal_identifier(table))
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
 }
 
 fn surreal_get_edges_query(query: &EdgeQuery, config: &SurrealConfig) -> Result<String> {
+    validate_edge_read(config, query)?;
     let tables = surreal_edge_tables(query.label.as_ref(), config);
     if tables.is_empty() {
         return Err(GrustError::Backend(
@@ -678,24 +719,33 @@ fn surreal_get_edges_query(query: &EdgeQuery, config: &SurrealConfig) -> Result<
     }
     Ok(format!(
         "SELECT *, meta::tb(id) AS __grust_label FROM {};",
-        tables.join(", ")
+        tables
+            .iter()
+            .map(|table| surreal_identifier(table))
+            .collect::<Vec<_>>()
+            .join(", ")
     ))
 }
 
-fn surreal_start_nodes_query(start: &Start, config: &SurrealConfig) -> String {
+fn surreal_start_nodes_query(start: &Start, config: &SurrealConfig) -> Result<String> {
+    validate_node_start(config, start)?;
     match start {
         Start::Node(id) => surreal_get_node_query(id, config),
         Start::NodesByLabel(label) => {
             let table = surreal_table_name(label.as_str());
-            format!("SELECT *, meta::tb(id) AS __grust_label FROM {table};")
+            let table = surreal_identifier(&table);
+            Ok(format!(
+                "SELECT *, meta::tb(id) AS __grust_label FROM {table};"
+            ))
         }
         Start::NodesByProperty { label, key, value } => {
             let table = surreal_table_name(label.as_str());
-            format!(
+            let table = surreal_identifier(&table);
+            Ok(format!(
                 "SELECT *, meta::tb(id) AS __grust_label FROM {table} WHERE {} = {};",
                 surreal_identifier(key),
-                surreal_value(value).unwrap_or_else(|_| "NONE".to_string())
-            )
+                surreal_value(value)?
+            ))
         }
     }
 }
@@ -727,9 +777,11 @@ fn surreal_edge_tables(label: Option<&Label>, config: &SurrealConfig) -> Vec<Str
 }
 
 fn surreal_schema_query(schema: &GraphSchema) -> Result<String> {
+    validate_schema(schema)?;
     let mut statements = Vec::new();
     for node_type in &schema.nodes {
         let table = surreal_table_name(node_type.label.as_str());
+        let table = surreal_identifier(&table);
         statements.push(format!("DEFINE TABLE {table} SCHEMAFULL;"));
         for field in &node_type.fields {
             statements.push(format!(
@@ -741,9 +793,15 @@ fn surreal_schema_query(schema: &GraphSchema) -> Result<String> {
     }
     for edge_type in &schema.edges {
         let table = surreal_table_name(&relationship_type(edge_type.label.as_str()));
+        let table = surreal_identifier(&table);
         statements.push(format!("DEFINE TABLE {table} TYPE RELATION SCHEMAFULL;"));
         statements.push(format!(
-            "DEFINE FIELD relationship ON TABLE {table} TYPE string;"
+            "DEFINE FIELD {} ON TABLE {table} TYPE string;",
+            surreal_identifier("relationship")
+        ));
+        statements.push(format!(
+            "DEFINE FIELD {} ON TABLE {table} TYPE option<string>;",
+            surreal_identifier("edge_id")
         ));
         for field in &edge_type.fields {
             statements.push(format!(
@@ -770,26 +828,39 @@ fn surreal_field_type(ty: &FieldType) -> &'static str {
 }
 
 fn surreal_upsert_nodes_query(nodes: &[Node]) -> Result<String> {
+    validate_node_batch(nodes)?;
     nodes
         .iter()
         .map(|node| {
-            Ok(format!(
-                "UPSERT type::record({}, {}) SET {};",
+            let record = format!(
+                "type::record({}, {})",
                 surreal_string(&surreal_table_name(node.label.as_str())),
-                surreal_string(node.id.as_str()),
-                surreal_node_props(node)?
-            ))
+                surreal_string(node.id.as_str())
+            );
+            let props = surreal_node_props(node)?;
+            Ok(if props.is_empty() {
+                format!("UPSERT {record};")
+            } else {
+                format!("UPSERT {record} SET {props};")
+            })
         })
         .collect::<Result<Vec<_>>>()
         .map(|statements| statements.join("\n"))
 }
 
 fn surreal_node_props(node: &Node) -> Result<String> {
+    validate_node_batch(std::slice::from_ref(node))?;
     Ok(node
         .props
         .iter()
-        .filter(|(key, _)| key.as_str() != "labels")
-        .map(|(key, value)| Ok(format!("{key} = {}", surreal_value(value)?)))
+        .filter(|(key, _)| !matches!(key.as_str(), "id" | "labels"))
+        .map(|(key, value)| {
+            Ok(format!(
+                "{} = {}",
+                surreal_identifier(key),
+                surreal_value(value)?
+            ))
+        })
         .collect::<Result<Vec<_>>>()?
         .join(", "))
 }
@@ -797,17 +868,20 @@ fn surreal_node_props(node: &Node) -> Result<String> {
 fn surreal_relate_edges_query(
     edges: &[Edge],
     id_tables: &BTreeMap<String, String>,
+    config: &SurrealConfig,
 ) -> Result<String> {
+    validate_resolved_edge_batch(config, edges, id_tables)?;
     let mut relation_tables = BTreeSet::new();
     let mut statements = Vec::new();
     for edge in edges {
         relation_tables.insert(surreal_table_name(&relationship_type(edge.label.as_str())));
     }
-    statements.extend(
-        relation_tables
-            .into_iter()
-            .map(|table| format!("DEFINE TABLE IF NOT EXISTS {table} TYPE RELATION;")),
-    );
+    statements.extend(relation_tables.into_iter().map(|table| {
+        format!(
+            "DEFINE TABLE IF NOT EXISTS {} TYPE RELATION;",
+            surreal_identifier(&table)
+        )
+    }));
     statements.extend(
         edges
         .iter()
@@ -831,6 +905,7 @@ fn surreal_relate_edges_query(
                 surreal_string(edge.to.as_str())
             );
             let table = surreal_table_name(&relationship_type(edge.label.as_str()));
+            let table = surreal_identifier(&table);
             Ok(format!(
                 "DELETE {table} WHERE in = {from} AND out = {to};\nRELATE ({from})->{table}->({to}) SET {};",
                 surreal_edge_props(edge)?
@@ -842,6 +917,7 @@ fn surreal_relate_edges_query(
 }
 
 fn surreal_delete_node_query(id: &NodeId, config: &SurrealConfig) -> Result<String> {
+    validate_node_ids(config, std::slice::from_ref(id))?;
     if config.relationships.is_empty() {
         return Err(GrustError::Backend(
             "SurrealConfig.relationships is empty; node deletes need configured relationship labels to remove incident edges".to_string(),
@@ -864,7 +940,12 @@ fn surreal_delete_node_query(id: &NodeId, config: &SurrealConfig) -> Result<Stri
         .join(" OR ");
     let mut statements = surreal_edge_tables(None, config)
         .into_iter()
-        .map(|table| format!("DELETE {table} WHERE {incident_clause};"))
+        .map(|table| {
+            format!(
+                "DELETE {} WHERE {incident_clause};",
+                surreal_identifier(&table)
+            )
+        })
         .collect::<Vec<_>>();
     statements.extend(
         records
@@ -875,10 +956,18 @@ fn surreal_delete_node_query(id: &NodeId, config: &SurrealConfig) -> Result<Stri
 }
 
 fn surreal_patch_node_query(id: &NodeId, props: &Props, config: &SurrealConfig) -> Result<String> {
+    validate_node_ids(config, std::slice::from_ref(id))?;
+    validate_node_patch(props)?;
     let assignments = props
         .iter()
         .filter(|(key, _)| key.as_str() != "labels")
-        .map(|(key, value)| Ok(format!("{key} = {}", surreal_value(value)?)))
+        .map(|(key, value)| {
+            Ok(format!(
+                "{} = {}",
+                surreal_identifier(key),
+                surreal_value(value)?
+            ))
+        })
         .collect::<Result<Vec<_>>>()?
         .join(", ");
     if assignments.is_empty() {
@@ -903,8 +992,10 @@ fn surreal_delete_edge_query(
     label: &Label,
     to: &NodeId,
     config: &SurrealConfig,
-) -> String {
+) -> Result<String> {
+    validate_edge_delete(config, from, label, to)?;
     let table = surreal_table_name(&relationship_type(label.as_str()));
+    let table = surreal_identifier(&table);
     let from_records = surreal_node_tables_for_id(from, config);
     let to_records = surreal_node_tables_for_id(to, config);
     let where_clause = from_records
@@ -922,7 +1013,7 @@ fn surreal_delete_edge_query(
         })
         .collect::<Vec<_>>()
         .join(" OR ");
-    format!("DELETE {table} WHERE {where_clause};")
+    Ok(format!("DELETE {table} WHERE {where_clause};"))
 }
 
 fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> Result<String> {
@@ -964,13 +1055,13 @@ fn surreal_mutation_query(mutation: &GraphMutation, config: &SurrealConfig) -> R
         )),
         GraphMutation::DeleteNode(id) => surreal_delete_node_query(id, config),
         GraphMutation::UpsertEdge(edge) => {
-            surreal_relate_edges_query(std::slice::from_ref(edge), &edge_id_tables(edge))
+            surreal_relate_edges_query(std::slice::from_ref(edge), &BTreeMap::new(), config)
         }
         GraphMutation::UpsertEdgesFromNodeMatches { .. } => Err(GrustError::Unsupported(
             "SurrealDB row-producing edge upserts are not implemented yet".to_string(),
         )),
         GraphMutation::DeleteEdge { from, label, to } => {
-            Ok(surreal_delete_edge_query(from, label, to, config))
+            surreal_delete_edge_query(from, label, to, config)
         }
         GraphMutation::DeleteMatchingEdges { .. } => Err(GrustError::Unsupported(
             "SurrealDB matched edge deletes are not implemented yet".to_string(),
@@ -985,6 +1076,7 @@ fn surreal_apply_mutations_query(
     mutations: &[GraphMutation],
     config: &SurrealConfig,
 ) -> Result<String> {
+    validate_mutations_write(config, mutations)?;
     let mut statements = vec!["BEGIN TRANSACTION;".to_string()];
     for mutation in mutations {
         statements.push(surreal_mutation_query(mutation, config)?);
@@ -994,29 +1086,51 @@ fn surreal_apply_mutations_query(
 }
 
 fn surreal_edge_props(edge: &Edge) -> Result<String> {
+    validate_edge_batch(std::slice::from_ref(edge))?;
     let mut props = vec![format!(
-        "relationship = {}",
+        "{} = {}",
+        surreal_identifier("relationship"),
         surreal_string(edge.label.as_str())
     )];
+    if let Some(id) = &edge.id {
+        props.push(format!(
+            "{} = {}",
+            surreal_identifier("edge_id"),
+            surreal_string(id.as_str())
+        ));
+    }
     props.extend(
         edge.props
             .iter()
-            .map(|(key, value)| Ok(format!("{key} = {}", surreal_value(value)?)))
+            .map(|(key, value)| {
+                Ok(format!(
+                    "{} = {}",
+                    surreal_identifier(key),
+                    surreal_value(value)?
+                ))
+            })
             .collect::<Result<Vec<_>>>()?,
     );
     Ok(props.join(", "))
 }
 
 fn surreal_id_tables(nodes: &[Node]) -> Result<BTreeMap<String, String>> {
-    nodes
-        .iter()
-        .map(|node| {
-            Ok((
-                node.id.as_str().to_string(),
-                surreal_table_name(node.label.as_str()),
-            ))
-        })
-        .collect()
+    validate_node_batch(nodes)?;
+    let mut tables = BTreeMap::new();
+    for node in nodes {
+        let table = surreal_table_name(node.label.as_str());
+        if let Some(existing) = tables.insert(node.id.as_str().to_string(), table.clone())
+            && existing != table
+        {
+            return Err(GrustError::Schema(format!(
+                "SurrealDB node id '{}' is claimed by tables '{}' and '{}'",
+                node.id.as_str(),
+                existing,
+                table
+            )));
+        }
+    }
+    Ok(tables)
 }
 
 fn surreal_node_from_value(mut value: serde_json::Value) -> Result<Node> {
@@ -1197,19 +1311,6 @@ where
     Ok(current)
 }
 
-fn edge_id_tables(edge: &Edge) -> BTreeMap<String, String> {
-    BTreeMap::from([
-        (
-            edge.from.as_str().to_string(),
-            node_id_table(edge.from.as_str()),
-        ),
-        (
-            edge.to.as_str().to_string(),
-            node_id_table(edge.to.as_str()),
-        ),
-    ])
-}
-
 fn node_id_table(id: &str) -> String {
     id.split_once(':')
         .map(|(prefix, _)| surreal_table_name(prefix))
@@ -1243,58 +1344,20 @@ fn surreal_value(value: &Value) -> Result<String> {
     }
 }
 
-fn surreal_table_name(value: &str) -> String {
-    let table = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if table.is_empty() {
-        "related_to".to_string()
-    } else {
-        table
-    }
-}
-
 fn surreal_string(value: &str) -> String {
     serde_json::to_string(value).expect("string serialization cannot fail")
 }
 
-fn surreal_identifier(value: &str) -> String {
-    let identifier = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    if identifier.is_empty() {
-        "default".to_string()
-    } else {
-        identifier
-    }
-}
-
 fn surreal_ws_address(surreal_url: &str) -> Result<String> {
-    let parsed = url::Url::parse(surreal_url).map_err(|err| {
-        GrustError::Backend(format!("invalid SurrealDB URL {surreal_url}: {err}"))
-    })?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| GrustError::Backend(format!("SurrealDB URL has no host: {surreal_url}")))?;
+    let parsed = validated_surreal_url(surreal_url)?;
+    let host = parsed.host_str().expect("validated URL has a host");
     Ok(match parsed.port() {
         Some(port) => format!("{host}:{port}"),
         None => host.to_string(),
     })
 }
 
+#[cfg(test)]
+mod hardening_tests;
 #[cfg(test)]
 mod tests;

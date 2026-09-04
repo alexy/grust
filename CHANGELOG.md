@@ -6,17 +6,149 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
-- Add a backend-neutral semantic graph taxonomy for versioned models,
-  datasets, fields, relationships, and metrics with stable replay identities.
-- Prove complete, replay-stable projection counts for the checksum-pinned
-  Apache Ossie TPC-DS model: five datasets, 31 fields, five metrics, and four
-  relationships.
+## 0.13.0 "Prawn" - 2026-09-04
 
-- Added a parser-backed bounded read policy for applications that expose
-  GQL/Cypher to untrusted clients. It rejects updating clauses, graph selection,
-  procedures, unbounded paths, non-literal limits, and oversized result sets
-  from the typed AST instead of relying on keyword scans.
+Prawn returns every publishable Grust crate to one lockstep release line. It
+includes the complete surface that was only partially shipped in the scoped
+0.12.1 Shrimp registry patch, plus the later safety, semantic-model,
+performance, backend, documentation, and benchmark work recorded below.
 
+### Release and portability
+
+- Moved all 15 publishable Grust crates and their intra-workspace dependency
+  requirements to 0.13.0; keep HelixDB, LadybugDB, QueryGraph Memory, and
+  examples explicitly unpublished while testing them in the workspace.
+- Removed the repository-wide absolute Apple SDK include path that mixed Xcode
+  and Command Line Tools headers. Native C++ troubleshooting now derives any
+  required fallback from the active `xcrun` SDK in the invoking shell.
+- Reconciled the Shrimp patch history, current release marker, README and book
+  examples, completed goal records, GQL claim scope, and centralized FirstPair
+  book/TextPack handoff for the named Prawn release.
+- Included Apache Ossie's `NOTICE` and Apache-2.0 text beside the exact upstream
+  TPC-DS fixture in the published facade archive. The release gate
+  `scripts/verify-package-attribution.sh` inspects the actual `.crate` archive
+  so a future package cannot silently drop the fixture or its attribution.
+- Qualified the backend dependency line rather than mechanically selecting the
+  highest version: Redis advances to 1.6.0 with FalkorDB v4.20.4, SurrealDB and
+  its Docker service advance to 3.2.4 with reqwest 0.13.4, pgGraph's live image
+  advances to 1.2.0, tokio-postgres advances to 0.7.18, and Turso advances from
+  a prerelease to stable 0.7.2. The applicable focused and live integration
+  gates pass.
+- Deliberately held LanceDB at 0.30.0 after the 0.38.0 default-feature,
+  local-mode build failed inside upstream `lancedb`: `job.rs` references the
+  remote-only `Error::Http` variant when `remote` is disabled. Held the
+  unpublished Helix adapter at exact `helix-db` 2.0.0 after the 3.0.0 probe
+  removed `DynamicQueryRequest`/`dynamic_query`, changed `Client::query`, and
+  targeted `/v2/query` while the checked Helix v3.0.1 server still exposed
+  `/v1/query`.
+
+### Safety and semantic projection
+
+- Added a backend-neutral semantic graph taxonomy for versioned models,
+  datasets, fields, relationships, and metrics. Projection now validates
+  SHA-256 identities, names, references, and uniqueness, uses collision-safe
+  identity components, and preserves separately named parallel relationships
+  in the constructed `Graph` with explicit edge IDs. Persisted multi-edge
+  preservation remains a backend capability; structurally keyed stores can
+  collapse same-endpoint, same-label edges.
+- Replaced the synthetic Ossie proof with the exact Apache Ossie TPC-DS YAML
+  from upstream commit `ddb19f1b135a61c65603f4823a3526e2fab00cf1`. The
+  packaged fixture must match SHA-256
+  `bafbdc9d0e304ab22a40592f2b6bdfd45cc399c566533cd71343d33380c0d6e1`
+  before parsing and replay-stably projecting five datasets, 31 fields, five
+  metrics, and four relationships.
+
+- Added a parser-backed bounded read policy for applications that expose a
+  deliberately small in-memory GQL/Cypher surface. It rejects updating clauses,
+  graph selection, procedures, unbounded paths, and non-literal limits from the
+  typed AST, then enforces parameter/graph/output byte ceilings, graph counts,
+  cumulative candidate work, intermediate bytes, and path hops, result rows,
+  per-range allocation, and a cooperative wall-clock timeout. The cumulative
+  byte budget includes cloned bindings, expression and aggregate results, and
+  DISTINCT/GROUP serialization, preventing pre-`LIMIT` projection amplification.
+  All reference reads retain a global
+  hard ceiling on scalar and table-valued `range()` allocation. Correlated
+  `CALL { ... }` index construction and catalog-procedure graph scans are now
+  charged on every invocation, closing a per-outer-row rescan bypass against
+  both the candidate-work limit and cooperative deadline. Authorization, remote
+  deadlines, and process isolation remain host responsibilities.
+
+- Made non-returning PostgreSQL and Turso
+  `execute_cypher_mutation_plan` calls atomic on their transactional stores.
+  Each executor rejects unsupported lowering before writing, then preserves
+  source order inside one isolated transaction. Their shared connections are
+  serialized for the complete transaction, and the next caller rolls back an
+  abandoned transaction if cancellation drops a future during `BEGIN`, a
+  statement, or `COMMIT`. The generic
+  write-with-`RETURN` helper remains sequential because later operations may
+  consume intermediate bindings; it is not a whole-statement atomicity
+  boundary. Explicit transaction scripts continue to batch supported
+  mutations.
+- Made PostgreSQL's public raw `execute` surface explicitly autocommit-only.
+  Its lexical guard rejects transaction-control statements in multi-statement
+  SQL while ignoring lookalike words in strings, quoted identifiers,
+  dollar-quoted bodies, and comments; PostgreSQL PGQ inherits the same guard.
+  Transaction helpers set their recovery marker before `BEGIN`, and every
+  serialized connection user first rolls back an in-flight transaction left
+  uncertain by cancellation.
+
+### Backend correctness and graph performance
+
+- Hardened the dynamic graph backends before query construction or transport.
+  FalkorDB validates configurable identity-property names, schema and
+  complete-graph label/relationship claims after lossy normalization, and
+  losslessly quoted property names, prevents a property map from overwriting
+  the configured structural ID, and no longer includes Redis URLs or
+  credentials in pool/query errors. Helix rejects unsafe
+  schema names, normalized relationship collisions, and attempts to overwrite
+  node/edge structural metadata, preflights complete graph batches, and omits
+  configured URLs from transport errors. SurrealDB uses lossless SurrealQL
+  identifier quoting, rejects ambiguous normalized record-table mappings and
+  reserved structural-field writes, validates schema/configuration and every
+  batch before I/O, preserves optional edge IDs in `edge_id`, and redacts URLs
+  from HTTP/WebSocket failures.
+- Added shared physical-schema claim validation for backends whose logical
+  names are lowered into native object namespaces. FalkorDB, Helix, LadybugDB,
+  LanceDB, and Sail now reject both lossy-name collisions and exact duplicate
+  declarations before emitting schema or write operations.
+- Added `validate_edge_key_components` and `checked_edge_key` for every
+  persistence/export path that materializes Grust's compatibility edge key.
+  CocoIndex, Cypher capture/refetch, LadybugDB, LanceDB, and Sail now reject
+  U+001F in source IDs, labels, target IDs, or explicit edge IDs before two
+  distinct edges can alias. Mixed explicit/idless equality additionally checks
+  the structural owner. LadybugDB also rejects U+001F in node IDs before its
+  managed metadata index can confuse a user record with a table marker.
+  Separately, `GraphValue` relationship deduplication now
+  uses length-framed identity components, so its payloads require no reserved
+  delimiter and crafted explicit/structural identities remain distinct.
+- Made recursive SQL walk pushdown safe for arbitrary `NodeId` text. PostgreSQL,
+  Spark SQL, and the generic SQLite dialect hex-encode IDs into delimiter-free
+  visited-set tokens before framing them; a dialect without both recursive-CTE
+  support and such an encoder declines variable-length and shortest-walk
+  pushdown instead of relying on a delimiter that may occur in an ID.
+
+- Added a Docker-reproducible LSQB compatibility and adversarial-query
+  harness under `benchmarks/lsqb`. The unchanged upstream baseline pins Graph
+  Data Council LSQB commit `242cb2fd31340ca688954cb94794d74c0d5b6f92`,
+  LadybugDB 0.19.0, and a digest-pinned Python 3.12.11 container; five
+  repetitions over `sfexample` match all nine expected result counts in 45/45
+  executions. A separately labeled Grust adapter is configured to run the same
+  28-node/72-edge fixture plus eight adversari.al count attacks across Memory,
+  Turso, and PostgreSQL 18.6 with a clean load per repetition. Nine additional,
+  backend-neutral attacks require stable policy rejections for unbounded paths,
+  range allocation,
+  candidate work, updating-clause smuggling, forbidden procedures, and excess
+  UNION arms, plus cumulative intermediate projection, correlated subquery
+  replanning, and correlated catalog rescans. Those eight count attacks plus
+  nine policy attacks are 17 separate
+  adversari.al attacks; each storage-backend cell has 17 count oracles (nine
+  LSQB-derived plus eight adversarial), while policy is one backend-neutral
+  rejection track. This is a reproducibility and compatibility microbenchmark,
+  not a performance ranking: LSQB is GDC-maintained but not an official LDBC
+  benchmark. The tracked evidence currently covers the unchanged upstream
+  45/45 run; the Grust matrix remains a release gate until its result artifacts
+  are captured.
+  These are not LDBC Benchmark Results.
 - Removed the Rust 1.96 strict-Clippy debt from the Cypher and Sail execution
   paths without adding lint suppressions. Writable `RETURN` parsing and
   evaluation now use named scope, aggregate, and cache contexts; Sail mutation
@@ -28,6 +160,15 @@ reconstructed from Git history, release commits, and the shipped docs.
   The property now reuses the one structural identity column throughout table
   descriptors, Delta DDL, and staged merges; incompatible non-string identity
   declarations fail before SQL reaches Sail.
+- Added the defaulted `GraphSqlDialect::max_identifier_bytes` hook. PostgreSQL
+  reports its 63-byte ceiling, so typed node/edge views and property indexes at
+  that limit remain valid while longer generated names fail with
+  `GrustError::Schema` before PostgreSQL can silently truncate or collide them.
+  Dialects without a declared limit retain their previous behavior.
+- Updated the internal, unpublished LadybugDB adapter from `lbug` 0.17.1 to
+  0.20.2 while retaining its Arrow 55 IPC boundary. The unchanged upstream
+  LSQB reference run deliberately keeps Ladybug 0.19.0 because that is the
+  version selected by the pinned upstream scripts.
 - Verified the QueryGraph stack against the exact optimized graph-enabled Sail
   `c5309365` artifact: 26 adapter tests, the dedicated non-null and temp-view
   gates, and both governed cognition parity/secrecy tests pass. The same
@@ -56,13 +197,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   uniqueness, native-constraint, and incident-endpoint validation. Bulk writes
   still validate one complete staged graph so cross-item constraints remain
   atomic and fail before mutation.
-- Prepare the `0.12.1` registry release containing the graph commit and Sail
-  APIs consumed by the current Marciana memory implementation.
-- Keep optional backend crates on the existing `0.12.0` line so the published
-  `grust-graph` patch release does not require intentionally unpublished
-  adapters.
 
-### 2026-08-06
+### Integration reliability
 
 - Bounded each Sail integration command with a configurable timeout. A stalled
   live phase now fails the harness instead of leaving the release gate running
@@ -78,7 +214,20 @@ reconstructed from Git history, release commits, and the shipped docs.
   keeps this explicitly local-source verification separate from Marciana's
   remote-reachable Sail compatibility baseline.
 
-### 2026-08-05
+### Governed memory, FirstPair, and query execution
+
+- Changed `querygraph-memory` relationship facts from one structurally
+  deduplicated direct edge to a hash-stable, per-record `MemoryRelation`
+  assertion node between the two entities. Distinct records can now retain
+  independent lineage for the same endpoints and relationship name. Assertion
+  IDs hash fixed-width length-prefixed components and remain identical across
+  32- and 64-bit hosts. Neighborhood reads can cross any mixture of legacy
+  direct `RELATES` edges and current assertion-node relationships at
+  successive logical hops, while tombstone preflight discovers the record's
+  assertion nodes and legacy fact edges before deleting that discovered set
+  with the record as one atomic batch on transactional stores. Discovery is
+  outside that transaction, so callers must synchronize concurrent link and
+  tombstone operations.
 
 - Updated `grust-sail` for current Sail Spark Connect sessions. Each session
   can leave its warehouse server-managed or configure and verify an explicit
@@ -207,7 +356,7 @@ reconstructed from Git history, release commits, and the shipped docs.
   storage, the `MemoryRecord`/`MemoryEntity` graph, space-only pushdown,
   transactional Turso consolidation, the sanctioned synchronous/asynchronous
   bridge, privacy-aware reference vector ranking, inert cognition plans, and
-  the explicit post-v1 security, lineage, scale, and hosting limits.
+  the explicit post-v1 security, scale, and hosting limits.
 
 - **First Pair Press image cover:** adapted the live Grust announcement
   headboard into a portrait cover, set Alexy Khrabrov as the sole author,
@@ -255,8 +404,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   embedding privacy, analytics emit plans through the vault front door, and
   the shared-store test proves vault-level tenant authorization. TypeSec
   Memory is published in `0.13.0` Lido; this adapter remains
-  `publish = false` pending a deliberate Grust release/distribution decision
-  and stays sibling-path linked for integration CI. LanceDB ANN,
+  `publish = false` pending a deliberate Grust release/distribution decision;
+  its TypeSec contract is pinned to the reviewed public Git revision so clean
+  checkout and integration CI builds do not require a sibling repository. LanceDB ANN,
   Sail-distributed cognition, fuller GQL pushdown, and a hosted multi-tenant
   service are explicitly post-v1 work rather than claims of this release. The
   adapter is consumed by qg-rust's signed-only memory API and its qg-python
@@ -322,6 +472,17 @@ reconstructed from Git history, release commits, and the shipped docs.
   lowerers (a bare wrapped var-length pattern lowered as a plain var-length
   scan, returning wrong rows on Sail). Differential-oracle coverage grows by
   two tests over the embedded `turso` and real-SQLite engines.
+
+## 0.12.1 "Shrimp" - 2026-08-06
+
+Shrimp was a scoped crates.io patch, not a lockstep workspace release. It
+published `grust-core`, `grust-cypher`, `grust-memory`, `grust-sail`,
+`grust-sql-core`, `grust-turso`, and the `grust-graph` facade at 0.12.1 for the
+graph-commit and Sail/Turso APIs consumed by Marciana. The other publishable
+backend crates remained at 0.12.0, and no `v0.12.1` repository tag, Shrimp post,
+TextPack, or 0.12.1 book was produced. Prawn is the first subsequent lockstep
+workspace release and supplies those missing cross-workspace documentation and
+verification boundaries without rewriting the historical registry state.
 
 ## 0.12.0 "Lobster" - 2026-07-03
 

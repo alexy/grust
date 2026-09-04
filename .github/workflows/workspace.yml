@@ -1,0 +1,56 @@
+name: workspace
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-gates:
+    name: fmt · clippy · test · package
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Check out Grust
+        uses: actions/checkout@v6
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y clang cmake libssl-dev pkg-config protobuf-compiler
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Graph benchmark formatting
+        run: cargo fmt --manifest-path benchmarks/lsqb/Cargo.toml -- --check
+
+      - name: Workspace build
+        run: cargo build --locked --workspace --all-features
+
+      - name: Workspace Clippy
+        run: cargo clippy --locked --workspace --all-features --all-targets -- -D warnings
+
+      - name: Graph benchmark Clippy
+        run: cargo clippy --locked --manifest-path benchmarks/lsqb/Cargo.toml --all-targets -- -D warnings
+
+      - name: Workspace tests
+        run: cargo test --locked --workspace --all-features
+
+      - name: Graph benchmark tests
+        run: cargo test --locked --manifest-path benchmarks/lsqb/Cargo.toml
+
+      - name: Release package verification
+        run: cargo package --locked --workspace --allow-dirty
+
+      - name: Third-party package attribution
+        run: bash scripts/verify-package-attribution.sh

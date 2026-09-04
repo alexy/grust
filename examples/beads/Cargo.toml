@@ -4,15 +4,18 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 description = "Example: model the beads issue tracker as a grust property graph."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 # grust is the graph for beads. This is an in-repo example, so it depends on the
 # workspace crates by path (it dogfoods the local tree). To use grust-beads
 # outside this repo, swap these for the published crates:
-#   grust-core   = "0.11.0"
-#   grust-cypher = "0.11.0"
+#   grust-core   = "0.13.0"
+#   grust-cypher = "0.13.0"
 [dependencies]
-grust-core = { path = "../../crates/grust-core" }
-grust-cypher = { path = "../../crates/grust-cypher" }
+grust-core = { version = "0.13.0", path = "../../crates/grust-core" }
+grust-cypher = { version = "0.13.0", path = "../../crates/grust-cypher" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

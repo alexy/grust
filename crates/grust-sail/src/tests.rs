@@ -207,6 +207,47 @@ fn graph_schema_typed_table_contract_is_public() {
 }
 
 #[test]
+fn typed_schema_rejects_normalized_table_and_column_collisions() {
+    let table_collision = GraphSchema::builder()
+        .node("a-b", Vec::new())
+        .node("a_b", Vec::new())
+        .build();
+    let error = sail_graph_schema_typed_tables(&table_collision)
+        .expect_err("colliding typed table names must fail");
+    assert!(error.to_string().contains("grust_node_a_b"));
+
+    let column_collision = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::optional("given-name", FieldType::String),
+                Field::optional("given_name", FieldType::String),
+            ],
+        )
+        .build();
+    let error = sail_graph_schema_typed_tables(&column_collision)
+        .expect_err("colliding typed column names must fail");
+    assert!(error.to_string().contains("given_name"));
+
+    let duplicate_label = GraphSchema::builder()
+        .node("Person", Vec::new())
+        .node("Person", Vec::new())
+        .build();
+    assert!(sail_graph_schema_typed_tables(&duplicate_label).is_err());
+
+    let duplicate_identity = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::required("id", FieldType::String),
+                Field::required("id", FieldType::String),
+            ],
+        )
+        .build();
+    assert!(sail_graph_schema_typed_tables(&duplicate_identity).is_err());
+}
+
+#[test]
 fn typed_node_merge_extracts_fields_from_staged_json() {
     let schema = person_schema();
     let node_type = schema.node_type(&Label::new("Person")).unwrap();
@@ -396,6 +437,19 @@ fn staged_edge_batch_preserves_explicit_arrow_edge_id() {
 
     assert_eq!(edges.len(), 1);
     assert_eq!(edges[0].id.as_ref().map(EdgeId::as_str), Some("edge-1"));
+}
+
+#[test]
+fn staged_edge_batch_rejects_ambiguous_and_explicit_delimiter_keys() {
+    let node_labels = std::collections::BTreeMap::new();
+    let first = Edge::new("b\u{1f}c", "a", "d", Props::new());
+    let second = Edge::new("c", "a\u{1f}b", "d", Props::new());
+    assert_eq!(edge_key(&first), edge_key(&second));
+    assert!(edges_record_batch(&[first], &node_labels).is_err());
+    assert!(edges_record_batch(&[second], &node_labels).is_err());
+
+    let explicit = Edge::new("KNOWS", "a", "d", Props::new()).with_id("edge\u{1f}one");
+    assert!(edges_record_batch(&[explicit], &node_labels).is_err());
 }
 
 #[test]

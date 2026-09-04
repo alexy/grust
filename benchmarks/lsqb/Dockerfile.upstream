@@ -1,0 +1,20 @@
+# syntax=docker/dockerfile:1.7
+ARG PYTHON_IMAGE=python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+FROM ${PYTHON_IMAGE}
+
+ARG LSQB_COMMIT=242cb2fd31340ca688954cb94794d74c0d5b6f92
+ARG LSQB_TREE=d99fab28d47791dbc0e7173abc4c66d8aadc64ca
+COPY upstream-requirements.txt /tmp/upstream-requirements.txt
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git \
+    && git clone --filter=blob:none https://github.com/ldbc/lsqb.git /opt/lsqb-source \
+    && git -C /opt/lsqb-source checkout --detach "${LSQB_COMMIT}" \
+    && test "$(git -C /opt/lsqb-source rev-parse HEAD^{tree})" = "${LSQB_TREE}" \
+    && pip install --disable-pip-version-check --no-cache-dir --require-hashes \
+        --only-binary=:all: --no-deps --requirement /tmp/upstream-requirements.txt \
+    && apt-get purge --yes --auto-remove git \
+    && apt-get clean \
+    && find /var/lib/apt/lists -mindepth 1 -delete
+
+COPY upstream-entrypoint.sh /usr/local/bin/upstream-entrypoint
+ENTRYPOINT ["upstream-entrypoint"]

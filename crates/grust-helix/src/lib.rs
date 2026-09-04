@@ -69,20 +69,11 @@ impl HelixHttpGraphStore {
             .json(request)
             .send()
             .await
-            .map_err(|err| {
-                GrustError::Backend(format!(
-                    "failed to POST Helix query to {}: {err}",
-                    self.config.query_url
-                ))
-            })?;
+            .map_err(|_| helix_transport_error("failed to POST Helix query"))?;
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|err| GrustError::Backend(format!("failed to read Helix response: {err}")))?;
         if !status.is_success() {
             return Err(GrustError::Backend(format!(
-                "Helix query failed with status {status}: {body}"
+                "Helix query failed with status {status}"
             )));
         }
         Ok(())
@@ -95,22 +86,17 @@ impl HelixHttpGraphStore {
             .json(request)
             .send()
             .await
-            .map_err(|err| {
-                GrustError::Backend(format!(
-                    "failed to POST Helix query to {}: {err}",
-                    self.config.query_url
-                ))
-            })?;
+            .map_err(|_| helix_transport_error("failed to POST Helix query"))?;
         let status = response.status();
+        if !status.is_success() {
+            return Err(GrustError::Backend(format!(
+                "Helix query failed with status {status}"
+            )));
+        }
         let body = response
             .text()
             .await
-            .map_err(|err| GrustError::Backend(format!("failed to read Helix response: {err}")))?;
-        if !status.is_success() {
-            return Err(GrustError::Backend(format!(
-                "Helix query failed with status {status}: {body}"
-            )));
-        }
+            .map_err(|_| helix_transport_error("failed to read Helix response"))?;
         serde_json::from_str(&body)
             .map_err(|err| GrustError::Serialization(format!("invalid Helix response: {err}")))
     }
@@ -135,6 +121,13 @@ impl GraphStore for HelixHttpGraphStore {
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        validate_helix_graph_relationships(graph)?;
+        for node in &graph.nodes {
+            helix_http_properties(node)?;
+        }
+        for edge in &graph.edges {
+            helix_http_edge_properties(edge)?;
+        }
         let mut report = LoadReport::default();
         for chunk in graph.nodes.chunks(self.config.batch_size.max(1)) {
             self.post(&helix_add_nodes_request(chunk)?).await?;
@@ -194,9 +187,8 @@ pub struct HelixSdkGraphStore {
 impl HelixSdkGraphStore {
     pub fn connect(config: HelixSdkConfig) -> Result<Self> {
         let base_url = helix_base_url(&config.base_url);
-        let client = HelixClient::new(Some(&base_url)).map_err(|err| {
-            GrustError::Backend(format!("failed to build Helix SDK client: {err}"))
-        })?;
+        let client = HelixClient::new(Some(&base_url))
+            .map_err(|_| helix_transport_error("failed to build Helix SDK client"))?;
         Ok(Self {
             config: HelixSdkConfig { base_url, ..config },
             client,
@@ -221,6 +213,13 @@ impl GraphStore for HelixSdkGraphStore {
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        validate_helix_graph_relationships(graph)?;
+        for node in &graph.nodes {
+            helix_sdk_properties(node)?;
+        }
+        for edge in &graph.edges {
+            helix_sdk_edge_properties(edge)?;
+        }
         let mut report = LoadReport::default();
         for chunk in graph.nodes.chunks(self.config.batch_size.max(1)) {
             post_helix_sdk_nodes(&self.client, chunk).await?;
@@ -296,16 +295,14 @@ fn helix_add_nodes_request(nodes: &[Node]) -> Result<serde_json::Value> {
 }
 
 fn helix_http_properties(node: &Node) -> Result<Vec<serde_json::Value>> {
-    node.props
-        .iter()
-        .filter_map(|(key, value)| {
-            if key == "labels" {
-                None
-            } else {
-                Some(helix_http_property(key, value))
-            }
-        })
-        .collect()
+    validate_helix_node_props(node)?;
+    let mut properties = vec![helix_http_property("id", &Value::from(node.id.as_str()))?];
+    for (key, value) in &node.props {
+        if key != "id" {
+            properties.push(helix_http_property(key, value)?);
+        }
+    }
+    Ok(properties)
 }
 
 fn helix_add_edges_request(edges: &[Edge]) -> Result<serde_json::Value> {
@@ -348,6 +345,7 @@ fn helix_add_edges_request(edges: &[Edge]) -> Result<serde_json::Value> {
 }
 
 fn helix_http_edge_properties(edge: &Edge) -> Result<Vec<serde_json::Value>> {
+    validate_helix_edge_props(edge)?;
     let mut properties = vec![
         json!(["relationship", {"Value": {"String": edge.label.as_str()}}]),
         json!(["from_id", {"Value": {"String": edge.from.as_str()}}]),
@@ -429,21 +427,22 @@ async fn post_helix_sdk_nodes(client: &HelixClient, nodes: &[Node]) -> Result<()
         .dynamic_query(request)
         .send()
         .await
-        .map_err(|err| GrustError::Backend(format!("Helix SDK node write failed: {err}")))?;
+        .map_err(|_| helix_transport_error("Helix SDK node write failed"))?;
     Ok(())
 }
 
 fn helix_sdk_properties(node: &Node) -> Result<Vec<(String, PropertyInput)>> {
-    node.props
-        .iter()
-        .filter_map(|(key, value)| {
-            if key == "labels" {
-                None
-            } else {
-                Some(helix_property_input(value).map(|value| (key.clone(), value)))
-            }
-        })
-        .collect()
+    validate_helix_node_props(node)?;
+    let mut properties = vec![(
+        "id".to_string(),
+        PropertyInput::from(node.id.as_str().to_string()),
+    )];
+    for (key, value) in &node.props {
+        if key != "id" {
+            properties.push((key.clone(), helix_property_input(value)?));
+        }
+    }
+    Ok(properties)
 }
 
 async fn post_helix_sdk_edges(client: &HelixClient, edges: &[Edge]) -> Result<()> {
@@ -474,11 +473,12 @@ async fn post_helix_sdk_edges(client: &HelixClient, edges: &[Edge]) -> Result<()
         .dynamic_query(request)
         .send()
         .await
-        .map_err(|err| GrustError::Backend(format!("Helix SDK edge write failed: {err}")))?;
+        .map_err(|_| helix_transport_error("Helix SDK edge write failed"))?;
     Ok(())
 }
 
 fn helix_sdk_edge_properties(edge: &Edge) -> Result<Vec<(String, PropertyInput)>> {
+    validate_helix_edge_props(edge)?;
     let mut properties = vec![
         (
             "relationship".to_string(),
@@ -545,7 +545,7 @@ async fn send_helix_sdk_read(
         .dynamic_query(sdk_request)
         .send()
         .await
-        .map_err(|err| GrustError::Backend(format!("Helix SDK read failed: {err}")))
+        .map_err(|_| helix_transport_error("Helix SDK read failed"))
 }
 
 fn helix_get_node_request(id: &NodeId) -> serde_json::Value {
@@ -817,7 +817,7 @@ async fn post_helix_sdk_drop_labels(client: &HelixClient, labels: &[String]) -> 
         .dynamic_query(request)
         .send()
         .await
-        .map_err(|err| GrustError::Backend(format!("Helix SDK replace/drop failed: {err}")))?;
+        .map_err(|_| helix_transport_error("Helix SDK replace/drop failed"))?;
     Ok(())
 }
 
@@ -829,18 +829,130 @@ fn helix_base_url(helix_url: &str) -> String {
         .to_string()
 }
 
+fn helix_transport_error(context: &str) -> GrustError {
+    GrustError::Backend(context.to_string())
+}
+
+fn validate_helix_graph_relationships(graph: &Graph) -> Result<()> {
+    let mut claims = graph
+        .edges
+        .iter()
+        .map(|edge| {
+            (
+                "relationship type".to_string(),
+                relationship_type(edge.label.as_str()),
+                format!("edge label '{}'", edge.label.as_str()),
+            )
+        })
+        .collect::<Vec<_>>();
+    // Multiple records can share one logical relationship label. Keep only
+    // one identical claim so strict collision checking targets distinct names.
+    claims.sort();
+    claims.dedup();
+    validate_physical_identifier_claims("Helix graph", claims)
+}
+
 fn validate_helix_schema(schema: &GraphSchema) -> Result<()> {
+    let mut claims = Vec::new();
     for node_type in &schema.nodes {
-        validate_helix_name(node_type.label.as_str())?;
+        let label = node_type.label.as_str();
+        validate_helix_name(label)?;
+        claims.push((
+            "node label".to_string(),
+            label.to_string(),
+            format!("node type '{label}'"),
+        ));
+        let namespace = format!("properties on node label '{label}'");
+        for reserved in HELIX_NODE_RESERVED_PROPERTIES {
+            claims.push((
+                namespace.clone(),
+                reserved.to_string(),
+                format!("structural node property '{reserved}'"),
+            ));
+        }
         for field in &node_type.fields {
             validate_helix_name(&field.name)?;
+            claims.push((
+                namespace.clone(),
+                field.name.clone(),
+                format!("node field '{label}.{}'", field.name),
+            ));
         }
     }
     for edge_type in &schema.edges {
-        validate_helix_name(&relationship_type(edge_type.label.as_str()))?;
+        let relationship = relationship_type(edge_type.label.as_str());
+        validate_helix_name(&relationship)?;
+        claims.push((
+            "relationship type".to_string(),
+            relationship.clone(),
+            format!("edge type '{}'", edge_type.label.as_str()),
+        ));
+        let namespace = format!("properties on relationship type '{relationship}'");
+        for reserved in HELIX_EDGE_RESERVED_PROPERTIES {
+            claims.push((
+                namespace.clone(),
+                reserved.to_string(),
+                format!("structural edge property '{reserved}'"),
+            ));
+        }
         for field in &edge_type.fields {
             validate_helix_name(&field.name)?;
+            claims.push((
+                namespace.clone(),
+                field.name.clone(),
+                format!("edge field '{}.{}'", edge_type.label.as_str(), field.name),
+            ));
         }
+    }
+    validate_physical_identifier_claims("Helix", claims)
+}
+
+const HELIX_NODE_RESERVED_PROPERTIES: &[&str] = &["id", "label", "labels", "$id", "$label"];
+const HELIX_EDGE_RESERVED_PROPERTIES: &[&str] = &[
+    "relationship",
+    "label",
+    "from_id",
+    "to_id",
+    "edge_id",
+    "$id",
+    "$label",
+    "$from",
+    "$to",
+];
+
+fn validate_helix_node_props(node: &Node) -> Result<()> {
+    if node
+        .props
+        .get("id")
+        .is_some_and(|value| value != &Value::from(node.id.as_str()))
+    {
+        return Err(GrustError::Schema(format!(
+            "Helix node property 'id' does not match structural id '{}'",
+            node.id
+        )));
+    }
+    if let Some(key) = node.props.keys().find(|key| {
+        key.as_str() != "id"
+            && HELIX_NODE_RESERVED_PROPERTIES
+                .iter()
+                .any(|reserved| key == reserved)
+    }) {
+        return Err(GrustError::Schema(format!(
+            "Helix node property '{key}' is reserved for structural metadata"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_helix_edge_props(edge: &Edge) -> Result<()> {
+    if let Some(key) = edge.props.keys().find(|key| {
+        HELIX_EDGE_RESERVED_PROPERTIES
+            .iter()
+            .any(|reserved| key == reserved)
+    }) {
+        return Err(GrustError::Schema(format!(
+            "Helix edge property '{key}' is reserved for structural metadata"
+        )));
     }
     Ok(())
 }

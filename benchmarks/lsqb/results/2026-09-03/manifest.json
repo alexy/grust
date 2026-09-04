@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "methodology_version": "2026-09-03",
+  "warning": "These are not LDBC Benchmark Results.",
+  "upstream": {
+    "repository": "https://github.com/ldbc/lsqb",
+    "commit": "242cb2fd31340ca688954cb94794d74c0d5b6f92",
+    "source_tree": "d99fab28d47791dbc0e7173abc4c66d8aadc64ca",
+    "query_tree": "50937f3d075245e2abd4c00a36c4b3c236766265",
+    "example_projected_fk_data_tree": "45181e6b274d014f8626038e1d398fa1b9e4c19d",
+    "expected_output_blob": "4d9dedb2f8c7a42af6defa327303b1aded39e3ad",
+    "license": "Apache-2.0"
+  },
+  "execution_environment": {
+    "host_os": "macOS 26.2 (25C56)",
+    "host_arch": "arm64",
+    "container_os": "linux",
+    "container_arch": "arm64",
+    "docker_engine_version": "29.4.3",
+    "docker_cpus": 10,
+    "docker_memory_bytes": 8321712128,
+    "host_cpu_model": "intentionally omitted; Docker-reported architecture and resources define the execution boundary"
+  },
+  "images": {
+    "upstream_python_base": "python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7",
+    "upstream_built_image_id": "sha256:f0d7329db8e55f23846910b259c827624d6b2678ced8f332e341e290fbe33e6f",
+    "grust_builder": "rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97",
+    "grust_runtime": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
+    "postgres": "postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af",
+    "postgres_local_image_id": "sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af",
+    "postgres_platform": "linux/arm64",
+    "postgres_used_by_upstream_track": false
+  },
+  "python_packages": {
+    "ladybug": {
+      "version": "0.19.0",
+      "linux_arm64_wheel_sha256": "9f5333857dbfd871b6fc611ff9e08b98c9b2f09d6ddcf1ae53061de85837bd65",
+      "linux_x86_64_wheel_sha256": "8c4d00d5cc55e13524eff56e3295732a3c1b8d272d001b30748c2cc348581827"
+    }
+  },
+  "tracks": {
+    "upstream": {
+      "state": "recorded",
+      "summary": "upstream-summary.json",
+      "raw_observations": "upstream-ladybug-sfexample.tsv"
+    },
+    "grust_compatibility": {
+      "state": "pending-clean-committed-revision",
+      "reason": "dirty release-candidate results are provisional and intentionally not promoted"
+    },
+    "adversarial_counts": {
+      "state": "pending-clean-committed-revision",
+      "reason": "dirty release-candidate results are provisional and intentionally not promoted"
+    },
+    "bounded_policy": {
+      "state": "pending-clean-committed-revision",
+      "reason": "dirty release-candidate results are provisional and intentionally not promoted"
+    }
+  }
+}

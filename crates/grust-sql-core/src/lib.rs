@@ -1,4 +1,5 @@
 use grust_core::prelude::*;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
 pub struct UniversalTableRefs {
@@ -24,6 +25,15 @@ pub trait GraphSqlDialect {
     fn upsert_edges_sql(&self, table: &str, edges: &[Edge]) -> Result<String>;
     fn patch_node_sql(&self, nodes_table: &str, id: &NodeId, props: &Props) -> Result<String>;
 
+    /// Maximum encoded byte length for generated SQL identifiers.
+    ///
+    /// Dialects without a fixed identifier limit can keep the default. Schema
+    /// rendering rejects overlong generated names before a backend can silently
+    /// truncate them into a collision.
+    fn max_identifier_bytes(&self) -> Option<usize> {
+        None
+    }
+
     fn begin_transaction(&self) -> &'static str {
         "BEGIN"
     }
@@ -42,6 +52,41 @@ pub fn universal_tables(prefix: &str, qualify: impl Fn(&str) -> String) -> Unive
         nodes: qualify(&format!("{prefix}_nodes")),
         edges: qualify(&format!("{prefix}_edges")),
     }
+}
+
+/// Validate the table and bootstrap-index identifiers derived from a universal
+/// graph table prefix.
+///
+/// This is separate from [`universal_bootstrap_sql`] so callers can reject a
+/// configuration before connecting to a backend or executing any DDL.
+pub fn validate_universal_identifier_lengths(
+    dialect: &impl GraphSqlDialect,
+    table_prefix: &str,
+) -> Result<()> {
+    for (physical, logical) in [
+        (format!("{table_prefix}_nodes"), "universal node table"),
+        (format!("{table_prefix}_edges"), "universal edge table"),
+        (
+            format!("{table_prefix}_edges_from_idx"),
+            "universal edge-source index",
+        ),
+        (
+            format!("{table_prefix}_edges_to_idx"),
+            "universal edge-target index",
+        ),
+        (
+            format!("{table_prefix}_nodes_label_idx"),
+            "universal node-label index",
+        ),
+    ] {
+        validate_generated_identifier_length(
+            dialect.name(),
+            dialect.max_identifier_bytes(),
+            &physical,
+            logical,
+        )?;
+    }
+    Ok(())
 }
 
 pub fn universal_bootstrap_sql(
@@ -344,6 +389,14 @@ pub fn schema_sql(
         nodes_table,
         edges_table,
     } = layout;
+    validate_universal_identifier_lengths(dialect, table_prefix)?;
+    validate_typed_field_aliases(dialect.name(), dialect.max_identifier_bytes(), schema)?;
+    validate_generated_schema_names(
+        dialect.name(),
+        dialect.max_identifier_bytes(),
+        table_prefix,
+        schema,
+    )?;
     let mut statements = Vec::new();
 
     for node_type in &schema.nodes {
@@ -407,6 +460,156 @@ pub fn schema_sql(
     }
 
     Ok(statements.join("\n"))
+}
+
+fn validate_generated_schema_names(
+    dialect: &str,
+    max_identifier_bytes: Option<usize>,
+    table_prefix: &str,
+    schema: &GraphSchema,
+) -> Result<()> {
+    fn claim(
+        names: &mut BTreeMap<String, String>,
+        physical: String,
+        logical: String,
+        dialect: &str,
+        max_identifier_bytes: Option<usize>,
+    ) -> Result<()> {
+        validate_generated_identifier_length(dialect, max_identifier_bytes, &physical, &logical)?;
+        if let Some(existing) = names.insert(physical.clone(), logical.clone()) {
+            return Err(GrustError::Schema(format!(
+                "schema objects '{existing}' and '{logical}' both normalize to '{physical}'"
+            )));
+        }
+        Ok(())
+    }
+
+    let mut names = BTreeMap::new();
+    for node_type in &schema.nodes {
+        let label = schema_identifier(node_type.label.as_str())?;
+        claim(
+            &mut names,
+            format!("{table_prefix}_node_{label}"),
+            format!("node view '{}'", node_type.label.as_str()),
+            dialect,
+            max_identifier_bytes,
+        )?;
+        for field in &node_type.fields {
+            let field_name = schema_identifier(&field.name)?;
+            claim(
+                &mut names,
+                format!("{table_prefix}_node_{label}_{field_name}_idx"),
+                format!("node index '{}.{}'", node_type.label.as_str(), field.name),
+                dialect,
+                max_identifier_bytes,
+            )?;
+        }
+    }
+    for edge_type in &schema.edges {
+        let label = schema_identifier(edge_type.label.as_str())?;
+        claim(
+            &mut names,
+            format!("{table_prefix}_edge_{label}"),
+            format!("edge view '{}'", edge_type.label.as_str()),
+            dialect,
+            max_identifier_bytes,
+        )?;
+        for field in &edge_type.fields {
+            let field_name = schema_identifier(&field.name)?;
+            claim(
+                &mut names,
+                format!("{table_prefix}_edge_{label}_{field_name}_idx"),
+                format!("edge index '{}.{}'", edge_type.label.as_str(), field.name),
+                dialect,
+                max_identifier_bytes,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_generated_identifier_length(
+    dialect: &str,
+    max_identifier_bytes: Option<usize>,
+    physical: &str,
+    logical: &str,
+) -> Result<()> {
+    if let Some(limit) = max_identifier_bytes {
+        let length = physical.len();
+        if length > limit {
+            return Err(GrustError::Schema(format!(
+                "{dialect} generated identifier '{physical}' for {logical} is {length} bytes; the limit is {limit} bytes"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_typed_field_aliases(
+    dialect: &str,
+    max_identifier_bytes: Option<usize>,
+    schema: &GraphSchema,
+) -> Result<()> {
+    for node_type in &schema.nodes {
+        validate_typed_field_alias_group(
+            dialect,
+            max_identifier_bytes,
+            "node",
+            node_type.label.as_str(),
+            &["id"],
+            &node_type.fields,
+        )?;
+    }
+    for edge_type in &schema.edges {
+        validate_typed_field_alias_group(
+            dialect,
+            max_identifier_bytes,
+            "edge",
+            edge_type.label.as_str(),
+            &["id", "from_id", "to_id"],
+            &edge_type.fields,
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_typed_field_alias_group(
+    dialect: &str,
+    max_identifier_bytes: Option<usize>,
+    object_kind: &str,
+    object_label: &str,
+    fixed_columns: &[&str],
+    fields: &[Field],
+) -> Result<()> {
+    let mut aliases = BTreeMap::new();
+    for fixed in fixed_columns {
+        aliases.insert((*fixed).to_string(), format!("fixed column '{fixed}'"));
+    }
+    for field in fields {
+        if field.name.is_empty() || field.name.contains('\0') {
+            return Err(GrustError::Schema(format!(
+                "invalid {dialect} typed field alias {:?} for {object_kind} '{object_label}'",
+                field.name
+            )));
+        }
+        if let Some(limit) = max_identifier_bytes {
+            let length = field.name.len();
+            if length > limit {
+                return Err(GrustError::Schema(format!(
+                    "{dialect} typed field alias '{}' for {object_kind} '{object_label}' is {length} bytes; the limit is {limit} bytes",
+                    field.name
+                )));
+            }
+        }
+        let logical = format!("field '{}'", field.name);
+        if let Some(existing) = aliases.insert(field.name.clone(), logical.clone()) {
+            return Err(GrustError::Schema(format!(
+                "{dialect} {object_kind} '{object_label}' columns '{existing}' and '{logical}' both use identifier '{}'",
+                field.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub fn props_to_json(props: &Props) -> Result<String> {
@@ -495,4 +698,49 @@ fn limit_clause(limit: Option<u32>) -> String {
     limit
         .map(|limit| format!(" LIMIT {limit}"))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_schema_names_reject_normalization_collisions() {
+        let schema = GraphSchema::builder()
+            .node("a-b", Vec::new())
+            .node("a_b", Vec::new())
+            .build();
+
+        let error = validate_generated_schema_names("test SQL", None, "grust", &schema)
+            .expect_err("colliding physical views must be rejected");
+        assert!(error.to_string().contains("both normalize"));
+        assert!(error.to_string().contains("grust_node_a_b"));
+    }
+
+    #[test]
+    fn generated_schema_names_reject_composed_index_collisions() {
+        let schema = GraphSchema::builder()
+            .node("a-b", vec![Field::optional("c", FieldType::String)])
+            .node("a", vec![Field::optional("b-c", FieldType::String)])
+            .build();
+
+        let error = validate_generated_schema_names("test SQL", None, "grust", &schema)
+            .expect_err("colliding physical indexes must be rejected");
+        assert!(error.to_string().contains("grust_node_a_b_c_idx"));
+    }
+
+    #[test]
+    fn generated_schema_names_apply_only_configured_byte_limit() {
+        let schema = GraphSchema::builder()
+            .node("x".repeat(53), Vec::new())
+            .build();
+
+        validate_generated_schema_names("unlimited SQL", None, "grust", &schema)
+            .expect("dialects without a limit accept the generated name");
+
+        let error = validate_generated_schema_names("PostgreSQL", Some(63), "grust", &schema)
+            .expect_err("64-byte PostgreSQL identifier must be rejected");
+        assert!(error.to_string().contains("is 64 bytes"));
+        assert!(error.to_string().contains("limit is 63 bytes"));
+    }
 }

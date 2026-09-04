@@ -244,7 +244,7 @@ where
 }
 
 pub(crate) fn return_row_key(values: &[Value], context: &str) -> Result<String> {
-    serde_json::to_string(
+    let key = serde_json::to_string(
         &values
             .iter()
             .map(Value::to_json)
@@ -252,7 +252,12 @@ pub(crate) fn return_row_key(values: &[Value], context: &str) -> Result<String> 
     )
     .map_err(|err| {
         GrustError::CypherExecution(format!("{context} key serialization failed: {err}"))
-    })
+    })?;
+    crate::read_budget::charge_intermediate_bytes(
+        key.len(),
+        &format!("serializing {context} keys"),
+    )?;
+    Ok(key)
 }
 
 pub(crate) async fn evaluate_return_aggregate<S>(
@@ -1640,10 +1645,11 @@ where
             continue;
         }
         let edges = matching_edges_on_store(store, binding).await?;
-        values.insert(
-            variable.clone(),
-            edges.into_iter().map(|edge| edge_key(&edge)).collect(),
-        );
+        let keys = edges
+            .iter()
+            .map(checked_edge_key)
+            .collect::<Result<Vec<_>>>()?;
+        values.insert(variable.clone(), keys);
     }
     Ok(())
 }
@@ -1847,19 +1853,17 @@ pub(crate) async fn edge_by_key_on_store<S>(store: &S, key: &str) -> Result<Opti
 where
     S: GraphStore + Sync,
 {
-    for edge in store
+    let edges = store
         .get_edges(EdgeQuery {
             from: None,
             to: None,
             label: None,
         })
-        .await?
-    {
-        if edge_key_matches(&edge, key) {
-            return Ok(Some(edge));
-        }
+        .await?;
+    for edge in &edges {
+        validate_edge_key_components(edge)?;
     }
-    Ok(None)
+    Ok(edges.into_iter().find(|edge| edge_key_matches(edge, key)))
 }
 
 pub(crate) fn merge_cypher_reports(report: &mut CypherMutationReport, next: CypherMutationReport) {
@@ -2120,6 +2124,13 @@ pub(crate) fn graph_edge_value(edge: &Edge) -> Result<Value> {
     })
 }
 
+/// Executes a writable statement while retaining the intermediate bindings
+/// needed to evaluate `RETURN`.
+///
+/// This compatibility path submits operations sequentially because later
+/// bindings can depend on earlier writes. It does not promise whole-statement
+/// rollback even when the store's `apply_mutations` batches are transactional.
+/// Use the explicit transaction-script API when atomic commit is required.
 pub async fn execute_cypher_mutation_returning_with_options_on_store<S>(
     store: &S,
     cypher: &str,
@@ -2325,6 +2336,7 @@ pub fn check_strict_create_plan_conflicts(plan: &GraphMutationPlan) -> Result<()
                 kind: GraphMutationPlanKind::Create,
                 edge,
             } => {
+                validate_edge_key_components(edge)?;
                 let duplicate_id = edge
                     .id
                     .as_ref()

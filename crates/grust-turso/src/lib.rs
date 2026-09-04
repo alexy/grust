@@ -3,6 +3,7 @@ use grust_core::prelude::*;
 use grust_cypher::pushdown::{NoTypeHints, SqlDialect, StrOp, combine_union, plan_read};
 use grust_cypher::{CypherParameters, CypherResultTable};
 use grust_sql_core::{GraphSqlDialect, UniversalTableRefs};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 mod guarded_commit;
 
@@ -74,6 +75,10 @@ pub struct TursoGraphStore {
     /// cannot accidentally absorb a concurrent read or write on the same
     /// connection.
     connection_gate: tokio::sync::Mutex<()>,
+    /// Set before an explicit transaction begins and cleared only after its
+    /// commit or rollback finishes. If a future is cancelled while the gate is
+    /// held, the next caller recovers the abandoned transaction first.
+    transaction_needs_rollback: AtomicBool,
 }
 
 impl TursoGraphStore {
@@ -96,6 +101,7 @@ impl TursoGraphStore {
             _db: TursoDatabase::Local(db),
             conn,
             connection_gate: tokio::sync::Mutex::new(()),
+            transaction_needs_rollback: AtomicBool::new(false),
         };
         store.apply_journal_mode().await?;
         Ok(store)
@@ -125,7 +131,7 @@ impl TursoGraphStore {
 
     /// Run a query expected to yield a single text cell in its first row.
     async fn query_scalar_text(&self, sql: &str) -> Result<Option<String>> {
-        let _gate = self.connection_gate.lock().await;
+        let _gate = self.lock_connection().await?;
         let mut rows = self
             .conn
             .query(sql, ())
@@ -172,6 +178,7 @@ impl TursoGraphStore {
             _db: TursoDatabase::Synced(db),
             conn,
             connection_gate: tokio::sync::Mutex::new(()),
+            transaction_needs_rollback: AtomicBool::new(false),
         })
     }
 
@@ -181,7 +188,7 @@ impl TursoGraphStore {
 
     #[cfg(feature = "sync")]
     pub async fn push(&self) -> Result<()> {
-        let _gate = self.connection_gate.lock().await;
+        let _gate = self.lock_connection().await?;
         match &self._db {
             TursoDatabase::Synced(db) => db
                 .push()
@@ -195,7 +202,7 @@ impl TursoGraphStore {
 
     #[cfg(feature = "sync")]
     pub async fn pull(&self) -> Result<bool> {
-        let _gate = self.connection_gate.lock().await;
+        let _gate = self.lock_connection().await?;
         match &self._db {
             TursoDatabase::Synced(db) => db
                 .pull()
@@ -208,8 +215,37 @@ impl TursoGraphStore {
     }
 
     async fn execute(&self, sql: &str) -> Result<()> {
-        let _gate = self.connection_gate.lock().await;
+        let _gate = self.lock_connection().await?;
         self.execute_unlocked(sql).await
+    }
+
+    async fn lock_connection(&self) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+        let gate = self.connection_gate.lock().await;
+        if self.transaction_needs_rollback.load(Ordering::Acquire) {
+            // Cancellation may occur while BEGIN, a statement, or COMMIT is
+            // being driven. If BEGIN never took effect the connection is
+            // already in autocommit mode; otherwise resolve the transaction
+            // before allowing another operation onto the shared connection.
+            self.recover_transaction_unlocked().await?;
+        }
+        Ok(gate)
+    }
+
+    /// Resolve a transaction whose completion is uncertain. The marker stays
+    /// set if state inspection or rollback fails, preventing later operations
+    /// from silently joining the abandoned transaction.
+    async fn recover_transaction_unlocked(&self) -> Result<()> {
+        let autocommit = self.conn.is_autocommit().map_err(|err| {
+            GrustError::Backend(format!(
+                "failed to inspect Turso transaction state during cancellation recovery: {err}"
+            ))
+        })?;
+        if !autocommit {
+            self.execute_unlocked("ROLLBACK").await?;
+        }
+        self.transaction_needs_rollback
+            .store(false, Ordering::Release);
+        Ok(())
     }
 
     async fn execute_unlocked(&self, sql: &str) -> Result<()> {
@@ -236,27 +272,57 @@ impl TursoGraphStore {
     /// retrying the whole transaction on a write-write / busy conflict (bounded).
     /// Only used when `journal_mode == Mvcc`.
     async fn execute_concurrent(&self, statements: &[String]) -> Result<()> {
+        self.execute_transaction(statements, true).await
+    }
+
+    /// Execute already-lowered statements on the shared connection while
+    /// holding its gate for the entire transaction, including rollback. This
+    /// prevents another task from observing or joining a failed transaction.
+    async fn execute_transaction(&self, statements: &[String], concurrent: bool) -> Result<()> {
         const MAX_ATTEMPTS: usize = 8;
-        let body = statements
+        if statements
             .iter()
-            .map(|s| s.trim().trim_end_matches(';'))
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join(";\n");
-        if body.is_empty() {
+            .all(|statement| statement.trim().is_empty())
+        {
             return Ok(());
         }
-        let txn = format!("BEGIN CONCURRENT;\n{body};\nCOMMIT;");
+        let _gate = self.lock_connection().await?;
         let mut attempt = 0;
         loop {
             attempt += 1;
-            match self.execute(&txn).await {
-                Ok(()) => return Ok(()),
+            self.transaction_needs_rollback
+                .store(true, Ordering::Release);
+            let result = async {
+                self.execute_unlocked(if concurrent {
+                    "BEGIN CONCURRENT"
+                } else {
+                    "BEGIN"
+                })
+                .await?;
+                for statement in statements {
+                    if !statement.trim().is_empty() {
+                        self.execute_unlocked(statement).await?;
+                    }
+                }
+                self.execute_unlocked("COMMIT").await
+            }
+            .await;
+            match result {
+                Ok(()) => {
+                    self.transaction_needs_rollback
+                        .store(false, Ordering::Release);
+                    return Ok(());
+                }
                 Err(err) => {
                     // A conflict aborts the transaction; clear any residual state
-                    // (best-effort) before retrying or surfacing the error.
-                    let _ = self.execute("ROLLBACK").await;
-                    if is_mvcc_conflict(&err) && attempt < MAX_ATTEMPTS {
+                    // before retrying or surfacing the error. If rollback itself
+                    // fails, keep the recovery marker set for the next caller.
+                    if let Err(recovery_err) = self.recover_transaction_unlocked().await {
+                        return Err(GrustError::Backend(format!(
+                            "{err}; Turso transaction recovery failed: {recovery_err}"
+                        )));
+                    }
+                    if concurrent && is_mvcc_conflict(&err) && attempt < MAX_ATTEMPTS {
                         continue;
                     }
                     return Err(err);
@@ -266,7 +332,11 @@ impl TursoGraphStore {
     }
 
     async fn query_nodes(&self, sql: &str) -> Result<Vec<Node>> {
-        let _gate = self.connection_gate.lock().await;
+        let _gate = self.lock_connection().await?;
+        self.query_nodes_unlocked(sql).await
+    }
+
+    async fn query_nodes_unlocked(&self, sql: &str) -> Result<Vec<Node>> {
         let mut rows =
             self.conn.query(sql, ()).await.map_err(|err| {
                 GrustError::Backend(format!("Turso node query failed: {err}: {sql}"))
@@ -281,7 +351,7 @@ impl TursoGraphStore {
     }
 
     async fn query_edges(&self, sql: &str) -> Result<Vec<Edge>> {
-        let _gate = self.connection_gate.lock().await;
+        let _gate = self.lock_connection().await?;
         let mut rows =
             self.conn.query(sql, ()).await.map_err(|err| {
                 GrustError::Backend(format!("Turso edge query failed: {err}: {sql}"))
@@ -423,26 +493,17 @@ impl GraphMutationStore for TursoGraphStore {
         if mutations.is_empty() {
             return Ok(());
         }
+        let nodes = self.nodes_table();
+        let edges = self.edges_table();
+        let statements = mutations
+            .iter()
+            .map(|mutation| {
+                grust_sql_core::mutation_sql(&TursoDialect, &nodes, &edges, mutation, sql_str)
+            })
+            .collect::<Result<Vec<_>>>()?;
         match self.config.journal_mode {
-            TursoJournalMode::Wal => {
-                self.execute(&apply_mutations_sql(
-                    &self.nodes_table(),
-                    &self.edges_table(),
-                    mutations,
-                )?)
-                .await
-            }
-            TursoJournalMode::Mvcc => {
-                let nodes = self.nodes_table();
-                let edges = self.edges_table();
-                let statements = mutations
-                    .iter()
-                    .map(|m| {
-                        grust_sql_core::mutation_sql(&TursoDialect, &nodes, &edges, m, sql_str)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                self.execute_concurrent(&statements).await
-            }
+            TursoJournalMode::Wal => self.execute_transaction(&statements, false).await,
+            TursoJournalMode::Mvcc => self.execute_concurrent(&statements).await,
         }
     }
 }
@@ -453,89 +514,92 @@ impl CypherMutationExecutor for TursoGraphStore {
         &self,
         plan: &GraphMutationPlan,
     ) -> Result<GraphMutationReport> {
-        let mut report = plan.report();
-        for operation in &plan.operations {
-            match operation {
-                GraphMutationPlanOp::PatchMatchingNodes {
-                    label,
-                    props,
-                    predicates,
-                    patch,
-                    ..
-                } => {
-                    let nodes = self
-                        .matching_nodes(label.as_ref(), props, predicates)
-                        .await?;
-                    report.matched_rows += nodes.len();
-                    report.node_patches += nodes.len();
-                    report.changed_nodes += nodes.len();
+        // Lower every fixed operation before opening the transaction so an
+        // unsupported trailing operation cannot commit a valid prefix.
+        let prepared = plan
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                GraphMutationPlanOp::PatchMatchingNodes { .. } => Ok(None),
+                other => mutation_sql(
+                    &self.nodes_table(),
+                    &self.edges_table(),
+                    &GraphMutation::from(other.clone()),
+                )
+                .map(Some),
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-                    for mut node in nodes {
-                        for (key, value) in patch {
-                            node.props.insert(key.clone(), value.clone());
+        const MAX_ATTEMPTS: usize = 8;
+        let concurrent = self.config.journal_mode == TursoJournalMode::Mvcc;
+        let _gate = self.lock_connection().await?;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let mut report = plan.report();
+            self.transaction_needs_rollback
+                .store(true, Ordering::Release);
+            let execution = async {
+                self.execute_unlocked(if concurrent {
+                    "BEGIN CONCURRENT"
+                } else {
+                    "BEGIN"
+                })
+                .await?;
+                for (operation, prepared_sql) in plan.operations.iter().zip(&prepared) {
+                    match operation {
+                        GraphMutationPlanOp::PatchMatchingNodes {
+                            label,
+                            props,
+                            predicates,
+                            patch,
+                            ..
+                        } => {
+                            let nodes = self
+                                .matching_nodes_unlocked(label.as_ref(), props, predicates)
+                                .await?;
+                            report.matched_rows += nodes.len();
+                            report.node_patches += nodes.len();
+                            report.changed_nodes += nodes.len();
+                            for node in nodes {
+                                let sql = patch_node_sql(&self.nodes_table(), &node.id, patch)?;
+                                self.execute_unlocked(&sql).await?;
+                            }
                         }
-                        self.put_node(&node).await?;
+                        _ => {
+                            self.execute_unlocked(
+                                prepared_sql
+                                    .as_deref()
+                                    .expect("fixed mutation SQL was precomputed"),
+                            )
+                            .await?;
+                        }
                     }
                 }
-                GraphMutationPlanOp::UpsertNode { node, .. } => {
-                    classify_node_upsert(self.put_node(node).await?, &mut report);
+                self.execute_unlocked("COMMIT").await?;
+                Ok::<_, GrustError>(report)
+            }
+            .await;
+
+            match execution {
+                Ok(report) => {
+                    self.transaction_needs_rollback
+                        .store(false, Ordering::Release);
+                    return Ok(report);
                 }
-                GraphMutationPlanOp::UpsertEdge { edge, .. } => {
-                    classify_edge_upsert(self.put_edge(edge).await?, &mut report);
-                }
-                GraphMutationPlanOp::DeleteMatchingNodes { .. } => {
-                    return Err(GrustError::CypherExecution(
-                        "matched node deletes require Turso delete query support".to_string(),
-                    ));
-                }
-                GraphMutationPlanOp::UpdateMatchingNodeProperty { .. } => {
-                    return Err(GrustError::CypherExecution(
-                        "matched node expression updates require Turso expression update support"
-                            .to_string(),
-                    ));
-                }
-                GraphMutationPlanOp::RemoveMatchingNodeProps { .. } => {
-                    return Err(GrustError::CypherExecution(
-                        "matched node property removals require Turso property removal support"
-                            .to_string(),
-                    ));
-                }
-                GraphMutationPlanOp::PatchMatchingEdges { .. } => {
-                    return Err(GrustError::CypherExecution(
-                        "matched edge patches require Turso edge query support".to_string(),
-                    ));
-                }
-                GraphMutationPlanOp::UpdateMatchingEdgeProperty { .. } => {
-                    return Err(GrustError::CypherExecution(
-                        "matched edge expression updates require Turso expression update support"
-                            .to_string(),
-                    ));
-                }
-                GraphMutationPlanOp::RemoveMatchingEdgeProps { .. } => {
-                    return Err(GrustError::CypherExecution(
-                        "matched edge property removals require Turso property removal support"
-                            .to_string(),
-                    ));
-                }
-                GraphMutationPlanOp::DeleteMatchingEdges { .. } => {
-                    return Err(GrustError::CypherExecution(
-                        "matched edge deletes require Turso edge query support".to_string(),
-                    ));
-                }
-                GraphMutationPlanOp::UpsertEdgesFromNodeMatches { .. } => {
-                    return Err(GrustError::CypherExecution(
-                        "row-producing edge upserts require Turso node-pair query support"
-                            .to_string(),
-                    ));
-                }
-                _ => {
-                    let mutation = GraphMutation::from(operation.clone());
-                    self.apply_mutations(std::slice::from_ref(&mutation))
-                        .await?;
+                Err(err) => {
+                    if let Err(recovery_err) = self.recover_transaction_unlocked().await {
+                        return Err(GrustError::Backend(format!(
+                            "{err}; Turso transaction recovery failed: {recovery_err}"
+                        )));
+                    }
+                    if concurrent && is_mvcc_conflict(&err) && attempt < MAX_ATTEMPTS {
+                        continue;
+                    }
+                    return Err(err);
                 }
             }
         }
-        Ok(report)
     }
 }
 
@@ -658,7 +722,7 @@ fn json_predicate(alias: &str, key: &str, value: &Value) -> Result<String> {
 }
 
 impl TursoGraphStore {
-    async fn matching_nodes(
+    async fn matching_nodes_unlocked(
         &self,
         label: Option<&Label>,
         props: &Props,
@@ -688,7 +752,7 @@ impl TursoGraphStore {
             TursoDialect.node_props_select("n"),
             self.nodes_table()
         );
-        let mut nodes = self.query_nodes(&sql).await?;
+        let mut nodes = self.query_nodes_unlocked(&sql).await?;
         if !predicates.is_empty() {
             nodes.retain(|node| {
                 predicates
@@ -860,7 +924,7 @@ impl TursoGraphStore {
 
     /// Execute pushdown SQL whose result cells decode as optional text.
     async fn run_text_rows(&self, sql: &str, columns: usize) -> Result<Vec<Vec<Option<String>>>> {
-        let _gate = self.connection_gate.lock().await;
+        let _gate = self.lock_connection().await?;
         let mut rows = self.conn.query(sql, ()).await.map_err(|err| {
             GrustError::Backend(format!("Turso read pushdown query failed: {err}: {sql}"))
         })?;

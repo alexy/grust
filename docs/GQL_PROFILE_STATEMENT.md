@@ -1,12 +1,17 @@
 # Grust GQL/Cypher — Profile Statement
 
-This is the precise, backed statement of what Grust's GQL/Cypher layer conforms to
-today. It began as the terminal deliverable of the GQL completion goal (U16) with
-`Full39075` as a **candidate** claim; the Full39075 completion goal
-(`docs/GQL_FULL39075_GOAL.md`, F1–F11) has since implemented every remaining
-feature, so **`Full39075` is now the realized profile**, backed feature-by-feature
-against the machine-readable manifest (`grust_cypher::gql::feature_manifest`),
-not by prose.
+This is the precise, backed statement of Grust's own GQL/Cypher feature catalog.
+It began as the terminal deliverable of the GQL completion goal (U16) with
+`Full39075` as a candidate internal profile. The completion goal
+(`docs/GQL_FULL39075_GOAL.md`, F1–F11) implemented every remaining catalogued
+feature, so **`Full39075` is the realized Grust profile**, backed
+feature-by-feature against the machine-readable manifest
+(`grust_cypher::gql::feature_manifest`), not by prose.
+
+The profile name does **not** claim complete ISO/IEC 39075 conformance, formal
+certification, or uniform execution on every backend. The manifest is a scoped
+Grust catalog, and the reference executor, pushdown engines, native escape
+hatches, and storage adapters have intentionally different capabilities.
 
 **Source of truth:** the `GqlFeature` manifest in `crates/grust-cypher/src/gql.rs`.
 This document must agree with it; the test `gql::tests::full_profile_claim_is_backed`
@@ -22,7 +27,7 @@ fails if the scoped-out set below drifts from the manifest.
 2. **PortableGql** — StrictWrite **plus** the portable read core, expression
    engine, aggregates/`RETURN`, read pushdown, the type-system values, procedures,
    `CALL { … }` subqueries, transaction surface, and the U10b write widenings.
-3. **Full39075** — the full ISO/IEC 39075 profile: PortableGql **plus** index and
+3. **Full39075** — the widest Grust catalog profile: PortableGql **plus** index and
    graph-type DDL metadata, catalog metadata, named graph selection, session
    control, first-class path and graph values, table-valued functions,
    shortest-path matching, and backend-native passthrough. **This is the
@@ -30,7 +35,7 @@ fails if the scoped-out set below drifts from the manifest.
 
 ## Realized profile (today): Full39075
 
-**69 of 74 catalogued features are `Supported`** (implemented + tested); the
+**69 of 74 Grust-catalogued features are `Supported`** (implemented + tested); the
 remaining 5 are intentional rejections. By family (run `support_summary()` for
 the live list): parser/semantics, resolved writes, broad matched writes,
 row-producing relationship writes, returning & aggregates, predicates &
@@ -66,13 +71,15 @@ missing features:
 - **Conformance corpora** — `tests/gql/portable_read.json`, `tests/golden/write_golden.json`
   (byte-identical write plans), `tests/golden/write_corpus.json`, plus the
   `grust-turso` differential read-pushdown oracle.
-- **Test floor** — 574 lib + integration in `grust-cypher`, never shrinking; the
-  327 strict-write tests remain green.
+- **Test floor** — the current `grust-cypher` library and integration suites
+  must stay green; the original 327 strict-write cases remain a historical
+  non-regression floor.
 
 ## Honest scope notes (within `Supported`)
 
 The realized profile claims exactly what the summaries in the manifest say, no
-more. Notable deliberate scopings:
+more. It is not an exhaustive clause-by-clause model of the ISO standard.
+Notable deliberate scopings:
 
 - `CALL { … }` subqueries use correlated **import-all** scoping (the subquery
   sees the outer row's bindings); `RETURN *` inside a subquery is a structured
