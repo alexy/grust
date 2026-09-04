@@ -1,4 +1,3 @@
-use grust_core::prelude::*;
 use tempfile::tempdir;
 
 use super::*;

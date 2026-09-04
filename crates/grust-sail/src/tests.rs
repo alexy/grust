@@ -3,13 +3,11 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use arrow::array::Array as _;
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use grust_core::prelude::*;
 use tonic::transport::Channel;
 
 use super::*;
