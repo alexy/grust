@@ -210,7 +210,7 @@ async fn prepare_backend(
 }
 
 fn streams_projected_dataset(backend: &str, scale: &str) -> bool {
-    scale != "example" && matches!(backend, "turso" | "postgres" | "sail")
+    scale != "example" && matches!(backend, "memory" | "turso" | "postgres" | "sail")
 }
 
 async fn execute_protocol(
@@ -709,13 +709,13 @@ mod tests {
     }
 
     #[test]
-    fn downloaded_row_source_backends_stream_projected_data() {
-        for backend in ["turso", "postgres", "sail"] {
+    fn downloaded_owned_and_row_source_backends_stream_projected_data() {
+        for backend in ["memory", "turso", "postgres", "sail"] {
             assert!(streams_projected_dataset(backend, "0.1"), "{backend}");
             assert!(streams_projected_dataset(backend, "0.3"), "{backend}");
             assert!(!streams_projected_dataset(backend, "example"), "{backend}");
         }
-        for backend in ["memory", "falkor", "ladybug"] {
+        for backend in ["falkor", "ladybug"] {
             assert!(!streams_projected_dataset(backend, "0.3"), "{backend}");
         }
     }

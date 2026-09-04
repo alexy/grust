@@ -13,7 +13,7 @@ is never rewritten as an unavailable core-runner fallback.
 
 | Backend | 0.13 dependency / service | Benchmark status | Qualification note |
 |---|---|---|---|
-| Memory | workspace implementation | executable | In-process portable reference; no service image. |
+| Memory | workspace implementation | executable | In-process portable reference; downloaded tiers decode chunks directly into the sole owned reference graph, with no full-graph clone or service image. |
 | Turso | `turso 0.7.2` | executable | Embedded SQL row-source pushdown with disclosed Rust completion where required. |
 | PostgreSQL | `tokio-postgres 0.7.18`; PostgreSQL 18.6 | executable | Fresh digest-pinned service for each cell; SQL row-source pushdown with disclosed Rust completion where required. |
 | Ladybug | `lbug 0.20.2` | executable at `sfexample` | Embedded backend is read back through `GraphStore`, checked against the source-label node and edge multisets, then evaluated by the shared reference. The separate unchanged upstream run remains Ladybug 0.19.0. |

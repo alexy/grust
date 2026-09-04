@@ -113,13 +113,14 @@ impl PreparedBackend {
         }
     }
 
-    /// Loads a projected-FK dataset incrementally into backends whose query
-    /// path does not need to retain the decoded source graph.
+    /// Loads a projected-FK dataset directly into the backend-owned
+    /// representation without first retaining a duplicate source graph.
     pub async fn prepare_projected_chunks<I>(id: &str, chunks: I) -> Result<Self, String>
     where
         I: IntoIterator<Item = Result<Graph, String>>,
     {
         match id {
+            "memory" => prepare_memory_chunks(chunks).await,
             "turso" => prepare_turso_chunks(chunks).await,
             "postgres" => prepare_postgres_chunks(chunks).await,
             #[cfg(feature = "sail")]
@@ -308,6 +309,33 @@ async fn prepare_memory(graph: &Graph) -> Result<PreparedBackend, String> {
     let graph = Arc::new(graph.clone());
     Ok(PreparedBackend {
         inner: Backend::Memory(graph),
+        load_ns: elapsed_ns(started)?,
+    })
+}
+
+async fn prepare_memory_chunks<I>(chunks: I) -> Result<PreparedBackend, String>
+where
+    I: IntoIterator<Item = Result<Graph, String>>,
+{
+    // Start before advancing the lazy iterator so CSV decode is part of the
+    // diagnostic load interval. Moving each chunk into this graph avoids the
+    // full deep clone used by the already-decoded example path.
+    let started = Instant::now();
+    let mut graph = Graph::default();
+    let mut loading_edges = false;
+    for chunk in chunks {
+        let chunk = chunk.map_err(|error| format!("dataset.load: {error}"))?;
+        if !chunk.nodes.is_empty() && loading_edges {
+            return Err(
+                "dataset.load: projected-FK chunks must load all nodes before edges".to_string(),
+            );
+        }
+        loading_edges |= !chunk.edges.is_empty();
+        graph.nodes.extend(chunk.nodes);
+        graph.edges.extend(chunk.edges);
+    }
+    Ok(PreparedBackend {
+        inner: Backend::Memory(Arc::new(graph)),
         load_ns: elapsed_ns(started)?,
     })
 }
@@ -820,9 +848,38 @@ mod tests {
     use grust_memory::MemoryGraphStore;
 
     use super::{
-        QueryExecutionError, adapter_version, blocking_count_with_timeout, put_projected_chunks,
-        resource_components,
+        Backend, QueryExecutionError, adapter_version, blocking_count_with_timeout,
+        prepare_memory_chunks, put_projected_chunks, resource_components,
     };
+
+    #[tokio::test]
+    async fn projected_chunks_build_one_owned_memory_graph_inside_the_load_interval() {
+        let delay = Duration::from_millis(5);
+        let nodes = Graph::new(
+            vec![
+                Node::new("Person", "a", Props::new()),
+                Node::new("Person", "b", Props::new()),
+            ],
+            Vec::new(),
+        );
+        let edges = Graph::new(Vec::new(), vec![Edge::new("KNOWS", "a", "b", Props::new())]);
+        let chunks = std::iter::once_with(move || {
+            std::thread::sleep(delay);
+            Ok(nodes)
+        })
+        .chain(std::iter::once(Ok(edges)));
+
+        let prepared = prepare_memory_chunks(chunks)
+            .await
+            .expect("memory chunks load");
+        assert!(prepared.load_ns >= u64::try_from(delay.as_nanos()).unwrap());
+        let Backend::Memory(graph) = &prepared.inner else {
+            panic!("memory preparation must retain the reference graph");
+        };
+        assert_eq!(Arc::strong_count(graph), 1);
+        assert_eq!(graph.nodes.len(), 2);
+        assert_eq!(graph.edges.len(), 1);
+    }
 
     #[tokio::test]
     async fn projected_chunks_are_loaded_incrementally_in_node_edge_order() {

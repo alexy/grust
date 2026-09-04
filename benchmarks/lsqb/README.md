@@ -262,13 +262,21 @@ tiers in fresh directories:
 
 ```sh
 benchmarks/lsqb/fetch-dataset.sh --scale 0.1
-CELL_TIMEOUT_MS=14400000 WARMUPS=2 RUNS=5 SF=0.1 \
+CELL_TIMEOUT_MS=14400000 WARMUPS=2 RUNS=5 QUERY_TIMEOUT_MS=600000 SF=0.1 \
   benchmarks/lsqb/run-grust.sh
 
 benchmarks/lsqb/fetch-dataset.sh --scale 0.3
-CELL_TIMEOUT_MS=14400000 WARMUPS=0 RUNS=1 QUERY_TIMEOUT_MS=30000 SF=0.3 \
+CELL_TIMEOUT_MS=14400000 WARMUPS=0 RUNS=1 QUERY_TIMEOUT_MS=1200000 SF=0.3 \
   benchmarks/lsqb/run-grust.sh
 ```
+
+These ten- and twenty-minute values are per-query ceilings, not expected
+latencies. They leave headroom for the admitted in-process reference work under
+the fixed 8-CPU, 6-GiB container envelope: a one-sample qualification measured
+SF0.1 q2 at about 54 seconds and SF0.3 q2 at about 311 seconds, while the
+adversarial reordered-join case has a larger certified intermediate. Keep the
+ceiling identical across cells in a published scale run; compare the recorded
+elapsed samples, not the timeout budget.
 
 At downloaded scales the matrix executes Memory as the in-process reference,
 Turso/PostgreSQL (and a qualified Sail service) as backend-row-source plus Rust
@@ -412,13 +420,14 @@ warm-up and measurement work, and report serialization; the examples above
 use one hour for the tiny graph and four hours for downloaded tiers.
 
 `load_ns` is diagnostic and is not compared across adapter classes. At
-downloaded scales Turso, PostgreSQL, a qualified Sail service, and FalkorDB
-decode and insert bounded node-first/edge-next chunks inside the load interval;
-their query phase retains no duplicate Rust source graph. Memory retains its
-single in-process graph, while example-scale and example-only materializing
-adapters receive an already decoded graph. Dataset inspection and manifest
-hashing occur before either boundary. Query latencies exclude all of those load
-and verification steps in both cases. If a downloaded-scale portable query
+downloaded scales Memory decodes bounded node-first/edge-next chunks directly
+into its single owned in-process graph. Turso, PostgreSQL, a qualified Sail
+service, and FalkorDB decode and insert the same bounded chunks inside their
+load intervals; none of these query phases retains a duplicate Rust source
+graph. Example-scale and example-only materializing adapters receive an already
+decoded graph. Dataset inspection and manifest hashing occur before either
+boundary. Query latencies exclude all of those load and verification steps in
+both cases. If a downloaded-scale portable query
 cannot use its backend row-source plan, that query is explicitly unsupported;
 it cannot fall back to timed backend materialization plus the Rust reference.
 

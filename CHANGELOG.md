@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Removed the downloaded-scale Memory benchmark's duplicate full-graph clone:
+  lazy projected-FK chunks now build the sole owned in-process reference graph,
+  and their decode time remains disclosed in `load_ns`.
 - Made the upstream benchmark launcher work under macOS Bash 3.2 at the
   example scale, preserve a failing exit status across cleanup, use portable
   BSD/GNU `chmod` argument ordering for authenticated dataset snapshots, and
