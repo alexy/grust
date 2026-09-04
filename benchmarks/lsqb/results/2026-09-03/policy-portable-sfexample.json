@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "warning": "These are not LDBC Benchmark Results.",
+  "suite": {
+    "name": "adversari.al bounded graph-read policy attacks",
+    "track": "policy",
+    "source_url": "https://github.com/ldbc/lsqb",
+    "source_commit": "242cb2fd31340ca688954cb94794d74c0d5b6f92",
+    "source_tree": "d99fab28d47791dbc0e7173abc4c66d8aadc64ca",
+    "query_tree": "50937f3d075245e2abd4c00a36c4b3c236766265",
+    "example_dataset_tree": "45181e6b274d014f8626038e1d398fa1b9e4c19d",
+    "license": "Apache-2.0",
+    "classification": "adversari.al policy extension over the pinned LSQB example graph; not an LSQB track"
+  },
+  "environment": {
+    "grust_revision": "2680c451db450cefe2411a944cce9960507bc0d3",
+    "backend": "portable-policy",
+    "scale_factor": "example",
+    "repetitions": 1,
+    "rust_version": "1.97.1",
+    "container_image": "grust-lsqb-benchmark:latest (sha256:45ca904ba0e68772e89db4410e8165b77111322ff3b5df03c8025fe421f6ba7c)",
+    "container_os": "linux",
+    "container_arch": "arm64",
+    "docker_engine_version": "29.4.3",
+    "docker_cpus": "10",
+    "docker_memory_bytes": "8321712128",
+    "postgres_image": "postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af",
+    "host_cpu": "intentionally omitted; Docker-reported architecture and resource allocation are authoritative for this run"
+  },
+  "graph": {
+    "nodes": 28,
+    "edges": 72
+  },
+  "policy": {
+    "max_candidate_work": 10000,
+    "max_intermediate_bytes": 268435456,
+    "intermediate_attack_max_candidate_work": 50000,
+    "intermediate_attack_parameter_bytes": 49152,
+    "max_range_items": 10000,
+    "max_union_arms": 4,
+    "max_path_length": 4
+  },
+  "runs": [
+    {
+      "repetition": 1,
+      "attacks": [
+        {
+          "id": "p1-unbounded-path",
+          "source_sha256": "fa1a963b956af49cee624496f8413a56df9d4cd6a03e37fb89f886638dda2a2f",
+          "expected_rejection": "syntax.unbounded-path",
+          "actual_rejection": "syntax.unbounded-path",
+          "elapsed_ns": 28750,
+          "status": "pass",
+          "error": "Cypher syntax error: [gql:syntax] unbounded variable-length paths are forbidden"
+        },
+        {
+          "id": "p2-range-bomb",
+          "source_sha256": "05031e9330ba9cd55c18596ad10e856f4679b9cd593351a05fcc5a944b9af314",
+          "expected_rejection": "execution.range-limit",
+          "actual_rejection": "execution.range-limit",
+          "elapsed_ns": 231125,
+          "status": "pass",
+          "error": "Cypher execution error: [gql:execution] range() would produce 10001 items; the read policy maximum is 10000"
+        },
+        {
+          "id": "p3-cartesian-work",
+          "source_sha256": "86f313fc5d69241830939ea11dacf00944c8a00b6562bde41b73825b883e17bd",
+          "expected_rejection": "execution.candidate-work",
+          "actual_rejection": "execution.candidate-work",
+          "elapsed_ns": 17553167,
+          "status": "pass",
+          "error": "Cypher execution error: [gql:execution] bounded read exceeded 10000 candidate-work units while scanning node candidates"
+        },
+        {
+          "id": "p4-updating-smuggle",
+          "source_sha256": "3962c0e72650f2a94a455ff8b6fbb361cef05718006ca6185822a29fdef3dfb6",
+          "expected_rejection": "syntax.updating-clause",
+          "actual_rejection": "syntax.updating-clause",
+          "elapsed_ns": 15458,
+          "status": "pass",
+          "error": "Cypher syntax error: [gql:syntax] updating clauses are forbidden by read policy"
+        },
+        {
+          "id": "p5-forbidden-procedure",
+          "source_sha256": "771c966de06c9a71badac9e35f529685d31f98b7cbf35a4248d4a6d5f9fc47b0",
+          "expected_rejection": "syntax.forbidden-procedure",
+          "actual_rejection": "syntax.forbidden-procedure",
+          "elapsed_ns": 1274042,
+          "status": "pass",
+          "error": "Cypher syntax error: [gql:syntax] procedure calls are forbidden by read policy"
+        },
+        {
+          "id": "p6-union-arms",
+          "source_sha256": "5ffd315f32b3cf0fa5e93cf0b2ac989fc7f04ecbfe496cc69bdd5cf03b6f8e9d",
+          "expected_rejection": "syntax.union-arms",
+          "actual_rejection": "syntax.union-arms",
+          "elapsed_ns": 11750,
+          "status": "pass",
+          "error": "Cypher syntax error: [gql:syntax] query must contain 1 to 4 UNION arms"
+        },
+        {
+          "id": "p7-intermediate-projection",
+          "source_sha256": "433bd9032aa35379b4ccf663d076e34918ef4ff20190890492ddd76f9da989db",
+          "expected_rejection": "execution.intermediate-bytes",
+          "actual_rejection": "execution.intermediate-bytes",
+          "elapsed_ns": 76118791,
+          "status": "pass",
+          "error": "Cypher execution error: [gql:execution] bounded read exceeded 268435456 cumulative intermediate bytes while materializing expression results"
+        },
+        {
+          "id": "p8-correlated-replan",
+          "source_sha256": "1b590e71eb234a4f9a4327e58a164f100507fbb0428e2f63cf1be525b76a2895",
+          "expected_rejection": "execution.candidate-work",
+          "actual_rejection": "execution.candidate-work",
+          "elapsed_ns": 3511042,
+          "status": "pass",
+          "error": "Cypher execution error: [gql:execution] bounded read exceeded 10000 candidate-work units while checking a bound node candidate"
+        },
+        {
+          "id": "p9-catalog-rescan",
+          "source_sha256": "f8725fec092728f512c03bb19c1001fce92e0fda25d2950c956441c8b68d8a95",
+          "expected_rejection": "execution.candidate-work",
+          "actual_rejection": "execution.candidate-work",
+          "elapsed_ns": 2425541,
+          "status": "pass",
+          "error": "Cypher execution error: [gql:execution] bounded read exceeded 10000 candidate-work units while scanning edges for db.propertyKeys()"
+        }
+      ]
+    }
+  ],
+  "valid": true
+}

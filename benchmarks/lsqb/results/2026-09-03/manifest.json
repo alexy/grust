@@ -26,6 +26,7 @@
     "upstream_built_image_id": "sha256:f0d7329db8e55f23846910b259c827624d6b2678ced8f332e341e290fbe33e6f",
     "grust_builder": "rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97",
     "grust_runtime": "debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171",
+    "grust_benchmark_built_image_id": "sha256:45ca904ba0e68772e89db4410e8165b77111322ff3b5df03c8025fe421f6ba7c",
     "postgres": "postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af",
     "postgres_local_image_id": "sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af",
     "postgres_platform": "linux/arm64",
@@ -45,16 +46,58 @@
       "raw_observations": "upstream-ladybug-sfexample.tsv"
     },
     "grust_compatibility": {
-      "state": "pending-clean-committed-revision",
-      "reason": "dirty release-candidate results are provisional and intentionally not promoted"
+      "state": "recorded",
+      "recorded_at_utc": "2026-09-04T15:00:00Z",
+      "source_revision": "2680c451db450cefe2411a944cce9960507bc0d3",
+      "command": "RUNS=5 SF=example benchmarks/lsqb/run-grust.sh",
+      "observations": 135,
+      "all_counts_matched": true,
+      "files": {
+        "memory": {
+          "path": "baseline-memory-sfexample.json",
+          "sha256": "c12c9a7cce7f0bed885a35d82a4b28ebbd0677e759d4364243404b8bdfa5b1d8"
+        },
+        "turso": {
+          "path": "baseline-turso-sfexample.json",
+          "sha256": "fa5ca4d4fd5de9f72dd3df43f63f77fee89c04c2eda3385a1dbcb6f924c358a2"
+        },
+        "postgres": {
+          "path": "baseline-postgres-sfexample.json",
+          "sha256": "3f4297109d7e2238692312fa682ccc0b9b479dbd91ef03145316246326504f79"
+        }
+      }
     },
     "adversarial_counts": {
-      "state": "pending-clean-committed-revision",
-      "reason": "dirty release-candidate results are provisional and intentionally not promoted"
+      "state": "recorded",
+      "recorded_at_utc": "2026-09-04T15:00:00Z",
+      "source_revision": "2680c451db450cefe2411a944cce9960507bc0d3",
+      "observations": 120,
+      "all_counts_matched": true,
+      "files": {
+        "memory": {
+          "path": "adversarial-memory-sfexample.json",
+          "sha256": "585bb3e5829b53557c43adea499104e4e56f2db3c22f10d9822447173a1fdf76"
+        },
+        "turso": {
+          "path": "adversarial-turso-sfexample.json",
+          "sha256": "e13b62d94b0d236d5a392fdd64c75815eeb96e4e0283d942577b80783913b5e6"
+        },
+        "postgres": {
+          "path": "adversarial-postgres-sfexample.json",
+          "sha256": "914d5ac0b8fee5a382633159d1160451270f70f74f2cd8215058bc4d199ad174"
+        }
+      }
     },
     "bounded_policy": {
-      "state": "pending-clean-committed-revision",
-      "reason": "dirty release-candidate results are provisional and intentionally not promoted"
+      "state": "recorded",
+      "recorded_at_utc": "2026-09-04T15:00:00Z",
+      "source_revision": "2680c451db450cefe2411a944cce9960507bc0d3",
+      "cases": 9,
+      "all_expected_rejections_matched": true,
+      "file": {
+        "path": "policy-portable-sfexample.json",
+        "sha256": "1fe729f842ce3a99158e5cdf56d54153b3cf7e897c5b2d52af743897279f70f7"
+      }
     }
   }
 }

@@ -196,8 +196,9 @@ LDBC benchmark.
 These are not LDBC Benchmark Results.
 
 The durable benchmark hub is [adversari.al/graph](https://adversari.al/graph).
-Tracked evidence currently covers the unchanged upstream run; the Grust matrix
-must still be captured before its results are described as completed.
+Tracked evidence covers the unchanged upstream 45/45 run plus a clean
+`2680c451` Grust matrix: all 135 LSQB-derived compatibility observations, all
+120 adversarial count observations, and all nine policy rejections passed.
 
 ## Core Model
 

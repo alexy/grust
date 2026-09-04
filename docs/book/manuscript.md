@@ -1509,11 +1509,12 @@ intermediate projection amplification, correlated subquery replanning, and
 correlated catalog rescans. Each
 backend cell therefore has 17 count oracles—the nine LSQB-derived queries plus
 eight adversarial count queries—while policy is reported once as its own track.
-Tracked evidence currently covers the unchanged upstream run; the Grust matrix
-must still be captured before its results are described as completed. This is
-a conformance and reproducibility microbenchmark over an example dataset, not
-a performance ranking. LSQB is maintained by the Graph Data Council but is not
-an official LDBC benchmark.
+Tracked evidence covers the unchanged upstream 45/45 run and clean Grust
+revision `2680c451`: all 135 LSQB-derived compatibility observations, all 120
+adversarial count observations, and all nine bounded-policy rejections passed.
+This is a conformance and reproducibility microbenchmark over an example
+dataset, not a performance ranking. LSQB is maintained by the Graph Data
+Council but is not an official LDBC benchmark.
 
 These are not LDBC Benchmark Results.
 

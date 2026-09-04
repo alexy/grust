@@ -145,9 +145,10 @@ performance, backend, documentation, and benchmark work recorded below.
   LSQB-derived plus eight adversarial), while policy is one backend-neutral
   rejection track. This is a reproducibility and compatibility microbenchmark,
   not a performance ranking: LSQB is GDC-maintained but not an official LDBC
-  benchmark. The tracked evidence currently covers the unchanged upstream
-  45/45 run; the Grust matrix remains a release gate until its result artifacts
-  are captured.
+  benchmark. Tracked evidence now covers the unchanged upstream 45/45 run and
+  clean Grust revision `2680c451`: 135/135 LSQB-derived compatibility
+  observations, 120/120 adversarial count observations, and 9/9 bounded-policy
+  rejections passed.
   These are not LDBC Benchmark Results.
 - Removed the Rust 1.96 strict-Clippy debt from the Cypher and Sail execution
   paths without adding lint suppressions. Writable `RETURN` parsing and

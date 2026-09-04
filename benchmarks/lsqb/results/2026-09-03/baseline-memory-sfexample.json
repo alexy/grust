@@ -1,0 +1,562 @@
+{
+  "schema_version": 1,
+  "warning": "These are not LDBC Benchmark Results.",
+  "suite": {
+    "name": "GDC-maintained LSQB compatibility run",
+    "track": "baseline",
+    "source_url": "https://github.com/ldbc/lsqb",
+    "source_commit": "242cb2fd31340ca688954cb94794d74c0d5b6f92",
+    "source_tree": "d99fab28d47791dbc0e7173abc4c66d8aadc64ca",
+    "query_tree": "50937f3d075245e2abd4c00a36c4b3c236766265",
+    "example_dataset_tree": "45181e6b274d014f8626038e1d398fa1b9e4c19d",
+    "license": "Apache-2.0",
+    "classification": "LSQB is a GDC-maintained microbenchmark, not an official LDBC benchmark"
+  },
+  "environment": {
+    "grust_revision": "2680c451db450cefe2411a944cce9960507bc0d3",
+    "backend": "memory",
+    "scale_factor": "example",
+    "repetitions": 5,
+    "rust_version": "1.97.1",
+    "container_image": "grust-lsqb-benchmark:latest (sha256:45ca904ba0e68772e89db4410e8165b77111322ff3b5df03c8025fe421f6ba7c)",
+    "container_os": "linux",
+    "container_arch": "arm64",
+    "docker_engine_version": "29.4.3",
+    "docker_cpus": "10",
+    "docker_memory_bytes": "8321712128",
+    "postgres_image": "postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af",
+    "host_cpu": "intentionally omitted; Docker-reported architecture and resource allocation are authoritative for this run"
+  },
+  "graph": {
+    "nodes": 28,
+    "edges": 72
+  },
+  "runs": [
+    {
+      "repetition": 1,
+      "load_ns": 75416,
+      "queries": [
+        {
+          "id": "q1",
+          "source_sha256": "e08571bf8c877508cd3745ee7dcc8c061259c3b4d5a3fb17a952fbac4f9145ed",
+          "adapter_sha256": "3f1048adb40cd8666593a587a83b93a02c2fa3e901bee00979fd46deab67fbf9",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 329875,
+          "status": "pass"
+        },
+        {
+          "id": "q2",
+          "source_sha256": "49df895df6b98037f6ce5972d9113ae7a3f263ec009e4fece9ec75bb47410b32",
+          "adapter_sha256": "07f74a31fe841278591404d68bf5206b683098db66af9a637759d2915f4f21d1",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 172667,
+          "status": "pass"
+        },
+        {
+          "id": "q3",
+          "source_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be",
+          "adapter_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 6,
+          "actual_count": 6,
+          "elapsed_ns": 1987750,
+          "status": "pass"
+        },
+        {
+          "id": "q4",
+          "source_sha256": "1675c38f7cc117ba9be4de8fc0c1d7073901a03cfc5a174f2241e14c602c9a9f",
+          "adapter_sha256": "9bca16043cb3c2e644405a7a8aa029542cb6a157c2f8324974d7cf8853ab662d",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 115959,
+          "status": "pass"
+        },
+        {
+          "id": "q5",
+          "source_sha256": "d836a819c7c96819f5dfa14d4e0097bcfb2222eb1561d3ffda22f15067cd8179",
+          "adapter_sha256": "3707bef37b50f309f3dabaffa2b9e6d6408e94a2b99939da52129d15483cb48d",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 145417,
+          "status": "pass"
+        },
+        {
+          "id": "q6",
+          "source_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93",
+          "adapter_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 204625,
+          "status": "pass"
+        },
+        {
+          "id": "q7",
+          "source_sha256": "3cb1b31a3f2d05efcaaebaea5ef70231bff30dcfe85aca21cb011ee99175ef0f",
+          "adapter_sha256": "e99733e4e9f57b674de0b1a6d374c333273d5566b10a9a5c8df18d1ededa59c3",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 11,
+          "actual_count": 11,
+          "elapsed_ns": 150875,
+          "status": "pass"
+        },
+        {
+          "id": "q8",
+          "source_sha256": "73fbce9474f0059cfc620c17c5016d19b0974cdbbc8f26637f51b86ea4f24b91",
+          "adapter_sha256": "415c8c5c93cf7a550d345b47e1500411255e2ab833e3b616e587c184771b7d2c",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 2,
+          "actual_count": 2,
+          "elapsed_ns": 224459,
+          "status": "pass"
+        },
+        {
+          "id": "q9",
+          "source_sha256": "f0e3402d9bf03cf2e01bf5d812399a4a2f2d40d4558a6ac04d09f0a77afbc8e4",
+          "adapter_sha256": "46ef30fb1c5bf5d0539743b31b15a59c7f509931cc0945734ef4b81443cce332",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 4,
+          "actual_count": 4,
+          "elapsed_ns": 414042,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "load_ns": 62167,
+      "queries": [
+        {
+          "id": "q1",
+          "source_sha256": "e08571bf8c877508cd3745ee7dcc8c061259c3b4d5a3fb17a952fbac4f9145ed",
+          "adapter_sha256": "3f1048adb40cd8666593a587a83b93a02c2fa3e901bee00979fd46deab67fbf9",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 39833,
+          "status": "pass"
+        },
+        {
+          "id": "q2",
+          "source_sha256": "49df895df6b98037f6ce5972d9113ae7a3f263ec009e4fece9ec75bb47410b32",
+          "adapter_sha256": "07f74a31fe841278591404d68bf5206b683098db66af9a637759d2915f4f21d1",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 144958,
+          "status": "pass"
+        },
+        {
+          "id": "q3",
+          "source_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be",
+          "adapter_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 6,
+          "actual_count": 6,
+          "elapsed_ns": 1885041,
+          "status": "pass"
+        },
+        {
+          "id": "q4",
+          "source_sha256": "1675c38f7cc117ba9be4de8fc0c1d7073901a03cfc5a174f2241e14c602c9a9f",
+          "adapter_sha256": "9bca16043cb3c2e644405a7a8aa029542cb6a157c2f8324974d7cf8853ab662d",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 153708,
+          "status": "pass"
+        },
+        {
+          "id": "q5",
+          "source_sha256": "d836a819c7c96819f5dfa14d4e0097bcfb2222eb1561d3ffda22f15067cd8179",
+          "adapter_sha256": "3707bef37b50f309f3dabaffa2b9e6d6408e94a2b99939da52129d15483cb48d",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 109833,
+          "status": "pass"
+        },
+        {
+          "id": "q6",
+          "source_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93",
+          "adapter_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 188834,
+          "status": "pass"
+        },
+        {
+          "id": "q7",
+          "source_sha256": "3cb1b31a3f2d05efcaaebaea5ef70231bff30dcfe85aca21cb011ee99175ef0f",
+          "adapter_sha256": "e99733e4e9f57b674de0b1a6d374c333273d5566b10a9a5c8df18d1ededa59c3",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 11,
+          "actual_count": 11,
+          "elapsed_ns": 172208,
+          "status": "pass"
+        },
+        {
+          "id": "q8",
+          "source_sha256": "73fbce9474f0059cfc620c17c5016d19b0974cdbbc8f26637f51b86ea4f24b91",
+          "adapter_sha256": "415c8c5c93cf7a550d345b47e1500411255e2ab833e3b616e587c184771b7d2c",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 2,
+          "actual_count": 2,
+          "elapsed_ns": 187750,
+          "status": "pass"
+        },
+        {
+          "id": "q9",
+          "source_sha256": "f0e3402d9bf03cf2e01bf5d812399a4a2f2d40d4558a6ac04d09f0a77afbc8e4",
+          "adapter_sha256": "46ef30fb1c5bf5d0539743b31b15a59c7f509931cc0945734ef4b81443cce332",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 4,
+          "actual_count": 4,
+          "elapsed_ns": 315250,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "repetition": 3,
+      "load_ns": 64583,
+      "queries": [
+        {
+          "id": "q1",
+          "source_sha256": "e08571bf8c877508cd3745ee7dcc8c061259c3b4d5a3fb17a952fbac4f9145ed",
+          "adapter_sha256": "3f1048adb40cd8666593a587a83b93a02c2fa3e901bee00979fd46deab67fbf9",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 30333,
+          "status": "pass"
+        },
+        {
+          "id": "q2",
+          "source_sha256": "49df895df6b98037f6ce5972d9113ae7a3f263ec009e4fece9ec75bb47410b32",
+          "adapter_sha256": "07f74a31fe841278591404d68bf5206b683098db66af9a637759d2915f4f21d1",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 139083,
+          "status": "pass"
+        },
+        {
+          "id": "q3",
+          "source_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be",
+          "adapter_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 6,
+          "actual_count": 6,
+          "elapsed_ns": 2138250,
+          "status": "pass"
+        },
+        {
+          "id": "q4",
+          "source_sha256": "1675c38f7cc117ba9be4de8fc0c1d7073901a03cfc5a174f2241e14c602c9a9f",
+          "adapter_sha256": "9bca16043cb3c2e644405a7a8aa029542cb6a157c2f8324974d7cf8853ab662d",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 117209,
+          "status": "pass"
+        },
+        {
+          "id": "q5",
+          "source_sha256": "d836a819c7c96819f5dfa14d4e0097bcfb2222eb1561d3ffda22f15067cd8179",
+          "adapter_sha256": "3707bef37b50f309f3dabaffa2b9e6d6408e94a2b99939da52129d15483cb48d",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 108208,
+          "status": "pass"
+        },
+        {
+          "id": "q6",
+          "source_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93",
+          "adapter_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 190667,
+          "status": "pass"
+        },
+        {
+          "id": "q7",
+          "source_sha256": "3cb1b31a3f2d05efcaaebaea5ef70231bff30dcfe85aca21cb011ee99175ef0f",
+          "adapter_sha256": "e99733e4e9f57b674de0b1a6d374c333273d5566b10a9a5c8df18d1ededa59c3",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 11,
+          "actual_count": 11,
+          "elapsed_ns": 155583,
+          "status": "pass"
+        },
+        {
+          "id": "q8",
+          "source_sha256": "73fbce9474f0059cfc620c17c5016d19b0974cdbbc8f26637f51b86ea4f24b91",
+          "adapter_sha256": "415c8c5c93cf7a550d345b47e1500411255e2ab833e3b616e587c184771b7d2c",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 2,
+          "actual_count": 2,
+          "elapsed_ns": 187625,
+          "status": "pass"
+        },
+        {
+          "id": "q9",
+          "source_sha256": "f0e3402d9bf03cf2e01bf5d812399a4a2f2d40d4558a6ac04d09f0a77afbc8e4",
+          "adapter_sha256": "46ef30fb1c5bf5d0539743b31b15a59c7f509931cc0945734ef4b81443cce332",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 4,
+          "actual_count": 4,
+          "elapsed_ns": 329375,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "load_ns": 63000,
+      "queries": [
+        {
+          "id": "q1",
+          "source_sha256": "e08571bf8c877508cd3745ee7dcc8c061259c3b4d5a3fb17a952fbac4f9145ed",
+          "adapter_sha256": "3f1048adb40cd8666593a587a83b93a02c2fa3e901bee00979fd46deab67fbf9",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 30625,
+          "status": "pass"
+        },
+        {
+          "id": "q2",
+          "source_sha256": "49df895df6b98037f6ce5972d9113ae7a3f263ec009e4fece9ec75bb47410b32",
+          "adapter_sha256": "07f74a31fe841278591404d68bf5206b683098db66af9a637759d2915f4f21d1",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 141209,
+          "status": "pass"
+        },
+        {
+          "id": "q3",
+          "source_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be",
+          "adapter_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 6,
+          "actual_count": 6,
+          "elapsed_ns": 1826167,
+          "status": "pass"
+        },
+        {
+          "id": "q4",
+          "source_sha256": "1675c38f7cc117ba9be4de8fc0c1d7073901a03cfc5a174f2241e14c602c9a9f",
+          "adapter_sha256": "9bca16043cb3c2e644405a7a8aa029542cb6a157c2f8324974d7cf8853ab662d",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 104750,
+          "status": "pass"
+        },
+        {
+          "id": "q5",
+          "source_sha256": "d836a819c7c96819f5dfa14d4e0097bcfb2222eb1561d3ffda22f15067cd8179",
+          "adapter_sha256": "3707bef37b50f309f3dabaffa2b9e6d6408e94a2b99939da52129d15483cb48d",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 101417,
+          "status": "pass"
+        },
+        {
+          "id": "q6",
+          "source_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93",
+          "adapter_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 189792,
+          "status": "pass"
+        },
+        {
+          "id": "q7",
+          "source_sha256": "3cb1b31a3f2d05efcaaebaea5ef70231bff30dcfe85aca21cb011ee99175ef0f",
+          "adapter_sha256": "e99733e4e9f57b674de0b1a6d374c333273d5566b10a9a5c8df18d1ededa59c3",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 11,
+          "actual_count": 11,
+          "elapsed_ns": 152541,
+          "status": "pass"
+        },
+        {
+          "id": "q8",
+          "source_sha256": "73fbce9474f0059cfc620c17c5016d19b0974cdbbc8f26637f51b86ea4f24b91",
+          "adapter_sha256": "415c8c5c93cf7a550d345b47e1500411255e2ab833e3b616e587c184771b7d2c",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 2,
+          "actual_count": 2,
+          "elapsed_ns": 200959,
+          "status": "pass"
+        },
+        {
+          "id": "q9",
+          "source_sha256": "f0e3402d9bf03cf2e01bf5d812399a4a2f2d40d4558a6ac04d09f0a77afbc8e4",
+          "adapter_sha256": "46ef30fb1c5bf5d0539743b31b15a59c7f509931cc0945734ef4b81443cce332",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 4,
+          "actual_count": 4,
+          "elapsed_ns": 318167,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "repetition": 5,
+      "load_ns": 59250,
+      "queries": [
+        {
+          "id": "q1",
+          "source_sha256": "e08571bf8c877508cd3745ee7dcc8c061259c3b4d5a3fb17a952fbac4f9145ed",
+          "adapter_sha256": "3f1048adb40cd8666593a587a83b93a02c2fa3e901bee00979fd46deab67fbf9",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 29208,
+          "status": "pass"
+        },
+        {
+          "id": "q2",
+          "source_sha256": "49df895df6b98037f6ce5972d9113ae7a3f263ec009e4fece9ec75bb47410b32",
+          "adapter_sha256": "07f74a31fe841278591404d68bf5206b683098db66af9a637759d2915f4f21d1",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 137792,
+          "status": "pass"
+        },
+        {
+          "id": "q3",
+          "source_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be",
+          "adapter_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 6,
+          "actual_count": 6,
+          "elapsed_ns": 1811542,
+          "status": "pass"
+        },
+        {
+          "id": "q4",
+          "source_sha256": "1675c38f7cc117ba9be4de8fc0c1d7073901a03cfc5a174f2241e14c602c9a9f",
+          "adapter_sha256": "9bca16043cb3c2e644405a7a8aa029542cb6a157c2f8324974d7cf8853ab662d",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 106334,
+          "status": "pass"
+        },
+        {
+          "id": "q5",
+          "source_sha256": "d836a819c7c96819f5dfa14d4e0097bcfb2222eb1561d3ffda22f15067cd8179",
+          "adapter_sha256": "3707bef37b50f309f3dabaffa2b9e6d6408e94a2b99939da52129d15483cb48d",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 100542,
+          "status": "pass"
+        },
+        {
+          "id": "q6",
+          "source_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93",
+          "adapter_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 194209,
+          "status": "pass"
+        },
+        {
+          "id": "q7",
+          "source_sha256": "3cb1b31a3f2d05efcaaebaea5ef70231bff30dcfe85aca21cb011ee99175ef0f",
+          "adapter_sha256": "e99733e4e9f57b674de0b1a6d374c333273d5566b10a9a5c8df18d1ededa59c3",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 11,
+          "actual_count": 11,
+          "elapsed_ns": 146458,
+          "status": "pass"
+        },
+        {
+          "id": "q8",
+          "source_sha256": "73fbce9474f0059cfc620c17c5016d19b0974cdbbc8f26637f51b86ea4f24b91",
+          "adapter_sha256": "415c8c5c93cf7a550d345b47e1500411255e2ab833e3b616e587c184771b7d2c",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 2,
+          "actual_count": 2,
+          "elapsed_ns": 191667,
+          "status": "pass"
+        },
+        {
+          "id": "q9",
+          "source_sha256": "f0e3402d9bf03cf2e01bf5d812399a4a2f2d40d4558a6ac04d09f0a77afbc8e4",
+          "adapter_sha256": "46ef30fb1c5bf5d0539743b31b15a59c7f509931cc0945734ef4b81443cce332",
+          "claim": "unchanged LSQB source; Grust adapter lowers Post/Comment inheritance and names q8/q9 anti-join edges",
+          "execution_mode": "in-memory-reference",
+          "expected_count": 4,
+          "actual_count": 4,
+          "elapsed_ns": 311542,
+          "status": "pass"
+        }
+      ]
+    }
+  ],
+  "valid": true
+}
