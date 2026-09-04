@@ -65,8 +65,10 @@ EXTERNAL_ATTESTATION_FIELDS = frozenset(
         "nano_cpus",
         "os",
         "phase",
+        "platform_manifest_digest",
         "published_bindings",
         "restart_count",
+        "runtime_image_id",
         "running",
         "started_at",
     }
@@ -469,6 +471,7 @@ def validate_external_attestation_record(
     record: dict[str, Any],
     backend: str,
     phase: str,
+    image: str,
     image_id: str,
     environment: dict[str, Any],
     label: str,
@@ -487,6 +490,25 @@ def validate_external_attestation_record(
     require(
         record["image_id"] == image_id,
         f"{label} image ID does not match images.tsv and the report",
+    )
+    require(
+        isinstance(image, str) and PINNED_IMAGE_RE.search(image) is not None,
+        f"{label} cannot bind to an invalid platform image",
+    )
+    platform_manifest_digest = image.rsplit("@", 1)[1]
+    require(
+        record["platform_manifest_digest"] == platform_manifest_digest,
+        f"{label} platform manifest does not match images.tsv",
+    )
+    runtime_image_id = record["runtime_image_id"]
+    require(
+        isinstance(runtime_image_id, str)
+        and IMAGE_ID_RE.fullmatch(runtime_image_id) is not None,
+        f"{label} has an invalid local runtime image ID",
+    )
+    require(
+        runtime_image_id in {image_id, platform_manifest_digest},
+        f"{label} local runtime image ID is neither the config nor platform manifest digest",
     )
 
     cpu_limit = environment.get("cpu_limit")
@@ -621,6 +643,7 @@ def validate_external_service_logs(
                     record,
                     backend,
                     phase,
+                    image["service_image"],
                     image["service_image_id"],
                     environment,
                     label,

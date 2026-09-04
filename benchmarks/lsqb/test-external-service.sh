@@ -30,7 +30,7 @@ expect_load_failure() {
 expect_attestation_failure() {
     local label=$1 expected=${2:-}
     if grust_external_attest_container \
-        sail "$SAIL_CONTAINER" "$SAIL_IMAGE_ID" 8 6442450944 50051 \
+        sail "$SAIL_CONTAINER" "$SAIL_IMAGE" "$SAIL_IMAGE_ID" 8 6442450944 50051 \
         linux arm64 "$expected" post-run >/dev/null 2>&1; then
         fail "$label"
     fi
@@ -129,23 +129,32 @@ docker() {
         return 97
     fi
     case "$1 $2" in
-        'container inspect') printf '%s\n' "$container_fixture" ;;
-        'image inspect') printf '%s\n' "$image_fixture" ;;
+        'container inspect')
+            [[ "$3" == -- && "$4" == "$SAIL_CONTAINER" ]] || return 96
+            printf '%s\n' "$container_fixture"
+            ;;
+        'image inspect')
+            [[ "$3" == -- && "$4" == "$SAIL_IMAGE" ]] || return 96
+            printf '%s\n' "$image_fixture"
+            ;;
         *) return 1 ;;
     esac
 }
 export -f docker
 attestation=$(grust_external_attest_container \
-    sail "$SAIL_CONTAINER" "$SAIL_IMAGE_ID" 8 6442450944 50051 \
+    sail "$SAIL_CONTAINER" "$SAIL_IMAGE" "$SAIL_IMAGE_ID" 8 6442450944 50051 \
     linux arm64 '' pre-run) || fail "valid container attestation was rejected"
 [[ "$attestation" != *"$secret_marker"* ]] || fail "attestation rendered an endpoint secret"
 [[ "$attestation" == "$(jq -cS . <<<"$attestation")" ]] || \
     fail "attestation JSON is not canonical"
-jq -e '
+jq -e --arg config "$SAIL_IMAGE_ID" --arg manifest "${SAIL_IMAGE##*@}" '
     .backend == "sail"
     and .phase == "pre-run"
     and .endpoint_host == "host.docker.internal"
     and .endpoint_port == 50051
+    and .image_id == $config
+    and .platform_manifest_digest == $manifest
+    and .runtime_image_id == $config
     and .restart_count == 0
     and .started_at == "2026-09-04T12:00:00.000000000Z"
     and .os == "linux"
@@ -160,15 +169,46 @@ jq -e '
 ' <<<"$attestation" >/dev/null || fail "attestation omitted qualified state"
 
 post_attestation=$(grust_external_attest_container \
-    sail "$SAIL_CONTAINER" "$SAIL_IMAGE_ID" 8 6442450944 50051 \
+    sail "$SAIL_CONTAINER" "$SAIL_IMAGE" "$SAIL_IMAGE_ID" 8 6442450944 50051 \
     linux arm64 "$attestation" post-run) || fail "stable post-run attestation was rejected"
 [[ $(jq -r .phase <<<"$post_attestation") == post-run ]] || fail "wrong post-run phase"
 
 if grust_external_attest_container \
-    sail "$SAIL_CONTAINER" "$SAIL_IMAGE_ID" 4 6442450944 50051 \
+    sail "$SAIL_CONTAINER" "$SAIL_IMAGE" "$SAIL_IMAGE_ID" 4 6442450944 50051 \
     linux arm64 '' pre-run >/dev/null 2>&1; then
     fail "wrong CPU limit was accepted"
 fi
+
+# Docker's legacy graphdriver store reports the image config digest as `.Id`,
+# while the containerd image store reports the platform-manifest digest. Both
+# are valid only when the container and inspected pinned reference agree.
+legacy_container_fixture=$container_fixture
+legacy_image_fixture=$image_fixture
+container_fixture=$(jq --arg image "${SAIL_IMAGE##*@}" '.[0].Image = $image' \
+    <<<"$legacy_container_fixture")
+image_fixture=$(jq --arg image "${SAIL_IMAGE##*@}" '.[0].Id = $image' \
+    <<<"$legacy_image_fixture")
+containerd_attestation=$(grust_external_attest_container \
+    sail "$SAIL_CONTAINER" "$SAIL_IMAGE" "$SAIL_IMAGE_ID" 8 6442450944 50051 \
+    linux arm64 '' pre-run) || fail "containerd image identity was rejected"
+jq -e --arg config "$SAIL_IMAGE_ID" --arg manifest "${SAIL_IMAGE##*@}" '
+    .image_id == $config
+    and .platform_manifest_digest == $manifest
+    and .runtime_image_id == $manifest
+' <<<"$containerd_attestation" >/dev/null || \
+    fail "containerd attestation did not preserve both image identities"
+
+container_fixture=$(jq --arg image "$(printf '4%.0s' {1..64})" \
+    '.[0].Image = ("sha256:" + $image)' <<<"$legacy_container_fixture")
+image_fixture=$(jq --arg image "$(printf '4%.0s' {1..64})" \
+    '.[0].Id = ("sha256:" + $image)' <<<"$legacy_image_fixture")
+expect_attestation_failure "unrelated local runtime image ID was accepted"
+container_fixture=$(jq --arg image "${SAIL_IMAGE##*@}" '.[0].Image = $image' \
+    <<<"$legacy_container_fixture")
+image_fixture=$legacy_image_fixture
+expect_attestation_failure "container image differing from inspected image was accepted"
+container_fixture=$legacy_container_fixture
+image_fixture=$legacy_image_fixture
 
 original_container_fixture=$container_fixture
 container_fixture=$(jq '.[0].RestartCount = 1' <<<"$original_container_fixture")

@@ -579,7 +579,8 @@ for backend in "${canonical_backends[@]}"; do
             fi
         elif [[ "$external_enabled" == 1 ]]; then
             external_attestation=$(grust_external_attest_container \
-                "$backend" "$external_container" "$configured_service_image_id" \
+                "$backend" "$external_container" "$service_image" \
+                "$configured_service_image_id" \
                 "$BENCHMARK_CPU_LIMIT" "$BENCHMARK_MEMORY_LIMIT_BYTES" \
                 "$external_host_port" linux "$BENCHMARK_CONTAINER_ARCH" \
                 "$external_reference_attestation" pre-run) || die \
@@ -696,7 +697,8 @@ for backend in "${canonical_backends[@]}"; do
 
         if [[ "$external_enabled" == 1 ]]; then
             external_attestation=$(grust_external_attest_container \
-                "$backend" "$external_container" "$configured_service_image_id" \
+                "$backend" "$external_container" "$service_image" \
+                "$configured_service_image_id" \
                 "$BENCHMARK_CPU_LIMIT" "$BENCHMARK_MEMORY_LIMIT_BYTES" \
                 "$external_host_port" linux "$BENCHMARK_CONTAINER_ARCH" \
                 "$external_reference_attestation" post-run) || die \

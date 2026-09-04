@@ -200,7 +200,8 @@ CELL_TIMEOUT_MS=600000 SMOKE=1 \
 Those three external-service cells are executable when an operator explicitly
 qualifies a local Docker container. Set the backend's
 `*_SERVICE_MODE=external`, existing endpoint variable, `*_VERSION`,
-digest-pinned `*_IMAGE`, matching config-digest `*_IMAGE_ID`, and
+platform-manifest-pinned `*_IMAGE`, matching registry config-digest
+`*_IMAGE_ID`, and
 `*_CONTAINER`; an optional positive `*_WORKER_THREADS` is recorded too.
 Prefixes are `SAIL`, `POSTGRES_PGQ`, and `HELIX`; endpoint variables are
 respectively `SAIL_ENDPOINT`, `POSTGRES_PGQ_URL`, and `HELIX_QUERY_URL`. The
@@ -209,8 +210,16 @@ container must publish that port on `0.0.0.0` or `::`. Only the current
 backend's endpoint is injected into its runner container; every other backend
 endpoint is absent. This keeps credentials out of unrelated backend cells.
 
-The orchestrator resolves the image manifest and inspects the running container
-and its local image before and after each cell. It requires the image ID,
+The orchestrator resolves the declared platform manifest through the registry,
+proves that it names the configured registry config digest, and inspects the
+running container and its local image before and after each cell. Each
+attestation retains `image_id` as that config digest, records the digest suffix
+of `*_IMAGE` as `platform_manifest_digest`, and records Docker's local
+container/image identity as `runtime_image_id`. Legacy graphdriver image stores
+usually expose the config digest as the runtime ID, while containerd-backed
+Docker stores can expose the platform-manifest digest; either representation is
+accepted only when it is one of those two registry-authenticated identities and
+the container and inspected local image agree. The attestation also requires
 Linux/runner architecture, CPU and memory limits, disabled swap, no cpuset
 pinning, published-port binding, immutable container ID/start time, and restart
 count to remain exact. Canonical sanitized inspections go to receipt-bound
@@ -334,6 +343,10 @@ arm64 platform manifest and records its separate image config digest in each
 backend identity and `images.tsv`; it never treats a config digest as a
 pullable manifest. Before starting a configured service it resolves that
 platform manifest through the registry and requires the expected config digest.
+For external services, the receipt-bound pre/post attestations additionally
+record the platform-manifest digest and Docker's observed runtime image ID so a
+legacy config-ID image store and a containerd manifest-ID image store remain
+distinguishable without changing the declared config identity.
 The manifest also records every locally built runner image ID. The policy
 report records its control-runner tag and immutable `sha256:` image ID, the
 `per-container` resource-limit scope, and the concrete host CPU model supplied

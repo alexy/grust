@@ -200,9 +200,10 @@ grust_external_load() {
 }
 
 grust_external_attest_container() {
-    local backend=$1 container=$2 expected_image_id=$3 expected_cpus=$4
-    local expected_memory=$5 expected_host_port=$6 expected_os=$7 expected_architecture=$8
-    local expected_attestation=${9:-} phase=${10:-pre-run} expected_json=null
+    local backend=$1 container=$2 expected_image=$3 expected_image_id=$4 expected_cpus=$5
+    local expected_memory=$6 expected_host_port=$7 expected_os=$8 expected_architecture=$9
+    local expected_attestation=${10:-} phase=${11:-pre-run} expected_json=null
+    local platform_manifest_digest
     local container_inspection image_inspection
     # `local` inherits an existing export attribute in Bash 3.2. Explicitly
     # remove it before these variables hold raw Docker inspection documents,
@@ -220,13 +221,22 @@ grust_external_attest_container() {
         echo "external-service.sh: invalid qualified host port for ${backend}" >&2
         return 1
     fi
+    if [[ ! "$expected_image" =~ ^[A-Za-z0-9][^[:space:]]*@sha256:[0-9a-f]{64}$ ]]; then
+        echo "external-service.sh: invalid pinned image reference for ${backend}" >&2
+        return 1
+    fi
+    if [[ ! "$expected_image_id" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+        echo "external-service.sh: invalid image config digest for ${backend}" >&2
+        return 1
+    fi
+    platform_manifest_digest=${expected_image##*@}
     [[ -z "$expected_attestation" ]] || expected_json=$expected_attestation
     container_inspection=$(docker container inspect -- "$container") || {
         echo "external-service.sh: cannot inspect ${backend} container: ${container}" >&2
         return 1
     }
-    image_inspection=$(docker image inspect -- "$expected_image_id") || {
-        echo "external-service.sh: cannot inspect ${backend} image config" >&2
+    image_inspection=$(docker image inspect -- "$expected_image") || {
+        echo "external-service.sh: cannot inspect ${backend} pinned image" >&2
         return 1
     }
     printf '%s\n%s\n' "$container_inspection" "$image_inspection" | jq -ceSs \
@@ -234,6 +244,7 @@ grust_external_attest_container() {
         --arg backend "$backend" \
         --arg phase "$phase" \
         --arg image_id "$expected_image_id" \
+        --arg platform_manifest_digest "$platform_manifest_digest" \
         --arg expected_os "$expected_os" \
         --arg expected_architecture "$expected_architecture" \
         --argjson nano_cpus "$((expected_cpus * 1000000000))" \
@@ -287,8 +298,13 @@ grust_external_attest_container() {
               and ($container.RestartCount | floor) == $container.RestartCount
               and $container.RestartCount >= 0) then .
           else error("container has no valid restart count") end
-        | if $container.Image == $image_id and $image.Id == $image_id then .
-          else error("container image config does not match the declared image ID") end
+        | if (($image.Id | type) == "string"
+              and ($image.Id | test("^sha256:[0-9a-f]{64}$"))) then .
+          else error("local image has no immutable runtime ID") end
+        | if $container.Image == $image.Id then .
+          else error("container image does not match the inspected local image") end
+        | if ($image.Id == $image_id or $image.Id == $platform_manifest_digest) then .
+          else error("local image ID is neither the registry config nor platform manifest digest") end
         | if $container.Platform == $expected_os
               and $image.Os == $expected_os
               and $image.Architecture == $expected_architecture then .
@@ -310,14 +326,16 @@ grust_external_attest_container() {
             cpuset_cpus: $container.HostConfig.CpusetCpus,
             endpoint_host: "host.docker.internal",
             endpoint_port: $endpoint_port,
-            image_id: $container.Image,
+            image_id: $image_id,
             memory_bytes: $container.HostConfig.Memory,
             memory_swap_bytes: $container.HostConfig.MemorySwap,
             nano_cpus: $container.HostConfig.NanoCpus,
             os: $image.Os,
             phase: $phase,
+            platform_manifest_digest: $platform_manifest_digest,
             published_bindings: $bindings,
             restart_count: $container.RestartCount,
+            runtime_image_id: $image.Id,
             running: $container.State.Running,
             started_at: $container.State.StartedAt
           }

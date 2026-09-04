@@ -34,6 +34,16 @@ digest-pinned Linux image of the runner architecture, no cpuset pinning, and
 the matrix CPU quota plus memory/no-swap limits; the publication receipt
 validates the canonical attestation records.
 
+External image identity has three explicit layers. `*_IMAGE` is a
+platform-manifest-pinned registry reference, `*_IMAGE_ID` is the registry
+config digest reached from that manifest, and each pre/post attestation records
+both `platform_manifest_digest` and Docker's observed `runtime_image_id` while
+retaining the config digest as `image_id`. The container and locally inspected
+image must report the same runtime ID. A legacy graphdriver store can report
+the config digest there, while a containerd-backed store can report the
+platform-manifest digest; no other value is accepted. This preserves the same
+registry manifest-to-config proof across Docker image-store implementations.
+
 The 2026-09-04 arm64 qualification candidates are PostgreSQL
 `19beta3-bookworm` platform manifest `sha256:787973…` with config
 `sha256:3a837e…`, and Helix `enterprise-dev` v0.9.0 platform manifest

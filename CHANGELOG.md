@@ -14,6 +14,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Added concrete opt-in qualification records for PostgreSQL 19 Beta 3 SQL/PGQ
   and the isolated Helix local runtime, while retaining fail-closed defaults
   and documenting why Sail still needs a registry-published immutable image.
+- Made external-service image attestation portable across Docker image stores:
+  the declared identity remains a platform-manifest reference plus its registry
+  config digest, while receipts separately bind the manifest digest and the
+  locally observed runtime ID. Legacy config-ID and containerd manifest-ID
+  representations are accepted only when the container and local image agree.
 
 ## 0.13.1 "Crayfish" - 2026-09-04
 

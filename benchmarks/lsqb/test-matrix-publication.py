@@ -45,7 +45,10 @@ def read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
-def external_attestations(backend: str, service_image_id: str) -> list[dict]:
+def external_attestations(
+    backend: str, service_image: str, service_image_id: str
+) -> list[dict]:
+    platform_manifest_digest = service_image.rsplit("@", 1)[1]
     stable = {
         "architecture": "arm64",
         "backend": backend,
@@ -58,6 +61,7 @@ def external_attestations(backend: str, service_image_id: str) -> list[dict]:
         "memory_swap_bytes": 6442450944,
         "nano_cpus": 8_000_000_000,
         "os": "linux",
+        "platform_manifest_digest": platform_manifest_digest,
         "published_bindings": [
             {
                 "container_port": 5432,
@@ -67,6 +71,7 @@ def external_attestations(backend: str, service_image_id: str) -> list[dict]:
             }
         ],
         "restart_count": 0,
+        "runtime_image_id": platform_manifest_digest,
         "running": True,
         "started_at": "2026-09-04T12:00:00.000000000Z",
     }
@@ -440,7 +445,7 @@ def qualify_external_backend(
         write_jsonl(watchdog_path, [watchdog])
         write_jsonl(
             output / "logs" / f"{suite}-{backend}-service.log",
-            external_attestations(backend, service_image_id),
+            external_attestations(backend, service_image, service_image_id),
         )
 
 
@@ -819,6 +824,27 @@ class MatrixPublicationTests(unittest.TestCase):
 
         mutations = (
             ("image-id", 0, "image_id", image_id("wrong-service"), "image ID"),
+            (
+                "platform-manifest",
+                0,
+                "platform_manifest_digest",
+                image_id("wrong-platform-manifest"),
+                "platform manifest",
+            ),
+            (
+                "runtime-image-malformed",
+                0,
+                "runtime_image_id",
+                "local-image",
+                "invalid local runtime image ID",
+            ),
+            (
+                "runtime-image-unrelated",
+                0,
+                "runtime_image_id",
+                image_id("unrelated-runtime-image"),
+                "neither the config nor platform manifest",
+            ),
             ("cpu", 0, "nano_cpus", 7_000_000_000, "CPU limit"),
             ("memory", 0, "memory_bytes", 1, "memory limit"),
             ("memory-swap", 0, "memory_swap_bytes", 1, "memory\\+swap limit"),
@@ -937,6 +963,21 @@ class MatrixPublicationTests(unittest.TestCase):
             record["started_at"] = "2026-09-04T12:01:00.000000000Z"
         write_jsonl(adversarial_log, records)
         self.assert_rejected(cross_track, "cross-track external service inventory")
+
+    def test_qualified_external_log_accepts_legacy_config_runtime_id(self) -> None:
+        case_root = self.root / "external-attestation-legacy-runtime-id"
+        case_root.mkdir()
+        output = make_bundle(case_root, self.revision)
+        qualify_external_backend(output)
+        service_image_id = "sha256:" + "c" * 64
+        for suite in PUBLICATION.SUITES:
+            service_log = output / "logs" / f"{suite}-sail-service.log"
+            records = read_jsonl(service_log)
+            for record in records:
+                record["runtime_image_id"] = service_image_id
+            write_jsonl(service_log, records)
+
+        self.issue(output)
 
     def test_partial_or_mutable_external_image_identity_is_rejected(self) -> None:
         partial = self.clone("partial-external-image")
