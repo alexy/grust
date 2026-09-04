@@ -4,7 +4,7 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dirname);
 const workspaceRoot = path.resolve(root, "../..");
-const cargoToml = path.join(workspaceRoot, "Cargo.toml");
+const cargoToml = path.join(workspaceRoot, "crates", "grust", "Cargo.toml");
 const metadata = path.join(root, "metadata.yaml");
 const cover = path.join(root, "cover.md");
 const manuscript = path.join(root, "manuscript.md");
@@ -25,10 +25,10 @@ const readYamlString = (yaml, key) => {
 };
 
 const cargoSource = await readFile(cargoToml, "utf8");
-const workspacePackage = cargoSource.match(/\[workspace\.package\]([\s\S]*?)(?:\n\[|$)/);
-const version = workspacePackage?.[1].match(/^\s*version\s*=\s*"([^"]+)"/m)?.[1];
+const packageTable = cargoSource.match(/\[package\]([\s\S]*?)(?:\n\[|$)/);
+const version = packageTable?.[1].match(/^\s*version\s*=\s*"([^"]+)"/m)?.[1];
 if (!version) {
-  throw new Error(`Missing [workspace.package] version in ${cargoToml}`);
+  throw new Error(`Missing explicit facade [package] version in ${cargoToml}`);
 }
 
 const metadataSource = await readFile(metadata, "utf8");

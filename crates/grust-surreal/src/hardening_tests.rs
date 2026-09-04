@@ -36,7 +36,13 @@ fn property_keys_are_losslessly_quoted_in_writes_and_predicates() {
 
 #[test]
 fn runtime_writes_reject_reserved_storage_fields() {
-    for key in ["id", "ID", "labels", "__grust_label"] {
+    for key in [
+        "id",
+        "ID",
+        "labels",
+        "__grust_label",
+        "__grust_physical_label",
+    ] {
         let node = Node::new(
             "Person",
             "person-1",
@@ -128,6 +134,14 @@ fn schema_rejects_table_collisions_and_fixed_or_duplicate_fields() {
         .node("Person", vec![Field::optional("labels", FieldType::String)])
         .build();
     assert!(surreal_schema_query(&labels_fixed).is_err());
+
+    let projection_fixed = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![Field::optional("__grust_physical_label", FieldType::String)],
+        )
+        .build();
+    assert!(surreal_schema_query(&projection_fixed).is_err());
 
     for field in [
         "id",

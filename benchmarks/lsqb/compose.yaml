@@ -2,7 +2,8 @@ name: grust-lsqb
 
 services:
   postgres:
-    image: postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
+    image: "${POSTGRES_IMAGE:-postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af}"
+    cpus: "${BENCHMARK_CPU_LIMIT:-8}"
     environment:
       POSTGRES_DB: grust
       POSTGRES_PASSWORD: postgres
@@ -11,26 +12,122 @@ services:
       test: ["CMD-SHELL", "pg_isready -U postgres -d grust"]
       interval: 1s
       timeout: 3s
-      retries: 30
+      retries: 60
+    mem_limit: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
+    memswap_limit: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
+    shm_size: 512mb
+
+  falkor:
+    image: "${FALKOR_IMAGE:-falkordb/falkordb:v4.20.4@sha256:adbddd418916c25618564ff8597a919b08bc76452ebeb74eb985c38d7281df62}"
+    cpus: "${BENCHMARK_CPU_LIMIT:-8}"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+    mem_limit: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
+    memswap_limit: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
+    shm_size: 512mb
+
+  surreal:
+    image: "${SURREAL_IMAGE:-surrealdb/surrealdb:v3.2.4@sha256:51baed8709f57f67dcf04b30e3177db846803fa9342dae2be58c6fa5f8d59843}"
+    cpus: "${BENCHMARK_CPU_LIMIT:-8}"
+    command:
+      - start
+      - --log
+      - warn
+      - --user
+      - root
+      - --pass
+      - root
+      - memory
+    healthcheck:
+      test: ["CMD", "/surreal", "is-ready", "--endpoint", "http://127.0.0.1:8000"]
+      interval: 1s
+      timeout: 5s
+      retries: 60
+    mem_limit: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
+    memswap_limit: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
+
+  pggraph:
+    image: "${PGGRAPH_IMAGE:-ghcr.io/evokoa/pggraph:1.2.0@sha256:5a69355fbac9f62222c072f3882ba0de7690d45d710e273a0515937e349b5873}"
+    cpus: "${BENCHMARK_CPU_LIMIT:-8}"
+    environment:
+      POSTGRES_DB: graph
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d graph"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+    mem_limit: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
+    memswap_limit: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
     shm_size: 512mb
 
   benchmark:
+    image: "${BENCHMARK_EXECUTION_IMAGE:-grust-lsqb-matrix-core:0.13}"
+    cpus: "${BENCHMARK_CPU_LIMIT:-8}"
     build:
       context: ../..
       dockerfile: benchmarks/lsqb/Dockerfile
       args:
-        GRUST_SOURCE_REVISION: ${GRUST_SOURCE_REVISION:-unknown}
-    depends_on:
-      postgres:
-        condition: service_healthy
+        BENCHMARK_FEATURE: "${BENCHMARK_FEATURE:-}"
+        GRUST_SOURCE_REVISION: "${GRUST_SOURCE_REVISION:-unknown}"
     environment:
-      BENCHMARK_IMAGE: grust-lsqb:local
-      CONTAINER_ARCH: ${BENCHMARK_CONTAINER_ARCH:-unknown}
+      BENCHMARK_IMAGE: "${BENCHMARK_IMAGE_TAG:-unknown}"
+      BENCHMARK_IMAGE_ID: "${BENCHMARK_IMAGE_ID:-unknown}"
+      BENCHMARK_RESOURCE_COMPONENTS: "${BENCHMARK_RESOURCE_COMPONENTS:-1}"
+      BENCHMARK_RESOURCE_LIMIT_SCOPE: per-container
+      CONTAINER_ARCH: "${BENCHMARK_CONTAINER_ARCH:-unknown}"
       CONTAINER_OS: linux
-      DOCKER_CPUS: ${BENCHMARK_DOCKER_CPUS:-unknown}
-      DOCKER_ENGINE_VERSION: ${BENCHMARK_DOCKER_ENGINE_VERSION:-unknown}
-      DOCKER_MEMORY_BYTES: ${BENCHMARK_DOCKER_MEMORY_BYTES:-unknown}
-      POSTGRES_URL: host=postgres user=postgres password=postgres dbname=grust
-      POSTGRES_IMAGE: postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af
+      DOCKER_CPUS: "${BENCHMARK_CPU_LIMIT:-8}"
+      DOCKER_ENGINE_VERSION: "${BENCHMARK_DOCKER_ENGINE_VERSION:-unknown}"
+      DOCKER_MEMORY_BYTES: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
+      HOST_CPU_MODEL: "${BENCHMARK_CPU_MODEL:-not reported}"
+      FALKOR_GRAPH: lsqb_matrix
+      FALKOR_IMAGE: "${FALKOR_IMAGE:-falkordb/falkordb:v4.20.4@sha256:adbddd418916c25618564ff8597a919b08bc76452ebeb74eb985c38d7281df62}"
+      FALKOR_IMAGE_ID: "${FALKOR_IMAGE_ID:-unresolved}"
+      FALKOR_VERSION: "${FALKOR_VERSION:-4.20.4}"
+      HELIX_IMAGE: "${HELIX_IMAGE:-}"
+      HELIX_IMAGE_ID: "${HELIX_IMAGE_ID:-}"
+      HELIX_VERSION: "${HELIX_VERSION:-}"
+      HELIX_WORKER_THREADS: "${HELIX_WORKER_THREADS:-}"
+      LADYBUG_VERSION: "${LADYBUG_VERSION:-0.20.2}"
+      LANCEDB_VERSION: "${LANCEDB_VERSION:-0.30.0}"
+      PGGRAPH_IMAGE: "${PGGRAPH_IMAGE:-ghcr.io/evokoa/pggraph:1.2.0@sha256:5a69355fbac9f62222c072f3882ba0de7690d45d710e273a0515937e349b5873}"
+      PGGRAPH_IMAGE_ID: "${PGGRAPH_IMAGE_ID:-unresolved}"
+      PGGRAPH_VERSION: "${PGGRAPH_VERSION:-1.2.0}"
+      POSTGRES_IMAGE: "${POSTGRES_IMAGE:-postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af}"
+      POSTGRES_IMAGE_ID: "${POSTGRES_IMAGE_ID:-unresolved}"
+      POSTGRES_PGQ_IMAGE: "${POSTGRES_PGQ_IMAGE:-}"
+      POSTGRES_PGQ_IMAGE_ID: "${POSTGRES_PGQ_IMAGE_ID:-}"
+      POSTGRES_PGQ_VERSION: "${POSTGRES_PGQ_VERSION:-}"
+      POSTGRES_PGQ_WORKER_THREADS: "${POSTGRES_PGQ_WORKER_THREADS:-}"
+      POSTGRES_VERSION: "${POSTGRES_VERSION:-18.6}"
+      SAIL_IMAGE: "${SAIL_IMAGE:-}"
+      SAIL_IMAGE_ID: "${SAIL_IMAGE_ID:-}"
+      SAIL_VERSION: "${SAIL_VERSION:-}"
+      SAIL_WORKER_THREADS: "${SAIL_WORKER_THREADS:-}"
+      SURREAL_IMAGE: "${SURREAL_IMAGE:-surrealdb/surrealdb:v3.2.4@sha256:51baed8709f57f67dcf04b30e3177db846803fa9342dae2be58c6fa5f8d59843}"
+      SURREAL_IMAGE_ID: "${SURREAL_IMAGE_ID:-unresolved}"
+      SURREAL_VERSION: "${SURREAL_VERSION:-3.2.4}"
+      TURSO_VERSION: "${TURSO_VERSION:-0.7.2}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    init: true
+    mem_limit: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
+    memswap_limit: "${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,mode=1777
+    user: "${BENCHMARK_UID:-0}:${BENCHMARK_GID:-0}"
     volumes:
-      - ./out:/out
+      - type: bind
+        source: "${BENCHMARK_OUTPUT_ROOT:-./out}"
+        target: /out
+      - type: bind
+        source: "${LSQB_DATA_ROOT:-./data}"
+        target: /datasets
+        read_only: true
+    working_dir: /tmp

@@ -493,9 +493,10 @@ impl SailGraphStore {
         let mut client = spark_client::with_decoding_limit(
             SparkConnectServiceClient::connect(config.endpoint.clone())
                 .await
-                .map_err(|e| {
-                    GrustError::Backend(format!("connect to Sail at {}: {e}", config.endpoint))
-                })?,
+                // Spark Connect endpoints may contain credentials or signed
+                // query parameters. Neither the endpoint nor a transport
+                // error that might echo it belongs in application logs.
+                .map_err(|_| GrustError::Backend("connect to Sail service failed".to_string()))?,
         );
         session_config::configure_warehouse(&mut client, &config).await?;
         Ok(Self {

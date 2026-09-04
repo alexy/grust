@@ -1,0 +1,695 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+    cat >&2 <<'USAGE'
+Usage: merge-reports.sh OUTPUT.json REPORT.json [REPORT.json ...]
+
+Merge schema-v2 one-backend LSQB reports. Reports must describe the same
+suite, environment, dataset, timing protocol, and per-query oracle identity.
+Partial matrices are valid artifacts but carry complete=false until all twelve
+canonical backends exist.
+USAGE
+}
+
+if [[ $# -lt 2 ]]; then
+    usage
+    exit 2
+fi
+
+output=$1
+shift
+reports=("$@")
+
+for command in jq ln mktemp python3; do
+    command -v "$command" >/dev/null 2>&1 || {
+        echo "merge-reports.sh: $command is required" >&2
+        exit 2
+    }
+done
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+# shellcheck source=benchmarks/lsqb/output-safety.sh
+source "$script_dir/output-safety.sh"
+manifest_path="$script_dir/evidence-manifest-v2.json"
+if [[ ! -f "$manifest_path" ]] || ! jq -e \
+    '.schema == "grust-lsqb-evidence-manifest-v2"' "$manifest_path" >/dev/null; then
+    echo "merge-reports.sh: missing or invalid canonical evidence manifest: $manifest_path" >&2
+    exit 2
+fi
+evidence_manifest=$(jq -S -c . "$manifest_path")
+canonical_backends=$(jq -c '[.backends[].id]' "$manifest_path")
+canonical_adapters=$(jq -c '[.backends[] | {key: .id, value: .adapter}] | from_entries' "$manifest_path")
+canonical_resource_components=$(jq -c \
+    '[.backends[] | {key: .id, value: .resource_components}] | from_entries' "$manifest_path")
+canonical_service_contracts=$(jq -c \
+    '[.backends[] | {key: .id, value: .service_contract}] | from_entries' "$manifest_path")
+canonical_runtime_versions=$(jq -c \
+    '[.backends[] | {key: .id, value: (.runtime_version // .service_identity.version // null)}] | from_entries' "$manifest_path")
+allowed_outcomes='["pass","mismatch","unsupported","unavailable","timeout","error","not_applicable"]'
+allowed_execution_classes='["in-process-reference","backend-native-aggregate","backend-row-source-rust-projection","backend-materialize-rust-reference","backend-neutral-policy"]'
+
+first=${reports[0]}
+for report in "${reports[@]}"; do
+    if [[ ! -f "$report" ]]; then
+        echo "merge-reports.sh: report does not exist: $report" >&2
+        exit 1
+    fi
+    if ! jq -e . "$report" >/dev/null; then
+        echo "merge-reports.sh: invalid JSON: $report" >&2
+        exit 1
+    fi
+done
+
+track=$(jq -er '.suite.track | select(type == "string")' "$first") || {
+    echo "merge-reports.sh: first report has no string suite.track: $first" >&2
+    exit 1
+}
+case "$track" in
+    baseline|adversarial)
+        expected_queries=$(jq -c --arg track "$track" '.tracks[$track].query_order' "$manifest_path")
+        ;;
+    *)
+        echo "merge-reports.sh: unsupported matrix suite.track $track; expected baseline or adversarial" >&2
+        exit 1
+        ;;
+esac
+
+# Everything except the cells and their computed flags is shared experiment
+# identity. Additive schema-v2 provenance therefore fails closed automatically.
+shared=$(jq -S -c 'del(.backends, .complete, .valid)' "$first")
+query_identity=$(jq -S -c '
+    [.backends[0].queries[] | {id, source_sha256, adapter_sha256, expected_count}]
+    | sort_by(.id)
+' "$first")
+backend_ids=()
+
+for report in "${reports[@]}"; do
+    candidate_shared=$(jq -S -c 'del(.backends, .complete, .valid)' "$report")
+    if [[ "$candidate_shared" != "$shared" ]]; then
+        echo "merge-reports.sh: shared report identity differs: $report" >&2
+        exit 1
+    fi
+
+    candidate_query_identity=$(jq -S -c '
+        [.backends[0].queries[] | {id, source_sha256, adapter_sha256, expected_count}]
+        | sort_by(.id)
+    ' "$report")
+    if [[ "$candidate_query_identity" != "$query_identity" ]]; then
+        echo "merge-reports.sh: per-query source, adapter, or oracle identity differs: $report" >&2
+        exit 1
+    fi
+
+    if ! jq -e \
+        --argjson backends "$canonical_backends" \
+        --argjson adapters "$canonical_adapters" \
+        --argjson resource_components "$canonical_resource_components" \
+        --argjson service_contracts "$canonical_service_contracts" \
+        --argjson runtime_versions "$canonical_runtime_versions" \
+        --argjson manifest "$evidence_manifest" \
+        --argjson outcomes "$allowed_outcomes" \
+        --argjson classes "$allowed_execution_classes" \
+        --argjson queries "$expected_queries" '
+            def string: type == "string";
+            def nonempty_string: string and length > 0;
+            def concrete_string:
+                string
+                and ((gsub("^\\s+|\\s+$"; "") | ascii_downcase) as $value
+                    | (($value | length) > 0)
+                    and ([
+                        "unknown", "not reported", "unreported", "unresolved",
+                        "unspecified", "none", "n/a", "not applicable", "not used"
+                      ] | index($value)) == null
+                    and ($value | startswith("intentionally omitted") | not)
+                );
+            def optional_string: . == null or string;
+            def optional_nonempty_string: . == null or nonempty_string;
+            def integer: type == "number" and . == floor;
+            def nonnegative_integer: integer and . >= 0;
+            def positive_integer: integer and . > 0;
+            def sha256: string and test("^[0-9a-f]{64}$");
+            def optional_sha256: . == null or sha256;
+            def image_id: string and test("^sha256:[0-9a-f]{64}$");
+            def pinned_image: concrete_string and test("@sha256:[0-9a-f]{64}$");
+            def neutral:
+                . == "unsupported" or . == "unavailable" or . == "not_applicable";
+            def execution_class_for($backend; $class):
+                if $backend == "memory" then
+                    $class == "in-process-reference"
+                elif $backend == "falkor" then
+                    $class == "backend-native-aggregate"
+                elif $backend == "cocoindex" then
+                    $class == null
+                elif $backend == "turso" or $backend == "postgres" or $backend == "sail" then
+                    $class == "backend-row-source-rust-projection"
+                    or $class == "backend-materialize-rust-reference"
+                else
+                    $class == "backend-materialize-rust-reference"
+                end;
+            def expected_position($query_index; $iteration; $query_count; $order):
+                if $order == "fixed" then
+                    $query_index + 1
+                else
+                    (($query_index - (($iteration - 1) % $query_count) + $query_count) % $query_count) + 1
+                end;
+            def observation_valid($observation; $expected; $query_index; $query_count; $order):
+                ($observation | type == "object")
+                and ($observation.iteration | positive_integer)
+                and ($observation.query_position | positive_integer and . <= $query_count)
+                and ($observation.query_position == expected_position(
+                    $query_index;
+                    $observation.iteration;
+                    $query_count;
+                    $order
+                ))
+                and ($observation.elapsed_ns | nonnegative_integer)
+                and ($observation.detail | optional_string)
+                and ($observation.outcome as $status | ($outcomes | index($status)) != null)
+                and (
+                    if $observation.outcome == "pass" then
+                        ($observation.actual_count | nonnegative_integer)
+                        and $observation.actual_count == $expected
+                    elif $observation.outcome == "mismatch" then
+                        ($observation.actual_count | nonnegative_integer)
+                        and $observation.actual_count != $expected
+                    elif $observation.outcome == "timeout" or $observation.outcome == "error" then
+                        $observation.actual_count == null
+                        and ($observation.detail | nonempty_string)
+                    else
+                        false
+                    end
+                );
+            def phase_valid($observations; $iterations; $expected; $query_index; $query_count; $order; $timeout_ns):
+                ($observations | type == "array" and length == $iterations)
+                and (($observations | map(.iteration) | sort) == [range(1; $iterations + 1)])
+                and all($observations[];
+                    observation_valid(.; $expected; $query_index; $query_count; $order)
+                    and (.outcome == "timeout" or .elapsed_ns <= $timeout_ns)
+                );
+            def reduced_outcome($observations):
+                if any($observations[]; .outcome == "error") then
+                    "error"
+                elif any($observations[]; .outcome == "timeout") then
+                    "timeout"
+                elif any($observations[]; .outcome == "mismatch") then
+                    "mismatch"
+                else
+                    "pass"
+                end;
+            def rust_plan_for($class):
+                if $class == "in-process-reference"
+                    or $class == "backend-materialize-rust-reference"
+                then "in_process"
+                elif $class == "backend-row-source-rust-projection" then "row_source"
+                else null
+                end;
+            def canonical_rust_rows($canonical; $class; $scale):
+                rust_plan_for($class) as $plan
+                | if $plan == null then null
+                  else {
+                      kind: $canonical.rust_rows[$plan].kind,
+                      rows: $canonical.rust_rows[$plan].rows[$scale]
+                  }
+                  end;
+            def rust_rows_valid:
+                . == null
+                or (
+                    type == "object"
+                    and (.kind == "exact" or .kind == "upper_bound" or .kind == "lower_bound")
+                    and (.rows | nonnegative_integer)
+                );
+            def common_query_valid($query; $canonical; $scale):
+                ($query | type == "object")
+                and ($query.id | nonempty_string)
+                and ($query.source_sha256 | sha256)
+                and ($query.adapter_sha256 | sha256)
+                and ($query.expected_count | nonnegative_integer)
+                and ($canonical | type == "object")
+                and ($query.source_sha256 == $canonical.source_sha256)
+                and ($query.adapter_sha256 == $canonical.adapter_sha256)
+                and ($query.expected_count == $canonical.expected_count)
+                and ($query.rust_rows | rust_rows_valid)
+                and ($query.rust_rows == canonical_rust_rows(
+                    $canonical;
+                    $query.execution.class;
+                    $scale
+                ))
+                and ($query.reason_code | optional_string)
+                and ($query.detail | optional_string)
+                and ($query.outcome as $status | ($outcomes | index($status)) != null)
+                and ($query.execution | type == "object")
+                and (
+                    $query.execution.class == null
+                    or ($query.execution.class as $class | ($classes | index($class)) != null)
+                )
+                and ($query.execution.language | nonempty_string)
+                and ($query.execution.transport | nonempty_string)
+                and ($query.execution.backend_query_sha256 | optional_sha256)
+                and ($query.warmups | type == "array")
+                and ($query.measurements | type == "array");
+            def executed_query_valid($query; $canonical; $backend; $scale; $warmups; $measurements; $query_count; $order; $timeout_ns):
+                common_query_valid($query; $canonical; $scale)
+                and (
+                    if $query.execution.class == null then
+                        $query.outcome == "error"
+                        and $query.reason_code == "query.classification"
+                        and ($query.detail | nonempty_string)
+                        and ($query.warmups | length == 0)
+                        and ($query.measurements | length == 0)
+                    else
+                        execution_class_for($backend; $query.execution.class)
+                        and (
+                            $scale == "example"
+                            or $query.execution.class != "backend-materialize-rust-reference"
+                        )
+                        and (
+                            $scale == "example"
+                            or $query.execution.class == "backend-native-aggregate"
+                            or (
+                                ($query.rust_rows.kind == "exact"
+                                    or $query.rust_rows.kind == "upper_bound")
+                                and $query.rust_rows.rows
+                                    <= $manifest.admission.downloaded_rust_row_limit
+                            )
+                        )
+                        and (
+                            if $query.execution.class == "backend-native-aggregate" then
+                                ($query.execution.backend_query_sha256 | sha256)
+                            else
+                                $query.execution.backend_query_sha256 == null
+                            end
+                        )
+                        and ($queries | index($query.id)) as $query_index
+                        | phase_valid(
+                            $query.warmups;
+                            $warmups;
+                            $query.expected_count;
+                            $query_index;
+                            $query_count;
+                            $order;
+                            $timeout_ns
+                        )
+                        and phase_valid(
+                            $query.measurements;
+                            $measurements;
+                            $query.expected_count;
+                            $query_index;
+                            $query_count;
+                            $order;
+                            $timeout_ns
+                        )
+                        and ($query.outcome == reduced_outcome($query.warmups + $query.measurements))
+                        and (
+                            if $query.outcome == "pass" then
+                                $query.reason_code == null
+                            elif $query.outcome == "mismatch" then
+                                $query.reason_code == "query.oracle-mismatch"
+                            elif $query.outcome == "timeout" then
+                                $query.reason_code == "query.timeout"
+                                and ($query.detail | nonempty_string)
+                            elif $query.outcome == "error" then
+                                $query.reason_code == "query.execution"
+                                and ($query.detail | nonempty_string)
+                            else
+                                false
+                            end
+                        )
+                    end
+                );
+            def disallowed_materialization_query_valid($query; $canonical; $backend; $scale):
+                ($manifest.backends[] | select(.id == $backend)) as $catalog
+                | common_query_valid($query; $canonical; $scale)
+                and $scale != "example"
+                and $catalog.query_capability == "portable"
+                and execution_class_for($backend; $query.execution.class)
+                and $query.execution.class == "backend-materialize-rust-reference"
+                and $query.execution.backend_query_sha256 == null
+                and $query.execution.transport == "not executed"
+                and $query.outcome == "unsupported"
+                and $query.reason_code == "performance.materialization-disallowed"
+                and $query.detail == "larger LSQB tiers refuse whole-backend materialization; only in-process reference, backend row-source, and backend-native aggregate paths are admitted"
+                and ($query.warmups | length == 0)
+                and ($query.measurements | length == 0);
+            def rust_row_refusal_query_valid($query; $canonical; $backend; $scale):
+                common_query_valid($query; $canonical; $scale)
+                and $scale != "example"
+                and execution_class_for($backend; $query.execution.class)
+                and (
+                    $query.execution.class == "in-process-reference"
+                    or $query.execution.class == "backend-row-source-rust-projection"
+                )
+                and ($query.rust_rows | rust_rows_valid and . != null)
+                and $query.execution.backend_query_sha256 == null
+                and $query.execution.transport == "not executed"
+                and $query.outcome == "unsupported"
+                and (
+                    if $query.rust_rows.rows > $manifest.admission.downloaded_rust_row_limit then
+                        $query.reason_code == $manifest.admission.row_limit_reason_code
+                        and $query.detail == "downloaded LSQB tiers refuse Rust row-producing execution when the certified exact cardinality, upper bound, or lower bound exceeds the canonical 1000000-row safety limit; backend-native aggregate execution remains admitted"
+                    elif $query.rust_rows.kind == "lower_bound" then
+                        $query.reason_code == $manifest.admission.bound_unavailable_reason_code
+                        and $query.detail == "downloaded LSQB tiers refuse Rust row-producing execution when only a lower bound at or below the canonical 1000000-row safety limit is certified; an exact cardinality or upper bound is required for admission"
+                    else false
+                    end
+                )
+                and ($query.warmups | length == 0)
+                and ($query.measurements | length == 0);
+            def nonexecuted_reason_valid($backend; $scale; $status; $reason):
+                ($manifest.backends[] | select(.id == $backend)) as $catalog
+                | if $status == "not_applicable" then
+                    $catalog.query_capability == "export-only"
+                    and $reason == "adapter.export-only"
+                elif $status == "unsupported" then
+                    $scale != "example"
+                    and $catalog.query_capability == "materialize"
+                    and $reason == "performance.materialization-disallowed"
+                elif $status == "unavailable" then
+                    ($reason == "runner.feature-not-compiled" and $catalog.feature != null)
+                    or (
+                        $reason == "backend.service-unavailable"
+                        and $catalog.service_contract == "external"
+                    )
+                elif $status == "error" then
+                    $reason == "dataset.load" or $reason == "backend.setup"
+                else
+                    false
+                end;
+            def nonexecuted_query_valid($query; $canonical; $backend; $scale; $status; $reason; $detail):
+                common_query_valid($query; $canonical; $scale)
+                and $query.outcome == $status
+                and execution_class_for($backend; $query.execution.class)
+                and $query.execution.backend_query_sha256 == null
+                and $query.execution.transport == "not executed"
+                and $query.reason_code == $reason
+                and $query.detail == $detail
+                and ($query.warmups | length == 0)
+                and ($query.measurements | length == 0);
+            def computed_valid:
+                [
+                    .backends[]
+                    | .setup_outcome,
+                      (.queries[].outcome),
+                      (.queries[] | .warmups[]?.outcome),
+                      (.queries[] | .measurements[]?.outcome)
+                ]
+                | all(. == "pass" or neutral);
+
+            . as $report
+            | ($report.timing.warmup_iterations) as $warmups
+            | ($report.timing.measurement_iterations) as $measurements
+            | ($queries | length) as $query_count
+            | ($report.timing.query_order) as $order
+            | ($report.timing.query_timeout_ms * 1000000) as $timeout_ns
+            | ($report.dataset.scale_factor) as $scale
+            | ($manifest.datasets[$scale]) as $known_dataset
+            | ($manifest.tracks[$report.suite.track].queries | with_entries(
+                .value.expected_count = .value.expected_count[$scale]
+              )) as $canonical_queries
+            | (
+                $report.schema_version == 2
+                and ($report.warning == $manifest.warning)
+                and $report.experiment_id == "lsqb-\($report.suite.track)-sf\($report.dataset.scale_factor)"
+                and ($report.suite | type == "object")
+                and ($report.suite.track == "baseline" or $report.suite.track == "adversarial")
+                and ($report.suite.name == $manifest.tracks[$report.suite.track].suite_name)
+                and ($report.suite.source_url == $manifest.suite.source_url)
+                and ($report.suite.source_commit == $manifest.suite.source_commit)
+                and ($report.suite.source_tree == $manifest.suite.source_tree)
+                and ($report.suite.query_tree == $manifest.suite.query_tree)
+                and ($report.suite.expected_output_sha256 == $manifest.suite.expected_output_sha256)
+                and ($report.suite.license == $manifest.suite.license)
+                and ($report.suite.classification == $manifest.suite.classification)
+                and ($report.environment | type == "object")
+                and ($report.environment.grust_revision | nonempty_string)
+                and ($report.environment.container_os | nonempty_string)
+                and ($report.environment.container_arch | nonempty_string)
+                and ($report.environment.docker_engine_version | nonempty_string)
+                and ($report.environment.cpu_model | nonempty_string)
+                and ($report.environment.cpu_limit | nonempty_string)
+                and ($report.environment.memory_limit_bytes | nonnegative_integer)
+                and (
+                    ($report.environment | has("resource_limit_scope") | not)
+                    or ($report.environment.resource_limit_scope | nonempty_string)
+                )
+                and ($report.dataset | type == "object")
+                and $known_dataset != null
+                and ($report.dataset.model == "LSQB projected foreign-key CSV adapted to Grust labels")
+                and ($report.dataset.source_url == $known_dataset.source_url)
+                and ($report.dataset.archive_sha256 == $known_dataset.archive_sha256)
+                and ($report.dataset.archive_bytes == $known_dataset.archive_bytes)
+                and ($report.dataset.extracted_manifest_sha256 == $known_dataset.extracted_manifest_sha256)
+                and ($report.dataset.csv_files == $known_dataset.csv_files)
+                and ($report.dataset.csv_bytes == $known_dataset.csv_bytes)
+                and ($report.dataset.nodes == $known_dataset.nodes)
+                and ($report.dataset.edges == $known_dataset.edges)
+                and ($report.dataset.person_nodes == $known_dataset.person_nodes)
+                and ($report.timing | type == "object")
+                and ($warmups | nonnegative_integer)
+                and ($measurements | positive_integer)
+                and ($report.timing.query_timeout_ms | positive_integer)
+                and ($report.timing.cell_timeout_ms | positive_integer)
+                and ($order == "fixed" or $order == "rotating")
+                and ($report.timing.boundary == "submit-to-scalar-consumed")
+                and ($report.timing.reload_before_each_iteration | type == "boolean")
+                and ($report.complete == false)
+                and ($report.valid | type == "boolean")
+                and ($report.backends | type == "array" and length == 1)
+                and (
+                    $report.backends[0] as $cell
+                    | ($cell.backend | type == "object")
+                    and ($cell.backend.name as $id | ($backends | index($id)) != null)
+                    and ($cell.backend.adapter == $adapters[$cell.backend.name])
+                    and ($cell.backend.adapter_version | nonempty_string)
+                    and (
+                        ($cell.backend | has("runner_image") | not)
+                        or ($cell.backend.runner_image | optional_nonempty_string)
+                    )
+                    and (
+                        ($cell.backend | has("runner_image_id") | not)
+                        or (
+                            $cell.backend.runner_image_id == null
+                            or ($cell.backend.runner_image_id | string and test("^sha256:[0-9a-f]{64}$"))
+                        )
+                    )
+                    and (
+                        ($cell.backend | has("resource_components") | not)
+                        or (
+                            $cell.backend.resource_components == (
+                                if $service_contracts[$cell.backend.name] == "external"
+                                    and (
+                                        $cell.setup_outcome == "unavailable"
+                                        or $cell.setup_outcome == "unsupported"
+                                    )
+                                    and $cell.backend.service_version == null
+                                    and $cell.backend.image == null
+                                    and $cell.backend.image_id == null
+                                then 1
+                                else $resource_components[$cell.backend.name]
+                                end
+                            )
+                        )
+                    )
+                    and ($cell.backend.service_version | optional_nonempty_string)
+                    and ($cell.backend.image | optional_nonempty_string)
+                    and ($cell.backend.image_id | . == null or (string and test("^sha256:[0-9a-f]{64}$")))
+                    and ($cell.backend.worker_threads | . == null or positive_integer)
+                    and (
+                        if $service_contracts[$cell.backend.name] == "none" then
+                            $cell.backend.service_version == $runtime_versions[$cell.backend.name]
+                            and $cell.backend.image == null
+                            and $cell.backend.image_id == null
+                            and $cell.backend.worker_threads == null
+                        elif $service_contracts[$cell.backend.name] == "external" then
+                            if $cell.backend.service_version == null
+                                and $cell.backend.image == null
+                                and $cell.backend.image_id == null
+                            then
+                                (
+                                    $cell.setup_outcome == "unavailable"
+                                    or $cell.setup_outcome == "unsupported"
+                                )
+                                and $cell.backend.resource_components == 1
+                                and $cell.backend.worker_threads == null
+                            else
+                                (
+                                    $cell.setup_outcome == "pass"
+                                    or $cell.setup_outcome == "error"
+                                )
+                                and $cell.backend.resource_components
+                                    == $resource_components[$cell.backend.name]
+                                and ($cell.backend.service_version | concrete_string)
+                                and ($cell.backend.image | pinned_image)
+                                and ($cell.backend.image_id | image_id)
+                            end
+                        else
+                            true
+                        end
+                    )
+                    and ($cell.setup_outcome as $status | ($outcomes | index($status)) != null)
+                    and ($cell.setup_detail | optional_string)
+                    and ($cell.load_ns | . == null or nonnegative_integer)
+                    and ($cell.queries | type == "array")
+                    and (
+                        [$cell.queries[].id] as $ids
+                        | ($ids | length) == ($ids | unique | length)
+                        and ($ids | sort) == ($queries | sort)
+                    )
+                    and (
+                        if $cell.setup_outcome == "pass" then
+                            ($cell.setup_detail == null)
+                            and ($cell.load_ns | nonnegative_integer)
+                            and all($cell.queries[];
+                                disallowed_materialization_query_valid(
+                                    .;
+                                    $canonical_queries[.id];
+                                    $cell.backend.name;
+                                    $scale
+                                )
+                                or rust_row_refusal_query_valid(
+                                    .;
+                                    $canonical_queries[.id];
+                                    $cell.backend.name;
+                                    $scale
+                                )
+                                or executed_query_valid(
+                                    .;
+                                    $canonical_queries[.id];
+                                    $cell.backend.name;
+                                    $scale;
+                                    $warmups;
+                                    $measurements;
+                                    $query_count;
+                                    $order;
+                                    $timeout_ns
+                                )
+                            )
+                        elif $cell.setup_outcome == "error" then
+                            ($cell.setup_detail | nonempty_string)
+                            and $cell.load_ns == null
+                            and (
+                                $cell.queries[0].reason_code as $reason
+                                | nonexecuted_reason_valid(
+                                    $cell.backend.name;
+                                    $scale;
+                                    "error";
+                                    $reason
+                                )
+                                and all($cell.queries[];
+                                    nonexecuted_query_valid(
+                                        .;
+                                        $canonical_queries[.id];
+                                        $cell.backend.name;
+                                        $scale;
+                                        "error";
+                                        $reason;
+                                        $cell.setup_detail
+                                    )
+                                )
+                            )
+                        elif ($cell.setup_outcome | neutral) then
+                            ($cell.setup_detail | nonempty_string)
+                            and $cell.load_ns == null
+                            and (
+                                $cell.queries[0].reason_code as $reason
+                                | nonexecuted_reason_valid(
+                                    $cell.backend.name;
+                                    $scale;
+                                    $cell.setup_outcome;
+                                    $reason
+                                )
+                                and all($cell.queries[];
+                                    nonexecuted_query_valid(
+                                        .;
+                                        $canonical_queries[.id];
+                                        $cell.backend.name;
+                                        $scale;
+                                        $cell.setup_outcome;
+                                        $reason;
+                                        $cell.setup_detail
+                                    )
+                                )
+                            )
+                        else
+                            false
+                        end
+                    )
+                )
+                and ($report.valid == ($report | computed_valid))
+            )
+        ' "$report" >/dev/null; then
+        echo "merge-reports.sh: invalid or semantically inconsistent one-backend schema-v2 report: $report" >&2
+        exit 1
+    fi
+
+    backend_id=$(jq -er '.backends[0].backend.name' "$report")
+    for seen in "${backend_ids[@]:-}"; do
+        if [[ -n "$seen" && "$seen" == "$backend_id" ]]; then
+            echo "merge-reports.sh: duplicate backend id: $backend_id" >&2
+            exit 1
+        fi
+    done
+    backend_ids+=("$backend_id")
+done
+
+output_dir=$(dirname -- "$output")
+output_name=$(basename -- "$output")
+lsqb_ensure_regular_directory "$output_dir" "merged report parent" 1 || exit 1
+output_dir=$(cd -- "$output_dir" && pwd -P)
+output_dir_identity=$(lsqb_directory_identity "$output_dir") || exit 1
+output="${output_dir}/${output_name}"
+lsqb_reject_existing_output "$output" "merged matrix report" || exit 1
+temporary_output=$(mktemp "$output_dir/.merge-reports.XXXXXX")
+output_installed=0
+cleanup() {
+    if (( output_installed == 1 )) && [[ -f "$output" && ! -L "$output" && \
+        -f "$temporary_output" && ! -L "$temporary_output" && \
+        "$temporary_output" -ef "$output" ]]; then
+        rm -f -- "$output"
+    fi
+    if [[ -n "$temporary_output" && -f "$temporary_output" && ! -L "$temporary_output" ]]; then
+        rm -f -- "$temporary_output"
+    fi
+}
+trap cleanup EXIT
+
+jq -S -s \
+    --argjson order "$canonical_backends" '
+        def neutral:
+            . == "unsupported" or . == "unavailable" or . == "not_applicable";
+        . as $reports
+        | $reports[0] as $base
+        | [$reports[].backends[0]]
+        | sort_by(.backend.name as $id | $order | index($id)) as $backends
+        | [$backends[].backend.name] as $ids
+        | ([
+            $backends[]
+            | .setup_outcome,
+              (.queries[].outcome),
+              (.queries[] | .warmups[]?.outcome),
+              (.queries[] | .measurements[]?.outcome)
+          ] | all(. == "pass" or neutral)) as $valid
+        | $base
+        | .backends = $backends
+        | .complete = ($ids == $order)
+        | .valid = $valid
+    ' "${reports[@]}" >"$temporary_output"
+
+chmod 0644 "$temporary_output"
+lsqb_verify_directory_identity \
+    "$output_dir" "$output_dir_identity" "merged report parent" || exit 1
+if ! ln -- "$temporary_output" "$output"; then
+    echo "merge-reports.sh: output appeared before atomic install: $output" >&2
+    exit 1
+fi
+output_installed=1
+lsqb_verify_directory_identity \
+    "$output_dir" "$output_dir_identity" "merged report parent" || exit 1
+[[ -f "$output" && ! -L "$output" && "$temporary_output" -ef "$output" ]] || {
+    echo "merge-reports.sh: installed output was replaced during creation: $output" >&2
+    exit 1
+}
+rm -f -- "$temporary_output"
+temporary_output=
+output_installed=0
+trap - EXIT
+printf '%s\n' "$output"

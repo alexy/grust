@@ -1,6 +1,6 @@
 [package]
 name = "grust-graph"
-version = "0.13.0"
+version = "0.13.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -43,8 +43,8 @@ grust-memory = { version = "0.13.0", path = "../grust-memory", optional = true }
 grust-postgres = { version = "0.13.0", path = "../grust-postgres", optional = true }
 grust-postgres-pgq = { version = "0.13.0", path = "../grust-postgres-pgq", optional = true }
 grust-pggraph = { version = "0.13.0", path = "../grust-pggraph", optional = true }
-grust-sail = { version = "0.13.0", path = "../grust-sail", optional = true }
-grust-surreal = { version = "0.13.0", path = "../grust-surreal", optional = true }
+grust-sail = { version = "0.13.1", path = "../grust-sail", optional = true }
+grust-surreal = { version = "0.13.1", path = "../grust-surreal", optional = true }
 grust-turso = { version = "0.13.0", path = "../grust-turso", optional = true }
 serde_json.workspace = true
 

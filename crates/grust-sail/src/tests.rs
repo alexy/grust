@@ -43,6 +43,22 @@ fn request_store() -> SailGraphStore {
     }
 }
 
+#[tokio::test]
+async fn connect_error_does_not_render_configured_endpoint_secrets() {
+    let secret = "grust-sail-sentinel-secret";
+    let config = SailConfig {
+        endpoint: format!("http://user:{secret}@127.0.0.1:9/spark?token={secret}"),
+        ..SailConfig::default()
+    };
+
+    let error = match SailGraphStore::connect(config).await {
+        Ok(_) => panic!("closed discard port must reject the connection"),
+        Err(error) => error.to_string(),
+    };
+    assert_eq!(error, "backend error: connect to Sail service failed");
+    assert!(!error.contains(secret));
+}
+
 fn query_string_rows(chunks: Vec<Vec<u8>>, columns: usize) -> Vec<Vec<String>> {
     let mut rows = Vec::new();
     for chunk in chunks {

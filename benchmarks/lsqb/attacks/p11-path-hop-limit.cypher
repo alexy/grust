@@ -1,0 +1,2 @@
+MATCH (a)-[:KNOWS*1..5]->(b)
+RETURN b LIMIT 1

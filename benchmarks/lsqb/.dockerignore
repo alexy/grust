@@ -1,0 +1,7 @@
+**
+!Dockerfile.upstream
+!fetch-upstream-source.py
+!upstream-entrypoint.sh
+!upstream-requirements.txt
+!validate-upstream.py
+!validate-upstream.sh

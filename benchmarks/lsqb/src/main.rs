@@ -1,22 +1,18 @@
-mod dataset;
-mod policy;
-mod queries;
-mod report;
-
 use std::env;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use grust_core::{Graph, GraphAdminStore, GraphStore, Value};
 use grust_cypher::pushdown::{NoTypeHints, SqlDialect, plan_read};
-use grust_cypher::{CypherParameters, CypherResultTable, ReadQueryPolicy};
+use grust_cypher::{CypherParameters, CypherResultTable};
+use grust_lsqb_runner::{dataset, policy, queries, report, safe_output};
 use grust_memory::MemoryGraphStore;
 use grust_postgres_core::{PostgresGraphConfig, PostgresGraphStore, PostgresReadDialect};
 use grust_turso::{TursoGraphStore, TursoReadDialect};
 use queries::{LSQB_COMMIT, LSQB_EXAMPLE_DATA_TREE, LSQB_QUERY_TREE, LSQB_TREE, QueryCase};
 use report::{
-    Environment, GraphSize, PolicyLimits, PolicyReport, PolicyRunResult, QueryResult, Report,
-    RunResult, SuiteIdentity,
+    Environment, GraphSize, POLICY_REPORT_SCHEMA_VERSION, PolicyLimits, PolicyReport,
+    PolicyRunResult, QueryResult, Report, RunResult, SuiteIdentity,
 };
 
 #[tokio::main]
@@ -29,6 +25,9 @@ async fn main() {
 
 async fn run() -> Result<(), String> {
     let arguments = Arguments::parse()?;
+    if arguments.suite == "policy" {
+        ensure_policy_scale(&arguments.scale)?;
+    }
     let data_dir = arguments.lsqb_root.join(format!(
         "data/social-network-sf{}-projected-fk",
         arguments.scale
@@ -38,8 +37,13 @@ async fn run() -> Result<(), String> {
         return run_policy_suite(&arguments, &graph);
     }
     let cases = match arguments.suite.as_str() {
-        "baseline" => queries::load_baseline(&arguments.lsqb_root)?,
-        "adversarial" => queries::load_adversarial(&arguments.attacks_dir)?,
+        "baseline" => queries::load_baseline_for_scale(&arguments.lsqb_root, &arguments.scale)?,
+        "adversarial" => queries::load_adversarial_for_scale(
+            &arguments.attacks_dir,
+            &arguments.lsqb_root,
+            &arguments.scale,
+            queries::DatasetStats::from_graph(&graph),
+        )?,
         other => {
             return Err(format!(
                 "unknown suite {other:?}; use baseline, adversarial, or policy"
@@ -80,6 +84,7 @@ async fn run() -> Result<(), String> {
             repetitions: arguments.runs,
             rust_version: env::var("RUST_VERSION").unwrap_or_else(|_| "unknown".into()),
             container_image: env::var("BENCHMARK_IMAGE").unwrap_or_else(|_| "unknown".into()),
+            container_image_id: env::var("BENCHMARK_IMAGE_ID").unwrap_or_else(|_| "unknown".into()),
             container_os: env::var("CONTAINER_OS").unwrap_or_else(|_| "linux".into()),
             container_arch: env::var("CONTAINER_ARCH").unwrap_or_else(|_| "unknown".into()),
             docker_engine_version: env::var("DOCKER_ENGINE_VERSION")
@@ -87,8 +92,10 @@ async fn run() -> Result<(), String> {
             docker_cpus: env::var("DOCKER_CPUS").unwrap_or_else(|_| "unknown".into()),
             docker_memory_bytes: env::var("DOCKER_MEMORY_BYTES")
                 .unwrap_or_else(|_| "unknown".into()),
+            resource_limit_scope: env::var("BENCHMARK_RESOURCE_LIMIT_SCOPE")
+                .unwrap_or_else(|_| "unknown".into()),
             postgres_image: env::var("POSTGRES_IMAGE").unwrap_or_else(|_| "not used".into()),
-            host_cpu: "intentionally omitted; Docker-reported architecture and resource allocation are authoritative for this run",
+            host_cpu: env::var("HOST_CPU_MODEL").unwrap_or_else(|_| "not reported".into()),
         },
         graph: GraphSize {
             nodes: graph.nodes.len(),
@@ -99,12 +106,7 @@ async fn run() -> Result<(), String> {
     };
 
     let json = serde_json::to_string_pretty(&report).map_err(|err| err.to_string())?;
-    if let Some(parent) = arguments.output.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
-    }
-    std::fs::write(&arguments.output, format!("{json}\n"))
-        .map_err(|err| format!("cannot write {}: {err}", arguments.output.display()))?;
+    safe_output::write_new(&arguments.output, format!("{json}\n").as_bytes())?;
     println!("{}", arguments.output.display());
     if valid {
         Ok(())
@@ -128,9 +130,8 @@ fn run_policy_suite(arguments: &Arguments, graph: &Graph) -> Result<(), String> 
         .iter()
         .flat_map(|run| &run.attacks)
         .all(|attack| attack.status == "pass");
-    let defaults = ReadQueryPolicy::default();
     let report = PolicyReport {
-        schema_version: 1,
+        schema_version: POLICY_REPORT_SCHEMA_VERSION,
         warning: "These are not LDBC Benchmark Results.",
         suite: SuiteIdentity {
             name: "adversari.al bounded graph-read policy attacks".to_string(),
@@ -150,6 +151,7 @@ fn run_policy_suite(arguments: &Arguments, graph: &Graph) -> Result<(), String> 
             repetitions: arguments.runs,
             rust_version: env::var("RUST_VERSION").unwrap_or_else(|_| "unknown".into()),
             container_image: env::var("BENCHMARK_IMAGE").unwrap_or_else(|_| "unknown".into()),
+            container_image_id: env::var("BENCHMARK_IMAGE_ID").unwrap_or_else(|_| "unknown".into()),
             container_os: env::var("CONTAINER_OS").unwrap_or_else(|_| "linux".into()),
             container_arch: env::var("CONTAINER_ARCH").unwrap_or_else(|_| "unknown".into()),
             docker_engine_version: env::var("DOCKER_ENGINE_VERSION")
@@ -157,26 +159,30 @@ fn run_policy_suite(arguments: &Arguments, graph: &Graph) -> Result<(), String> 
             docker_cpus: env::var("DOCKER_CPUS").unwrap_or_else(|_| "unknown".into()),
             docker_memory_bytes: env::var("DOCKER_MEMORY_BYTES")
                 .unwrap_or_else(|_| "unknown".into()),
+            resource_limit_scope: env::var("BENCHMARK_RESOURCE_LIMIT_SCOPE")
+                .unwrap_or_else(|_| "unknown".into()),
             postgres_image: env::var("POSTGRES_IMAGE").unwrap_or_else(|_| "not used".into()),
-            host_cpu: "intentionally omitted; Docker-reported architecture and resource allocation are authoritative for this run",
+            host_cpu: env::var("HOST_CPU_MODEL").unwrap_or_else(|_| "not reported".into()),
         },
         graph: GraphSize {
             nodes: graph.nodes.len(),
             edges: graph.edges.len(),
         },
-        policy: PolicyLimits {
-            max_candidate_work: policy::POLICY_MAX_CANDIDATE_WORK,
-            max_intermediate_bytes: defaults.max_intermediate_bytes,
-            intermediate_attack_max_candidate_work: policy::INTERMEDIATE_ATTACK_MAX_CANDIDATE_WORK,
-            intermediate_attack_parameter_bytes: policy::INTERMEDIATE_ATTACK_PARAMETER_BYTES,
-            max_range_items: defaults.max_range_items,
-            max_union_arms: defaults.max_union_arms,
-            max_path_length: defaults.max_path_length,
-        },
+        policy: PolicyLimits::from(&policy::benchmark_policy()),
         runs,
         valid,
     };
     write_report(arguments, &report, valid)
+}
+
+fn ensure_policy_scale(scale: &str) -> Result<(), String> {
+    if scale == "example" {
+        Ok(())
+    } else {
+        Err(format!(
+            "the backend-neutral policy suite is fixed to --scale example; got {scale:?}"
+        ))
+    }
 }
 
 fn write_report(
@@ -185,12 +191,7 @@ fn write_report(
     valid: bool,
 ) -> Result<(), String> {
     let json = serde_json::to_string_pretty(report).map_err(|err| err.to_string())?;
-    if let Some(parent) = arguments.output.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
-    }
-    std::fs::write(&arguments.output, format!("{json}\n"))
-        .map_err(|err| format!("cannot write {}: {err}", arguments.output.display()))?;
+    safe_output::write_new(&arguments.output, format!("{json}\n").as_bytes())?;
     println!("{}", arguments.output.display());
     if valid {
         Ok(())
@@ -450,5 +451,17 @@ impl Arguments {
             attacks_dir,
             output,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_policy_scale;
+
+    #[test]
+    fn policy_suite_is_fixed_to_the_example_graph() {
+        assert!(ensure_policy_scale("example").is_ok());
+        assert!(ensure_policy_scale("0.1").is_err());
+        assert!(ensure_policy_scale("0.3").is_err());
     }
 }

@@ -2,5 +2,6 @@
 /out/
 /data/
 /upstream/
+__pycache__/
+*.pyc
 *.log
-

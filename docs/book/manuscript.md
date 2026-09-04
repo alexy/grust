@@ -305,7 +305,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.13.0", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.13.1", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -313,7 +313,7 @@ grust = { package = "grust-graph", version = "0.13.0", features = ["typed-garde"
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.13.0", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.13.1", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -1307,8 +1307,11 @@ Arrow IPC streams.
 Connection establishment validates the client configuration. The default
 `SailWarehouse::ServerManaged` policy does not set
 `spark.sql.warehouse.dir`; Sail's catalog and warehouse configuration remain
-authoritative, which is safe across a remote client boundary and does not
-silently select a new client-local persistence path. Co-located development
+authoritative. Connection failures use a stable message and do not render the
+configured endpoint or transport error because either can disclose endpoint
+credentials or signed parameters. The warehouse policy is safe across a remote
+client boundary and does not silently select a new client-local persistence
+path. Co-located development
 can opt into `SailWarehouse::LocalSessionScoped`, which derives a path beneath
 the client's temporary directory from the session ID. Grust does not delete
 that directory; callers own cleanup, and reusing the session ID reuses the
@@ -1417,6 +1420,13 @@ still target a known relation table directly. Traversal batches target-node
 reads per step through `get_nodes`, avoiding a serial node lookup for every
 edge in a fan-out. Mutation batches are wrapped in SurrealDB transactions.
 SurrealDB 3.2 identifiers are quoted without lossy property-name rewriting.
+Every newly written node stores its original, case-sensitive Grust label in
+the reserved `__grust_label` field instead of reconstructing that label from a
+normalized, lowercase physical table. Reads of older rows fall back to the
+physical table label exposed as `__grust_physical_label`. Record decoding
+separates the table at the first colon and removes only a matching outer
+backtick pair, preserving colon-bearing logical IDs such as `City:4` without a
+trailing backtick.
 Configuration, schema fields, normalized node/relation table claims, reserved
 storage fields, and complete graph batches validate before bootstrap or write
 I/O. Optional Grust edge IDs are stored separately as `edge_id`; node `id` and
@@ -1471,11 +1481,15 @@ Docker Compose where a service is available. The repository-level
 `docs/INTEGRATION.md` guide covers profiles, modes, Docker image pins,
 source-checkout configuration, and CI strategy.
 
-Prawn's dependency qualification moves the Redis client to 1.6.0 and the
-FalkorDB service to v4.20.4, the SurrealDB Rust SDK and service to 3.2.4 with
-reqwest 0.13.4, pgGraph's service to 1.2.0, tokio-postgres to 0.7.18, and Turso
-from a prerelease to stable 0.7.2. These are tested compatibility updates, not
-new claims that every adapter implements the portable Cypher executor.
+Crayfish 0.13.1 is a scoped registry patch: `grust-sail`, `grust-surreal`, and
+the `grust-graph` facade move to 0.13.1, while consumers naming any other
+published Grust crate directly continue to use 0.13.0. Sail connection
+failures no longer render configured endpoints or transport errors that might
+echo credentials. It inherits Prawn's dependency
+qualification: Redis client 1.6.0 and FalkorDB service v4.20.4, SurrealDB Rust
+SDK and service 3.2.4 with reqwest 0.13.4, pgGraph service 1.2.0,
+tokio-postgres 0.7.18, and stable Turso 0.7.2. These are tested compatibility
+updates, not claims that every adapter implements the portable Cypher executor.
 
 Two attempted upgrades remain intentionally held. LanceDB stays at 0.30.0:
 the attempted 0.38.0 default-feature local build fails within upstream
@@ -1493,33 +1507,56 @@ The repository also carries a Docker-reproducible compatibility workload in
 [`benchmarks/lsqb`](https://github.com/querygraph/grust/tree/main/benchmarks/lsqb).
 The unmodified upstream side pins Graph Data Council LSQB commit
 `242cb2fd31340ca688954cb94794d74c0d5b6f92`, LadybugDB 0.19.0, and a
-digest-pinned Python 3.12.11 container. Across five repetitions of LSQB's small
-`sfexample` graph—28 nodes and 72 edges—all nine query counts match the
-upstream oracles: 8, 3, 6, 8, 3, 8, 11, 2, and 4, for 45/45 successful checks.
+digest-pinned Python 3.12.11 container. It validates LSQB's nine count queries
+independently of Grust.
 
-The Grust compatibility adapter is kept separate from those unchanged scripts.
-It is configured to reload the same fixture for each of five repetitions on
-Memory, Turso, and PostgreSQL 18.6. The separately labeled adversari.al
-extension has 17 attacks with two expectation models: eight exact-count queries
-exercise rewrite, optional-match, range-expansion, Cartesian-product, and union
-boundaries on each backend, while nine backend-neutral negative cases must be
-rejected for unbounded paths, excessive range allocation or candidate work,
-updating-clause smuggling, forbidden procedures, excess UNION arms,
-intermediate projection amplification, correlated subquery replanning, and
-correlated catalog rescans. Each
-backend cell therefore has 17 count oracles—the nine LSQB-derived queries plus
-eight adversarial count queries—while policy is reported once as its own track.
-Tracked evidence covers the unchanged upstream 45/45 run and clean Grust
-revision `2680c451`: all 135 LSQB-derived compatibility observations, all 120
-adversarial count observations, and all nine bounded-policy rejections passed.
-This is a conformance and reproducibility microbenchmark over an example
-dataset, not a performance ranking. LSQB is maintained by the Graph Data
-Council but is not an official LDBC benchmark.
+The adapted Grust side is rectangular across twelve declared backends: Memory,
+Turso, PostgreSQL, Ladybug, FalkorDB, SurrealDB, LanceDB, Sail, pgGraph,
+PostgreSQL PGQ, Helix, and CocoIndex. Baseline and adversarial suites each
+contain one cell per backend, yielding 24 count reports in a complete run even
+when a declared cell is unsupported, unavailable, or not applicable. For every
+backend, the baseline cell declares nine LSQB-derived queries and the
+adversarial cell declares 13 separately labeled count attacks. A distinct
+backend-neutral suite has 14 required policy rejections, so the adversari.al
+extension contains 27 attacks across two non-overlapping expectation models.
+
+Reports name the measured execution class as `in-process-reference`,
+`backend-native-aggregate`, `backend-row-source-rust-projection`,
+`backend-materialize-rust-reference`, or `backend-neutral-policy`. Each query
+ends as `pass`, `mismatch`, `unsupported`, `unavailable`, `timeout`, `error`, or
+`not_applicable`; policy cases separately record pass/fail and a stable
+rejection category. A capability or service gap remains visible rather than
+becoming a fallback pass. Those execution classes are not performance
+equivalent and their timings must not be collapsed.
+
+The 28-node, 72-edge `sfexample` graph is a conformance and orchestration gate,
+not a backend ranking. Authenticated LSQB SF0.1 and SF0.3 downloads add larger
+tiers with sealed archive and extracted-manifest identities. At those scales,
+the harness admits in-process reference, backend row-source with disclosed Rust
+projection, and backend-native aggregate execution, while whole-store
+materialization plus the Rust reference is explicitly `unsupported`. The
+manifest additionally binds a per-query, per-execution-class logical-row bound:
+only exact cardinalities or certified upper bounds at or below 1,000,000 are
+timed on downloaded tiers. Larger or insufficient Rust-row bounds are explicit
+unsupported outcomes without samples, while native scalar aggregates remain a
+separate class. The
+fourteen-case policy suite remains fixed to `sfexample`. Sail, PostgreSQL PGQ,
+and Helix have no default pinned service startup contract; their cells are
+`unavailable` unless an operator explicitly qualifies a digest-pinned,
+resource-limited external service.
+
+This is a conformance and reproducibility microbenchmark, and LSQB is not an
+official LDBC benchmark. Only a clean orchestrated run with a valid publication
+receipt is admitted as 0.13.1 evidence; diagnostic and discovery runs are not
+publication evidence. That receipt inventories one normalized watchdog record
+per cell, binding the configured hard limit and elapsed wall time to the child
+exit status and exact container ID, name, project, and service observed by the
+supervisor. Missing, timed-out, or cross-cell records are rejected.
 
 These are not LDBC Benchmark Results.
 
-Detailed evidence and future workloads belong at the durable
-[adversari.al graph benchmark hub](https://adversari.al/graph).
+The evidence home and canonical public presentation are at
+[adversari.al/graph](https://adversari.al/graph).
 
 # 9. Cypher and GQL
 

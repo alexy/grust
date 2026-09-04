@@ -6,6 +6,55 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 0.13.1 "Crayfish" - 2026-09-04
+
+Crayfish is a scoped registry patch for `grust-sail`, `grust-surreal`, and the
+`grust-graph` facade. All other publishable crates remain on 0.13.0.
+
+### Credential safety
+
+- Stop rendering the configured Sail Spark Connect endpoint or its transport
+  error in connection failures. Endpoints can carry credentials or signed
+  query parameters, so failures now use a stable secret-free message.
+
+### SurrealDB correctness
+
+- Preserve the original case-sensitive Grust label in SurrealDB rows instead
+  of reconstructing it from the normalized physical table name, while keeping
+  a backward-compatible physical-label fallback for existing data.
+- Decode record IDs by separating the table at the first colon, so logical IDs
+  such as `City:4` no longer return as a truncated `4\`` value. Reserve both
+  internal label fields against user schema and property collisions.
+
+### Benchmarks and evidence
+
+- Expanded the LSQB-derived Docker harness from a three-backend compatibility
+  harness to a rectangular, machine-validated twelve-backend matrix. Reports
+  preserve pass, mismatch, timeout, unsupported, unavailable, error, and
+  not-applicable outcomes; disclose native, row-source, materialization, and
+  in-process execution classes; and bind source, adapter, dataset, image,
+  resource, query, warm-up, and measurement provenance instead of blending
+  unlike timings.
+- Extended the adversari.al graph suite to 13 deterministic count-oracle cases
+  and 14 bounded-policy attacks, including zero-hop paths, Unicode and null
+  semantics, parser trivia, edge scans, query-byte and path-hop pressure,
+  invalid Unicode, graph selection, and unterminated comments.
+- Added authenticated LSQB SF0.1/SF0.3 acquisition, an independently validated
+  unchanged-upstream Ladybug runner, strict evidence merge/summarization
+  checks, and a larger GDC workload ladder covering SNB BI, SNB Interactive,
+  FinBench, Graphalytics, and Text2GraphQuery. Derived runs retain the required
+  “These are not LDBC Benchmark Results” boundary.
+- Made larger-scale evidence fail closed: streamed loaders avoid duplicate
+  source graphs; plan-specific logical-row bounds refuse unsafe Rust
+  materialization; late non-yielding work becomes a timeout; compiled features,
+  qualified service failures, output overwrite/symlink hazards, and unlike
+  per-component resource envelopes cannot masquerade as comparable passes.
+  Publication receipts bind normalized watchdog completion attestations for
+  all 24 backend-suite cells and the policy cell; the separate upstream
+  Ladybug receipt binds its own record. Each attestation fixes the configured
+  hard limit, elapsed wall time, child exit status, and exact container ID,
+  name, project, and service observed by the narrowly scoped supervisor.
+
 ## 0.13.0 "Prawn" - 2026-09-04
 
 Prawn returns every publishable Grust crate to one lockstep release line. It

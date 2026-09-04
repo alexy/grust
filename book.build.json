@@ -9,7 +9,7 @@
   "stem": "grust",
   "version": {
     "source": "cargo",
-    "file": "Cargo.toml"
+    "file": "crates/grust/Cargo.toml"
   },
   "kindleName": "${stem} (${version})",
   "dist": "docs/book/build/dist",

@@ -3470,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "grust-graph"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "garde",
  "grust-cocoindex",
@@ -3589,7 +3589,7 @@ dependencies = [
 
 [[package]]
 name = "grust-sail"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",
@@ -3617,7 +3617,7 @@ dependencies = [
 
 [[package]]
 name = "grust-surreal"
-version = "0.13.0"
+version = "0.13.1"
 dependencies = [
  "async-trait",
  "futures-executor",

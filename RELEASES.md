@@ -12,8 +12,10 @@ history.
   `grust-cypher`, `grust-memory`, `grust-sail`, `grust-sql-core`,
   `grust-turso`, and `grust-graph`; the other publishable backends remained on
   0.12.0)
-- Prawn — 0.13.0 (2026-09-04) ← current
-- Crayfish
+- Prawn — 0.13.0 (2026-09-04)
+- Crayfish — 0.13.1 (2026-09-04; scoped registry patch: `grust-sail`,
+  `grust-surreal`, and `grust-graph`; all other publishable crates remain on
+  0.13.0) ← current
 - Krill
 
 ## Barnacles

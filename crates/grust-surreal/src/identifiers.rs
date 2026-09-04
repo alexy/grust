@@ -5,7 +5,7 @@ use grust_core::prelude::*;
 use super::SurrealConfig;
 
 const BASE_TABLE: &str = "record";
-const NODE_STORAGE_FIELDS: &[&str] = &["id", "labels", "__grust_label"];
+const NODE_STORAGE_FIELDS: &[&str] = &["id", "labels", "__grust_label", "__grust_physical_label"];
 const EDGE_STORAGE_FIELDS: &[&str] = &[
     "id",
     "in",

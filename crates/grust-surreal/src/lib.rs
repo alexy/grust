@@ -664,7 +664,7 @@ fn surreal_get_node_query(id: &NodeId, config: &SurrealConfig) -> Result<String>
         .collect::<Vec<_>>()
         .join(" OR ");
     Ok(format!(
-        "SELECT *, meta::tb(id) AS __grust_label FROM {} WHERE {where_clause};",
+        "SELECT *, meta::tb(id) AS __grust_physical_label FROM {} WHERE {where_clause};",
         tables
             .iter()
             .map(|table| surreal_identifier(table))
@@ -700,7 +700,7 @@ fn surreal_get_nodes_query(ids: &[NodeId], config: &SurrealConfig) -> Result<Str
         .collect::<Vec<_>>()
         .join(" OR ");
     Ok(format!(
-        "SELECT *, meta::tb(id) AS __grust_label FROM {} WHERE {where_clause};",
+        "SELECT *, meta::tb(id) AS __grust_physical_label FROM {} WHERE {where_clause};",
         tables
             .iter()
             .map(|table| surreal_identifier(table))
@@ -735,7 +735,7 @@ fn surreal_start_nodes_query(start: &Start, config: &SurrealConfig) -> Result<St
             let table = surreal_table_name(label.as_str());
             let table = surreal_identifier(&table);
             Ok(format!(
-                "SELECT *, meta::tb(id) AS __grust_label FROM {table};"
+                "SELECT *, meta::tb(id) AS __grust_physical_label FROM {table};"
             ))
         }
         Start::NodesByProperty { label, key, value } => {
@@ -783,6 +783,10 @@ fn surreal_schema_query(schema: &GraphSchema) -> Result<String> {
         let table = surreal_table_name(node_type.label.as_str());
         let table = surreal_identifier(&table);
         statements.push(format!("DEFINE TABLE {table} SCHEMAFULL;"));
+        statements.push(format!(
+            "DEFINE FIELD {} ON TABLE {table} TYPE string;",
+            surreal_identifier("__grust_label")
+        ));
         for field in &node_type.fields {
             statements.push(format!(
                 "DEFINE FIELD {} ON TABLE {table} TYPE {};",
@@ -850,19 +854,25 @@ fn surreal_upsert_nodes_query(nodes: &[Node]) -> Result<String> {
 
 fn surreal_node_props(node: &Node) -> Result<String> {
     validate_node_batch(std::slice::from_ref(node))?;
-    Ok(node
-        .props
-        .iter()
-        .filter(|(key, _)| !matches!(key.as_str(), "id" | "labels"))
-        .map(|(key, value)| {
-            Ok(format!(
-                "{} = {}",
-                surreal_identifier(key),
-                surreal_value(value)?
-            ))
-        })
-        .collect::<Result<Vec<_>>>()?
-        .join(", "))
+    let mut props = vec![format!(
+        "{} = {}",
+        surreal_identifier("__grust_label"),
+        surreal_string(node.label.as_str())
+    )];
+    props.extend(
+        node.props
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "id" | "labels"))
+            .map(|(key, value)| {
+                Ok(format!(
+                    "{} = {}",
+                    surreal_identifier(key),
+                    surreal_value(value)?
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?,
+    );
+    Ok(props.join(", "))
 }
 
 fn surreal_relate_edges_query(
@@ -1139,6 +1149,7 @@ fn surreal_node_from_value(mut value: serde_json::Value) -> Result<Node> {
     })?;
     let label = object
         .remove("__grust_label")
+        .or_else(|| object.remove("__grust_physical_label"))
         .and_then(|value| value.as_str().map(Label::new))
         .ok_or_else(|| GrustError::Serialization("SurrealDB node row has no label".to_string()))?;
     let id =
@@ -1146,6 +1157,7 @@ fn surreal_node_from_value(mut value: serde_json::Value) -> Result<Node> {
             GrustError::Serialization("SurrealDB node row has no id".to_string())
         })?)?;
     object.remove("__grust_label");
+    object.remove("__grust_physical_label");
     object.remove("id");
     let props = object
         .iter()
@@ -1197,7 +1209,7 @@ fn surreal_edge_from_value(mut value: serde_json::Value) -> Result<Edge> {
 fn surreal_record_id(value: &serde_json::Value) -> Result<NodeId> {
     if let Some(id) = value.as_str() {
         return Ok(NodeId::new(surreal_record_key(
-            id.rsplit_once(':').map(|(_, id)| id).unwrap_or(id),
+            id.split_once(':').map(|(_, id)| id).unwrap_or(id),
         )));
     }
     if let Some(object) = value.as_object()

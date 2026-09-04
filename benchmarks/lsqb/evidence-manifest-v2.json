@@ -1,0 +1,154 @@
+{
+  "schema": "grust-lsqb-evidence-manifest-v2",
+  "warning": "These are not LDBC Benchmark Results.",
+  "suite": {
+    "source_url": "https://github.com/ldbc/lsqb",
+    "source_commit": "242cb2fd31340ca688954cb94794d74c0d5b6f92",
+    "source_tree": "d99fab28d47791dbc0e7173abc4c66d8aadc64ca",
+    "query_tree": "50937f3d075245e2abd4c00a36c4b3c236766265",
+    "expected_output_sha256": "f2467b14cd6a060e8513d5357471ae6cff486c2f5e38074febe08a4cf4db0d3a",
+    "license": "Apache-2.0",
+    "classification": "LSQB-derived, unaudited comparison; not an official LDBC benchmark result"
+  },
+  "admission": {
+    "downloaded_rust_row_limit": 1000000,
+    "metric": "maximum logical binding-stage rows materialized in Rust by the selected execution class",
+    "in_process_method": "exact stage maxima for the current reference executor over each pinned dataset; a8 is a conservative upper bound across sequential UNION arms",
+    "row_source_method": "exact surviving SQL/Spark binding rows for non-UNION plans; a8 is a conservative upper bound across sequential UNION arms",
+    "row_limit_reason_code": "performance.rust-row-limit",
+    "bound_unavailable_reason_code": "performance.rust-row-bound-unavailable"
+  },
+  "backends": [
+    {"id": "memory", "adapter": "grust-memory", "adapter_version": "0.13.0", "runtime_version": null, "resource_components": 1, "service_contract": "none", "feature": null, "query_capability": "portable"},
+    {"id": "turso", "adapter": "grust-turso", "adapter_version": "0.13.0", "runtime_version": "0.7.2", "resource_components": 1, "service_contract": "none", "feature": null, "query_capability": "portable"},
+    {"id": "postgres", "adapter": "grust-postgres-core", "adapter_version": "0.13.0", "resource_components": 2, "service_contract": "configured", "service_identity": {"version": "18.6", "platforms": {"arm64": {"image": "postgres:18.6-bookworm@sha256:4d155aa3f2c2cc1838bb70e81396f76373ec7275ec9ce9cf32873cd677c9a992", "config_id": "sha256:b85269e8c6aa961524542eb4dcca44c4aa1deba2cf507e9e28d5ba8f971aeab9"}, "amd64": {"image": "postgres:18.6-bookworm@sha256:a10c981235b4f635e65df0cfb66a5598064628128505dbc6a3ed4ca303717521", "config_id": "sha256:f372eda99ac2ea249c3dce566dcdf468397035371284d2cf2103b4bc52b3b39e"}}}, "feature": null, "query_capability": "portable"},
+    {"id": "ladybug", "adapter": "grust-ladybug", "adapter_version": "0.13.0", "runtime_version": "0.20.2", "resource_components": 1, "service_contract": "none", "feature": "ladybug", "query_capability": "materialize"},
+    {"id": "falkor", "adapter": "grust-falkor", "adapter_version": "0.13.0", "resource_components": 2, "service_contract": "configured", "service_identity": {"version": "4.20.4", "platforms": {"arm64": {"image": "falkordb/falkordb:v4.20.4@sha256:c4c07542d1ec55337c0312f1591f5387d48c46f65afc51aacdefbc674ffb1fa0", "config_id": "sha256:23c7a71f7c72150a1e6cf6b3dd679de5b1501040e906e0ab00b219b4c6433ae4"}, "amd64": {"image": "falkordb/falkordb:v4.20.4@sha256:adc18c64e8cfd37a3f834cf0863c69be935b0fd81caa4b06d8ec7242ca1e8e0f", "config_id": "sha256:3a56052a5da8ea999faa2913fa6be2a025f781e247a7af3fa03a32112326ddc2"}}}, "feature": "falkor", "query_capability": "native-aggregate"},
+    {"id": "surreal", "adapter": "grust-surreal", "adapter_version": "0.13.1", "resource_components": 2, "service_contract": "configured", "service_identity": {"version": "3.2.4", "platforms": {"arm64": {"image": "surrealdb/surrealdb:v3.2.4@sha256:2642fcb2045a82b967d41ef01b327e43cb97a82557717a33318332f4a07a95b2", "config_id": "sha256:16ad1cd7d6b4fce53fd979202a63b2b42f45b9a6340d5c01922220225f665d17"}, "amd64": {"image": "surrealdb/surrealdb:v3.2.4@sha256:6a5002363ff5b000b72a55f985203e951e3175e578002954b0e38f113e48a698", "config_id": "sha256:6e2f7f0134c79f659704986384895226bf84452673404060949b2c67d722da3f"}}}, "feature": "surreal", "query_capability": "materialize"},
+    {"id": "lancedb", "adapter": "grust-lancedb", "adapter_version": "0.13.0", "runtime_version": "0.30.0", "resource_components": 1, "service_contract": "none", "feature": "lancedb", "query_capability": "materialize"},
+    {"id": "sail", "adapter": "grust-sail", "adapter_version": "0.13.1", "runtime_version": null, "resource_components": 2, "service_contract": "external", "feature": "sail", "query_capability": "portable"},
+    {"id": "pggraph", "adapter": "grust-pggraph", "adapter_version": "0.13.0", "resource_components": 2, "service_contract": "configured", "service_identity": {"version": "1.2.0", "platforms": {"arm64": {"image": "ghcr.io/evokoa/pggraph:1.2.0@sha256:0da99f1af9eb57e6c80fd13341c2c10162ff263b5ee197fbad1d88a393f45b31", "config_id": "sha256:bdbfb22059babc16e83368c7f0c8ae282f42cb12fad7c65eff5b1531b4149f7f"}, "amd64": {"image": "ghcr.io/evokoa/pggraph:1.2.0@sha256:f96389f225b402271660ca1b10f0ed184b1047b882091ecdb00a712e6bdcc526", "config_id": "sha256:ad4d9fe5273d8a3fe96dca184a41a148617635e93e3a4c1795fcfb1de3cda22c"}}}, "feature": "pggraph", "query_capability": "materialize"},
+    {"id": "postgres-pgq", "adapter": "grust-postgres-pgq", "adapter_version": "0.13.0", "runtime_version": null, "resource_components": 2, "service_contract": "external", "feature": "postgres-pgq", "query_capability": "materialize"},
+    {"id": "helix", "adapter": "grust-helix", "adapter_version": "0.13.0", "runtime_version": null, "resource_components": 2, "service_contract": "external", "feature": "helix", "query_capability": "materialize"},
+    {"id": "cocoindex", "adapter": "grust-cocoindex", "adapter_version": "0.13.0", "runtime_version": null, "resource_components": 1, "service_contract": "none", "feature": null, "query_capability": "export-only"}
+  ],
+  "datasets": {
+    "example": {
+      "source_url": "https://github.com/ldbc/lsqb/tree/242cb2fd31340ca688954cb94794d74c0d5b6f92/data/social-network-sfexample-projected-fk",
+      "archive_sha256": null,
+      "archive_bytes": null,
+      "extracted_manifest_sha256": "e47d935e186ccda58147fc2609d3db1a6f0e218b92384cf63a7161e2c2974def",
+      "csv_files": 36,
+      "csv_bytes": 1361,
+      "nodes": 28,
+      "edges": 72,
+      "person_nodes": 5
+    },
+    "0.1": {
+      "source_url": "https://datasets.ldbcouncil.org/lsqb/social-network-sf0.1-projected-fk.tar.zst",
+      "archive_sha256": "20b08cfbc0b765bb066135a4c8d99367fb4f0d5c500a63b725e258dcb91b7005",
+      "archive_bytes": 6362514,
+      "extracted_manifest_sha256": "c0d76ea897df030f901c7436d2d7ee0cd31591db54c3c6c311d79a68fa138085",
+      "csv_files": 36,
+      "csv_bytes": 53863509,
+      "nodes": 432235,
+      "edges": 2080404,
+      "person_nodes": 1700
+    },
+    "0.3": {
+      "source_url": "https://datasets.ldbcouncil.org/lsqb/social-network-sf0.3-projected-fk.tar.zst",
+      "archive_sha256": "4aad6e31047a356d40e8c315916c3fe35a77911024136d69868b39b16f8ccf33",
+      "archive_bytes": 19134337,
+      "extracted_manifest_sha256": "aeb94da1177ca732b127574116d7624b131113ffc7f6f8e612b0bb2dab31d5f3",
+      "csv_files": 36,
+      "csv_bytes": 160662563,
+      "nodes": 1179535,
+      "edges": 6183839,
+      "person_nodes": 3900
+    }
+  },
+  "tracks": {
+    "baseline": {
+      "suite_name": "GDC-maintained LSQB compatibility matrix",
+      "query_order": ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8", "q9"],
+      "queries": {
+        "q1": {"source_sha256": "e08571bf8c877508cd3745ee7dcc8c061259c3b4d5a3fb17a952fbac4f9145ed", "adapter_sha256": "3f1048adb40cd8666593a587a83b93a02c2fa3e901bee00979fd46deab67fbf9", "expected_count": {"example": 8, "0.1": 8773828, "0.3": 45515831}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 8, "0.1": 8773828, "0.3": 45515831}}, "row_source": {"kind": "exact", "rows": {"example": 8, "0.1": 8773828, "0.3": 45515831}}}},
+        "q2": {"source_sha256": "49df895df6b98037f6ce5972d9113ae7a3f263ec009e4fece9ec75bb47410b32", "adapter_sha256": "07f74a31fe841278591404d68bf5206b683098db66af9a637759d2915f4f21d1", "expected_count": {"example": 3, "0.1": 82990, "0.3": 277454}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 12, "0.1": 82990, "0.3": 277454}}, "row_source": {"kind": "exact", "rows": {"example": 3, "0.1": 82990, "0.3": 277454}}}},
+        "q3": {"source_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be", "adapter_sha256": "5eb0a515fb894e91ecbc1f40656e757884a234953bf87565aec5fcc85007e5be", "expected_count": {"example": 6, "0.1": 30456, "0.3": 140736}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 65, "0.1": 32030444, "0.3": 366184650}}, "row_source": {"kind": "exact", "rows": {"example": 6, "0.1": 30456, "0.3": 140736}}}},
+        "q4": {"source_sha256": "1675c38f7cc117ba9be4de8fc0c1d7073901a03cfc5a174f2241e14c602c9a9f", "adapter_sha256": "9bca16043cb3c2e644405a7a8aa029542cb6a157c2f8324974d7cf8853ab662d", "expected_count": {"example": 8, "0.1": 784511, "0.3": 3461431}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 8, "0.1": 784511, "0.3": 3461431}}, "row_source": {"kind": "exact", "rows": {"example": 8, "0.1": 784511, "0.3": 3461431}}}},
+        "q5": {"source_sha256": "d836a819c7c96819f5dfa14d4e0097bcfb2222eb1561d3ffda22f15067cd8179", "adapter_sha256": "3707bef37b50f309f3dabaffa2b9e6d6408e94a2b99939da52129d15483cb48d", "expected_count": {"example": 3, "0.1": 1079722, "0.3": 3703494}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 7, "0.1": 1195993, "0.3": 4093326}}, "row_source": {"kind": "exact", "rows": {"example": 3, "0.1": 1079722, "0.3": 3703494}}}},
+        "q6": {"source_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93", "adapter_sha256": "b8c550aa3c452a99fe65d22ae23e7461ee2705b8be45e96a1d2d1d6143880c93", "expected_count": {"example": 8, "0.1": 55607896, "0.3": 285509755}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 13, "0.1": 56447509, "0.3": 288136027}}, "row_source": {"kind": "exact", "rows": {"example": 8, "0.1": 55607896, "0.3": 285509755}}}},
+        "q7": {"source_sha256": "3cb1b31a3f2d05efcaaebaea5ef70231bff30dcfe85aca21cb011ee99175ef0f", "adapter_sha256": "e99733e4e9f57b674de0b1a6d374c333273d5566b10a9a5c8df18d1ededa59c3", "expected_count": {"example": 11, "0.1": 1628132, "0.3": 6456925}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 11, "0.1": 1628132, "0.3": 6456925}}, "row_source": {"kind": "exact", "rows": {"example": 11, "0.1": 1628132, "0.3": 6456925}}}},
+        "q8": {"source_sha256": "73fbce9474f0059cfc620c17c5016d19b0974cdbbc8f26637f51b86ea4f24b91", "adapter_sha256": "415c8c5c93cf7a550d345b47e1500411255e2ab833e3b616e587c184771b7d2c", "expected_count": {"example": 2, "0.1": 537142, "0.3": 1848731}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 7, "0.1": 1195993, "0.3": 4093326}}, "row_source": {"kind": "exact", "rows": {"example": 2, "0.1": 537142, "0.3": 1848731}}}},
+        "q9": {"source_sha256": "f0e3402d9bf03cf2e01bf5d812399a4a2f2d40d4558a6ac04d09f0a77afbc8e4", "adapter_sha256": "46ef30fb1c5bf5d0539743b31b15a59c7f509931cc0945734ef4b81443cce332", "expected_count": {"example": 4, "0.1": 51009398, "0.3": 268837983}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 13, "0.1": 56447509, "0.3": 288136027}}, "row_source": {"kind": "exact", "rows": {"example": 4, "0.1": 51009398, "0.3": 268837983}}}}
+      }
+    },
+    "adversarial": {
+      "suite_name": "adversari.al LSQB-derived graph attack matrix",
+      "query_order": ["a1-reversed-chain", "a2-reordered-join", "a3-split-match", "a4-optional-fanout", "a5-negated-pattern", "a6-range-expansion", "a7-cartesian-count", "a8-union-dedup", "a9-path-zero-hop", "a10-unicode-literal", "a11-schema-null-probe", "a12-parser-comment-trivia", "a13-resource-edge-scan"],
+      "queries": {
+        "a1-reversed-chain": {"source_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261", "adapter_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261", "expected_count": {"example": 8, "0.1": 8773828, "0.3": 45515831}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 8, "0.1": 8773828, "0.3": 45515831}}, "row_source": {"kind": "exact", "rows": {"example": 8, "0.1": 8773828, "0.3": 45515831}}}},
+        "a2-reordered-join": {"source_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817", "adapter_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817", "expected_count": {"example": 3, "0.1": 82990, "0.3": 277454}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 3, "0.1": 172438, "0.3": 413514}}, "row_source": {"kind": "exact", "rows": {"example": 3, "0.1": 82990, "0.3": 277454}}}},
+        "a3-split-match": {"source_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2", "adapter_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2", "expected_count": {"example": 8, "0.1": 784511, "0.3": 3461431}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 8, "0.1": 784511, "0.3": 3461431}}, "row_source": {"kind": "exact", "rows": {"example": 8, "0.1": 784511, "0.3": 3461431}}}},
+        "a4-optional-fanout": {"source_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a", "adapter_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a", "expected_count": {"example": 11, "0.1": 1628132, "0.3": 6456925}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 11, "0.1": 1628132, "0.3": 6456925}}, "row_source": {"kind": "exact", "rows": {"example": 11, "0.1": 1628132, "0.3": 6456925}}}},
+        "a5-negated-pattern": {"source_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c", "adapter_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c", "expected_count": {"example": 2, "0.1": 537142, "0.3": 1848731}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 7, "0.1": 1195993, "0.3": 4093326}}, "row_source": {"kind": "exact", "rows": {"example": 2, "0.1": 537142, "0.3": 1848731}}}},
+        "a6-range-expansion": {"source_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb", "adapter_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb", "expected_count": {"example": 10000, "0.1": 10000, "0.3": 10000}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 10000, "0.1": 10000, "0.3": 10000}}, "row_source": {"kind": "exact", "rows": {"example": 10000, "0.1": 10000, "0.3": 10000}}}},
+        "a7-cartesian-count": {"source_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3", "adapter_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3", "expected_count": {"example": 125, "0.1": 4913000000, "0.3": 59319000000}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 125, "0.1": 4913000000, "0.3": 59319000000}}, "row_source": {"kind": "exact", "rows": {"example": 125, "0.1": 4913000000, "0.3": 59319000000}}}},
+        "a8-union-dedup": {"source_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a", "adapter_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a", "expected_count": {"example": 5, "0.1": 1700, "0.3": 3900}, "rust_rows": {"in_process": {"kind": "upper_bound", "rows": {"example": 10, "0.1": 3400, "0.3": 7800}}, "row_source": {"kind": "upper_bound", "rows": {"example": 10, "0.1": 3400, "0.3": 7800}}}},
+        "a9-path-zero-hop": {"source_sha256": "6b9ee94a62a6536dba6de54c51a710f57969e4050085c5b59b5bcb35fd3776a1", "adapter_sha256": "6b9ee94a62a6536dba6de54c51a710f57969e4050085c5b59b5bcb35fd3776a1", "expected_count": {"example": 5, "0.1": 1700, "0.3": 3900}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 5, "0.1": 1700, "0.3": 3900}}, "row_source": {"kind": "exact", "rows": {"example": 5, "0.1": 1700, "0.3": 3900}}}},
+        "a10-unicode-literal": {"source_sha256": "2727c4bc9d0b1e0cad2eca3fcf60563653677d948c60b98a26c4107c3cd61ad3", "adapter_sha256": "2727c4bc9d0b1e0cad2eca3fcf60563653677d948c60b98a26c4107c3cd61ad3", "expected_count": {"example": 5, "0.1": 1700, "0.3": 3900}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 5, "0.1": 1700, "0.3": 3900}}, "row_source": {"kind": "exact", "rows": {"example": 5, "0.1": 1700, "0.3": 3900}}}},
+        "a11-schema-null-probe": {"source_sha256": "d74bd4b51bf9f95daef7b87722c66fef1116e124030a37a5950e52fe8282f2f8", "adapter_sha256": "d74bd4b51bf9f95daef7b87722c66fef1116e124030a37a5950e52fe8282f2f8", "expected_count": {"example": 5, "0.1": 1700, "0.3": 3900}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 5, "0.1": 1700, "0.3": 3900}}, "row_source": {"kind": "exact", "rows": {"example": 5, "0.1": 1700, "0.3": 3900}}}},
+        "a12-parser-comment-trivia": {"source_sha256": "54105ed2f134a22d052260930c32a73d5a020a0de9aad692e1fbd0e40fc8b26d", "adapter_sha256": "54105ed2f134a22d052260930c32a73d5a020a0de9aad692e1fbd0e40fc8b26d", "expected_count": {"example": 28, "0.1": 432235, "0.3": 1179535}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 28, "0.1": 432235, "0.3": 1179535}}, "row_source": {"kind": "exact", "rows": {"example": 28, "0.1": 432235, "0.3": 1179535}}}},
+        "a13-resource-edge-scan": {"source_sha256": "ab3f505be43ea08dda6e4009f5eec08b743f90d40e18cff88d6eadd755e04471", "adapter_sha256": "ab3f505be43ea08dda6e4009f5eec08b743f90d40e18cff88d6eadd755e04471", "expected_count": {"example": 72, "0.1": 2080404, "0.3": 6183839}, "rust_rows": {"in_process": {"kind": "exact", "rows": {"example": 72, "0.1": 2080404, "0.3": 6183839}}, "row_source": {"kind": "exact", "rows": {"example": 72, "0.1": 2080404, "0.3": 6183839}}}}
+      }
+    }
+  },
+  "policy": {
+    "schema_version": 2,
+    "suite_name": "adversari.al bounded graph-read policy attacks",
+    "example_dataset_tree": "45181e6b274d014f8626038e1d398fa1b9e4c19d",
+    "classification": "adversari.al policy extension over the pinned LSQB example graph; not an LSQB track",
+    "environment": {
+      "backend": "portable-policy",
+      "rust_version": "1.97.1",
+      "container_image": "grust-lsqb-matrix-core:0.13",
+      "container_os": "linux",
+      "resource_limit_scope": "per-container"
+    },
+    "limits": {
+      "max_query_bytes": 2000,
+      "max_parameter_bytes": 65536,
+      "max_graph_nodes": 100000,
+      "max_graph_edges": 500000,
+      "max_graph_bytes": 67108864,
+      "max_candidate_work": 10000,
+      "max_intermediate_bytes": 268435456,
+      "max_result_rows": 50,
+      "max_output_bytes": 1048576,
+      "max_range_items": 10000,
+      "max_union_arms": 4,
+      "max_path_length": 4,
+      "max_execution_time_ms": 2000,
+      "allow_graph_selection": false,
+      "allow_catalog_procedures": false,
+      "require_match": true
+    },
+    "attack_order": ["p1-unbounded-path", "p2-range-bomb", "p3-cartesian-work", "p4-updating-smuggle", "p5-forbidden-procedure", "p6-union-arms", "p7-intermediate-projection", "p8-correlated-replan", "p9-catalog-rescan", "p10-resource-query-bytes", "p11-path-hop-limit", "p12-unicode-invalid-scalar", "p13-schema-graph-selection", "p14-parser-unterminated-comment"],
+    "attacks": {
+      "p1-unbounded-path": {"source_sha256": "fa1a963b956af49cee624496f8413a56df9d4cd6a03e37fb89f886638dda2a2f", "expected_rejection": "syntax.unbounded-path", "overrides": {}},
+      "p2-range-bomb": {"source_sha256": "05031e9330ba9cd55c18596ad10e856f4679b9cd593351a05fcc5a944b9af314", "expected_rejection": "execution.range-limit", "overrides": {}},
+      "p3-cartesian-work": {"source_sha256": "86f313fc5d69241830939ea11dacf00944c8a00b6562bde41b73825b883e17bd", "expected_rejection": "execution.candidate-work", "overrides": {}},
+      "p4-updating-smuggle": {"source_sha256": "3962c0e72650f2a94a455ff8b6fbb361cef05718006ca6185822a29fdef3dfb6", "expected_rejection": "syntax.updating-clause", "overrides": {}},
+      "p5-forbidden-procedure": {"source_sha256": "771c966de06c9a71badac9e35f529685d31f98b7cbf35a4248d4a6d5f9fc47b0", "expected_rejection": "syntax.forbidden-procedure", "overrides": {}},
+      "p6-union-arms": {"source_sha256": "5ffd315f32b3cf0fa5e93cf0b2ac989fc7f04ecbfe496cc69bdd5cf03b6f8e9d", "expected_rejection": "syntax.union-arms", "overrides": {}},
+      "p7-intermediate-projection": {"source_sha256": "433bd9032aa35379b4ccf663d076e34918ef4ff20190890492ddd76f9da989db", "expected_rejection": "execution.intermediate-bytes", "overrides": {"max_candidate_work": 50000, "parameter_payload_bytes": 49152}},
+      "p8-correlated-replan": {"source_sha256": "1b590e71eb234a4f9a4327e58a164f100507fbb0428e2f63cf1be525b76a2895", "expected_rejection": "execution.candidate-work", "overrides": {}},
+      "p9-catalog-rescan": {"source_sha256": "f8725fec092728f512c03bb19c1001fce92e0fda25d2950c956441c8b68d8a95", "expected_rejection": "execution.candidate-work", "overrides": {"allow_catalog_procedures": true}},
+      "p10-resource-query-bytes": {"source_sha256": "9906c529d405209754d649517b21ca420514af69a7ca7725ed43958b038f4ad2", "expected_rejection": "syntax.query-bytes", "overrides": {}},
+      "p11-path-hop-limit": {"source_sha256": "cb058bf2b497556cc75fc7e21e1eea76f0e93192a86f4008b3bf18d6f50ff36c", "expected_rejection": "syntax.path-limit", "overrides": {}},
+      "p12-unicode-invalid-scalar": {"source_sha256": "621d8f165862a92a214c360eff0a85928cae654f7e333bd6712c91c57eea69b2", "expected_rejection": "syntax.invalid-unicode-scalar", "overrides": {}},
+      "p13-schema-graph-selection": {"source_sha256": "c94ad786a73203f21025d3a4918a0845662f2b7bdaed35b9b0b2dd0233002cbe", "expected_rejection": "syntax.graph-selection", "overrides": {}},
+      "p14-parser-unterminated-comment": {"source_sha256": "db96957aedc9ec94f0f587ac84337b65012c6801fdd6eaedd9446a79f35c9b28", "expected_rejection": "syntax.unterminated-comment", "overrides": {}}
+    }
+  }
+}

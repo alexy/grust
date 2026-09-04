@@ -305,9 +305,11 @@ Grust already implements this shape:
 - `docs/book/build.sh` passes `--metadata-file metadata.yaml` to Pandoc.
 - `docs/book/metadata.yaml` carries `title_stem: "grust"` for catalog and upload
   surfaces.
-- `docs/book/build.sh` reads `[workspace.package].version` from `Cargo.toml` and
-  derives the Kindle library title as `<title_stem> (<version>)`, such as
-  `grust (0.13.0)` for the current workspace version.
+- The unified build and source hooks read the public facade's `[package]`
+  version from `crates/grust/Cargo.toml` and derive the Kindle library title as
+  `<title_stem> (<version>)`, such as `grust (0.13.1)` for the current scoped
+  facade patch. This remains accurate when unaffected workspace crates stay on
+  the preceding compatible patch.
 - The EPUB build uses `--epub-title-page=false` and the canonical PNG as its
   Pandoc cover image.
 - `docs/book/fix_epub_layout.sh` applies the same post-Pandoc layout repair
@@ -317,7 +319,7 @@ Grust already implements this shape:
   title.
 - `docs/book/check_epub_metadata.py` validates `EPUB/content.opf`,
   `EPUB/toc.ncx`, and `EPUB/nav.xhtml` inside the generated EPUB. It reads the
-  workspace version with `tomllib`, reads `title_stem` from `metadata.yaml`, and
+  facade version with `tomllib`, reads `title_stem` from `metadata.yaml`, and
   expects OPF `dc:title` and title sort metadata to be
   `grust (<version>)` while NCX/nav titles remain `Grust`.
 - The same checker verifies that `build/dist/VERSION.md` records the

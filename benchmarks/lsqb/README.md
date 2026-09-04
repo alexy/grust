@@ -6,9 +6,10 @@ This directory keeps two deliberately separate tracks:
    LSQB Ladybug scripts and example dataset run unchanged in a container.
 2. **Grust compatibility and adversarial runs.** Grust imports the same pinned
    projected-foreign-key data, checks the original LSQB query bytes, applies a
-   documented compatibility adapter, and then runs the nine LSQB query shapes
-   plus 17 clearly separate adversari.al extensions: eight per-backend count
-   attacks and nine backend-neutral bounded-policy rejection attacks.
+   documented compatibility adapter, and emits an explicit twelve-backend
+   matrix for the nine LSQB query shapes plus 27 clearly separate adversari.al
+   extensions: 13 per-backend count attacks and 14 backend-neutral
+   bounded-policy rejection attacks.
 
 LSQB is a GDC-maintained labelled-subgraph-query microbenchmark. It is **not an
 official LDBC benchmark**, these runs are not audited, and the checked-in
@@ -27,39 +28,112 @@ The qualification above follows the GDC/LDBC
 | Repository | [`ldbc/lsqb`](https://github.com/ldbc/lsqb) |
 | Commit | `242cb2fd31340ca688954cb94794d74c0d5b6f92` (2026-08-04, “Kuzu -> Ladybug”) |
 | Full tree | `d99fab28d47791dbc0e7173abc4c66d8aadc64ca` |
+| [Codeload source archive](https://codeload.github.com/ldbc/lsqb/tar.gz/242cb2fd31340ca688954cb94794d74c0d5b6f92) | 2,861,380 bytes; SHA-256 `db17ee8b0a8559d6cb7c06e1388e6d89cee2ac924779473ac847965c0c0d37bb` |
 | `cypher/` tree | `50937f3d075245e2abd4c00a36c4b3c236766265` |
 | Example projected-FK data tree | `45181e6b274d014f8626038e1d398fa1b9e4c19d` |
 | Expected-output blob | `4d9dedb2f8c7a42af6defa327303b1aded39e3ad` |
+| Expected-output SHA-256 | `f2467b14cd6a060e8513d5357471ae6cff486c2f5e38074febe08a4cf4db0d3a` |
 | LSQB source license | Apache-2.0; see upstream `LICENSE` and `NOTICE` |
 | Upstream system | Ladybug 0.19.0, as pinned by `ladybug/vars.sh` |
 
-The upstream image build verifies the exact commit and full repository tree,
-which transitively fixes the recorded query and example-data subtrees. The
-compatibility runner also verifies a SHA-256 digest for every q1–q9 source file
-before executing its separate track.
+The upstream image downloads the exact commit's codeload archive with Python's
+standard library, verifies its byte length and SHA-256 before safely extracting
+regular files and directories, and installs no mutable `apt` packages. That
+archive fixes the recorded tree, query, example-data, and expected-output
+identities. The compatibility runner also verifies a SHA-256 digest for every
+q1–q9 source file before executing its separate track.
 
 LSQB publishes projected-FK and merged-FK datasets at `example`, `0.1`, `0.3`,
 `1`, `3`, `10`, `30`, `100`, `300`, and `1000`. This harness checks in no
 downloaded dataset. The pinned example projected-FK dataset is already in the
-upstream repository and is the only dataset used by the recorded evidence.
-Follow LSQB's own download instructions for larger scales.
+upstream repository. The immediately supported downloaded tiers are the
+official projected-FK SF0.1 and SF0.3 archives; fetch and verify them with
+`fetch-dataset.sh`. See [`DATASETS.md`](DATASETS.md) for hashes, provenance,
+and the larger dataset ladder.
+
+The selected post-LSQB ladder uses SNB BI SF1/SF3 for development before SF10
+validation and SF30+ analytical performance; SNB Interactive v1 SF1 for
+development before SF10 validation and SF30+ OLTP performance; and FinBench
+SF0.1 for loader/correctness before SF1 validation and the complete SF10 run. A
+separate Graphalytics algorithms track adds a weighted Datagen graph for all
+six kernels before multi-billion-edge strain, while Text2GraphQuery remains a
+language/model accuracy track.
+Dataset sizes, source links, pinning requirements, and fair-use qualifications
+are recorded in [`DATASETS.md`](DATASETS.md); none of these development runs
+are labelled LDBC Benchmark Results. GDC's [current published benchmark
+catalog](https://ldbcouncil.org/benchmarks/) does not list a drop-in ISO GQL
+engine-performance suite: SNB BI/Interactive and FinBench are the stronger
+database workloads, while Text2GraphQuery tests language-generation accuracy.
+Any GQL translation is therefore a separately hashed adversari.al workload
+pinned to ISO/IEC 39075:2024 plus Cor 1:2026, never presented as unchanged
+upstream input.
 
 ## Exact Docker commands
 
 Run the pristine upstream reference first:
 
 ```sh
-RUNS=5 SF=example benchmarks/lsqb/run-upstream.sh
+CELL_TIMEOUT_MS=3600000 RUNS=5 SF=example benchmarks/lsqb/run-upstream.sh
 ```
 
-`Dockerfile.upstream` clones the exact commit and installs the exact Ladybug
-version requested upstream. For each repetition, the wrapper copies the
-pristine checkout and invokes the upstream scripts without modifying them:
+For the unchanged native Ladybug reference at SF0.1, fetch the pinned archive
+first. `run-upstream.sh` validates the extracted directory before building and
+requires the exact receipt written by `fetch-dataset.sh`, then bind-mounts only
+that dataset into the pinned checkout, read-only:
+
+```sh
+benchmarks/lsqb/fetch-dataset.sh --scale 0.1
+CELL_TIMEOUT_MS=14400000 RUNS=5 SF=0.1 benchmarks/lsqb/run-upstream.sh
+```
+
+Both wrappers enforce the same default 8-CPU, 6-GiB per-container cap with
+swap disabled. The upstream wrapper passes that CPU count through Ladybug's
+supported thread argument, so its worker count and CPU quota are identical.
+It requires a clean committed worktree before the image build and confirms the
+same revision after execution. Set a fresh `OUTPUT_DIR` for every run.
+
+Before running queries, the upstream directory receives an atomically written
+`environment.tsv` identity containing the OCI-labelled runner image ID,
+authenticated source/dataset identities, protocol, container-scoped CPU model,
+and resource limits. The image validates exactly q1–q9 for every repetition
+against the byte-pinned upstream oracle and atomically emits
+`raw-validation.tsv` with every raw CSV hash. Only then does the host create
+`complete.tsv`, which hashes both records plus the normalized `watchdog.json`
+completion attestation and is the required terminal
+publication receipt. Before reporting success, the wrapper invokes
+`validate-upstream-bundle.sh`; that standalone gate rejects every unlisted
+entry or symlink, enforces the exact TSV schemas and run identity, and
+read-only revalidates every raw CSV and receipt hash against the bundled,
+byte-pinned `expected-output.csv`. `complete.tsv` hashes that oracle alongside
+the environment and raw-validation receipts, making the output independently
+reverifiable without a checkout. A failed terminal check removes
+`complete.tsv`, so the directory remains explicitly incomplete.
+Existing identity, result, validation, or completion files are never
+overwritten. The bundle validator deliberately requires the independently
+expected revision, image ID, timestamps, resources, and environment identity
+as arguments; it consumes the bundled oracle directly. Use
+`validate-upstream-bundle.sh --help` for its offline
+interface. The non-Docker validator, bundle mutation, and safe-extractor
+self-tests are:
+
+```sh
+benchmarks/lsqb/test-validate-upstream.sh
+benchmarks/lsqb/test-validate-upstream-bundle.sh
+benchmarks/lsqb/test-dataset-integrity.sh
+benchmarks/lsqb/test-external-service.sh
+python3 benchmarks/lsqb/test-cell-watchdog.py
+python3 benchmarks/lsqb/test-fetch-upstream-source.py
+```
+
+`Dockerfile.upstream` authenticates the exact codeload archive and installs the
+exact Ladybug version requested upstream. For each repetition, the wrapper
+copies the pristine source and invokes the upstream scripts; the only supplied
+argument is Ladybug's supported explicit worker-thread count:
 
 ```sh
 cd ladybug/..
 SF=example ./ladybug/init-and-load.sh
-SF=example ./ladybug/run.sh
+SF=example ./ladybug/run.sh 8
 SF=example ./ladybug/stop.sh
 ```
 
@@ -69,25 +143,172 @@ reuse the same Ladybug database path for a second initialization.
 After the upstream run, execute the separate Grust matrix:
 
 ```sh
+CELL_TIMEOUT_MS=3600000 RUNS=5 SF=example benchmarks/lsqb/run-grust.sh
+```
+
+That builds a core runner and one Cargo-feature image for each optional
+adapter, then runs baseline and adversarial cells in canonical order. Every
+backend-suite cell gets a fresh container and, where applicable, a fresh
+service and volume. It produces 24 one-backend reports, two merged schema-v2
+matrices, the one backend-neutral 14-attack policy report, logs, and an image
+manifest under `out/matrix-sfexample/`. A feature-build failure, configured
+service failure, runner crash, or load failure can never be replaced by a
+neutral fallback cell: the run either retains an explicit error result or
+stops. Only services explicitly unconfigured below may be `unavailable`;
+CocoIndex is explicitly `not_applicable`.
+
+A structurally complete clean publication run atomically adds
+`publication-receipt.json`, even when a truthful query or policy outcome
+failed and the wrapper consequently exits nonzero. The receipt records each
+suite's validity, policy validity, and `all_required_outcomes_valid`; neutral
+unsupported, unavailable, and not-applicable outcomes remain explicitly
+neutral rather than being called passes. Completion is an evidence-integrity
+claim, not a passing-result claim. It binds the exact
+40-hex source revision to the bundled canonical evidence manifest, every
+component, matrix, policy, and `images.tsv` hash, and the exact output-file
+inventory. Each cell also has one normalized record under `watchdogs/` binding
+the configured wall-clock limit, measured elapsed wall time, child exit status,
+and the immutable container ID, name, project, and service observed by the
+supervisor. A missing, timed-out, malformed, or cross-cell record is not
+publishable. Recheck a copied or staged result directory without depending on a
+mutable catalog file outside the bundle:
+
+```sh
+python3 benchmarks/lsqb/validate-matrix-publication.py verify \
+  --output-dir benchmarks/lsqb/out/matrix-sfexample
+```
+
+Missing receipts, discovery/manual output, symlinks, extra files, mutations,
+and report/image identity drift are rejected.
+
+PostgreSQL, FalkorDB, SurrealDB, and pgGraph have pinned service images. Sail,
+PostgreSQL PGQ, and Helix have no pinned Docker startup contract, so their
+feature images are built but the default run records service unavailability.
+Ladybug and LanceDB are embedded. Set `SMOKE=1` for a one-run Memory-only
+infrastructure check:
+
+```sh
+CELL_TIMEOUT_MS=600000 SMOKE=1 \
+  OUTPUT_DIR=/tmp/grust-lsqb-smoke benchmarks/lsqb/run-grust.sh
+```
+
+Those three external-service cells are executable when an operator explicitly
+qualifies a local Docker container. Set the backend's
+`*_SERVICE_MODE=external`, existing endpoint variable, `*_VERSION`,
+digest-pinned `*_IMAGE`, matching config-digest `*_IMAGE_ID`, and
+`*_CONTAINER`; an optional positive `*_WORKER_THREADS` is recorded too.
+Prefixes are `SAIL`, `POSTGRES_PGQ`, and `HELIX`; endpoint variables are
+respectively `SAIL_ENDPOINT`, `POSTGRES_PGQ_URL`, and `HELIX_QUERY_URL`. The
+endpoint must use `host.docker.internal` with an explicit port, and the declared
+container must publish that port on `0.0.0.0` or `::`. Only the current
+backend's endpoint is injected into its runner container; every other backend
+endpoint is absent. This keeps credentials out of unrelated backend cells.
+
+The orchestrator resolves the image manifest and inspects the running container
+and its local image before and after each cell. It requires the image ID,
+Linux/runner architecture, CPU and memory limits, disabled swap, unrestricted
+CPU set, published-port binding, immutable container ID/start time, and restart
+count to remain exact. Canonical sanitized inspections go to receipt-bound
+service logs, and the publication verifier parses and binds them to the report
+and image manifest. The endpoint itself is never recorded because it can
+contain credentials. Partial tuples, mutable images, mismatched resources,
+loopback-only port publishing, restarts, and changed containers are rejected.
+
+External qualification is opt-in because preparation clears and reloads the
+target graph. It never discovers, starts, stops, or reuses an unrelated
+container automatically. A typical shape is:
+
+```sh
+HELIX_SERVICE_MODE=external \
+HELIX_QUERY_URL=http://host.docker.internal:8080/v1/query \
+HELIX_VERSION=<exact-version> \
+HELIX_IMAGE=<repository>@sha256:<platform-manifest> \
+HELIX_IMAGE_ID=sha256:<image-config> \
+HELIX_CONTAINER=<running-container-name-or-id> \
+CELL_TIMEOUT_MS=3600000 \
 RUNS=5 SF=example benchmarks/lsqb/run-grust.sh
 ```
 
-That builds one runner image, starts the digest-pinned PostgreSQL service, and
-runs both tracks over Grust Memory, Turso, and PostgreSQL. To run one cell:
+For a complete twelve-cell development pass from a dirty worktree, use a fresh
+directory and opt into discovery mode:
+
+```sh
+CELL_TIMEOUT_MS=3600000 DISCOVERY=1 \
+  OUTPUT_DIR=/tmp/grust-lsqb-discovery benchmarks/lsqb/run-grust.sh
+```
+
+`DISCOVERY=1` remains subject to the rectangular matrix contract but appends an
+independently rejected `-discovery` marker to the revision (in addition to any
+`-dirty` marker) and skips publication validators. Its output is diagnostic
+and must not be checked in, deployed, or described as result evidence. It
+cannot be combined with `SMOKE=1`.
+
+After the example conformance gate passes, run the authenticated downloaded
+tiers in fresh directories:
+
+```sh
+benchmarks/lsqb/fetch-dataset.sh --scale 0.1
+CELL_TIMEOUT_MS=14400000 WARMUPS=2 RUNS=5 SF=0.1 \
+  benchmarks/lsqb/run-grust.sh
+
+benchmarks/lsqb/fetch-dataset.sh --scale 0.3
+CELL_TIMEOUT_MS=14400000 WARMUPS=0 RUNS=1 QUERY_TIMEOUT_MS=30000 SF=0.3 \
+  benchmarks/lsqb/run-grust.sh
+```
+
+At downloaded scales the matrix executes Memory as the in-process reference,
+Turso/PostgreSQL (and a qualified Sail service) as backend-row-source plus Rust
+projection, and FalkorDB as backend-native aggregate. Whole-store
+materialization bridges remain explicit `unsupported` cells, and no summary
+ranks unlike execution classes against each other.
+
+To inspect or run one cell manually, build its feature-specific image and use
+the same read-only mounts:
 
 ```sh
 export GRUST_SOURCE_REVISION="$(git rev-parse HEAD)"
+export BENCHMARK_FEATURE=lancedb
+export BENCHMARK_IMAGE_TAG=grust-lsqb-matrix-lancedb:0.13
+export BENCHMARK_EXECUTION_IMAGE="$BENCHMARK_IMAGE_TAG"
 docker compose -f benchmarks/lsqb/compose.yaml build benchmark
-docker compose -f benchmarks/lsqb/compose.yaml up -d --wait postgres
-docker compose -f benchmarks/lsqb/compose.yaml run --rm benchmark \
-  --backend memory --suite baseline --scale example --runs 5 \
-  --output /out/grust/baseline-memory-sfexample.json
-docker compose -f benchmarks/lsqb/compose.yaml down --volumes
+export BENCHMARK_IMAGE_ID="$(docker image inspect --format '{{.Id}}' "$BENCHMARK_IMAGE_TAG")"
+export BENCHMARK_EXECUTION_IMAGE="$BENCHMARK_IMAGE_ID"
+docker compose -f benchmarks/lsqb/compose.yaml run --rm --no-deps benchmark \
+  --backend lancedb --suite baseline --scale example \
+  --warmups 2 --runs 5 --query-timeout-ms 30000 \
+  --cell-timeout-ms 3600000 \
+  --output /out/baseline-lancedb-sfexample.json
 ```
 
-Scratch data and raw output live under ignored `data/`, `upstream/`, and `out/`
-directories. Only bounded result records selected for review belong in
-`results/`.
+This direct one-cell command is diagnostic only: the declared cell timeout is
+not a watchdog unless the command is supervised by `cell-watchdog.py`, and it
+does not produce the clean-worktree publication receipt emitted and validated
+by `run-grust.sh`.
+
+The benchmark container root is read-only, `/tmp` is a fresh tmpfs, and the
+output mount is writable. For downloaded scales, the orchestrator first copies
+only authenticated CSVs and their receipt into a private, read-only snapshot;
+that snapshot is mounted at `/datasets` read-only and re-authenticated before
+and after every benchmark container. Downloaded scales use a pinned in-image
+query/oracle tree plus that snapshot. Before starting containers, the
+orchestrator recomputes
+the extracted CSV manifest and requires the known fingerprint derived from the
+verified official SF0.1 or SF0.3 archive. It also checks that same fingerprint
+in every emitted component before merge, so selecting a scale cannot by itself
+assert archive provenance. Every benchmark or service container has an enforced
+default limit of 8 CPUs and 6,442,450,944 bytes (6 GiB), and the runner refuses
+to start if the Docker VM exposes less. Override both runs consistently with
+`BENCHMARK_CPU_LIMIT` and `BENCHMARK_MEMORY_LIMIT_BYTES`; the exact enforced
+values are recorded in every report with `resource_limit_scope=per-container`.
+Backend identity records the components actually started for that cell, so a
+two-container execution is not presented as sharing a single cap and an
+unconfigured-service `unavailable` cell records only its runner rather than an
+imaginary service process.
+Scratch data and raw output live under
+ignored `data/`, `upstream/`, and `out/` directories. The orchestrator refuses
+to overwrite an image manifest or component/matrix report; choose a new
+`OUTPUT_DIR` for another run. Only bounded result records selected for review
+belong in `results/`.
 
 ## Images
 
@@ -96,13 +317,34 @@ The Dockerfiles and Compose file pin multi-platform image indexes by digest:
 | Purpose | Pinned image |
 |---|---|
 | Unchanged upstream run | `python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7` |
-| Grust builder | `rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97` |
-| Grust runtime | `debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171` |
+| Grust builder | `rust:1.97.1-trixie@sha256:b1b3c9c0d921d7fa0a6d1f9ec7e4eab87f8c8ec97644c3d791450f131dec813f` |
+| Grust runtime | `debian:trixie-slim@sha256:d7e12182ce18b85b93007c1dedf31f2d29e01ccf3182cc4017c709b6259bc132` |
 | PostgreSQL | `postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af` |
+| FalkorDB | `falkordb/falkordb:v4.20.4@sha256:adbddd418916c25618564ff8597a919b08bc76452ebeb74eb985c38d7281df62` |
+| SurrealDB | `surrealdb/surrealdb:v3.2.4@sha256:51baed8709f57f67dcf04b30e3177db846803fa9342dae2be58c6fa5f8d59843` |
+| pgGraph | `ghcr.io/evokoa/pggraph:1.2.0@sha256:5a69355fbac9f62222c072f3882ba0de7690d45d710e273a0515937e349b5873` |
 
-Runner output also includes the locally built image ID and exact Git revision.
-`run-grust.sh` automatically suffixes a dirty worktree revision with `-dirty`;
-only a clean committed revision is eligible for checked-in Grust evidence.
+Those are registry index digests. The orchestrator chooses a pinned amd64 or
+arm64 platform manifest and records its separate image config digest in each
+backend identity and `images.tsv`; it never treats a config digest as a
+pullable manifest. Before starting a configured service it resolves that
+platform manifest through the registry and requires the expected config digest.
+The manifest also records every locally built runner image ID. The policy
+report records its control-runner tag and immutable `sha256:` image ID, the
+`per-container` resource-limit scope, and the concrete host CPU model supplied
+to the container. Reports include the exact Git revision. `run-grust.sh`
+automatically suffixes a dirty worktree revision with `-dirty`; strict evidence
+validation accepts only a clean committed revision.
+
+LanceDB's generated bindings require build-only protobuf tooling. The builder
+pins `libprotobuf32t64`, `libprotobuf-dev`, `libprotoc32t64`, and
+`protobuf-compiler` to Debian version `3.21.12-11+deb13u1` and verifies
+`libprotoc 3.21.12`; these packages are not copied into the runtime image.
+Reqwest 0.13 initializes its platform verifier even for the matrix's plain-HTTP
+service endpoints. The slim runtime therefore receives the `ca-certificates`
+20250419 bundle from the digest-pinned builder image, verifies bundle SHA-256
+`714d457d580922dbf1d0be8bd35ba236a842b50b0072ae791582a19adef772a5`,
+and sets `SSL_CERT_FILE`; it does not install mutable runtime packages.
 
 ## What is measured
 
@@ -115,22 +357,79 @@ q1 q2 q3 q4 q5 q6 q7 q8 q9
  8  3  6  8  3  8 11  2  4
 ```
 
-The Grust JSON records graph load nanoseconds separately from query wall-clock
-nanoseconds, plus expected/actual counts, status, original source digest,
-executed-adapter digest, and the execution mode for every query and repetition.
-`sql-row-source-pushdown+rust-projection` means Turso or PostgreSQL executed the
-supported row-source plan in SQL and Grust completed projection using the
-shared Rust semantics. `in-memory-reference-fallback` means the backend first
-materialized its stored graph and the reference executor handled that query.
-Memory is always recorded as `in-memory-reference`. Thus a matching count is an
-end-to-end compatibility result; it is not, by itself, a claim of fully native
-database execution. Report summaries use the median and full min–max range
-across five clean loads. No warm-up samples are removed.
+Schema-v2 JSON records graph load nanoseconds separately, then keeps every
+warm-up and measured observation with its rotating query position,
+expected/actual count, outcome, source/adapter digest, and execution class. The
+default protocol is two warm-ups and five measured iterations. The measured
+boundary is query submission through scalar consumption; it excludes image
+build, service/container startup, CSV parsing, graph load, and report
+serialization.
 
-Elapsed times include in-process query dispatch but exclude image build,
-container startup, CSV parsing, and report serialization. They are useful for
-reproducibility and regression detection on the same environment. The 28-node,
-72-edge example graph is too small for backend-winner claims.
+`query_timeout_ms` is the requested query cutoff, not a process-isolation
+claim. FalkorDB receives that deadline in `GRAPH.RO_QUERY`; the runner adds a
+bounded Redis socket grace, waits for the blocking request to finish, and
+replaces the connection after a timeout before measuring another sample.
+Memory runs each synchronous query in a blocking task. Other asynchronous
+backends retain an in-flight query future after its deadline. In both cases a
+deadline produces a timeout outcome, but the runner first waits for that work
+to quiesce so it cannot overlap or contaminate the next sample. Consequently a
+timed-out observation's wall time can exceed the requested cutoff. This is a
+measurement-isolation rule, not a hostile-code sandbox. A monotonic
+post-return check also converts non-yielding work that completes after the
+deadline into `timeout`; validators reject any non-timeout observation whose
+recorded elapsed time exceeds the cutoff. `run-grust.sh`
+therefore requires an explicit positive `CELL_TIMEOUT_MS`, records it as
+`timing.cell_timeout_ms`, gives every Compose run container a unique name, and
+supervises that exact name under a hard wall-clock watchdog. The watchdog
+verifies the container's Compose project/service labels before killing by its
+immutable ID. Successful run containers are retained long enough for that
+identity to be observed, then removed by the same exact-ID check instead of an
+auto-remove race. The watchdog writes the observed identity to an exclusively
+created completion record on every terminal path. That receipt-bound record
+also fixes the configured timeout, elapsed wall time, child exit status, and
+terminal state. If the watchdog fires—or cannot prove the container
+identity—the run stops without a publication receipt. The bound covers the
+entire Compose run, including container creation/start, dataset load, all
+warm-up and measurement work, and report serialization; the examples above
+use one hour for the tiny graph and four hours for downloaded tiers.
+
+`load_ns` is diagnostic and is not compared across adapter classes. At
+downloaded scales Turso, PostgreSQL, a qualified Sail service, and FalkorDB
+decode and insert bounded node-first/edge-next chunks inside the load interval;
+their query phase retains no duplicate Rust source graph. Memory retains its
+single in-process graph, while example-scale and example-only materializing
+adapters receive an already decoded graph. Dataset inspection and manifest
+hashing occur before either boundary. Query latencies exclude all of those load
+and verification steps in both cases. If a downloaded-scale portable query
+cannot use its backend row-source plan, that query is explicitly unsupported;
+it cannot fall back to timed backend materialization plus the Rust reference.
+
+The bundled evidence manifest also fixes a 1,000,000-row admission ceiling for
+downloaded-scale execution that would materialize logical rows in Rust. It
+records plan-specific cardinality evidence for the in-process reference and
+backend row source because their intermediate row counts can differ sharply:
+SF0.1 q3 reaches 32,030,444 logical rows in the clause-by-clause Memory plan
+but sends 30,456 final matches through a qualifying SQL row source. Only a
+canonical exact cardinality or upper bound at or below the ceiling is admitted.
+Larger bounds use `performance.rust-row-limit`; an insufficient lower bound
+uses `performance.rust-row-bound-unavailable`; both are `unsupported` without
+observations. FalkorDB's backend-native scalar aggregate remains admitted.
+This prevents an explosive count such as the 4.913-billion-row SF0.1 Cartesian
+attack from exhausting the runner before its cooperative timeout can quiesce.
+It is a capability and safety boundary, not a zero-time performance result.
+
+`backend-native-aggregate` means the backend computed the scalar itself.
+`backend-row-source-rust-projection` means SQL or Spark supplied rows and Grust
+completed the disclosed projection. `backend-materialize-rust-reference`
+includes backend reads for every source label and edge shape, source node/edge
+multiset validation, and the shared Rust query execution in each timed sample.
+It detects missing, changed, duplicated, or additional records within those
+source shapes; it does not claim to enumerate unrelated backend-only labels.
+`in-process-reference` is the Memory control. These classes are not
+performance-equivalent and summaries must not collapse them. Unsupported,
+unavailable, and not-applicable cells have no timing samples. The 28-node,
+72-edge example graph is useful for conformance and orchestration checks, not
+backend-winner claims.
 
 ## Compatibility adapter boundary
 
@@ -153,13 +452,13 @@ digests appear in every JSON record.
 ## adversari.al extension
 
 The extension is not part of LSQB. It uses the same graph only after the
-upstream reference and compatibility checks succeed. Its 17 attacks have two
-non-overlapping expectation models: eight exact counts and nine required policy
-rejections. Each storage-backend cell therefore has 17 count oracles (nine
-LSQB-derived plus eight adversarial); the nine policy attacks are one separate,
+upstream reference and compatibility checks succeed. Its 27 attacks have two
+non-overlapping expectation models: 13 exact counts and 14 required policy
+rejections. Each storage-backend cell therefore has 22 count oracles (nine
+LSQB-derived plus 13 adversarial); the 14 policy attacks are one separate,
 backend-neutral rejection track.
 
-| Attack | Boundary exercised | Expected count |
+| Attack | Boundary exercised | `sfexample` expected count |
 |---|---|---:|
 | `a1-reversed-chain` | Entire q1 chain written in reverse | 8 |
 | `a2-reordered-join` | q2 atoms reordered around shared variables | 3 |
@@ -169,6 +468,11 @@ backend-neutral rejection track.
 | `a6-range-expansion` | Bounded `range`/`UNWIND` amplification | 10,000 |
 | `a7-cartesian-count` | Three-way Cartesian cardinality | 125 |
 | `a8-union-dedup` | Deduplication of identical aggregate rows | 5 |
+| `a9-path-zero-hop` | Zero-hop bounded-path identity over `Person` | 5 |
+| `a10-unicode-literal` | Unicode literal/escape equivalence and result identifier | 5 |
+| `a11-schema-null-probe` | Quoted missing-property GQL null semantics | 5 |
+| `a12-parser-comment-trivia` | Comment-delimited tokens and nested projection parentheses | 28 |
+| `a13-resource-edge-scan` | Full directed-edge aggregate cardinality | 72 |
 
 Every attack has one deterministic count oracle. A query error, missing result,
 wrong type, or wrong count fails that backend cell.
@@ -177,6 +481,11 @@ The bounded-policy track runs once through Grust's portable parser and
 cooperative read executor; it is not repeated as if it were a storage-backend
 performance score. Each case records the expected and actual stable rejection
 category, error text, source hash, elapsed time, and pass/fail status.
+It is deliberately fixed to the small, pinned `sfexample` graph: it validates
+backend-neutral parser and resource-policy rejection semantics, not storage
+performance. `run-grust.sh` therefore omits this track for SF0.1 and SF0.3
+instead of materializing those downloaded datasets in the legacy policy runner
+or publishing a misleading scale-qualified policy result.
 
 | Attack | Required rejection category |
 |---|---|
@@ -189,27 +498,39 @@ category, error text, source hash, elapsed time, and pass/fail status.
 | `p7-intermediate-projection` | `execution.intermediate-bytes` |
 | `p8-correlated-replan` | `execution.candidate-work` |
 | `p9-catalog-rescan` | `execution.candidate-work` |
+| `p10-resource-query-bytes` | `syntax.query-bytes` |
+| `p11-path-hop-limit` | `syntax.path-limit` |
+| `p12-unicode-invalid-scalar` | `syntax.invalid-unicode-scalar` |
+| `p13-schema-graph-selection` | `syntax.graph-selection` |
+| `p14-parser-unterminated-comment` | `syntax.unterminated-comment` |
 
-The recorded policy inherits the Grust defaults of at most 256 MiB of
-cumulative intermediate materialization, 10,000 range items, four UNION arms,
-and four cumulative path hops. It deliberately tightens the candidate-work
-budget to 10,000 units so work-amplification rejections are fast and
-deterministic even under a loaded CI host. The intermediate-projection case
-uses a disclosed 48 KiB parameter and raises only that case's candidate-work
-ceiling to 50,000 so its expected byte-budget boundary is reached first. All
-accepted queries must end in a
-positive literal `LIMIT` within the result-row ceiling. These negative cases
-never contribute to the LSQB count table.
+Policy report schema 2 serializes the complete effective base
+`ReadQueryPolicy`, not a hand-picked limit subset. The pinned policy allows at
+most 2,000 query bytes, 64 KiB of parameters, 100,000 graph nodes, 500,000
+graph edges, 64 MiB of encoded graph data, 10,000 candidate-work units, 256 MiB
+of cumulative intermediate materialization, 50 result rows, 1 MiB of output,
+10,000 range items, four UNION arms, four cumulative path hops, and 2,000 ms of
+cooperative execution. Graph selection and catalog procedures are disabled,
+and a `MATCH` is required. Each attack also records an exact override object:
+`p7-intermediate-projection` uses a disclosed 48 KiB parameter and raises only
+its candidate-work ceiling to 50,000 so the byte-budget boundary is reached
+first; `p9-catalog-rescan` enables catalog procedures so its candidate-work
+guard can be tested. Every other override object is empty. These negative
+cases never contribute to the LSQB count table.
 
 ## Backend scope
 
-The Grust Docker matrix covers the three backends that currently share the
-portable read-query executor needed for all seventeen count oracles: Memory,
-Turso, and PostgreSQL. The unchanged upstream cell covers Ladybug through
-LSQB's own implementation. The policy track uses the backend-neutral
-`portable-policy` label. Other Grust storage adapters remain outside this query
-matrix until they expose the same aggregate/openCypher surface; omission is not
-reported as a pass or failure.
+The schema-v2 matrix is rectangular across Memory, Turso, PostgreSQL, Ladybug,
+FalkorDB, SurrealDB, LanceDB, Sail, pgGraph, PostgreSQL PGQ, Helix, and
+CocoIndex. It does not pretend all twelve have the same capability: native,
+row-source-plus-Rust, materialize-plus-reference, unavailable, unsupported,
+and export-only outcomes stay distinct. The unchanged upstream Ladybug run is
+separate from Grust's Ladybug adapter cell. The policy track remains a
+backend-neutral `portable-policy` check and is never counted as twelve storage
+backend measurements. See [`BACKENDS.md`](BACKENDS.md) for exact qualification
+and service gaps.
 
-See [`results/2026-09-03`](results/2026-09-03) for the bounded evidence and the
-canonical public presentation at [adversari.al/graph](https://adversari.al/graph).
+See [`results/2026-09-03`](results/2026-09-03) for the historical schema-v1,
+three-backend bounded evidence. The receipt-backed schema-v2 evidence and its
+canonical presentation belong at
+[adversari.al/graph](https://adversari.al/graph).

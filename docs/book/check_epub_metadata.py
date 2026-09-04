@@ -115,13 +115,13 @@ def pandoc_slug(value: str) -> str:
 
 
 def expected_catalog_metadata() -> tuple[str, str, str, str]:
-    cargo_toml = Path(__file__).resolve().parents[2] / "Cargo.toml"
+    cargo_toml = Path(__file__).resolve().parents[2] / "crates" / "grust" / "Cargo.toml"
     metadata_yaml = Path(__file__).resolve().parent / "metadata.yaml"
     with cargo_toml.open("rb") as handle:
         cargo = tomllib.load(handle)
-    version = cargo.get("workspace", {}).get("package", {}).get("version")
+    version = cargo.get("package", {}).get("version")
     if not version:
-        raise ValueError(f"missing [workspace.package] version in {cargo_toml}")
+        raise ValueError(f"missing facade [package] version in {cargo_toml}")
     metadata_source = metadata_yaml.read_text(encoding="utf-8")
     title_stem = read_metadata_value(metadata_source, "title_stem")
     visible_title = read_metadata_value(metadata_source, "title")

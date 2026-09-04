@@ -83,8 +83,34 @@ fn upsert_nodes_preserves_arrays() {
     let graph = sample_graph();
     let query = surreal_upsert_nodes_query(&graph.nodes).unwrap();
     assert!(query.contains("UPSERT type::record(\"talk\", \"talk-1\")"));
+    assert!(query.contains("`__grust_label` = \"Talk\""));
+    assert!(query.contains("`__grust_label` = \"Person\""));
     assert!(query.contains("`tags` = [\"rust\",\"graphs\"]"));
     assert!(!query.contains("`id` ="));
+}
+
+#[test]
+fn node_round_trip_preserves_logical_label_and_colons_inside_record_keys() {
+    let node = Node::new("City", "City:4", Props::new());
+    let query = surreal_upsert_nodes_query(std::slice::from_ref(&node)).unwrap();
+
+    assert!(query.contains("type::record(\"city\", \"City:4\")"));
+    assert!(query.contains("`__grust_label` = \"City\""));
+
+    let decoded = surreal_node_from_value(serde_json::json!({
+        "id": "city:`City:4`",
+        "__grust_label": "City"
+    }))
+    .unwrap();
+    assert_eq!(decoded, node);
+
+    for record in [
+        serde_json::json!("city:`City:4`"),
+        serde_json::json!({"id": {"String": "City:4"}}),
+        serde_json::json!({"id": "`City:4`"}),
+    ] {
+        assert_eq!(surreal_record_id(&record).unwrap(), NodeId::new("City:4"));
+    }
 }
 
 #[test]
@@ -225,7 +251,7 @@ fn get_node_query_scans_candidate_tables_in_one_statement() {
     };
     let query = surreal_get_node_query(&NodeId::new("talk-1"), &config).unwrap();
 
-    assert!(query.starts_with("SELECT *, meta::tb(id) AS __grust_label FROM "));
+    assert!(query.starts_with("SELECT *, meta::tb(id) AS __grust_physical_label FROM "));
     assert!(query.contains("`person`, `record`, `talk`"));
     assert!(query.contains("id = type::record(\"talk\", \"talk-1\")"));
     assert_eq!(query.matches("SELECT").count(), 1);
@@ -240,7 +266,7 @@ fn get_nodes_query_batches_candidate_records_in_one_statement() {
     let query = surreal_get_nodes_query(&[NodeId::new("person-1"), NodeId::new("talk-1")], &config)
         .unwrap();
 
-    assert!(query.starts_with("SELECT *, meta::tb(id) AS __grust_label FROM "));
+    assert!(query.starts_with("SELECT *, meta::tb(id) AS __grust_physical_label FROM "));
     assert!(query.contains("`person`, `record`, `talk`"));
     assert!(query.contains("id = type::record(\"person\", \"person-1\")"));
     assert!(query.contains("id = type::record(\"talk\", \"talk-1\")"));
@@ -287,8 +313,8 @@ fn get_edges_query_accepts_explicit_label_without_relationship_config() {
 #[test]
 fn surreal_response_parsers_rebuild_grust_values() {
     let string_id_node = surreal_node_from_value(serde_json::json!({
-        "id": "person:`person-1`",
-        "__grust_label": "person",
+        "id": "city:`City:4`",
+        "__grust_label": "City",
         "name": "Ada Lovelace"
     }))
     .unwrap();
@@ -305,10 +331,15 @@ fn surreal_response_parsers_rebuild_grust_values() {
         "name": "Grace Hopper"
     }))
     .unwrap();
+    let legacy_node = surreal_node_from_value(serde_json::json!({
+        "id": "city:`City:5`",
+        "__grust_physical_label": "city"
+    }))
+    .unwrap();
     let edge = surreal_edge_from_value(serde_json::json!({
         "id": "presents:abc",
         "__grust_label": "presents",
-        "in": {"id": {"String": "person-1"}},
+        "in": "city:`City:4`",
         "out": {"id": "`talk-1`"},
         "relationship": "presents",
         "edge_id": "edge-1",
@@ -316,8 +347,8 @@ fn surreal_response_parsers_rebuild_grust_values() {
     }))
     .unwrap();
 
-    assert_eq!(string_id_node.id, NodeId::new("person-1"));
-    assert_eq!(string_id_node.label, Label::new("person"));
+    assert_eq!(string_id_node.id, NodeId::new("City:4"));
+    assert_eq!(string_id_node.label, Label::new("City"));
     assert_eq!(
         string_id_node.props.get("name"),
         Some(&Value::String("Ada Lovelace".to_string()))
@@ -326,7 +357,10 @@ fn surreal_response_parsers_rebuild_grust_values() {
     assert_eq!(typed_id_node.props.get("score"), Some(&Value::Int(42)));
     assert_eq!(typed_id_node.props.get("active"), Some(&Value::Bool(true)));
     assert_eq!(sdk_string_id_node.id, NodeId::new("person-3"));
-    assert_eq!(edge.from, NodeId::new("person-1"));
+    assert_eq!(legacy_node.id, NodeId::new("City:5"));
+    assert_eq!(legacy_node.label, Label::new("city"));
+    assert!(!legacy_node.props.contains_key("__grust_physical_label"));
+    assert_eq!(edge.from, NodeId::new("City:4"));
     assert_eq!(edge.to, NodeId::new("talk-1"));
     assert_eq!(edge.label, Label::new("presents"));
     assert_eq!(edge.id, Some(EdgeId::new("edge-1")));
@@ -357,6 +391,7 @@ fn graph_schema_defines_schemafull_tables_and_fields() {
     let query = surreal_schema_query(&schema).unwrap();
 
     assert!(query.contains("DEFINE TABLE `person` SCHEMAFULL"));
+    assert!(query.contains("DEFINE FIELD `__grust_label` ON TABLE `person` TYPE string"));
     assert!(query.contains("DEFINE FIELD `name` ON TABLE `person` TYPE string"));
     assert!(query.contains("DEFINE FIELD `age` ON TABLE `person` TYPE int"));
     assert!(query.contains("DEFINE TABLE `presents` TYPE RELATION SCHEMAFULL"));
@@ -423,11 +458,23 @@ async fn live_http_put_read_and_traverse() {
         .await
         .expect("read node")
         .expect("talk node missing");
-    assert_eq!(fetched.label, Label::new("talk"));
+    assert_eq!(fetched.label, Label::new("Talk"));
     assert_eq!(fetched.id, NodeId::new("talk-1"));
 
+    let colon_id_node = Node::new("Talk", "Talk:4", Props::new());
+    store
+        .put_node(&colon_id_node)
+        .await
+        .expect("write colon-id node");
+    let colon_id_fetched = store
+        .get_node(&NodeId::new("Talk:4"))
+        .await
+        .expect("read colon-id node")
+        .expect("colon-id node missing");
+    assert_eq!(colon_id_fetched, colon_id_node);
+
     let result = store
-        .traverse(Traversal::from_node("person-1").out("presents").to("talk"))
+        .traverse(Traversal::from_node("person-1").out("presents").to("Talk"))
         .await
         .expect("traverse");
     assert_eq!(result.len(), 1);

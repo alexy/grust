@@ -2,19 +2,29 @@
 ARG PYTHON_IMAGE=python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
 FROM ${PYTHON_IMAGE}
 
+ARG GRUST_SOURCE_REVISION
 ARG LSQB_COMMIT=242cb2fd31340ca688954cb94794d74c0d5b6f92
-ARG LSQB_TREE=d99fab28d47791dbc0e7173abc4c66d8aadc64ca
-COPY upstream-requirements.txt /tmp/upstream-requirements.txt
-RUN apt-get update \
-    && apt-get install --yes --no-install-recommends git \
-    && git clone --filter=blob:none https://github.com/ldbc/lsqb.git /opt/lsqb-source \
-    && git -C /opt/lsqb-source checkout --detach "${LSQB_COMMIT}" \
-    && test "$(git -C /opt/lsqb-source rev-parse HEAD^{tree})" = "${LSQB_TREE}" \
-    && pip install --disable-pip-version-check --no-cache-dir --require-hashes \
-        --only-binary=:all: --no-deps --requirement /tmp/upstream-requirements.txt \
-    && apt-get purge --yes --auto-remove git \
-    && apt-get clean \
-    && find /var/lib/apt/lists -mindepth 1 -delete
+ARG LSQB_ARCHIVE_URL=https://codeload.github.com/ldbc/lsqb/tar.gz/242cb2fd31340ca688954cb94794d74c0d5b6f92
+ARG LSQB_ARCHIVE_BYTES=2861380
+ARG LSQB_ARCHIVE_SHA256=db17ee8b0a8559d6cb7c06e1388e6d89cee2ac924779473ac847965c0c0d37bb
+LABEL org.opencontainers.image.source="https://github.com/querygraph/grust" \
+      org.opencontainers.image.revision="${GRUST_SOURCE_REVISION}" \
+      org.opencontainers.image.title="Grust pinned upstream LSQB runner" \
+      org.opencontainers.image.licenses="Apache-2.0" \
+      io.adversari.al.lsqb.commit="${LSQB_COMMIT}" \
+      io.adversari.al.lsqb.archive.sha256="${LSQB_ARCHIVE_SHA256}"
 
-COPY upstream-entrypoint.sh /usr/local/bin/upstream-entrypoint
+COPY --chmod=0555 fetch-upstream-source.py /usr/local/libexec/fetch-upstream-source.py
+COPY upstream-requirements.txt /tmp/upstream-requirements.txt
+RUN python3 /usr/local/libexec/fetch-upstream-source.py \
+        --url "${LSQB_ARCHIVE_URL}" \
+        --expected-bytes "${LSQB_ARCHIVE_BYTES}" \
+        --expected-sha256 "${LSQB_ARCHIVE_SHA256}" \
+        --archive-root "lsqb-${LSQB_COMMIT}" \
+        --destination /opt/lsqb-source \
+    && pip install --disable-pip-version-check --no-cache-dir --require-hashes \
+        --only-binary=:all: --no-deps --requirement /tmp/upstream-requirements.txt
+
+COPY --chmod=0555 validate-upstream.sh validate-upstream.py /usr/local/libexec/
+COPY --chmod=0555 upstream-entrypoint.sh /usr/local/bin/upstream-entrypoint
 ENTRYPOINT ["upstream-entrypoint"]
