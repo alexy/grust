@@ -19,6 +19,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   config digest, while receipts separately bind the manifest digest and the
   locally observed runtime ID. Legacy config-ID and containerd manifest-ID
   representations are accepted only when the container and local image agree.
+- Kept the receipt issuer's isolated semantic-validation sandbox complete when
+  merge hardening introduced the shared output-safety helper, with a real
+  end-to-end fixture that prevents missing validator dependencies from recurring.
 
 ## 0.13.1 "Crayfish" - 2026-09-04
 

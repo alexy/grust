@@ -1094,7 +1094,12 @@ def run_semantic_validators(script_directory: Path, output_directory: Path, scal
     backend_ids = [entry["id"] for entry in manifest_backends(manifest)]
     with tempfile.TemporaryDirectory(prefix="grust-lsqb-publication-validator.") as temporary:
         tools_directory = Path(temporary)
-        for name in ("merge-reports.sh", "validate-evidence.sh", "validate-policy.sh"):
+        for name in (
+            "merge-reports.sh",
+            "output-safety.sh",
+            "validate-evidence.sh",
+            "validate-policy.sh",
+        ):
             source = script_directory / name
             destination = tools_directory / name
             shutil.copyfile(source, destination)

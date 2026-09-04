@@ -525,6 +525,17 @@ class MatrixPublicationTests(unittest.TestCase):
                 self.assertIn(f"logs/{suite}-{backend}-service.log", inventory)
                 self.assertIn(f"watchdogs/{suite}-{backend}.json", inventory)
 
+    def test_isolated_semantic_validator_copies_merge_dependencies(self) -> None:
+        def assert_tools_are_complete(command: list[str], _label: str) -> None:
+            tools_directory = Path(command[0]).parent
+            self.assertTrue((tools_directory / "merge-reports.sh").is_file())
+            self.assertTrue((tools_directory / "output-safety.sh").is_file())
+
+        with mock.patch.object(
+            PUBLICATION, "run_validator", side_effect=assert_tools_are_complete
+        ):
+            PUBLICATION.run_semantic_validators(SCRIPT_DIRECTORY, self.output, "example")
+
     def test_missing_watchdog_completion_record_is_not_publishable(self) -> None:
         case_root = self.root / "missing-watchdog-completion"
         case_root.mkdir()
