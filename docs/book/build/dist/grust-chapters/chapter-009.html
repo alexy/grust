@@ -5,7 +5,7 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
-  <meta name="dcterms.date" content="2026-08-06" />
+  <meta name="dcterms.date" content="2026-09-04" />
   <title>7. Rust Concepts Used</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
@@ -70,8 +70,10 @@ and query strategy.</p>
 such as <code>memory</code>, <code>lancedb</code>,
 <code>postgres</code>, <code>postgres-pgq</code>, <code>pggraph</code>,
 <code>turso</code>, <code>sail</code>, <code>falkor</code>,
-<code>helix</code>, <code>surreal</code>, or <code>cocoindex</code> are
-enabled.</p>
+<code>surreal</code>, or <code>cocoindex</code> are enabled. The HelixDB
+and LadybugDB adapters remain internal <code>publish = false</code>
+workspace crates and are deliberately absent from the crates.io
+facade.</p>
 <p>Serde makes the graph model portable. Core types derive
 <code>Serialize</code> and <code>Deserialize</code>, and backends can
 turn properties into JSON strings, JSONB, Arrow string columns, or

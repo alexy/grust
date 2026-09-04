@@ -5,7 +5,7 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
-  <meta name="dcterms.date" content="2026-08-06" />
+  <meta name="dcterms.date" content="2026-09-04" />
   <title>6. The Store Contract</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
@@ -121,7 +121,8 @@
 </nav>
 <h1 data-number="7" id="the-store-contract"><span
 class="header-section-number">7</span> 6. The Store Contract</h1>
-<p>The central backend trait is <code>GraphStore</code>:</p>
+<p>The central backend trait is <code>GraphStore</code> (capability and
+native-constraint methods are omitted here for brevity):</p>
 <div class="sourceCode" id="cb1"><pre
 class="sourceCode rust"><code class="sourceCode rust"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="at">#[</span><span class="pp">async_trait::</span>async_trait<span class="at">]</span></span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a><span class="kw">pub</span> <span class="kw">trait</span> GraphStore<span class="op">:</span> <span class="bu">Send</span> <span class="op">+</span> <span class="bu">Sync</span> <span class="op">{</span></span>

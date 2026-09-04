@@ -5,8 +5,8 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
-  <meta name="dcterms.date" content="2026-08-06" />
-  <title>12. Where Grust Can Grow</title>
+  <meta name="dcterms.date" content="2026-09-04" />
+  <title>13. Where Grust Can Grow</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
     span.navlink { flex: 1; }
@@ -115,12 +115,12 @@
 <span class="navlink-label">Next:</span> <a href="chapter-016.html" accesskey="n" rel="next">Conclusion</a>
 </span>
 <span class="navlink">
-<span class="navlink-label">Previous:</span> <a href="chapter-014.html" accesskey="p" rel="previous">11. Design Tradeoffs</a>
+<span class="navlink-label">Previous:</span> <a href="chapter-014.html" accesskey="p" rel="previous">12. Design Tradeoffs</a>
 </span>
 </div>
 </nav>
 <h1 data-number="14" id="where-grust-can-grow"><span
-class="header-section-number">14</span> 12. Where Grust Can Grow</h1>
+class="header-section-number">14</span> 13. Where Grust Can Grow</h1>
 <p>The next natural step is to deepen graph-native read and traversal
 support across the backends. HelixDB, LadybugDB, and SurrealDB now
 satisfy the portable <code>GraphStore</code> read and traversal surface,
@@ -132,8 +132,11 @@ path returns, shortest paths, and aggregation are all tempting. The
 important rule is to extend the IR only when several backends can
 implement the concept without smuggling database-specific query strings
 through the abstraction.</p>
-<p>Incremental mutation now has a small extension trait for backends
-that can delete elements:</p>
+<p>Incremental mutation uses an extension trait for backends that can
+apply graph deltas. Its operation model starts with element upsert and
+deletion and also contains the typed node/edge patch, matched update,
+property removal, and row-producing operations used by the portable
+Cypher planner:</p>
 <div class="sourceCode" id="cb1"><pre
 class="sourceCode rust"><code class="sourceCode rust"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="kw">pub</span> <span class="kw">enum</span> GraphMutation <span class="op">{</span></span>
 <span id="cb1-2"><a href="#cb1-2" aria-hidden="true" tabindex="-1"></a>    UpsertNode(Node)<span class="op">,</span></span>
@@ -144,7 +147,8 @@ class="sourceCode rust"><code class="sourceCode rust"><span id="cb1-1"><a href="
 <span id="cb1-7"><a href="#cb1-7" aria-hidden="true" tabindex="-1"></a>        label<span class="op">:</span> Label<span class="op">,</span></span>
 <span id="cb1-8"><a href="#cb1-8" aria-hidden="true" tabindex="-1"></a>        to<span class="op">:</span> NodeId<span class="op">,</span></span>
 <span id="cb1-9"><a href="#cb1-9" aria-hidden="true" tabindex="-1"></a>    <span class="op">},</span></span>
-<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<span id="cb1-10"><a href="#cb1-10" aria-hidden="true" tabindex="-1"></a>    <span class="co">// Patch and matched-operation variants omitted here.</span></span>
+<span id="cb1-11"><a href="#cb1-11" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
 <p>That serves CocoIndex-style target-state systems, streaming
 pipelines, and ordinary applications that need to apply deltas instead
 of replacing whole graphs. The default <code>apply_mutations</code>
@@ -155,6 +159,13 @@ PostgreSQL and pgGraph stores wrap mutation batches in PostgreSQL
 transactions, Turso wraps them in a local SQL transaction (which
 <code>querygraph-memory</code> relies on for atomic
 supersede-and-replace consolidation), and the SurrealDB HTTP and SDK
-stores wrap mutation batches in SurrealDB transactions.</p>
+stores wrap mutation batches in SurrealDB transactions. PostgreSQL and
+Turso’s non-returning Cypher plan executors also reject unsupported
+lowering before writing, then execute the supported operations in source
+order inside one isolated transaction. The generic
+write-with-<code>RETURN</code> helper remains sequential because later
+operations may use intermediate bindings; it is not a whole-statement
+atomicity boundary. Explicit transaction scripts batch supported
+mutations when atomicity is required.</p>
 </body>
 </html>

@@ -5,7 +5,7 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
-  <meta name="dcterms.date" content="2026-08-06" />
+  <meta name="dcterms.date" content="2026-09-04" />
   <title>8. Backend Architecture</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
@@ -174,7 +174,20 @@ queries. When a hop fans out to multiple target nodes, the backend reads
 those target nodes with <code>get_nodes</code> instead of issuing one
 node query per edge. Property-start traversal filters by label in
 LanceDB, then compares decoded Grust properties exactly so nested JSON
-or serialized fragments cannot produce false positives.</p>
+or serialized fragments cannot produce false positives. Before
+persisting either an explicit or structural edge key, LanceDB calls the
+checked identity path and rejects U+001F in the source ID, label, target
+ID, or explicit ID. CocoIndex, LadybugDB, Sail, and Cypher
+capture/refetch use the same guard, and mixed explicit/idless
+comparisons also require the same structural owner instead of trusting a
+key-shaped string alone. Ladybug’s managed metadata index reserves the
+same delimiter, so its adapter rejects U+001F in node IDs before a user
+record can alias a table marker.</p>
+<p>Schema object identity is checked separately. The shared
+<code>validate_physical_identifier_claims</code> helper lets FalkorDB,
+Helix, LadybugDB, LanceDB, and Sail reject lossy-name collisions and
+exact duplicate declarations within each native namespace before schema
+or write operations are emitted.</p>
 <p>This backend is a natural home for later vector-search extensions.
 The core <code>GraphStore</code> trait should stay graph-focused;
 LanceDB-specific nearest-neighbor search can live in an extension trait
@@ -190,9 +203,9 @@ backend-neutral graph model.</p>
 <h2 data-number="9.3" id="ladybugdb"><span
 class="header-section-number">9.3</span> LadybugDB</h2>
 <p><code>grust-ladybug</code> embeds LadybugDB directly through the Rust
-<code>lbug</code> crate. It is the durable local graph-database backend:
-no Docker service, no HTTP bridge, and no separate daemon. The store
-opens either an in-memory Ladybug database or an on-disk Ladybug
+<code>lbug</code> 0.20.2 crate. It is the durable local graph-database
+backend: no Docker service, no HTTP bridge, and no separate daemon. The
+store opens either an in-memory Ladybug database or an on-disk Ladybug
 directory and creates Grust-managed Ladybug node and relationship tables
 from graph labels.</p>
 <p>Ladybug can be used for typed or untyped property graphs, and the
@@ -211,13 +224,19 @@ Grust <code>Node</code> and <code>Edge</code> values from the managed
 tables, while traversal evaluates the portable Grust traversal IR by
 walking Ladybug relationship tables and reading target nodes through the
 same <code>GraphStore</code> contract.</p>
-<p>The <code>ladybug-arrow</code> facade feature also exposes Ladybug’s
-embedded Arrow table path through Arrow IPC streams. A caller can
-register IPC node tables, relationship tables, and CSR relationship
-tables directly with Ladybug, then query them with Ladybug Cypher and
-receive result chunks back as Arrow IPC. The public boundary is IPC
-bytes rather than a Rust <code>RecordBatch</code> type, so callers do
-not have to match Ladybug’s internal Arrow crate version exactly.</p>
+<p>Ladybug’s managed metadata index uses U+001F to frame table markers
+and node entries. The adapter therefore rejects that delimiter in node
+IDs before any mutation; this is stricter than the backend-neutral
+<code>NodeId</code> type and is part of the Ladybug storage
+contract.</p>
+<p>The internal crate’s <code>arrow</code> feature also exposes
+Ladybug’s embedded Arrow table path through Arrow IPC streams. A
+workspace caller can register IPC node tables, relationship tables, and
+CSR relationship tables directly with Ladybug, then query them with
+Ladybug Cypher and receive result chunks back as Arrow IPC. The public
+boundary is IPC bytes rather than a Rust <code>RecordBatch</code> type,
+so callers do not have to match Ladybug’s internal Arrow crate version
+exactly.</p>
 <p>The first implementation stores Grust properties as JSON text for
 portable round trips. Later schema lowering can add typed Ladybug
 columns, full-text indexes, vector indexes, and direct graph-RAG
@@ -236,6 +255,16 @@ PostgreSQL DDL. It does not require PostgreSQL extensions, so the same
 another managed PostgreSQL-compatible service. Reads use SQL against the
 universal tables. Traversal is lowered to SQL joins over those tables.
 Mutation batches are wrapped in PostgreSQL transactions.</p>
+<p>The shared connection is serialized across every explicit
+transaction. A recovery marker is set before <code>BEGIN</code> and
+cleared only after PostgreSQL acknowledges <code>COMMIT</code> or
+<code>ROLLBACK</code>; if cancellation drops a future mid-flight, the
+next serialized caller rolls back the uncertain transaction before doing
+new work. The public raw <code>PostgresGraphStore::execute</code>
+surface is deliberately autocommit-only. Its lexical guard rejects
+transaction-control statements in a batch while ignoring lookalike words
+inside strings, identifiers, dollar-quoted bodies, and comments.
+PostgreSQL PGQ forwards through the same contract.</p>
 <p>Schema application adds typed label views and expression indexes. For
 example, a <code>Person</code> node schema with
 <code>name: String</code> and <code>age: Int</code> can produce a
@@ -268,6 +297,19 @@ for undirected steps. Turso keeps JSON text, <code>json_extract</code>,
 undirected join shape. Sail does not use this SQL core because its SQL
 path runs through Spark Connect, Arrow IPC staging, and distributed
 Spark SQL rather than a direct row-store connection.</p>
+<p>Recursive walk pushdown no longer stores raw node IDs between
+sentinel delimiters. PostgreSQL, Spark SQL, and the generic SQLite
+dialect encode IDs as hexadecimal, delimiter-free tokens before
+constructing visited sets. A dialect without both recursive-CTE support
+and an encoding hook declines variable-path or shortest-walk pushdown
+and preserves correctness through fallback.</p>
+<p><code>GraphSqlDialect::max_identifier_bytes</code> lets a dialect
+declare a limit for generated schema identifiers. PostgreSQL reports its
+63-byte ceiling: typed node/edge view and property-index names at the
+limit remain valid, while longer names fail with
+<code>GrustError::Schema</code> before the server can silently truncate
+them into an ambiguous or colliding identifier. Dialects that retain the
+default <code>None</code> keep their existing behavior.</p>
 <h2 data-number="9.5" id="turso"><span
 class="header-section-number">9.5</span> Turso</h2>
 <p><code>grust-turso</code> uses the Turso Rust SDK directly. The
@@ -335,7 +377,23 @@ journal mode. A default <code>TursoConfig</code> still uses
 <p>The adapter projects memory into a small property graph:</p>
 <pre class="text"><code>(:MemoryRecord {record: &lt;opaque JSON&gt;, space: ...})
     -[:MENTIONS]-&gt;(:MemoryEntity {name, kind})
-(:MemoryEntity)-[:RELATES {rel, fact_id}]-&gt;(:MemoryEntity)</code></pre>
+(:MemoryEntity)-[:RELATES]-&gt;(:MemoryRelation {rel, fact_id})
+    -[:RELATES]-&gt;(:MemoryEntity)</code></pre>
+<p>Each <code>MemoryRelation</code> is an assertion, not merely an
+endpoint pair. Its node ID is a SHA-256 identity over length-prefixed
+source, relationship name, target, and record ID components. Replaying
+one record is stable, while two records that assert the same named
+relation between the same entities retain separate lineage. Neighborhood
+traversal follows the two-edge assertion shape and also reads the legacy
+direct <code>RELATES {rel, fact_id}</code> representation so existing
+durable stores remain compatible. Tombstone preflight first discovers
+the record’s assertion nodes and any legacy fact edges, then submits
+deletion of that discovered set with the record node as one mutation
+batch. A transactional backend makes that deletion batch atomic, and
+other records’ assertions survive. The discovery reads are not isolated
+inside that transaction: callers must synchronize a tombstone with
+concurrent links for the same record so a new assertion cannot appear
+after discovery and escape the deletion batch.</p>
 <p>The complete TypeSec <code>StoredRecord</code> is serialized into one
 opaque JSON property and round-tripped whole. Grust does not open the
 protected content. TypeSec’s <code>MemoryVault</code> remains the only
@@ -496,14 +554,10 @@ collision-resistant IDs at its boundary. <code>VectorIndex</code> is not
 a persistent LanceDB ANN implementation, and memory predicates beyond
 space are not fully pushed into GQL. Cognition job idempotency does not
 replace durable TypeDID nonce replay protection shared across gateway
-replicas. Grust’s structural edge identity remains
-<code>(from, label, to)</code>, so changing <code>fact_id</code> cannot
-preserve parallel <code>RELATES</code> assertions between the same
-endpoints; assertion nodes or a multi-edge identity surface are still
-needed for full lineage. Finally, vault-level tenant checks, restart
-persistence, and running-service conformance do not by themselves
-constitute a hosted multi-tenant service with quotas, migrations,
-backups, deletion propagation, and service-level objectives.</p>
+replicas. Finally, vault-level tenant checks, restart persistence, and
+running-service conformance do not by themselves constitute a hosted
+multi-tenant service with quotas, migrations, backups, deletion
+propagation, and service-level objectives.</p>
 <h2 data-number="9.7" id="sail"><span
 class="header-section-number">9.7</span> Sail</h2>
 <p><code>grust-sail</code> connects to a Sail Spark Connect server over
@@ -601,7 +655,14 @@ SurrealDB</h2>
 <p>The FalkorDB backend writes through Redis <code>GRAPH.QUERY</code>
 using Cypher-like <code>MERGE</code> statements. It batches nodes by
 label path and edges by relationship type. Schema application creates
-label/property indexes for declared node types.</p>
+label/property indexes for declared node types. Configurable
+identity-property names and generated labels, relationships, and
+properties are validated before Cypher construction. Property names
+retain their physical spelling through backtick quoting where FalkorDB
+permits it; unsafe delimiters and normalized-name collisions within a
+schema or complete graph load fail closed. The configured structural ID
+wins over property-map data, and connection-pool/query failures do not
+render the Redis URL or credentials.</p>
 <p>The HelixDB backend has HTTP and SDK stores. Both support batched
 writes, node reads, edge reads, and backend-neutral traversal through
 Helix dynamic queries. Edge writes store Grust relationship metadata
@@ -613,7 +674,12 @@ dropping non-string values; unsupported JSON object properties return an
 explicit error. The current schema hook validates that labels,
 relationships, and fields can be safely lowered through the
 dynamic-query path; backend-native schema-file generation can build on
-that same <code>GraphSchema</code> contract later.</p>
+that same <code>GraphSchema</code> contract later. Schema and graph
+preflight also reject normalized relationship collisions and attempts to
+declare or write the structural <code>id</code>/label and edge-metadata
+fields. Both HTTP and SDK graph loads validate all chunks before
+transport, and transport failures omit configured URLs and their
+embedded credentials or query strings.</p>
 <p>The SurrealDB backend also has HTTP and SDK stores. It can bootstrap,
 clear, upsert nodes, relate edges, delete nodes and edges, read nodes
 and edges, and execute traversal hop-by-hop through the
@@ -629,7 +695,15 @@ scanning no relation tables. Explicit edge-label reads and deletes can
 still target a known relation table directly. Traversal batches
 target-node reads per step through <code>get_nodes</code>, avoiding a
 serial node lookup for every edge in a fan-out. Mutation batches are
-wrapped in SurrealDB transactions.</p>
+wrapped in SurrealDB transactions. SurrealDB 3.2 identifiers are quoted
+without lossy property-name rewriting. Configuration, schema fields,
+normalized node/relation table claims, reserved storage fields, and
+complete graph batches validate before bootstrap or write I/O. Optional
+Grust edge IDs are stored separately as <code>edge_id</code>; node
+<code>id</code> and <code>labels</code>, relation
+<code>in</code>/<code>out</code>, and internal metadata cannot be
+overwritten by user properties. HTTP and WebSocket failures omit URL
+userinfo and query secrets.</p>
 <h2 data-number="9.9" id="cocoindex"><span
 class="header-section-number">9.9</span> CocoIndex</h2>
 <p><code>grust-cocoindex</code> is intentionally not an ordinary
@@ -666,5 +740,58 @@ configured local source checkouts such as <code>~/src/sail</code>,
 available. The repository-level <code>docs/INTEGRATION.md</code> guide
 covers profiles, modes, Docker image pins, source-checkout
 configuration, and CI strategy.</p>
+<p>Prawn’s dependency qualification moves the Redis client to 1.6.0 and
+the FalkorDB service to v4.20.4, the SurrealDB Rust SDK and service to
+3.2.4 with reqwest 0.13.4, pgGraph’s service to 1.2.0, tokio-postgres to
+0.7.18, and Turso from a prerelease to stable 0.7.2. These are tested
+compatibility updates, not new claims that every adapter implements the
+portable Cypher executor.</p>
+<p>Two attempted upgrades remain intentionally held. LanceDB stays at
+0.30.0: the attempted 0.38.0 default-feature local build fails within
+upstream <code>lancedb</code> because <code>job.rs</code> references the
+remote-only <code>Error::Http</code> variant when <code>remote</code> is
+disabled. The unpublished Helix adapter stays at exact
+<code>helix-db</code> 2.0.0: 3.0.0 removed
+<code>DynamicQueryRequest</code> and <code>dynamic_query</code>, changed
+<code>Client::query</code>, and targets <code>/v2/query</code>, while
+the checked Helix v3.0.1 server still exposes <code>/v1/query</code>.
+The repository’s <code>benchmarks/lsqb/BACKENDS.md</code> records the
+full qualification matrix and live gate evidence.</p>
+<h2 data-number="9.11" id="lsqb-compatibility-microbenchmark"><span
+class="header-section-number">9.11</span> LSQB Compatibility
+Microbenchmark</h2>
+<p>The repository also carries a Docker-reproducible compatibility
+workload in <a
+href="https://github.com/querygraph/grust/tree/main/benchmarks/lsqb"><code>benchmarks/lsqb</code></a>.
+The unmodified upstream side pins Graph Data Council LSQB commit
+<code>242cb2fd31340ca688954cb94794d74c0d5b6f92</code>, LadybugDB 0.19.0,
+and a digest-pinned Python 3.12.11 container. Across five repetitions of
+LSQB’s small <code>sfexample</code> graph—28 nodes and 72 edges—all nine
+query counts match the upstream oracles: 8, 3, 6, 8, 3, 8, 11, 2, and 4,
+for 45/45 successful checks.</p>
+<p>The Grust compatibility adapter is kept separate from those unchanged
+scripts. It is configured to reload the same fixture for each of five
+repetitions on Memory, Turso, and PostgreSQL 18.6. The separately
+labeled adversari.al extension has 17 attacks with two expectation
+models: eight exact-count queries exercise rewrite, optional-match,
+range-expansion, Cartesian-product, and union boundaries on each
+backend, while nine backend-neutral negative cases must be rejected for
+unbounded paths, excessive range allocation or candidate work,
+updating-clause smuggling, forbidden procedures, excess UNION arms,
+intermediate projection amplification, correlated subquery replanning,
+and correlated catalog rescans. Each backend cell therefore has 17 count
+oracles—the nine LSQB-derived queries plus eight adversarial count
+queries—while policy is reported once as its own track. Tracked evidence
+covers the unchanged upstream 45/45 run and clean Grust revision
+<code>2680c451</code>: all 135 LSQB-derived compatibility observations,
+all 120 adversarial count observations, and all nine bounded-policy
+rejections passed. This is a conformance and reproducibility
+microbenchmark over an example dataset, not a performance ranking. LSQB
+is maintained by the Graph Data Council but is not an official LDBC
+benchmark.</p>
+<p>These are not LDBC Benchmark Results.</p>
+<p>Detailed evidence and future workloads belong at the durable <a
+href="https://adversari.al/graph">adversari.al graph benchmark
+hub</a>.</p>
 </body>
 </html>

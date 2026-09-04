@@ -5,8 +5,8 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
-  <meta name="dcterms.date" content="2026-08-06" />
-  <title>10. Schema and Validation Direction</title>
+  <meta name="dcterms.date" content="2026-09-04" />
+  <title>11. Schema and Validation Direction</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
     span.navlink { flex: 1; }
@@ -47,7 +47,7 @@
 </div>
 <div class="sitenav">
 <span class="navlink">
-<span class="navlink-label">Next:</span> <a href="chapter-014.html" accesskey="n" rel="next">11. Design Tradeoffs</a>
+<span class="navlink-label">Next:</span> <a href="chapter-014.html" accesskey="n" rel="next">12. Design Tradeoffs</a>
 </span>
 <span class="navlink">
 <span class="navlink-label">Previous:</span> <a href="chapter-012.html" accesskey="p" rel="previous">10. Example: A Conference Graph</a>
@@ -55,7 +55,7 @@
 </div>
 </nav>
 <h1 data-number="12" id="schema-and-validation-direction"><span
-class="header-section-number">12</span> 10. Schema and Validation
+class="header-section-number">12</span> 11. Schema and Validation
 Direction</h1>
 <p>Grust has schema types: <code>GraphSchema</code>,
 <code>NodeType</code>, <code>EdgeType</code>, <code>Field</code>,
@@ -124,6 +124,45 @@ DDL through <code>native_constraint_capability</code>.
 portable interchange surface. A typed backend can add native tables,
 fields, indexes, or constraints behind the same <code>GraphStore</code>
 trait.</p>
+<h2 data-number="12.1" id="semantic-model-projection"><span
+class="header-section-number">12.1</span> Semantic Model Projection</h2>
+<p>The public facade can also project a versioned semantic model into
+this same property-graph shape. <code>SemanticModelProjection</code>
+describes datasets, their fields and physical sources, metrics, and
+named relationships, bound to a positive model version and SHA-256
+source-artifact identity.</p>
+<p><code>semantic_model_graph</code> validates nonempty normalized
+names, SHA-256 formats, dataset references, and per-scope uniqueness
+before construction. It uses length-prefixed identity components so
+punctuation cannot alias a structural separator. Every containment and
+dataset-relationship edge has an explicit stable ID; therefore two
+differently named semantic relationships between the same dataset pair
+survive as distinct edges instead of being collapsed by the ordinary
+builder’s structural deduplication policy. That statement describes the
+constructed <code>Graph</code>. Persistence keeps both only on backends
+that support explicit edge IDs; structurally keyed stores collapse edges
+with the same source, label, and destination.</p>
+<p>The output does not introduce a special semantic storage protocol. It
+is an ordinary <code>Graph</code> containing <code>SemanticModel</code>,
+<code>SemanticDataset</code>, <code>SemanticField</code>, and
+<code>SemanticMetric</code> nodes plus containment and
+<code>RELATES_DATASET</code> edges. It can be replay-compared, queried
+through the reference engine, or persisted through any backend that
+supports those ordinary graph operations, subject to that backend’s
+documented multi-edge capability. Artifact-specific adapters remain
+responsible for parsing a source file and computing the hash supplied to
+the projection.</p>
+<p>The conformance fixture is not synthetic: the test loads the packaged
+Apache Ossie TPC-DS YAML from upstream commit
+<code>ddb19f1b135a61c65603f4823a3526e2fab00cf1</code>, verifies SHA-256
+<code>bafbdc9d0e304ab22a40592f2b6bdfd45cc399c566533cd71343d33380c0d6e1</code>,
+parses the document, and replay-compares the resulting five datasets, 31
+fields, five metrics, and four relationships. The published
+<code>grust-graph</code> archive includes Apache Ossie’s
+<code>NOTICE</code> and Apache-2.0 text beside that exact fixture.
+<code>scripts/verify-package-attribution.sh</code> inspects the
+generated crate archive so release packaging fails if any of those three
+files is absent.</p>
 <p>The key architectural point is that schema is metadata about a Grust
 graph, not a replacement for the graph. Application code can begin with
 plain graph construction, add schemas when operational needs demand it,

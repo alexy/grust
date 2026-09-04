@@ -5,7 +5,7 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
-  <meta name="dcterms.date" content="2026-08-06" />
+  <meta name="dcterms.date" content="2026-09-04" />
   <title>9. Cypher and GQL</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
@@ -94,6 +94,24 @@ projection still runs through the shared reference. Pushed results are
 therefore identical to the reference <em>by construction</em>, and an
 embedded-SQLite differential oracle checks reference-vs-pushdown row
 equality on every change.</p>
+<p>Applications that intentionally expose a small read-only surface can
+use <code>ReadQueryPolicy</code>, <code>validate_read_query</code>, and
+<code>run_bounded_read_query</code>. This is more than a final
+<code>LIMIT</code>: the parser-backed gate rejects updating and unsafe
+query shapes, while the in-memory reference executor enforces serialized
+query, parameter, graph, and output sizes; node and edge counts;
+cumulative candidate scan and expansion work; cumulative intermediate
+bytes; result rows; range allocation; cumulative path hops; and a
+cooperative wall-clock timeout. The intermediate budget accounts cloned
+bindings, expression and aggregate results, and DISTINCT/GROUP keys
+before a final <code>LIMIT</code>. Scalar and table-valued ranges also
+keep a library-wide <code>MAX_RANGE_ITEMS</code> ceiling. Correlated
+<code>CALL { ... }</code> subqueries charge every repeated
+node/adjacency index build, and catalog procedures charge each graph
+scan, so an outer row cannot reset that work or its deadline.
+Authorization, tenant-safe graph projection, remote-backend deadlines,
+and process isolation remain the host’s responsibility; the cooperative
+timeout is not an operating-system hard kill.</p>
 <h2 data-number="10.2" id="values-procedures-transactions-writes"><span
 class="header-section-number">10.2</span> Values, procedures,
 transactions, writes</h2>
@@ -135,11 +153,13 @@ cross-variable correlated <code>SET</code>.</p>
 class="header-section-number">10.3</span> A backed profile</h2>
 <p>What the layer claims to support is stated precisely in
 <code>docs/GQL_PROFILE_STATEMENT.md</code>: the realized profile is the
-set of <code>Supported</code> features — as of the Full39075 completion
-goal that is the <strong>full ISO/IEC 39075 profile</strong>, with the
-only non-supported manifest entries being five intentional strict-write
-rejections (conformance guards, not gaps). A test pins that scoped-out
-set to the feature manifest, so the documentation and the code cannot
-drift apart.</p>
+set of <code>Supported</code> features in Grust’s scoped manifest. The
+internal profile is named <code>Full39075</code>, but it is not a claim
+of complete ISO/IEC 39075 certification or uniform backend execution.
+Sixty-nine of the 74 Grust-catalogued features are implemented; the
+other five are intentional strict-write rejections. A test pins that
+scoped-out set to the feature manifest, while backend descriptors and
+integration tests record which execution paths are reference, pushed,
+native, or unsupported.</p>
 </body>
 </html>

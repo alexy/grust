@@ -5,7 +5,7 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
-  <meta name="dcterms.date" content="2026-08-06" />
+  <meta name="dcterms.date" content="2026-09-04" />
   <title>2. The Core Property Graph</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
@@ -158,14 +158,28 @@ class="sourceCode rust"><code class="sourceCode rust"><span id="cb2-1"><a href="
 <span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>    Int(<span class="dt">i64</span>)<span class="op">,</span></span>
 <span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>    Float(<span class="dt">f64</span>)<span class="op">,</span></span>
 <span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>    <span class="dt">String</span>(<span class="dt">String</span>)<span class="op">,</span></span>
-<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>    StringArray(<span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">String</span><span class="op">&gt;</span>)<span class="op">,</span></span>
-<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>    Json(<span class="pp">serde_json::</span>Value)<span class="op">,</span></span>
-<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>    DateTime(RfcDate)<span class="op">,</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>    Decimal(Decimal)<span class="op">,</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>    Duration(Duration)<span class="op">,</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>    StringArray(<span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">String</span><span class="op">&gt;</span>)<span class="op">,</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>    IntArray(<span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">i64</span><span class="op">&gt;</span>)<span class="op">,</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>    FloatArray(<span class="dt">Vec</span><span class="op">&lt;</span><span class="dt">f64</span><span class="op">&gt;</span>)<span class="op">,</span></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>    <span class="dt">Path</span>(PathValue)<span class="op">,</span></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>    Graph(GraphValue)<span class="op">,</span></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>    Json(<span class="pp">serde_json::</span>Value)<span class="op">,</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a><span class="op">}</span></span></code></pre></div>
 <p>The use of <code>BTreeMap</code> is a quiet but useful choice.
 Iteration order is stable, which makes generated JSON, tests, and
 backend query generation more predictable. That is especially helpful in
 a project whose backends turn one graph into SQL, Cypher-like queries,
 Arrow batches, JSON target state, or SDK calls.</p>
+<p><code>GraphValue</code> deduplicates relationships by explicit ID or
+structural identity. Those identities use length-framed components
+rather than payload delimiters, so punctuation and control text inside
+an ID, label, or endpoint cannot make two distinct relationship values
+look identical. Persisted compatibility keys have a different contract:
+<code>checked_edge_key</code> rejects U+001F in every component before a
+tabular or export backend materializes the delimiter-based key.</p>
 <p><code>Node::new</code> also inserts an <code>id</code> property if
 one is not already present. That means a Grust node has a first-class
 typed identity and an ordinary property view of that identity, which
