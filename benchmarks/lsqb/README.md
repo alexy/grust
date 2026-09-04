@@ -119,6 +119,8 @@ self-tests are:
 ```sh
 benchmarks/lsqb/test-validate-upstream.sh
 benchmarks/lsqb/test-validate-upstream-bundle.sh
+benchmarks/lsqb/test-run-upstream.sh
+benchmarks/lsqb/test-launcher-portability.sh
 benchmarks/lsqb/test-dataset-integrity.sh
 benchmarks/lsqb/test-external-service.sh
 python3 benchmarks/lsqb/test-cell-watchdog.py

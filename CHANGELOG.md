@@ -6,6 +6,12 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Made the upstream benchmark launcher work under macOS Bash 3.2 at the
+  example scale, preserve a failing exit status across cleanup, use portable
+  BSD/GNU `chmod` argument ordering for authenticated dataset snapshots, and
+  accept the stock macOS Python 3.9 interpreter for external-service
+  qualification.
+
 ## 0.13.1 "Crayfish" - 2026-09-04
 
 Crayfish is a scoped registry patch for `grust-sail`, `grust-surreal`, and the

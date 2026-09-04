@@ -22,7 +22,7 @@ memory_limit_bytes=${BENCHMARK_MEMORY_LIMIT_BYTES:-6442450944}
 cell_timeout_ms=${CELL_TIMEOUT_MS:-}
 cpu_model=${BENCHMARK_CPU_MODEL:-}
 output_root=${OUTPUT_DIR:-${root}/out/upstream}
-dataset_mount=()
+dataset_mount=
 dataset_manifest=e47d935e186ccda58147fc2609d3db1a6f0e218b92384cf63a7161e2c2974def
 dataset_archive_sha256=not-applicable
 dataset_archive_bytes=not-applicable
@@ -58,9 +58,9 @@ cleanup_temporary_records() {
                             echo "run-upstream.sh: refusing unsafe dataset snapshot cleanup: $dataset_snapshot_directory" >&2
                             return 1
                         }
-                        chmod u+w -- "$dataset_snapshot_directory" || return 1
+                        chmod -- u+w "$dataset_snapshot_directory" || return 1
                     fi
-                    chmod u+w -- "$dataset_snapshot_root" || return 1
+                    chmod -- u+w "$dataset_snapshot_root" || return 1
                     rm -rf -- "$dataset_snapshot_root"
                     dataset_snapshot_root=
                     dataset_snapshot_directory=
@@ -76,7 +76,16 @@ cleanup_temporary_records() {
         esac
     fi
 }
-trap cleanup_temporary_records EXIT
+
+cleanup_on_exit() {
+    local original_status=$1
+    trap - EXIT
+    set +e
+    cleanup_temporary_records
+    exit "$original_status"
+}
+
+trap 'cleanup_on_exit "$?"' EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -160,10 +169,7 @@ if [[ "$scale" != example ]]; then
     [[ "$LSQB_DATASET_SNAPSHOT_DIRECTORY" == "$dataset_snapshot_directory" ]] || die \
         "dataset snapshot helper returned an unexpected directory"
     dataset_dir=$dataset_snapshot_directory
-    dataset_mount=(
-        --mount
-        "type=bind,source=${dataset_dir},target=/opt/lsqb-source/data/${dataset},readonly"
-    )
+    dataset_mount="type=bind,source=${dataset_dir},target=/opt/lsqb-source/data/${dataset},readonly"
 fi
 
 mkdir -p -- "$output_root"
@@ -277,6 +283,12 @@ fi
 watchdog="${output_root}/watchdog.json"
 project="grust-lsqb-upstream-$$-${RANDOM}${RANDOM}"
 cell_container="${project}-ladybug-cell"
+# Bash 3.2 treats an expanded empty array as unset under `set -u`. Keep this
+# argv tail nonempty at every scale by including the image ID in it.
+docker_run_tail=("$image_id")
+if [[ -n "$dataset_mount" ]]; then
+    docker_run_tail=(--mount "$dataset_mount" "$image_id")
+fi
 lsqb_open_exclusive_output_fd 3 "$watchdog" "upstream watchdog completion record" || die \
     "cannot create upstream watchdog completion record"
 cell_status=0
@@ -297,8 +309,7 @@ python3 "${root}/cell-watchdog.py" \
     --memory "$memory_limit_bytes" \
     --memory-swap "$memory_limit_bytes" \
     --volume "${output_root}:/out" \
-    "${dataset_mount[@]}" \
-    "$image_id" || cell_status=$?
+    "${docker_run_tail[@]}" || cell_status=$?
 lsqb_close_output_fd 3 "$watchdog" "upstream watchdog completion record" || die \
     "upstream watchdog completion record path changed during execution"
 [[ -s "$watchdog" && ! -L "$watchdog" ]] || die \

@@ -81,6 +81,15 @@ grust_external_load sail >/dev/null || fail "valid external contract was not res
 [[ $(grust_external_endpoint_port postgres-pgq \
     "postgresql://user:${secret_marker}@host.docker.internal:55433/graph") == 55433 ]] || \
     fail "PostgreSQL URL endpoint was not normalized"
+if [[ -x /usr/bin/python3 ]]; then
+    system_python_port=$(
+        PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            grust_external_endpoint_port sail \
+            "https://host.docker.internal:50052/system-python"
+    ) || fail "system /usr/bin/python3 could not parse an external endpoint"
+    [[ "$system_python_port" == 50052 ]] || \
+        fail "system /usr/bin/python3 returned the wrong external endpoint port"
+fi
 if grust_external_endpoint_port postgres-pgq \
     "host=host.docker.internal hostaddr=127.0.0.1 port=55432 password=${secret_marker}" \
     >/dev/null 2>&1; then

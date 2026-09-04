@@ -9,7 +9,7 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/grust-lsqb-dataset-test.XXXXXX")
 cleanup() {
     case "$work" in
         "${TMPDIR:-/tmp}"/grust-lsqb-dataset-test.*)
-            chmod -R u+w -- "$work" 2>/dev/null || true
+            chmod -R -- u+w "$work" 2>/dev/null || true
             rm -rf -- "$work"
             ;;
         *) echo "test-dataset-integrity.sh: refusing unsafe cleanup: $work" >&2 ;;

@@ -38,6 +38,7 @@ grust_external_endpoint_port() {
 import os
 import shlex
 import sys
+from typing import Dict, Optional, Set
 from urllib.parse import parse_qsl, urlsplit
 
 
@@ -60,7 +61,7 @@ if not endpoint or any(ord(character) < 32 or ord(character) == 127 for characte
     fail("external endpoint is empty or contains a control character")
 
 
-def require_host_port(host: str | None, port: int | None) -> int:
+def require_host_port(host: Optional[str], port: Optional[int]) -> int:
     if host is None or host.lower() != "host.docker.internal":
         fail("external endpoint host must be host.docker.internal")
     if port is None or not 1 <= port <= 65535:
@@ -68,7 +69,7 @@ def require_host_port(host: str | None, port: int | None) -> int:
     return port
 
 
-def url_port(value: str, schemes: set[str]) -> int:
+def url_port(value: str, schemes: Set[str]) -> int:
     try:
         parsed = urlsplit(value)
         port = parsed.port
@@ -96,7 +97,7 @@ elif backend == "postgres-pgq":
             tokens = shlex.split(endpoint, posix=True)
         except ValueError:
             fail("PostgreSQL external endpoint has invalid quoting")
-        values: dict[str, str] = {}
+        values: Dict[str, str] = {}
         for token in tokens:
             key, separator, value = token.partition("=")
             key = key.lower()

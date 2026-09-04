@@ -50,9 +50,9 @@ cleanup_dataset_snapshot() {
                     echo "run-grust.sh: refusing unsafe dataset snapshot cleanup: $dataset_snapshot_directory" >&2
                     return 1
                 }
-                chmod u+w -- "$dataset_snapshot_directory" || return 1
+                chmod -- u+w "$dataset_snapshot_directory" || return 1
             fi
-            chmod u+w -- "$dataset_snapshot_root" || return 1
+            chmod -- u+w "$dataset_snapshot_root" || return 1
             rm -rf -- "$dataset_snapshot_root"
             dataset_snapshot_root=
             dataset_snapshot_directory=
