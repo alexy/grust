@@ -18,7 +18,7 @@ Source:
 - `fix_epub_layout.sh` rewrites Pandoc's EPUB defaults so the custom cover is
   first in the reading spine and marked as frontmatter.
 - `check_epub_metadata.py` verifies the generated EPUB package metadata, stable
-  EPUB, versioned symlink, and dist marker before MOBI conversion.
+  EPUB, versioned handoff link, and dist marker before MOBI conversion.
 
 Build:
 
@@ -35,9 +35,11 @@ Checks:
 - The metadata check inspects the generated EPUB package for real title,
   title sort key, creator, language, date, modified timestamp, navigation
   titles, and generated fallback labels such as `UNTITLED` or `Unknown`.
-- It also checks that the stable title-stem EPUB is byte-identical to the
-  canonical EPUB, the versioned Send to Kindle path is a symlink to it, and
-  `VERSION.md` records the Kindle name, build date, stable EPUB, and symlink.
+- The local metadata check and shared package verifier together check that the
+  stable title-stem EPUB is byte-identical to the canonical EPUB, the
+  version-only Kindle catalog link and version-and-source-stamped handoff link
+  resolve to it, and `VERSION.md` records the Kindle name, build date, source
+  commit, stable EPUB, and both links.
 - The same check also enforces the Kindle-facing layout invariants used by the
   TypeSec checker: cover-then-visible-TOC spine order,
   frontmatter cover XHTML, no generated cover heading, and no flexbox on the
@@ -47,7 +49,9 @@ Outputs:
 
 - `build/dist/grust.pdf`
 - `build/dist/grust.epub`
-- `build/dist/grust (<version>).epub` ignored symlink to `grust.epub`
+- `build/dist/grust (<version>).epub` Kindle catalog link to `grust.epub`
+- `build/dist/grust (<version>-<short-commit>).epub` handoff link to
+  `grust.epub`
 - `build/dist/grust.mobi`
 - `build/dist/grust.html`
 - `build/dist/grust-chapters/`

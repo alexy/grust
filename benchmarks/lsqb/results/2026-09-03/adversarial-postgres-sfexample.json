@@ -1,0 +1,507 @@
+{
+  "schema_version": 1,
+  "warning": "These are not LDBC Benchmark Results.",
+  "suite": {
+    "name": "adversari.al LSQB-derived graph attacks",
+    "track": "adversarial",
+    "source_url": "https://github.com/ldbc/lsqb",
+    "source_commit": "242cb2fd31340ca688954cb94794d74c0d5b6f92",
+    "source_tree": "d99fab28d47791dbc0e7173abc4c66d8aadc64ca",
+    "query_tree": "50937f3d075245e2abd4c00a36c4b3c236766265",
+    "example_dataset_tree": "45181e6b274d014f8626038e1d398fa1b9e4c19d",
+    "license": "Apache-2.0",
+    "classification": "LSQB is a GDC-maintained microbenchmark, not an official LDBC benchmark"
+  },
+  "environment": {
+    "grust_revision": "2680c451db450cefe2411a944cce9960507bc0d3",
+    "backend": "postgres",
+    "scale_factor": "example",
+    "repetitions": 5,
+    "rust_version": "1.97.1",
+    "container_image": "grust-lsqb-benchmark:latest (sha256:45ca904ba0e68772e89db4410e8165b77111322ff3b5df03c8025fe421f6ba7c)",
+    "container_os": "linux",
+    "container_arch": "arm64",
+    "docker_engine_version": "29.4.3",
+    "docker_cpus": "10",
+    "docker_memory_bytes": "8321712128",
+    "postgres_image": "postgres:18.6-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af",
+    "host_cpu": "intentionally omitted; Docker-reported architecture and resource allocation are authoritative for this run"
+  },
+  "graph": {
+    "nodes": 28,
+    "edges": 72
+  },
+  "runs": [
+    {
+      "repetition": 1,
+      "load_ns": 9149625,
+      "queries": [
+        {
+          "id": "a1-reversed-chain",
+          "source_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
+          "adapter_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
+          "claim": "equivalent q1 with the entire chain reversed",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 4848375,
+          "status": "pass"
+        },
+        {
+          "id": "a2-reordered-join",
+          "source_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817",
+          "adapter_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817",
+          "claim": "equivalent q2 with reordered join atoms",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 1356083,
+          "status": "pass"
+        },
+        {
+          "id": "a3-split-match",
+          "source_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2",
+          "adapter_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2",
+          "claim": "equivalent q4 split across MATCH clauses",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 987500,
+          "status": "pass"
+        },
+        {
+          "id": "a4-optional-fanout",
+          "source_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a",
+          "adapter_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a",
+          "claim": "q7 optional fanout with explicit WITH boundary",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 11,
+          "actual_count": 11,
+          "elapsed_ns": 997167,
+          "status": "pass"
+        },
+        {
+          "id": "a5-negated-pattern",
+          "source_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c",
+          "adapter_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c",
+          "claim": "q8 anti-join with reordered predicates",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 2,
+          "actual_count": 2,
+          "elapsed_ns": 1298041,
+          "status": "pass"
+        },
+        {
+          "id": "a6-range-expansion",
+          "source_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb",
+          "adapter_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb",
+          "claim": "bounded scalar range and UNWIND amplification",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 10000,
+          "actual_count": 10000,
+          "elapsed_ns": 9335334,
+          "status": "pass"
+        },
+        {
+          "id": "a7-cartesian-count",
+          "source_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
+          "adapter_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
+          "claim": "three-way Cartesian product cardinality",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 125,
+          "actual_count": 125,
+          "elapsed_ns": 2183833,
+          "status": "pass"
+        },
+        {
+          "id": "a8-union-dedup",
+          "source_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a",
+          "adapter_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a",
+          "claim": "UNION deduplication of identical aggregate rows",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 5,
+          "actual_count": 5,
+          "elapsed_ns": 556167,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "repetition": 2,
+      "load_ns": 5950667,
+      "queries": [
+        {
+          "id": "a1-reversed-chain",
+          "source_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
+          "adapter_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
+          "claim": "equivalent q1 with the entire chain reversed",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 4641584,
+          "status": "pass"
+        },
+        {
+          "id": "a2-reordered-join",
+          "source_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817",
+          "adapter_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817",
+          "claim": "equivalent q2 with reordered join atoms",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 1081375,
+          "status": "pass"
+        },
+        {
+          "id": "a3-split-match",
+          "source_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2",
+          "adapter_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2",
+          "claim": "equivalent q4 split across MATCH clauses",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 700500,
+          "status": "pass"
+        },
+        {
+          "id": "a4-optional-fanout",
+          "source_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a",
+          "adapter_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a",
+          "claim": "q7 optional fanout with explicit WITH boundary",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 11,
+          "actual_count": 11,
+          "elapsed_ns": 816458,
+          "status": "pass"
+        },
+        {
+          "id": "a5-negated-pattern",
+          "source_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c",
+          "adapter_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c",
+          "claim": "q8 anti-join with reordered predicates",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 2,
+          "actual_count": 2,
+          "elapsed_ns": 922959,
+          "status": "pass"
+        },
+        {
+          "id": "a6-range-expansion",
+          "source_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb",
+          "adapter_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb",
+          "claim": "bounded scalar range and UNWIND amplification",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 10000,
+          "actual_count": 10000,
+          "elapsed_ns": 5262250,
+          "status": "pass"
+        },
+        {
+          "id": "a7-cartesian-count",
+          "source_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
+          "adapter_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
+          "claim": "three-way Cartesian product cardinality",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 125,
+          "actual_count": 125,
+          "elapsed_ns": 1973625,
+          "status": "pass"
+        },
+        {
+          "id": "a8-union-dedup",
+          "source_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a",
+          "adapter_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a",
+          "claim": "UNION deduplication of identical aggregate rows",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 5,
+          "actual_count": 5,
+          "elapsed_ns": 615291,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "repetition": 3,
+      "load_ns": 6138292,
+      "queries": [
+        {
+          "id": "a1-reversed-chain",
+          "source_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
+          "adapter_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
+          "claim": "equivalent q1 with the entire chain reversed",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 4583709,
+          "status": "pass"
+        },
+        {
+          "id": "a2-reordered-join",
+          "source_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817",
+          "adapter_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817",
+          "claim": "equivalent q2 with reordered join atoms",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 1076750,
+          "status": "pass"
+        },
+        {
+          "id": "a3-split-match",
+          "source_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2",
+          "adapter_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2",
+          "claim": "equivalent q4 split across MATCH clauses",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 892625,
+          "status": "pass"
+        },
+        {
+          "id": "a4-optional-fanout",
+          "source_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a",
+          "adapter_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a",
+          "claim": "q7 optional fanout with explicit WITH boundary",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 11,
+          "actual_count": 11,
+          "elapsed_ns": 1136125,
+          "status": "pass"
+        },
+        {
+          "id": "a5-negated-pattern",
+          "source_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c",
+          "adapter_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c",
+          "claim": "q8 anti-join with reordered predicates",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 2,
+          "actual_count": 2,
+          "elapsed_ns": 1154000,
+          "status": "pass"
+        },
+        {
+          "id": "a6-range-expansion",
+          "source_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb",
+          "adapter_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb",
+          "claim": "bounded scalar range and UNWIND amplification",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 10000,
+          "actual_count": 10000,
+          "elapsed_ns": 5452000,
+          "status": "pass"
+        },
+        {
+          "id": "a7-cartesian-count",
+          "source_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
+          "adapter_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
+          "claim": "three-way Cartesian product cardinality",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 125,
+          "actual_count": 125,
+          "elapsed_ns": 2049250,
+          "status": "pass"
+        },
+        {
+          "id": "a8-union-dedup",
+          "source_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a",
+          "adapter_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a",
+          "claim": "UNION deduplication of identical aggregate rows",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 5,
+          "actual_count": 5,
+          "elapsed_ns": 664625,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "repetition": 4,
+      "load_ns": 6249042,
+      "queries": [
+        {
+          "id": "a1-reversed-chain",
+          "source_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
+          "adapter_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
+          "claim": "equivalent q1 with the entire chain reversed",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 4687625,
+          "status": "pass"
+        },
+        {
+          "id": "a2-reordered-join",
+          "source_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817",
+          "adapter_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817",
+          "claim": "equivalent q2 with reordered join atoms",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 1056417,
+          "status": "pass"
+        },
+        {
+          "id": "a3-split-match",
+          "source_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2",
+          "adapter_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2",
+          "claim": "equivalent q4 split across MATCH clauses",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 863792,
+          "status": "pass"
+        },
+        {
+          "id": "a4-optional-fanout",
+          "source_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a",
+          "adapter_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a",
+          "claim": "q7 optional fanout with explicit WITH boundary",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 11,
+          "actual_count": 11,
+          "elapsed_ns": 747708,
+          "status": "pass"
+        },
+        {
+          "id": "a5-negated-pattern",
+          "source_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c",
+          "adapter_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c",
+          "claim": "q8 anti-join with reordered predicates",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 2,
+          "actual_count": 2,
+          "elapsed_ns": 816333,
+          "status": "pass"
+        },
+        {
+          "id": "a6-range-expansion",
+          "source_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb",
+          "adapter_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb",
+          "claim": "bounded scalar range and UNWIND amplification",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 10000,
+          "actual_count": 10000,
+          "elapsed_ns": 5461834,
+          "status": "pass"
+        },
+        {
+          "id": "a7-cartesian-count",
+          "source_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
+          "adapter_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
+          "claim": "three-way Cartesian product cardinality",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 125,
+          "actual_count": 125,
+          "elapsed_ns": 2072083,
+          "status": "pass"
+        },
+        {
+          "id": "a8-union-dedup",
+          "source_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a",
+          "adapter_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a",
+          "claim": "UNION deduplication of identical aggregate rows",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 5,
+          "actual_count": 5,
+          "elapsed_ns": 507334,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "repetition": 5,
+      "load_ns": 6199250,
+      "queries": [
+        {
+          "id": "a1-reversed-chain",
+          "source_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
+          "adapter_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
+          "claim": "equivalent q1 with the entire chain reversed",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 4673250,
+          "status": "pass"
+        },
+        {
+          "id": "a2-reordered-join",
+          "source_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817",
+          "adapter_sha256": "9feddd1034727c545bc3bf96f93cf32a77f536be1adf40bf009ed993f98cd817",
+          "claim": "equivalent q2 with reordered join atoms",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 3,
+          "actual_count": 3,
+          "elapsed_ns": 1024916,
+          "status": "pass"
+        },
+        {
+          "id": "a3-split-match",
+          "source_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2",
+          "adapter_sha256": "2a7bcadae9504306f5ee1b277dbda6e7d1fa8fa77434eb22e67ca459f61ad3a2",
+          "claim": "equivalent q4 split across MATCH clauses",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 8,
+          "actual_count": 8,
+          "elapsed_ns": 712417,
+          "status": "pass"
+        },
+        {
+          "id": "a4-optional-fanout",
+          "source_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a",
+          "adapter_sha256": "1c084f12166a9652c0237595d02aa6cb7ac45c876aa4b17c762dada26ca69b8a",
+          "claim": "q7 optional fanout with explicit WITH boundary",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 11,
+          "actual_count": 11,
+          "elapsed_ns": 810250,
+          "status": "pass"
+        },
+        {
+          "id": "a5-negated-pattern",
+          "source_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c",
+          "adapter_sha256": "54acc2c021ff08834cb072dba195de46aefc5b0dbd8759644361caf3ea8a9f3c",
+          "claim": "q8 anti-join with reordered predicates",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 2,
+          "actual_count": 2,
+          "elapsed_ns": 873584,
+          "status": "pass"
+        },
+        {
+          "id": "a6-range-expansion",
+          "source_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb",
+          "adapter_sha256": "2415105f2524bedd1f909667e72061eb1cb29460debf43d99aefc2d70c62c2fb",
+          "claim": "bounded scalar range and UNWIND amplification",
+          "execution_mode": "in-memory-reference-fallback",
+          "expected_count": 10000,
+          "actual_count": 10000,
+          "elapsed_ns": 5090792,
+          "status": "pass"
+        },
+        {
+          "id": "a7-cartesian-count",
+          "source_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
+          "adapter_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
+          "claim": "three-way Cartesian product cardinality",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 125,
+          "actual_count": 125,
+          "elapsed_ns": 2046333,
+          "status": "pass"
+        },
+        {
+          "id": "a8-union-dedup",
+          "source_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a",
+          "adapter_sha256": "271f6f5c94c281863b59a82ed932cfc548d2b136a4fbf5247a9fd50590951c8a",
+          "claim": "UNION deduplication of identical aggregate rows",
+          "execution_mode": "sql-row-source-pushdown+rust-projection",
+          "expected_count": 5,
+          "actual_count": 5,
+          "elapsed_ns": 604417,
+          "status": "pass"
+        }
+      ]
+    }
+  ],
+  "valid": true
+}

@@ -1,7 +1,8 @@
 use async_trait::async_trait;
 use grust_core::prelude::*;
 use grust_postgres_core::{
-    PostgresGraphConfig, PostgresGraphStore, quote_ident, sql_str, validate_identifier,
+    PostgresGraphConfig, PostgresGraphStore, postgres_schema_sql, quote_ident, sql_str,
+    validate_identifier, validate_postgres_config,
 };
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls};
@@ -48,9 +49,7 @@ pub struct PostgresPgqStore {
 
 impl PostgresPgqStore {
     pub async fn connect(config: PostgresPgqConfig) -> Result<Self> {
-        validate_identifier(&config.schema)?;
-        validate_identifier(&config.table_prefix)?;
-        validate_identifier(&config.graph_name)?;
+        validate_pgq_config(&config)?;
         let postgres = PostgresGraphStore::connect(PostgresGraphConfig::from(&config)).await?;
         let (client, connection) = tokio_postgres::connect(&config.connection_string, NoTls)
             .await
@@ -76,6 +75,7 @@ impl PostgresPgqStore {
         &self.config
     }
 
+    /// Forward SQL through the PostgreSQL core store's autocommit-only guard.
     pub async fn execute(&self, sql: &str) -> Result<()> {
         self.postgres.execute(sql).await
     }
@@ -96,8 +96,14 @@ impl PostgresPgqStore {
 #[async_trait]
 impl GraphStore for PostgresPgqStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        let ddl = postgres_schema_sql(
+            &PostgresGraphConfig::from(&self.config),
+            &self.nodes_table(),
+            &self.edges_table(),
+            schema,
+        )?;
         self.bootstrap().await?;
-        self.postgres.apply_schema(schema).await
+        self.execute(&ddl).await
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
@@ -196,7 +202,7 @@ pub fn pgq_bootstrap_sql(
     nodes_table: &str,
     edges_table: &str,
 ) -> Result<String> {
-    validate_identifier(&config.graph_name)?;
+    validate_pgq_config(config)?;
     let graph_name = qualified_name(&config.schema, &config.graph_name);
     Ok(format!(
         "DROP PROPERTY GRAPH IF EXISTS {graph_name};
@@ -216,6 +222,11 @@ pub fn pgq_bootstrap_sql(
                     PROPERTIES (label, props::text AS props)
             );"
     ))
+}
+
+fn validate_pgq_config(config: &PostgresPgqConfig) -> Result<()> {
+    validate_postgres_config(&PostgresGraphConfig::from(config))?;
+    validate_identifier(&config.graph_name)
 }
 
 pub fn pgq_traversal_sql(

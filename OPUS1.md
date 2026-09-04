@@ -1,24 +1,27 @@
 # Grust Review & Improvement Plan (OPUS1)
 
-Review of `~/src/grust` at branch `codex/cypher-write`. Findings are ordered by
-severity. Each item lists the location, the problem, and a concrete fix.
+Historical review of `~/src/grust` at branch `codex/cypher-write`. Findings are
+ordered by their severity at that checkpoint; line numbers and implementation
+claims are not current.
 
-Status update: items 1, 2, 4, 6, and 9 have been addressed in the current
-tree. Items 3, 5, 7, and 8 remain follow-ups.
+Status: **archived, not an active backlog.** Later releases addressed additional
+items—including static Sail SQL allocation and Sail batch `get_nodes`—and
+versioned path dependencies are intentionally required for crates.io packaging.
+Revalidate any remaining observation against current code and open fresh work
+instead of following the status labels below.
 
-## Verification notes
+## Verification notes from the original review
 
-- `cargo build --workspace --all-features` currently fails in this environment
-  on a **C++ toolchain issue** (`cxx-1.0.138` cannot find `<algorithm>`), pulled
-  in transitively (helix-db / lancedb). This is an environment/SDK problem, not a
-  code defect, but it means `--all-features` CI on macOS needs a working C++ SDK.
-  Per-crate builds without the native backends are unaffected.
-- Correction to an earlier informal review: `get_nodes` **is** overridden by
-  `grust-memory`, `grust-pggraph`, `grust-ladybug`, `grust-lancedb`, and
-  `grust-surreal`. Only `grust-falkor` and `grust-sail` fall back to the
-  sequential default.
-- The WHERE operator table (`parse_where_predicate`, sail lib.rs ~1552) is
-  correctly ordered (`>=`,`<=`,`<>`,`!=` before `=`,`>`,`<`) — no bug there.
+- At that checkpoint, `cargo build --workspace --all-features` failed on a C++
+  toolchain mismatch (`cxx-1.0.138` could not find `<algorithm>`), pulled in
+  transitively by native backends. This recorded an environment/SDK issue, not
+  a durable statement about the present workspace.
+- At that checkpoint, `get_nodes` was overridden by `grust-memory`,
+  `grust-pggraph`, `grust-ladybug`, `grust-lancedb`, and `grust-surreal`; the
+  review's backend list must not be used as a current capability matrix.
+- The reviewed WHERE operator table (`parse_where_predicate`, then in Sail)
+  was correctly ordered (`>=`,`<=`,`<>`,`!=` before `=`,`>`,`<`) and was not a
+  bug.
 
 ---
 

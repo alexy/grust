@@ -359,6 +359,135 @@ impl LadybugGraphStore {
         Ok(format!("{prefix}_rel_{label}_{from_label}_{to_label}"))
     }
 
+    fn schema_identifier_claims(
+        &self,
+        schema: &GraphSchema,
+    ) -> Result<Vec<(String, String, String)>> {
+        let (node_index, rel_index) = self.metadata_tables()?;
+        let mut claims = vec![
+            (
+                "table".to_string(),
+                node_index,
+                "Ladybug node metadata index".to_string(),
+            ),
+            (
+                "table".to_string(),
+                rel_index,
+                "Ladybug relationship metadata index".to_string(),
+            ),
+        ];
+        for node in &schema.nodes {
+            claims.push((
+                "table".to_string(),
+                self.node_table_name(&node.label)?,
+                format!("node type '{}'", node.label.as_str()),
+            ));
+            let field_namespace = format!("field in node type '{}'", node.label.as_str());
+            for field in &node.fields {
+                claims.push((
+                    field_namespace.clone(),
+                    field.name.clone(),
+                    format!("node field '{}.{}'", node.label.as_str(), field.name),
+                ));
+            }
+        }
+        for edge in &schema.edges {
+            let field_namespace = format!("field in edge type '{}'", edge.label.as_str());
+            for field in &edge.fields {
+                claims.push((
+                    field_namespace.clone(),
+                    field.name.clone(),
+                    format!("edge field '{}.{}'", edge.label.as_str(), field.name),
+                ));
+            }
+            for from in &edge.from {
+                for to in &edge.to {
+                    claims.push((
+                        "table".to_string(),
+                        self.rel_table_name(&edge.label, from, to)?,
+                        format!(
+                            "edge type '{}': '{}' -> '{}'",
+                            edge.label.as_str(),
+                            from.as_str(),
+                            to.as_str()
+                        ),
+                    ));
+                }
+            }
+        }
+        Ok(claims)
+    }
+
+    fn validate_schema_identifiers(&self, schema: &GraphSchema) -> Result<()> {
+        validate_physical_identifier_claims("Ladybug", self.schema_identifier_claims(schema)?)
+    }
+
+    fn validate_graph_identifiers(&self, graph: &Graph) -> Result<()> {
+        let (node_index, rel_index) = self.metadata_tables()?;
+        let mut claims = vec![
+            (
+                "table".to_string(),
+                node_index,
+                "Ladybug node metadata index".to_string(),
+            ),
+            (
+                "table".to_string(),
+                rel_index,
+                "Ladybug relationship metadata index".to_string(),
+            ),
+        ];
+        let labels = graph
+            .nodes
+            .iter()
+            .map(|node| (node.id.clone(), node.label.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for node in &graph.nodes {
+            validate_ladybug_node_id(&node.id)?;
+        }
+        for edge in &graph.edges {
+            validate_edge_key_components(edge)?;
+        }
+        for node in &graph.nodes {
+            claims.push((
+                "table".to_string(),
+                self.node_table_name(&node.label)?,
+                format!("node label '{}'", node.label.as_str()),
+            ));
+        }
+        for edge in &graph.edges {
+            let from = labels.get(&edge.from).ok_or_else(|| {
+                GrustError::Schema(format!(
+                    "Ladybug edge '{}' references unknown from node '{}'",
+                    edge.label.as_str(),
+                    edge.from.as_str()
+                ))
+            })?;
+            let to = labels.get(&edge.to).ok_or_else(|| {
+                GrustError::Schema(format!(
+                    "Ladybug edge '{}' references unknown to node '{}'",
+                    edge.label.as_str(),
+                    edge.to.as_str()
+                ))
+            })?;
+            claims.push((
+                "table".to_string(),
+                self.rel_table_name(&edge.label, from, to)?,
+                format!(
+                    "relationship '{}': '{}' -> '{}'",
+                    edge.label.as_str(),
+                    from.as_str(),
+                    to.as_str()
+                ),
+            ));
+        }
+        // Repeated graph values intentionally share their label-derived table.
+        // Collapse identical value-level claims while retaining distinct logical
+        // claims that normalize to the same physical table.
+        claims.sort();
+        claims.dedup();
+        validate_physical_identifier_claims("Ladybug", claims)
+    }
+
     fn ensure_node_table(&self, conn: &lbug::Connection<'_>, label: &Label) -> Result<NodeTable> {
         let table = self.node_table_name(label)?;
         Self::exec_ignore_exists(
@@ -555,6 +684,7 @@ impl LadybugGraphStore {
         edge: &Edge,
         labels: Option<(&Label, &Label)>,
     ) -> Result<PutOutcome> {
+        validate_edge_key_components(edge)?;
         self.bootstrap_locked(conn)?;
         let (from_label, to_label) = match labels {
             Some(labels) => labels,
@@ -600,7 +730,7 @@ impl LadybugGraphStore {
         from_table: &str,
         to_table: &str,
     ) -> Result<()> {
-        let id = edge_key(edge);
+        let id = checked_edge_key(edge)?;
         let props = props_to_string(&edge.props)?;
         Self::execute(
             conn,
@@ -757,6 +887,7 @@ impl LadybugGraphStore {
 #[async_trait]
 impl GraphStore for LadybugGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        self.validate_schema_identifiers(schema)?;
         self.with_conn(|conn| {
             self.bootstrap_locked(conn)?;
             for node in &schema.nodes {
@@ -776,6 +907,7 @@ impl GraphStore for LadybugGraphStore {
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
+        validate_ladybug_node_id(&node.id)?;
         if let Some(schema) = self.require_schema_for_typed_mode()? {
             schema.validate_node(node)?;
         }
@@ -783,6 +915,7 @@ impl GraphStore for LadybugGraphStore {
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
+        validate_edge_key_components(edge)?;
         let schema = self.require_schema_for_typed_mode()?;
         self.with_conn(|conn| {
             if let Some(schema) = schema.as_ref() {
@@ -793,6 +926,7 @@ impl GraphStore for LadybugGraphStore {
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        self.validate_graph_identifiers(graph)?;
         if let Some(schema) = self.require_schema_for_typed_mode()? {
             schema.validate_graph(graph)?;
         }
@@ -836,7 +970,7 @@ impl GraphStore for LadybugGraphStore {
                 };
                 let from_table = self.node_table_name(from_label)?;
                 let to_table = self.node_table_name(to_label)?;
-                edge_tables.insert(edge_key(edge), (rel_table, from_table, to_table));
+                edge_tables.insert(checked_edge_key(edge)?, (rel_table, from_table, to_table));
             }
             Self::exec(conn, "BEGIN TRANSACTION;")?;
             let result = (|| {
@@ -852,7 +986,7 @@ impl GraphStore for LadybugGraphStore {
                     report.nodes += 1;
                 }
                 for edge in &graph.edges {
-                    let edge_key = edge_key(edge);
+                    let edge_key = checked_edge_key(edge)?;
                     let (rel_table, from_table, to_table) =
                         edge_tables.get(&edge_key).ok_or_else(|| {
                             GrustError::Schema(format!(
@@ -1094,8 +1228,27 @@ fn row_to_edge(row: Vec<lbug::Value>, label: &Label) -> Result<Edge> {
     let id = row_string(&row, 2, "edge")?;
     let props = props_from_string(&row_string(&row, 3, "edge")?)?;
     let mut edge = Edge::new(label.clone(), from, to, props);
-    edge.id = Some(EdgeId::from(id));
+    // Ladybug persists the structural edge key in `r.id` even when the Grust
+    // edge has no explicit ID. Recover that logical distinction on read so an
+    // idless edge can be written again. Valid explicit IDs cannot contain the
+    // U+001F structural delimiter, so an exact structural-key match is
+    // unambiguous under the checked edge-key contract.
+    let structural_id = checked_edge_key(&edge)?;
+    if id != structural_id {
+        edge.id = Some(EdgeId::from(id));
+        validate_edge_key_components(&edge)?;
+    }
     Ok(edge)
+}
+
+fn validate_ladybug_node_id(id: &NodeId) -> Result<()> {
+    if id.as_str().contains('\u{1f}') {
+        return Err(GrustError::Schema(
+            "Ladybug node id contains reserved U+001F used by metadata and edge identities"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn rel_index_id(label: &Label, from_label: &Label, to_label: &Label) -> String {

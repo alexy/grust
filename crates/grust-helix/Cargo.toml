@@ -6,13 +6,13 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "HelixDB GraphStore backend for Grust."
-publish = false  # helix-db not on crates.io
+publish = false  # Internal backend: independently validated and intentionally outside the facade.
 keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-grust-core = { version = "0.12.0", path = "../grust-core" }
+grust-core = { version = "0.13.0", path = "../grust-core" }
 helix-db = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }

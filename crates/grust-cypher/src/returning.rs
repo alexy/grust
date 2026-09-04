@@ -132,20 +132,19 @@ pub(crate) fn find_return_control_clause(return_clause: &str) -> Option<usize> {
                 .chars()
                 .rev()
                 .find(|ch| !ch.is_whitespace());
-            if previous != Some('.') && !is_return_alias_keyword_prefix(&return_clause[..absolute])
-            {
-                if keyword != "ORDER"
+            if previous != Some('.')
+                && !is_return_alias_keyword_prefix(&return_clause[..absolute])
+                && (keyword != "ORDER"
                     || rest[index + keyword.len()..]
                         .trim_start()
                         .get(..2)
-                        .is_some_and(|value| value.eq_ignore_ascii_case("BY"))
-                {
-                    // Keep the earliest control keyword across all three so the
-                    // projection/control split point is correct regardless of
-                    // the order the keywords appear in the clause.
-                    earliest = Some(earliest.map_or(absolute, |current| current.min(absolute)));
-                    break;
-                }
+                        .is_some_and(|value| value.eq_ignore_ascii_case("BY")))
+            {
+                // Keep the earliest control keyword across all three so the
+                // projection/control split point is correct regardless of
+                // the order the keywords appear in the clause.
+                earliest = Some(earliest.map_or(absolute, |current| current.min(absolute)));
+                break;
             }
             let next = index + keyword.len();
             offset += next;
@@ -586,14 +585,22 @@ pub(crate) enum CypherReturnScalarAst<'a> {
     PathFunction,
 }
 
+/// Bindings visible while the final writable `RETURN` clause is parsed.
+///
+/// The scope keeps every binding family together so validation cannot
+/// accidentally omit a newly supported row source at one call site.
+pub(crate) struct CypherReturnScope<'a> {
+    pub(crate) node_bindings: &'a HashMap<String, NodeId>,
+    pub(crate) edge_bindings: &'a HashMap<String, CypherBoundEdgeIdentity>,
+    pub(crate) row_node_bindings: &'a HashMap<String, GraphNodeMatch>,
+    pub(crate) row_edge_match_bindings: &'a HashMap<String, GraphRelationshipMatch>,
+    pub(crate) row_edge_bindings: &'a HashMap<String, CypherRowProducedEdgeBinding>,
+    pub(crate) row_path_bindings: &'a HashMap<String, CypherRowProducedPathBinding>,
+}
+
 pub(crate) fn parse_cypher_return_clause(
     clause: &str,
-    node_bindings: &HashMap<String, NodeId>,
-    edge_bindings: &HashMap<String, CypherBoundEdgeIdentity>,
-    row_node_bindings: &HashMap<String, GraphNodeMatch>,
-    row_edge_match_bindings: &HashMap<String, GraphRelationshipMatch>,
-    row_edge_bindings: &HashMap<String, CypherRowProducedEdgeBinding>,
-    row_path_bindings: &HashMap<String, CypherRowProducedPathBinding>,
+    scope: &CypherReturnScope<'_>,
     parameters: &CypherParameters,
 ) -> Result<CypherReturnClause> {
     let (projection_clause, control_clause) = split_return_control(clause);
@@ -617,25 +624,29 @@ pub(crate) fn parse_cypher_return_clause(
             return Err(cypher_syntax("RETURN contains an empty projection"));
         }
         let (expression, alias) = split_return_alias(projection)?;
-        if let Some((aggregate, variable, target, distinct)) =
-            parse_aggregate_projection(expression, parameters)?
+        if let Some(ParsedAggregateProjection {
+            aggregate,
+            variable,
+            target,
+            distinct,
+        }) = parse_aggregate_projection(expression, parameters)?
         {
             if let Some(variable) = variable.as_ref() {
                 validate_return_variable_binding(
                     variable,
-                    node_bindings,
-                    edge_bindings,
-                    row_node_bindings,
-                    row_edge_match_bindings,
-                    row_edge_bindings,
-                    row_path_bindings,
+                    scope.node_bindings,
+                    scope.edge_bindings,
+                    scope.row_node_bindings,
+                    scope.row_edge_match_bindings,
+                    scope.row_edge_bindings,
+                    scope.row_path_bindings,
                 )?;
                 if matches!(
                     target,
                     CypherReturnTarget::PathLength
                         | CypherReturnTarget::PathNodes
                         | CypherReturnTarget::PathRelationships
-                ) && !row_path_bindings.contains_key(variable)
+                ) && !scope.row_path_bindings.contains_key(variable)
                 {
                     return Err(cypher_unsupported_cardinality(
                         "writable Cypher RETURN path functions require a bound path variable",
@@ -643,12 +654,12 @@ pub(crate) fn parse_cypher_return_clause(
                 }
                 let element = cypher_return_element_for_variable(
                     variable,
-                    node_bindings,
-                    edge_bindings,
-                    row_node_bindings,
-                    row_edge_match_bindings,
-                    row_edge_bindings,
-                    row_path_bindings,
+                    scope.node_bindings,
+                    scope.edge_bindings,
+                    scope.row_node_bindings,
+                    scope.row_edge_match_bindings,
+                    scope.row_edge_bindings,
+                    scope.row_path_bindings,
                 )?;
                 validate_return_function_target(&target, element)?;
             }
@@ -666,12 +677,12 @@ pub(crate) fn parse_cypher_return_clause(
         if projection == "*" {
             append_star_return_projections(
                 &mut projections,
-                node_bindings,
-                edge_bindings,
-                row_node_bindings,
-                row_edge_match_bindings,
-                row_edge_bindings,
-                row_path_bindings,
+                scope.node_bindings,
+                scope.edge_bindings,
+                scope.row_node_bindings,
+                scope.row_edge_match_bindings,
+                scope.row_edge_bindings,
+                scope.row_path_bindings,
             )?;
             continue;
         }
@@ -770,12 +781,12 @@ pub(crate) fn parse_cypher_return_clause(
             } else {
                 cypher_return_element_for_variable(
                     &variable,
-                    node_bindings,
-                    edge_bindings,
-                    row_node_bindings,
-                    row_edge_match_bindings,
-                    row_edge_bindings,
-                    row_path_bindings,
+                    scope.node_bindings,
+                    scope.edge_bindings,
+                    scope.row_node_bindings,
+                    scope.row_edge_match_bindings,
+                    scope.row_edge_bindings,
+                    scope.row_path_bindings,
                 )?
             };
         if matches!(
@@ -915,17 +926,18 @@ pub(crate) fn parse_order_items(
     Ok(order_by)
 }
 
+/// Normalized aggregate metadata produced before binding validation.
+pub(crate) struct ParsedAggregateProjection {
+    pub(crate) aggregate: CypherReturnAggregate,
+    pub(crate) variable: Option<String>,
+    pub(crate) target: CypherReturnTarget,
+    pub(crate) distinct: bool,
+}
+
 pub(crate) fn parse_aggregate_projection(
     expression: &str,
     parameters: &CypherParameters,
-) -> Result<
-    Option<(
-        CypherReturnAggregate,
-        Option<String>,
-        CypherReturnTarget,
-        bool,
-    )>,
-> {
+) -> Result<Option<ParsedAggregateProjection>> {
     let expression = expression.trim();
     let Some(open) = expression.find('(') else {
         return Ok(None);
@@ -967,10 +979,20 @@ pub(crate) fn parse_aggregate_projection(
         (body, false)
     };
     if let Some((variable, target)) = parse_return_path_function_projection(body)? {
-        return Ok(Some((aggregate, Some(variable), target, distinct)));
+        return Ok(Some(ParsedAggregateProjection {
+            aggregate,
+            variable: Some(variable),
+            target,
+            distinct,
+        }));
     }
     if let Some((variable, target)) = parse_return_element_function_projection(body)? {
-        return Ok(Some((aggregate, Some(variable), target, distinct)));
+        return Ok(Some(ParsedAggregateProjection {
+            aggregate,
+            variable: Some(variable),
+            target,
+            distinct,
+        }));
     }
     if !matches!(
         aggregate,
@@ -987,10 +1009,20 @@ pub(crate) fn parse_aggregate_projection(
                 "writable Cypher RETURN does not support COUNT(DISTINCT *)",
             ));
         }
-        return Ok(Some((aggregate, None, CypherReturnTarget::All, distinct)));
+        return Ok(Some(ParsedAggregateProjection {
+            aggregate,
+            variable: None,
+            target: CypherReturnTarget::All,
+            distinct,
+        }));
     }
     if let Some((variable, target)) = parse_restricted_return_target_expression(body, parameters)? {
-        return Ok(Some((aggregate, variable, target, distinct)));
+        return Ok(Some(ParsedAggregateProjection {
+            aggregate,
+            variable,
+            target,
+            distinct,
+        }));
     }
     if !matches!(
         aggregate,
@@ -1002,12 +1034,12 @@ pub(crate) fn parse_aggregate_projection(
         )));
     }
     if let Ok((variable, key)) = parse_property_ref(body, "RETURN aggregate projection") {
-        return Ok(Some((
+        return Ok(Some(ParsedAggregateProjection {
             aggregate,
-            Some(variable),
-            CypherReturnTarget::Property(key),
+            variable: Some(variable),
+            target: CypherReturnTarget::Property(key),
             distinct,
-        )));
+        }));
     }
     if !matches!(
         aggregate,
@@ -1017,15 +1049,15 @@ pub(crate) fn parse_aggregate_projection(
             "writable Cypher RETURN only supports {aggregate_name}(variable.property) or restricted CASE"
         )));
     }
-    Ok(Some((
+    Ok(Some(ParsedAggregateProjection {
         aggregate,
-        Some(parse_required_cypher_variable(
+        variable: Some(parse_required_cypher_variable(
             body,
             "RETURN aggregate projection",
         )?),
-        CypherReturnTarget::Element,
+        target: CypherReturnTarget::Element,
         distinct,
-    )))
+    }))
 }
 
 pub(crate) fn parse_restricted_return_target_expression(

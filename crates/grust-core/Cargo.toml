@@ -1,6 +1,6 @@
 [package]
 name = "grust-core"
-version.workspace = true
+version = "0.13.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -25,4 +25,9 @@ typed-garde = ["dep:garde"]
 typed-zod-rs = ["typed-garde", "dep:zod-rs"]
 
 [dev-dependencies]
+criterion.workspace = true
 futures-executor.workspace = true
+
+[[bench]]
+name = "graph_core"
+harness = false

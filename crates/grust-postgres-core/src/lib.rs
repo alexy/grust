@@ -1,8 +1,15 @@
+mod sql_safety;
+
 use async_trait::async_trait;
 use grust_core::prelude::*;
 use grust_cypher::pushdown::{NoTypeHints, SqlDialect, StrOp, combine_union, plan_read};
 use grust_cypher::{CypherParameters, CypherResultTable};
 use grust_sql_core::{GraphSqlDialect, UniversalTableRefs};
+pub use sql_safety::POSTGRES_IDENTIFIER_MAX_BYTES;
+use sql_safety::{
+    validate_autocommit_sql, validate_identifier_length, validate_typed_column_alias,
+};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls};
 
@@ -29,13 +36,20 @@ impl Default for PostgresGraphConfig {
 pub struct PostgresGraphStore {
     config: PostgresGraphConfig,
     client: Client,
+    /// A PostgreSQL `Client` multiplexes one connection. Keep explicit
+    /// transactions isolated so concurrent store calls cannot accidentally
+    /// become part of the same transaction.
+    connection_gate: tokio::sync::Mutex<()>,
+    /// Set before an explicit transaction begins and cleared only after its
+    /// commit or rollback finishes. If a future is cancelled while the gate is
+    /// held, the next caller recovers the abandoned transaction first.
+    transaction_needs_rollback: AtomicBool,
     connection_task: JoinHandle<()>,
 }
 
 impl PostgresGraphStore {
     pub async fn connect(config: PostgresGraphConfig) -> Result<Self> {
-        validate_identifier(&config.schema)?;
-        validate_identifier(&config.table_prefix)?;
+        validate_postgres_config(&config)?;
         let (client, connection) = tokio_postgres::connect(&config.connection_string, NoTls)
             .await
             .map_err(|err| {
@@ -51,6 +65,8 @@ impl PostgresGraphStore {
         Ok(Self {
             config,
             client,
+            connection_gate: tokio::sync::Mutex::new(()),
+            transaction_needs_rollback: AtomicBool::new(false),
             connection_task,
         })
     }
@@ -59,7 +75,38 @@ impl PostgresGraphStore {
         &self.config
     }
 
+    /// Execute SQL without allowing callers to manage this shared connection's
+    /// transaction state. Explicit transaction-control statements are rejected
+    /// before the SQL is sent to PostgreSQL.
     pub async fn execute(&self, sql: &str) -> Result<()> {
+        validate_autocommit_sql(sql)?;
+        let _gate = self.lock_connection().await?;
+        self.execute_unlocked(sql).await
+    }
+
+    async fn lock_connection(&self) -> Result<tokio::sync::MutexGuard<'_, ()>> {
+        let gate = self.connection_gate.lock().await;
+        if self.transaction_needs_rollback.load(Ordering::Acquire) {
+            // Cancellation can happen while BEGIN, a statement, or COMMIT is
+            // in flight. PostgreSQL processes this rollback after any earlier
+            // request on the same connection; ROLLBACK outside a transaction
+            // is harmless if COMMIT already won the race.
+            self.rollback_transaction_unlocked().await?;
+        }
+        Ok(gate)
+    }
+
+    /// Resolve the explicit transaction and clear the recovery marker only
+    /// after PostgreSQL acknowledges the rollback. A failed rollback leaves
+    /// the marker set so later callers cannot silently join stale state.
+    async fn rollback_transaction_unlocked(&self) -> Result<()> {
+        self.execute_unlocked("ROLLBACK").await?;
+        self.transaction_needs_rollback
+            .store(false, Ordering::Release);
+        Ok(())
+    }
+
+    async fn execute_unlocked(&self, sql: &str) -> Result<()> {
         self.client
             .batch_execute(sql)
             .await
@@ -67,6 +114,11 @@ impl PostgresGraphStore {
     }
 
     async fn query_nodes(&self, sql: &str) -> Result<Vec<Node>> {
+        let _gate = self.lock_connection().await?;
+        self.query_nodes_unlocked(sql).await
+    }
+
+    async fn query_nodes_unlocked(&self, sql: &str) -> Result<Vec<Node>> {
         let rows = self.client.query(sql, &[]).await.map_err(|err| {
             GrustError::Backend(format!("PostgreSQL node query failed: {err}: {sql}"))
         })?;
@@ -74,10 +126,46 @@ impl PostgresGraphStore {
     }
 
     async fn query_edges(&self, sql: &str) -> Result<Vec<Edge>> {
+        let _gate = self.lock_connection().await?;
+        self.query_edges_unlocked(sql).await
+    }
+
+    async fn query_edges_unlocked(&self, sql: &str) -> Result<Vec<Edge>> {
         let rows = self.client.query(sql, &[]).await.map_err(|err| {
             GrustError::Backend(format!("PostgreSQL edge query failed: {err}: {sql}"))
         })?;
         rows.into_iter().map(row_to_edge).collect()
+    }
+
+    async fn execute_transaction(&self, statements: &[String]) -> Result<()> {
+        if statements.is_empty() {
+            return Ok(());
+        }
+        let _gate = self.lock_connection().await?;
+        self.transaction_needs_rollback
+            .store(true, Ordering::Release);
+        self.execute_unlocked("BEGIN").await?;
+        for statement in statements {
+            if let Err(err) = self.execute_unlocked(statement).await {
+                if let Err(recovery_err) = self.rollback_transaction_unlocked().await {
+                    return Err(GrustError::Backend(format!(
+                        "{err}; PostgreSQL transaction recovery failed: {recovery_err}"
+                    )));
+                }
+                return Err(err);
+            }
+        }
+        if let Err(err) = self.execute_unlocked("COMMIT").await {
+            if let Err(recovery_err) = self.rollback_transaction_unlocked().await {
+                return Err(GrustError::Backend(format!(
+                    "{err}; PostgreSQL transaction recovery failed: {recovery_err}"
+                )));
+            }
+            return Err(err);
+        }
+        self.transaction_needs_rollback
+            .store(false, Ordering::Release);
+        Ok(())
     }
 
     fn tables(&self) -> UniversalTableRefs {
@@ -190,6 +278,9 @@ impl SqlDialect for PostgresReadDialect {
             "'false'".to_string()
         }
     }
+    fn recursive_walk_id_token(&self, expr: &str) -> Option<String> {
+        Some(format!("encode(convert_to({expr}, 'UTF8'), 'hex')"))
+    }
     fn strpos_sql(&self, haystack: &str, needle: &str) -> String {
         format!("position({needle} in {haystack})")
     }
@@ -245,6 +336,15 @@ impl PostgresGraphStore {
     /// every column (text, bigint, jsonb, …) as text — exactly the
     /// text-rows contract the pushdown leaves reconstruct from.
     async fn run_text_rows(&self, sql: &str, columns: usize) -> Result<Vec<Vec<Option<String>>>> {
+        let _gate = self.lock_connection().await?;
+        self.run_text_rows_unlocked(sql, columns).await
+    }
+
+    async fn run_text_rows_unlocked(
+        &self,
+        sql: &str,
+        columns: usize,
+    ) -> Result<Vec<Vec<Option<String>>>> {
         let messages = self.client.simple_query(sql).await.map_err(|err| {
             GrustError::Backend(format!("PostgreSQL read pushdown failed: {err}: {sql}"))
         })?;
@@ -276,23 +376,23 @@ impl PostgresGraphStore {
         params: &CypherParameters,
     ) -> Result<CypherResultTable> {
         let dialect = self.read_dialect();
-        if let Some(plan) = plan_read(cypher, params, &NoTypeHints)? {
-            if plan.supported_by(&dialect) {
-                if let Some((arms, distinct)) = plan.union_arms() {
-                    let mut tables = Vec::with_capacity(arms.len());
-                    for arm in arms {
-                        let rows = self
-                            .run_text_rows(&arm.to_sql(&dialect), arm.column_count())
-                            .await?;
-                        tables.push(arm.project_text_rows(&dialect, rows, params)?);
-                    }
-                    return combine_union(tables, distinct);
+        if let Some(plan) = plan_read(cypher, params, &NoTypeHints)?
+            && plan.supported_by(&dialect)
+        {
+            if let Some((arms, distinct)) = plan.union_arms() {
+                let mut tables = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    let rows = self
+                        .run_text_rows(&arm.to_sql(&dialect), arm.column_count())
+                        .await?;
+                    tables.push(arm.project_text_rows(&dialect, rows, params)?);
                 }
-                let rows = self
-                    .run_text_rows(&plan.to_sql(&dialect), plan.column_count())
-                    .await?;
-                return plan.project_text_rows(&dialect, rows, params);
+                return combine_union(tables, distinct);
             }
+            let rows = self
+                .run_text_rows(&plan.to_sql(&dialect), plan.column_count())
+                .await?;
+            return plan.project_text_rows(&dialect, rows, params);
         }
         let graph = self.read_graph().await?;
         grust_cypher::read::run_read_query(&graph, cypher, params)
@@ -300,7 +400,7 @@ impl PostgresGraphStore {
 
     /// Nodes matching a label + inline props (+ post-filtered predicates) —
     /// the bounded matched-write support, mirroring the Turso executor.
-    async fn matching_nodes(
+    async fn matching_nodes_unlocked(
         &self,
         label: Option<&Label>,
         props: &Props,
@@ -329,7 +429,7 @@ impl PostgresGraphStore {
             "SELECT n.id, n.label, n.props::text AS props FROM {} n{where_clause}",
             self.nodes_table()
         );
-        let mut nodes = self.query_nodes(&sql).await?;
+        let mut nodes = self.query_nodes_unlocked(&sql).await?;
         if !predicates.is_empty() {
             nodes.retain(|node| {
                 predicates
@@ -347,34 +447,85 @@ impl CypherMutationExecutor for PostgresGraphStore {
         &self,
         plan: &GraphMutationPlan,
     ) -> Result<GraphMutationReport> {
+        // Lower every fixed operation before opening the transaction so an
+        // unsupported trailing operation cannot commit a valid prefix.
+        let prepared = plan
+            .operations
+            .iter()
+            .map(|operation| match operation {
+                GraphMutationPlanOp::PatchMatchingNodes { .. } => Ok(None),
+                other => mutation_sql(
+                    &self.nodes_table(),
+                    &self.edges_table(),
+                    &GraphMutation::from(other.clone()),
+                )
+                .map(Some),
+            })
+            .collect::<Result<Vec<_>>>()?;
+
         let mut report = plan.report();
-        for operation in &plan.operations {
-            match operation {
-                GraphMutationPlanOp::PatchMatchingNodes {
-                    label,
-                    props,
-                    predicates,
-                    patch,
-                    ..
-                } => {
-                    let nodes = self
-                        .matching_nodes(label.as_ref(), props, predicates)
-                        .await?;
-                    report.matched_rows += nodes.len();
-                    report.node_patches += nodes.len();
-                    report.changed_nodes += nodes.len();
-                    for node in nodes {
-                        self.execute(&patch_node_sql(&self.nodes_table(), &node.id, patch)?)
+        let _gate = self.lock_connection().await?;
+        self.transaction_needs_rollback
+            .store(true, Ordering::Release);
+        self.execute_unlocked("BEGIN").await?;
+        let execution = async {
+            for (operation, prepared_sql) in plan.operations.iter().zip(prepared) {
+                match operation {
+                    GraphMutationPlanOp::PatchMatchingNodes {
+                        label,
+                        props,
+                        predicates,
+                        patch,
+                        ..
+                    } => {
+                        let nodes = self
+                            .matching_nodes_unlocked(label.as_ref(), props, predicates)
                             .await?;
+                        report.matched_rows += nodes.len();
+                        report.node_patches += nodes.len();
+                        report.changed_nodes += nodes.len();
+                        for node in nodes {
+                            let sql = patch_node_sql(&self.nodes_table(), &node.id, patch)?;
+                            self.execute_unlocked(&sql).await?;
+                        }
+                    }
+                    _ => {
+                        self.execute_unlocked(
+                            prepared_sql
+                                .as_deref()
+                                .expect("fixed mutation SQL was precomputed"),
+                        )
+                        .await?;
                     }
                 }
-                other => {
-                    self.apply_mutations(std::slice::from_ref(&other.clone().into()))
-                        .await?;
+            }
+            Ok::<_, GrustError>(report)
+        }
+        .await;
+
+        match execution {
+            Ok(report) => {
+                if let Err(err) = self.execute_unlocked("COMMIT").await {
+                    if let Err(recovery_err) = self.rollback_transaction_unlocked().await {
+                        return Err(GrustError::Backend(format!(
+                            "{err}; PostgreSQL transaction recovery failed: {recovery_err}"
+                        )));
+                    }
+                    return Err(err);
                 }
+                self.transaction_needs_rollback
+                    .store(false, Ordering::Release);
+                Ok(report)
+            }
+            Err(err) => {
+                if let Err(recovery_err) = self.rollback_transaction_unlocked().await {
+                    return Err(GrustError::Backend(format!(
+                        "{err}; PostgreSQL transaction recovery failed: {recovery_err}"
+                    )));
+                }
+                Err(err)
             }
         }
-        Ok(report)
     }
 }
 
@@ -387,14 +538,14 @@ impl Drop for PostgresGraphStore {
 #[async_trait]
 impl GraphStore for PostgresGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
-        self.bootstrap().await?;
-        self.execute(&postgres_schema_sql(
+        let ddl = postgres_schema_sql(
             &self.config,
             &self.nodes_table(),
             &self.edges_table(),
             schema,
-        )?)
-        .await
+        )?;
+        self.bootstrap().await?;
+        self.execute(&ddl).await
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
@@ -497,12 +648,11 @@ impl GraphMutationStore for PostgresGraphStore {
         if mutations.is_empty() {
             return Ok(());
         }
-        self.execute(&apply_mutations_sql(
-            &self.nodes_table(),
-            &self.edges_table(),
-            mutations,
-        )?)
-        .await
+        let statements = mutations
+            .iter()
+            .map(|mutation| mutation_sql(&self.nodes_table(), &self.edges_table(), mutation))
+            .collect::<Result<Vec<_>>>()?;
+        self.execute_transaction(&statements).await
     }
 }
 
@@ -511,6 +661,7 @@ pub fn bootstrap_sql(
     nodes_table: &str,
     edges_table: &str,
 ) -> Result<String> {
+    validate_postgres_config(config)?;
     let schema = quote_ident(&config.schema);
     Ok(grust_sql_core::universal_bootstrap_sql(
         &PostgresDialect,
@@ -530,11 +681,14 @@ pub fn postgres_schema_sql(
     edges_table: &str,
     schema: &GraphSchema,
 ) -> Result<String> {
+    validate_postgres_config(config)?;
     grust_sql_core::schema_sql(
         &PostgresDialect,
-        &config.table_prefix,
-        nodes_table,
-        edges_table,
+        grust_sql_core::GraphSqlSchemaLayout {
+            table_prefix: &config.table_prefix,
+            nodes_table,
+            edges_table,
+        },
         schema,
         |view| qualified_table(&config.schema, view),
         quote_ident,
@@ -544,6 +698,7 @@ pub fn postgres_schema_sql(
 }
 
 pub fn postgres_typed_column(field: &Field) -> Result<String> {
+    validate_typed_column_alias(&field.name)?;
     Ok(format!(
         "{} AS {}",
         postgres_prop_expr(field),
@@ -692,11 +847,18 @@ pub fn sql_str(value: &str) -> String {
 }
 
 pub fn validate_identifier(value: &str) -> Result<()> {
-    grust_sql_core::validate_identifier("PostgreSQL", value)
+    grust_sql_core::validate_identifier("PostgreSQL", value)?;
+    validate_identifier_length(value)
+}
+
+pub fn validate_postgres_config(config: &PostgresGraphConfig) -> Result<()> {
+    validate_identifier(&config.schema)?;
+    validate_identifier(&config.table_prefix)?;
+    grust_sql_core::validate_universal_identifier_lengths(&PostgresDialect, &config.table_prefix)
 }
 
 pub fn validate_json_key(value: &str) -> Result<()> {
-    validate_identifier(value)
+    grust_sql_core::validate_identifier("PostgreSQL JSON property key", value)
         .map_err(|_| GrustError::Schema(format!("invalid JSON property key '{value}'")))
 }
 
@@ -709,6 +871,10 @@ struct PostgresDialect;
 impl GraphSqlDialect for PostgresDialect {
     fn name(&self) -> &'static str {
         "PostgreSQL"
+    }
+
+    fn max_identifier_bytes(&self) -> Option<usize> {
+        Some(POSTGRES_IDENTIFIER_MAX_BYTES)
     }
 
     fn props_column_type(&self) -> &'static str {

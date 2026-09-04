@@ -1,7 +1,6 @@
-# On macOS 26 (Tahoe), the CLT's top-level C++ include dir only has stubs;
-# the full libc++ headers live inside the SDK. Apple clang with
-# -mmacosx-version-min=26.x does not automatically search the SDK's
-# usr/include/c++/v1, so crates that compile C++ (e.g. cxx, ladybug's bridge)
-# fail with '<algorithm> file not found'. Add the SDK C++ path explicitly.
-[env]
-CXXFLAGS = "-isystem /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/include/c++/v1"
+# Do not pin an Apple SDK path here. Cargo configuration is shared by Xcode,
+# Command Line Tools, CI, and release verification; an absolute SDK path can
+# silently mix headers from a different active developer directory.
+#
+# See docs/CXX.md for a per-shell fallback that derives the include directory
+# from `xcrun --show-sdk-path` when an older C++ bridge cannot find libc++.

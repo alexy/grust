@@ -1,0 +1,19 @@
+[package]
+name = "grust-lsqb-runner"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+grust-core = { path = "../../crates/grust-core" }
+grust-cypher = { path = "../../crates/grust-cypher" }
+grust-memory = { path = "../../crates/grust-memory" }
+grust-postgres-core = { path = "../../crates/grust-postgres-core" }
+grust-turso = { path = "../../crates/grust-turso" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+

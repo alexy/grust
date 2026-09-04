@@ -1149,9 +1149,13 @@ pub struct GqlBackendDescriptor {
     /// Supports standalone session state commands (`USE`, `SET`, `RESET`) in
     /// the shared portable session model.
     pub session_control: bool,
-    /// The backend's mutation store reports `GraphMutationAtomicity::Transactional`
-    /// (i.e. a statement batch can commit/rollback atomically). Verified against
-    /// each backend's `mutation_atomicity()` in the working tree (Unit 13).
+    /// The backend's mutation store reports `GraphMutationAtomicity::Transactional`:
+    /// one [`grust_core::GraphMutation`] slice is committed or rolled back as a
+    /// unit. This does not claim that native-language escape hatches are atomic.
+    /// Portable Cypher executors must either lower a statement to one such
+    /// slice or establish an equivalent isolated backend transaction before
+    /// relying on this flag. Verified against each backend's
+    /// `mutation_atomicity()` in the working tree (Unit 13).
     pub transactional: bool,
     /// The query languages this backend's engine accepts natively through an
     /// explicit escape hatch, outside portable conformance (Full39075 F11).

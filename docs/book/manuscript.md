@@ -26,7 +26,8 @@ Edge  = optional id + from + to + label + properties
 
 This book is a guided tour of that model. It covers the workspace architecture,
 the Rust concepts the code leans on, the core graph types, traversal IR, backend
-contracts, implemented backends, proposed backends, and practical examples.
+contracts, implemented backend profiles, query safety, semantic-model
+projection, and practical examples.
 
 # 1. The Shape of Grust
 
@@ -54,6 +55,7 @@ flowchart TB
   core --> traversal["Traversal IR"]
   stores --> local["grust-memory"]
   stores --> database["FalkorDB, HelixDB, SurrealDB"]
+  stores --> rowstore["PostgreSQL, SQL/PGQ, Turso"]
   stores --> analytic["LanceDB, pgGraph, Sail"]
 ```
 
@@ -114,7 +116,14 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
+    DateTime(RfcDate),
+    Decimal(Decimal),
+    Duration(Duration),
     StringArray(Vec<String>),
+    IntArray(Vec<i64>),
+    FloatArray(Vec<f64>),
+    Path(PathValue),
+    Graph(GraphValue),
     Json(serde_json::Value),
 }
 ```
@@ -124,6 +133,13 @@ which makes generated JSON, tests, and backend query generation more
 predictable. That is especially helpful in a project whose backends turn one
 graph into SQL, Cypher-like queries, Arrow batches, JSON target state, or SDK
 calls.
+
+`GraphValue` deduplicates relationships by explicit ID or structural identity.
+Those identities use length-framed components rather than payload delimiters,
+so punctuation and control text inside an ID, label, or endpoint cannot make
+two distinct relationship values look identical. Persisted compatibility keys
+have a different contract: `checked_edge_key` rejects U+001F in every component
+before a tabular or export backend materializes the delimiter-based key.
 
 `Node::new` also inserts an `id` property if one is not already present. That
 means a Grust node has a first-class typed identity and an ordinary property
@@ -289,7 +305,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.11.0", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.13.0", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -297,7 +313,7 @@ grust = { package = "grust-graph", version = "0.11.0", features = ["typed-garde"
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.11.0", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.13.0", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -744,7 +760,8 @@ and GAP-style R-MAT graph families.
 
 # 6. The Store Contract
 
-The central backend trait is `GraphStore`:
+The central backend trait is `GraphStore` (capability and native-constraint
+methods are omitted here for brevity):
 
 ```rust
 #[async_trait::async_trait]
@@ -811,8 +828,10 @@ configuration, batching, serialization, and query strategy.
 
 Feature flags keep the facade crate light. The public `grust` crate re-exports
 backend crates only when features such as `memory`, `lancedb`, `postgres`,
-`postgres-pgq`, `pggraph`, `turso`, `sail`, `falkor`, `helix`, `surreal`, or
-`cocoindex` are enabled.
+`postgres-pgq`, `pggraph`, `turso`, `sail`, `falkor`, `surreal`, or
+`cocoindex` are enabled. The HelixDB and LadybugDB adapters remain internal
+`publish = false` workspace crates and are deliberately absent from the
+crates.io facade.
 
 Serde makes the graph model portable. Core types derive `Serialize` and
 `Deserialize`, and backends can turn properties into JSON strings, JSONB,
@@ -844,6 +863,8 @@ flowchart TB
   graphdb --> helix["HelixDB\nHTTP or SDK\nreads + traversal"]
   graphdb --> surreal["SurrealDB\nschemafull tables\nreads + traversal"]
   graphdb --> ladybug["LadybugDB\nembedded Cypher\ntyped or untyped tables"]
+  tabular --> postgres["PostgreSQL\nuniversal JSONB tables\nSQL reads + writes"]
+  tabular --> turso["Turso\nlocal SQL tables\nreads + writes"]
   tabular --> lance["LanceDB\nuniversal + typed Arrow tables"]
   tabular --> pg["pgGraph\nSQL traversal + typed views"]
   tabular --> sail["Sail\nuniversal + typed Delta tables"]
@@ -896,6 +917,18 @@ out to multiple target nodes, the backend reads those target nodes with
 `get_nodes` instead of issuing one node query per edge. Property-start
 traversal filters by label in LanceDB, then compares decoded Grust properties
 exactly so nested JSON or serialized fragments cannot produce false positives.
+Before persisting either an explicit or structural edge key, LanceDB calls the
+checked identity path and rejects U+001F in the source ID, label, target ID, or
+explicit ID. CocoIndex, LadybugDB, Sail, and Cypher capture/refetch use the same
+guard, and mixed explicit/idless comparisons also require the same structural
+owner instead of trusting a key-shaped string alone. Ladybug's managed metadata
+index reserves the same delimiter, so its adapter rejects U+001F in node IDs
+before a user record can alias a table marker.
+
+Schema object identity is checked separately. The shared
+`validate_physical_identifier_claims` helper lets FalkorDB, Helix, LadybugDB,
+LanceDB, and Sail reject lossy-name collisions and exact duplicate declarations
+within each native namespace before schema or write operations are emitted.
 
 This backend is a natural home for later vector-search extensions. The core
 `GraphStore` trait should stay graph-focused; LanceDB-specific nearest-neighbor
@@ -910,8 +943,8 @@ columnar surface without giving up the backend-neutral graph model.
 
 ## LadybugDB
 
-`grust-ladybug` embeds LadybugDB directly through the Rust `lbug` crate. It is
-the durable local graph-database backend: no Docker service, no HTTP bridge,
+`grust-ladybug` embeds LadybugDB directly through the Rust `lbug` 0.20.2 crate.
+It is the durable local graph-database backend: no Docker service, no HTTP bridge,
 and no separate daemon. The store opens either an in-memory Ladybug database or
 an on-disk Ladybug directory and creates Grust-managed Ladybug node and
 relationship tables from graph labels.
@@ -931,8 +964,13 @@ values from the managed tables, while traversal evaluates the portable Grust
 traversal IR by walking Ladybug relationship tables and reading target nodes
 through the same `GraphStore` contract.
 
-The `ladybug-arrow` facade feature also exposes Ladybug's embedded Arrow table
-path through Arrow IPC streams. A caller can register IPC node tables,
+Ladybug's managed metadata index uses U+001F to frame table markers and node
+entries. The adapter therefore rejects that delimiter in node IDs before any
+mutation; this is stricter than the backend-neutral `NodeId` type and is part
+of the Ladybug storage contract.
+
+The internal crate's `arrow` feature also exposes Ladybug's embedded Arrow
+table path through Arrow IPC streams. A workspace caller can register IPC node tables,
 relationship tables, and CSR relationship tables directly with Ladybug, then
 query them with Ladybug Cypher and receive result chunks back as Arrow IPC. The
 public boundary is IPC bytes rather than a Rust `RecordBatch` type, so callers
@@ -959,6 +997,15 @@ can target local PostgreSQL, Neon, or another managed PostgreSQL-compatible
 service. Reads use SQL against the universal tables. Traversal is lowered to
 SQL joins over those tables. Mutation batches are wrapped in PostgreSQL
 transactions.
+
+The shared connection is serialized across every explicit transaction. A
+recovery marker is set before `BEGIN` and cleared only after PostgreSQL
+acknowledges `COMMIT` or `ROLLBACK`; if cancellation drops a future mid-flight,
+the next serialized caller rolls back the uncertain transaction before doing
+new work. The public raw `PostgresGraphStore::execute` surface is deliberately
+autocommit-only. Its lexical guard rejects transaction-control statements in a
+batch while ignoring lookalike words inside strings, identifiers, dollar-quoted
+bodies, and comments. PostgreSQL PGQ forwards through the same contract.
 
 Schema application adds typed label views and expression indexes. For example,
 a `Person` node schema with `name: String` and `age: Int` can produce a
@@ -989,6 +1036,19 @@ steps. Turso keeps JSON text, `json_extract`, `json_patch`, SQLite-compatible
 views, and a derived-table undirected join shape. Sail does not use this SQL
 core because its SQL path runs through Spark Connect, Arrow IPC staging, and
 distributed Spark SQL rather than a direct row-store connection.
+
+Recursive walk pushdown no longer stores raw node IDs between sentinel
+delimiters. PostgreSQL, Spark SQL, and the generic SQLite dialect encode IDs as
+hexadecimal, delimiter-free tokens before constructing visited sets. A dialect
+without both recursive-CTE support and an encoding hook declines variable-path
+or shortest-walk pushdown and preserves correctness through fallback.
+
+`GraphSqlDialect::max_identifier_bytes` lets a dialect declare a limit for
+generated schema identifiers. PostgreSQL reports its 63-byte ceiling: typed
+node/edge view and property-index names at the limit remain valid, while longer
+names fail with `GrustError::Schema` before the server can silently truncate
+them into an ambiguous or colliding identifier. Dialects that retain the
+default `None` keep their existing behavior.
 
 ## Turso
 
@@ -1063,8 +1123,23 @@ The adapter projects memory into a small property graph:
 ```text
 (:MemoryRecord {record: <opaque JSON>, space: ...})
     -[:MENTIONS]->(:MemoryEntity {name, kind})
-(:MemoryEntity)-[:RELATES {rel, fact_id}]->(:MemoryEntity)
+(:MemoryEntity)-[:RELATES]->(:MemoryRelation {rel, fact_id})
+    -[:RELATES]->(:MemoryEntity)
 ```
+
+Each `MemoryRelation` is an assertion, not merely an endpoint pair. Its node ID
+is a SHA-256 identity over length-prefixed source, relationship name, target,
+and record ID components. Replaying one record is stable, while two records
+that assert the same named relation between the same entities retain separate
+lineage. Neighborhood traversal follows the two-edge assertion shape and also
+reads the legacy direct `RELATES {rel, fact_id}` representation so existing
+durable stores remain compatible. Tombstone preflight first discovers the
+record's assertion nodes and any legacy fact edges, then submits deletion of
+that discovered set with the record node as one mutation batch. A transactional
+backend makes that deletion batch atomic, and other records' assertions
+survive. The discovery reads are not isolated inside that transaction: callers
+must synchronize a tombstone with concurrent links for the same record so a
+new assertion cannot appear after discovery and escape the deletion batch.
 
 The complete TypeSec `StoredRecord` is serialized into one opaque JSON property
 and round-tripped whole. Grust does not open the protected content. TypeSec's
@@ -1113,20 +1188,114 @@ importance analyzers likewise make no writes. They consume already-recalled
 views and emit inert `ConsolidationPlan` values that must return through the
 capability-gated vault.
 
-The durable v1 proof has explicit limits. `MemoryId::next()` uses a process-local
-counter, so a restarted writer can collide with persisted `mem-N` identifiers;
-a hosted or multi-process system needs collision-resistant durable IDs and
-idempotency. `VectorIndex` is not a persistent LanceDB ANN implementation,
-memory predicates beyond space are not fully pushed into GQL, and the reference
-analytics are not distributed Sail cognition. TypeDID request verification is
-present at the QueryGraph service boundary, but durable anti-replay state shared
-across replicas is post-v1. Grust's structural edge identity remains
-`(from, label, to)`, so changing `fact_id` cannot preserve parallel `RELATES`
-assertions between the same endpoints; assertion nodes or a multi-edge identity
-surface are still needed for full lineage. Finally, vault-level tenant checks,
-restart persistence, and an end-to-end local demonstration do not by themselves
-constitute a hosted multi-tenant service with quotas, migrations, backups,
-deletion propagation, and service-level objectives.
+The governed cognition path extends that rule instead of bypassing it. A
+`CognitionRequest` contains one TypeSec-authorized input, its canonical binding,
+its optional vault-verified governed source scope, the exact LakeCat snapshot
+and policy-narrowed projection, the field mapping used by governed ingestion
+to derive the selected memory records, a durable job
+identity, and either the deduplicate or reconcile operation. The trusted host
+selects a fixed reference or native Sail profile
+before protected input is loaded; public engine implementations cannot report
+their own trusted identity. Both asynchronous engines return a bound
+`CognitionProposal`, never a store handle or direct write.
+
+Every bound proposal uses TypeSec proposal schema version 4. That wire contract
+identifies `input_snapshot` with the canonical immutable snapshot digest,
+keeps the LakeCat grant digest as separate binding evidence, and carries an
+explicit `mutated` or `no_change` effect. Reference and Sail derive that effect
+from the complete proposal: zero drafts and zero plan steps means no-change;
+every nonempty plan is mutating. Earlier bound schema versions fail closed;
+unbound schema version 1 remains only an inert local planning value. This wire
+version is independent of the operation algorithm version below.
+
+Deduplicate and reconcile each own an explicit version-2 semantic contract.
+Reference and Sail profiles bind the same per-operation version because they
+must produce the same canonical plan. Crate, package, and build versions remain
+useful implementation metadata, but never substitute for the algorithm version
+in signed TypeDID authority. Previously signed version-1 or package-bound
+intents are deliberately incompatible and must be authorized again; no native
+profile silently upgrades their authority.
+
+Live Sail does not re-read LakeCat rows or reinterpret the ingestion mapping.
+It derives and stages only authorized IDs, normalized text keys,
+contradiction prefix/tail keys, and validity timestamps under a collision-safe
+session view; it does not stage the raw text column. Planning has independent
+finite operation, abort, and cleanup deadlines, and cleanup is attempted after
+success, failure, timeout, or caller cancellation. The Spark client and
+cognition decoder reuse the same public 16 MiB Arrow IPC payload limit; the
+decoded protobuf message has one additional MiB of bounded envelope headroom.
+Normalized and contradiction keys remain content-derived rather than
+anonymized, so the Sail endpoint belongs inside the processing boundary
+authorized for that protected input.
+Arrow framing, schemas, declared rows, buffers, compressed expansion, result
+counts, and local reconciliation work are checked before Arrow result-array
+allocation and then rechecked against the complete result. The reference and
+Sail engines use the same deterministic planning functions, so input
+permutation and timestamp ties produce canonical output.
+
+Durability is a separate storage capability. `GraphCommitStore` combines exact
+node or absence expectations, a mutation batch, an idempotency digest, and a
+backend receipt in one transaction. Turso mints the receipt's canonical UTC
+RFC 3339 timestamp at nanosecond precision immediately before inserting that
+receipt into the same transaction. It is backend-issued transaction-boundary
+evidence, not a wall-clock observation taken after storage fsync, and recovery
+returns those exact persisted bytes or fails closed on malformed time. The
+cognition scheduler stores only scoped digests, issues bounded renewable bearer
+leases, persists only the canonical
+proposal digest, and survives reopen. During application, TypeSec supplies the
+opaque prepared commit; Grust atomically checks source revisions, applies its
+exact memory operations and ID-only index outbox, writes the audit record,
+persists the outcome, and completes the job. A no-change token has empty
+operations, affected IDs, and outbox, and retains the prior memory version, but
+the exact source guards, job, audit, outcome, and guarded ledger still commit
+as one decision. Recovery is read-only and cross-validates the job, audit,
+outcome, authority scope, optional governed source scope, proposal, effect, and
+backend receipt. Durable outcome schema version 3 requires TypeSec audit schema
+version 2, which carries the same typed effect, distinct grant and snapshot
+digests, and the trusted authority-revalidation and preparation times. Audit
+and commit-envelope digests use version-3 domains so this evidence layout
+cannot be confused with either predecessor. TypeSec owns scope
+selection and authoritative reload checks; Grust preserves that evidence and
+atomically enforces the prepared full-record preconditions. Tests exercise
+concurrent identical decisions and commit-then-response loss and prove that
+retry plus reopen retain exactly one job, audit record, outcome, guarded ledger,
+and the exact mutation/outbox shape required by the effect.
+
+The scheduler's `transitionedAt` is a caller-supplied logical transition time;
+for `Completed` it is explicitly the TypeSec audit's `preparedAt`. It is not a
+backend commit timestamp. A completed job's `completionDigest` is exactly the
+canonical TypeSec prepared digest for either effect, never the resulting memory
+version; this avoids collapsing no-change into an unchanged memory version.
+Recovery checks durable schema versions before deserialization, rejects
+incompatible historical outcome and audit layouts, and requires affected IDs
+to retain TypeSec's strict canonical order. Authoritative
+`committedAt` evidence exists only in the outcome and receipt, must be canonical
+RFC 3339, and cannot predate preparation. Grust rejects malformed or regressive
+backend time on initial return and recovery instead of substituting a timestamp
+from another phase.
+
+The scheduler and outbox APIs are storage primitives behind Marciana's
+authenticated scheduler and trusted worker pool. A worker intentionally need
+not equal the submitter, which lets expired work move safely, but canonical
+owner strings and scoped job keys are not credentials. Once issued, lease and
+claim tokens are bearer credentials for worker transitions. Marciana must
+authorize acquisition and cancellation and keep those tokens confidential;
+only a freshly prepared opaque TypeSec commit can authorize memory mutation.
+
+This is a native Grust, TypeSec, LakeCat, and Sail composition. Cognee supplied
+design inspiration only; no Cognee runtime, adapter, or storage dependency is
+present.
+
+The durable proof still has explicit limits. `MemoryId::next()` uses a
+process-local counter, so a restarted ordinary writer can collide with
+persisted `mem-N` identifiers; a hosted or multi-process service should mint
+collision-resistant IDs at its boundary. `VectorIndex` is not a persistent
+LanceDB ANN implementation, and memory predicates beyond space are not fully
+pushed into GQL. Cognition job idempotency does not replace durable TypeDID
+nonce replay protection shared across gateway replicas. Finally,
+vault-level tenant checks, restart persistence, and running-service conformance
+do not by themselves constitute a hosted multi-tenant service with quotas,
+migrations, backups, deletion propagation, and service-level objectives.
 
 ## Sail
 
@@ -1134,6 +1303,22 @@ deletion propagation, and service-level objectives.
 data in Spark DataFrames backed by Delta tables. SQL commands and reads are
 sent as Spark Connect SQL relation plans, and read results are decoded from
 Arrow IPC streams.
+
+Connection establishment validates the client configuration. The default
+`SailWarehouse::ServerManaged` policy does not set
+`spark.sql.warehouse.dir`; Sail's catalog and warehouse configuration remain
+authoritative, which is safe across a remote client boundary and does not
+silently select a new client-local persistence path. Co-located development
+can opt into `SailWarehouse::LocalSessionScoped`, which derives a path beneath
+the client's temporary directory from the session ID. Grust does not delete
+that directory; callers own cleanup, and reusing the session ID reuses the
+path. Durable callers can use `SailWarehouse::ExplicitPath` with a stable
+absolute path visible to the server; Grust sets and reads that override back
+through the same Spark Connect session. Reopening tables across sessions
+additionally requires Sail to provide persistent catalog metadata. If Sail's
+unconfigured warehouse fallback is the relative `spark-warehouse` path, the
+server needs an absolute setting or the client must select one of the explicit
+Grust overrides before creating managed Delta tables.
 
 Bulk writes stage Arrow IPC batches as Spark Connect `LocalRelation` temp views
 and then merge from those views. That avoids building one giant SQL literal per
@@ -1151,12 +1336,17 @@ IPC streams as session temp views and query them with Spark SQL, collect Spark
 SQL results as Arrow IPC chunks, or load Grust-shaped node and edge IPC streams
 through the normal graph write path. This gives Sail the same data-source role
 as Ladybug while keeping Sail's internal Arrow 58 dependency separate from
-Ladybug's Arrow 55 dependency.
+Ladybug's Arrow 55 dependency. Staged views can be dropped through a validated,
+idempotent helper, allowing protected batch inputs to be cleaned up on success,
+execution failure, or an uncertain retry.
 
 When a schema is applied, Sail creates typed Delta tables per node and edge
 label and mirrors writes into them with `MERGE INTO`. The universal Spark
 tables keep traversal simple and portable; the typed tables make declared graph
-labels available as ordinary Spark columns.
+labels available as ordinary Spark columns. Their declared names survive table
+creation, while Delta constraints reject null structural node and edge
+identities. Constraint-registry values likewise enter through staged Arrow
+rather than SQL string interpolation.
 
 Sail also has reusable graph analytics helpers over the persisted generic
 tables. `read_graph` collects the generic `grust_nodes` and `grust_edges`
@@ -1190,7 +1380,13 @@ Writable Cypher is not a separate Sail persistence path. The portable Cypher/GQL
 The FalkorDB backend writes through Redis `GRAPH.QUERY` using Cypher-like
 `MERGE` statements. It batches nodes by label path and edges by relationship
 type. Schema application creates label/property indexes for declared node
-types.
+types. Configurable identity-property names and generated labels,
+relationships, and properties are validated before Cypher construction.
+Property names retain their physical spelling through backtick quoting where
+FalkorDB permits it; unsafe delimiters and normalized-name collisions within a
+schema or complete graph load fail closed. The configured structural ID wins
+over property-map data, and connection-pool/query failures do not render the
+Redis URL or credentials.
 
 The HelixDB backend has HTTP and SDK stores. Both support batched writes, node
 reads, edge reads, and backend-neutral traversal through Helix dynamic queries.
@@ -1201,7 +1397,11 @@ properties instead of silently dropping non-string values; unsupported JSON
 object properties return an explicit error. The current schema hook validates
 that labels, relationships, and fields can be safely lowered through the
 dynamic-query path; backend-native schema-file generation can build on that same
-`GraphSchema` contract later.
+`GraphSchema` contract later. Schema and graph preflight also reject normalized
+relationship collisions and attempts to declare or write the structural
+`id`/label and edge-metadata fields. Both HTTP and SDK graph loads validate all
+chunks before transport, and transport failures omit configured URLs and their
+embedded credentials or query strings.
 
 The SurrealDB backend also has HTTP and SDK stores. It can bootstrap, clear,
 upsert nodes, relate edges, delete nodes and edges, read nodes and edges, and
@@ -1216,6 +1416,13 @@ silently scanning no relation tables. Explicit edge-label reads and deletes can
 still target a known relation table directly. Traversal batches target-node
 reads per step through `get_nodes`, avoiding a serial node lookup for every
 edge in a fan-out. Mutation batches are wrapped in SurrealDB transactions.
+SurrealDB 3.2 identifiers are quoted without lossy property-name rewriting.
+Configuration, schema fields, normalized node/relation table claims, reserved
+storage fields, and complete graph batches validate before bootstrap or write
+I/O. Optional Grust edge IDs are stored separately as `edge_id`; node `id` and
+`labels`, relation `in`/`out`, and internal metadata cannot be overwritten by
+user properties. HTTP and WebSocket failures omit URL userinfo and query
+secrets.
 
 ## CocoIndex
 
@@ -1264,6 +1471,56 @@ Docker Compose where a service is available. The repository-level
 `docs/INTEGRATION.md` guide covers profiles, modes, Docker image pins,
 source-checkout configuration, and CI strategy.
 
+Prawn's dependency qualification moves the Redis client to 1.6.0 and the
+FalkorDB service to v4.20.4, the SurrealDB Rust SDK and service to 3.2.4 with
+reqwest 0.13.4, pgGraph's service to 1.2.0, tokio-postgres to 0.7.18, and Turso
+from a prerelease to stable 0.7.2. These are tested compatibility updates, not
+new claims that every adapter implements the portable Cypher executor.
+
+Two attempted upgrades remain intentionally held. LanceDB stays at 0.30.0:
+the attempted 0.38.0 default-feature local build fails within upstream
+`lancedb` because `job.rs` references the remote-only `Error::Http` variant
+when `remote` is disabled. The unpublished Helix adapter stays at exact
+`helix-db` 2.0.0: 3.0.0 removed `DynamicQueryRequest` and `dynamic_query`,
+changed `Client::query`, and targets `/v2/query`, while the checked Helix v3.0.1
+server still exposes `/v1/query`. The repository's
+`benchmarks/lsqb/BACKENDS.md` records the full qualification matrix and live
+gate evidence.
+
+## LSQB Compatibility Microbenchmark
+
+The repository also carries a Docker-reproducible compatibility workload in
+[`benchmarks/lsqb`](https://github.com/querygraph/grust/tree/main/benchmarks/lsqb).
+The unmodified upstream side pins Graph Data Council LSQB commit
+`242cb2fd31340ca688954cb94794d74c0d5b6f92`, LadybugDB 0.19.0, and a
+digest-pinned Python 3.12.11 container. Across five repetitions of LSQB's small
+`sfexample` graph—28 nodes and 72 edges—all nine query counts match the
+upstream oracles: 8, 3, 6, 8, 3, 8, 11, 2, and 4, for 45/45 successful checks.
+
+The Grust compatibility adapter is kept separate from those unchanged scripts.
+It is configured to reload the same fixture for each of five repetitions on
+Memory, Turso, and PostgreSQL 18.6. The separately labeled adversari.al
+extension has 17 attacks with two expectation models: eight exact-count queries
+exercise rewrite, optional-match, range-expansion, Cartesian-product, and union
+boundaries on each backend, while nine backend-neutral negative cases must be
+rejected for unbounded paths, excessive range allocation or candidate work,
+updating-clause smuggling, forbidden procedures, excess UNION arms,
+intermediate projection amplification, correlated subquery replanning, and
+correlated catalog rescans. Each
+backend cell therefore has 17 count oracles—the nine LSQB-derived queries plus
+eight adversarial count queries—while policy is reported once as its own track.
+Tracked evidence covers the unchanged upstream 45/45 run and clean Grust
+revision `2680c451`: all 135 LSQB-derived compatibility observations, all 120
+adversarial count observations, and all nine bounded-policy rejections passed.
+This is a conformance and reproducibility microbenchmark over an example
+dataset, not a performance ranking. LSQB is maintained by the Graph Data
+Council but is not an official LDBC benchmark.
+
+These are not LDBC Benchmark Results.
+
+Detailed evidence and future workloads belong at the durable
+[adversari.al graph benchmark hub](https://adversari.al/graph).
+
 # 9. Cypher and GQL
 
 The property graph model so far is a Rust API: builders, traversals, and the
@@ -1299,6 +1556,22 @@ the `RETURN` projection still runs through the shared reference. Pushed results
 are therefore identical to the reference *by construction*, and an embedded-SQLite
 differential oracle checks reference-vs-pushdown row equality on every change.
 
+Applications that intentionally expose a small read-only surface can use
+`ReadQueryPolicy`, `validate_read_query`, and `run_bounded_read_query`. This is
+more than a final `LIMIT`: the parser-backed gate rejects updating and unsafe
+query shapes, while the in-memory reference executor enforces serialized query,
+parameter, graph, and output sizes; node and edge counts; cumulative candidate
+scan and expansion work; cumulative intermediate bytes; result rows; range
+allocation; cumulative path hops; and a cooperative wall-clock timeout. The
+intermediate budget accounts cloned bindings, expression and aggregate results,
+and DISTINCT/GROUP keys before a final `LIMIT`. Scalar and table-valued ranges also keep
+a library-wide `MAX_RANGE_ITEMS` ceiling. Correlated `CALL { ... }` subqueries
+charge every repeated node/adjacency index build, and catalog procedures charge
+each graph scan, so an outer row cannot reset that work or its deadline.
+Authorization, tenant-safe graph projection, remote-backend deadlines, and
+process isolation remain the host's responsibility; the cooperative timeout is
+not an operating-system hard kill.
+
 ## Values, procedures, transactions, writes
 
 The value model gains first-class lossless `Decimal` (SQL `DECIMAL`-style) and
@@ -1333,11 +1606,13 @@ and cross-variable correlated `SET`.
 
 What the layer claims to support is stated precisely in
 `docs/GQL_PROFILE_STATEMENT.md`: the realized profile is the set of `Supported`
-features — as of the Full39075 completion goal that is the **full ISO/IEC 39075
-profile**, with the only non-supported manifest entries being five intentional
-strict-write rejections (conformance guards, not gaps). A test pins that
-scoped-out set to the feature manifest, so the documentation and the code cannot
-drift apart.
+features in Grust's scoped manifest. The internal profile is named
+`Full39075`, but it is not a claim of complete ISO/IEC 39075 certification or
+uniform backend execution. Sixty-nine of the 74 Grust-catalogued features are
+implemented; the other five are intentional strict-write rejections. A test
+pins that scoped-out set to the feature manifest, while backend descriptors and
+integration tests record which execution paths are reference, pushed, native,
+or unsupported.
 
 # 10. Example: A Conference Graph
 
@@ -1467,7 +1742,7 @@ flowchart LR
   presentedBy --> ada["Person\nperson:ada"]
 ```
 
-# 10. Schema and Validation Direction
+# 11. Schema and Validation Direction
 
 Grust has schema types: `GraphSchema`, `NodeType`, `EdgeType`, `Field`,
 `FieldType`, `EdgeUniqueness`, and `GraphConstraint`. `GraphSchema` validates
@@ -1525,12 +1800,49 @@ A flexible backend can keep universal node and edge tables as the portable
 interchange surface. A typed backend can add native tables, fields, indexes, or
 constraints behind the same `GraphStore` trait.
 
+## Semantic Model Projection
+
+The public facade can also project a versioned semantic model into this same
+property-graph shape. `SemanticModelProjection` describes datasets, their
+fields and physical sources, metrics, and named relationships, bound to a
+positive model version and SHA-256 source-artifact identity.
+
+`semantic_model_graph` validates nonempty normalized names, SHA-256 formats,
+dataset references, and per-scope uniqueness before construction. It uses
+length-prefixed identity components so punctuation cannot alias a structural
+separator. Every containment and dataset-relationship edge has an explicit
+stable ID; therefore two differently named semantic relationships between the
+same dataset pair survive as distinct edges instead of being collapsed by the
+ordinary builder's structural deduplication policy. That statement describes
+the constructed `Graph`. Persistence keeps both only on backends that support
+explicit edge IDs; structurally keyed stores collapse edges with the same
+source, label, and destination.
+
+The output does not introduce a special semantic storage protocol. It is an
+ordinary `Graph` containing `SemanticModel`, `SemanticDataset`,
+`SemanticField`, and `SemanticMetric` nodes plus containment and
+`RELATES_DATASET` edges. It can be replay-compared, queried through the
+reference engine, or persisted through any backend that supports those ordinary
+graph operations, subject to that backend's documented multi-edge capability.
+Artifact-specific adapters remain responsible for parsing a source file and
+computing the hash supplied to the projection.
+
+The conformance fixture is not synthetic: the test loads the packaged Apache
+Ossie TPC-DS YAML from upstream commit
+`ddb19f1b135a61c65603f4823a3526e2fab00cf1`, verifies SHA-256
+`bafbdc9d0e304ab22a40592f2b6bdfd45cc399c566533cd71343d33380c0d6e1`,
+parses the document, and replay-compares the resulting five datasets, 31
+fields, five metrics, and four relationships. The published `grust-graph`
+archive includes Apache Ossie's `NOTICE` and Apache-2.0 text beside that exact
+fixture. `scripts/verify-package-attribution.sh` inspects the generated crate
+archive so release packaging fails if any of those three files is absent.
+
 The key architectural point is that schema is metadata about a Grust graph, not
 a replacement for the graph. Application code can begin with plain graph
 construction, add schemas when operational needs demand it, and still speak the
 same store trait.
 
-# 11. Design Tradeoffs
+# 12. Design Tradeoffs
 
 The universal node/edge layout appears in multiple backend plans because it is
 the easiest way to preserve arbitrary property graphs:
@@ -1554,7 +1866,7 @@ Grust's current architecture keeps both paths open. Core stays universal.
 Backends choose their storage layout. Schema support can become richer without
 forcing every backend to look the same.
 
-# 12. Where Grust Can Grow
+# 13. Where Grust Can Grow
 
 The next natural step is to deepen graph-native read and traversal support
 across the backends. HelixDB, LadybugDB, and SurrealDB now satisfy the portable
@@ -1567,8 +1879,10 @@ returns, shortest paths, and aggregation are all tempting. The important rule is
 to extend the IR only when several backends can implement the concept without
 smuggling database-specific query strings through the abstraction.
 
-Incremental mutation now has a small extension trait for backends that can
-delete elements:
+Incremental mutation uses an extension trait for backends that can apply graph
+deltas. Its operation model starts with element upsert and deletion and also
+contains the typed node/edge patch, matched update, property removal, and
+row-producing operations used by the portable Cypher planner:
 
 ```rust
 pub enum GraphMutation {
@@ -1580,6 +1894,7 @@ pub enum GraphMutation {
         label: Label,
         to: NodeId,
     },
+    // Patch and matched-operation variants omitted here.
 }
 ```
 
@@ -1592,7 +1907,12 @@ method. The PostgreSQL and pgGraph stores wrap mutation batches in PostgreSQL
 transactions, Turso wraps them in a local SQL transaction (which
 `querygraph-memory` relies on for atomic supersede-and-replace consolidation),
 and the SurrealDB HTTP and SDK stores wrap mutation batches in SurrealDB
-transactions.
+transactions. PostgreSQL and Turso's non-returning Cypher plan executors also
+reject unsupported lowering before writing, then execute the supported
+operations in source order inside one isolated transaction. The generic
+write-with-`RETURN` helper remains sequential because later operations may use
+intermediate bindings; it is not a whole-statement atomicity boundary. Explicit
+transaction scripts batch supported mutations when atomicity is required.
 
 # Conclusion
 

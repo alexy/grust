@@ -46,12 +46,7 @@ impl FalkorGraphStore {
     }
 
     fn connection(&self) -> Result<PooledConnection<RedisConnectionManager>> {
-        self.pool.get().map_err(|err| {
-            GrustError::Backend(format!(
-                "failed to acquire FalkorDB Redis connection from pool for {}: {err}",
-                self.config.redis_url
-            ))
-        })
+        self.pool.get().map_err(|_| falkor_pool_error())
     }
 
     fn query<C>(&self, connection: &mut C, query: &str) -> Result<RedisValue>
@@ -62,7 +57,7 @@ impl FalkorGraphStore {
             .arg(&self.config.graph)
             .arg(query)
             .query::<RedisValue>(connection)
-            .map_err(|err| GrustError::Backend(format!("FalkorDB query failed: {query}: {err}")))
+            .map_err(|_| falkor_query_error())
     }
 
     /// Backend-native Cypher escape hatch (Full39075 F11): run `query` verbatim
@@ -100,28 +95,32 @@ impl ManageConnection for RedisConnectionManager {
 #[async_trait]
 impl GraphStore for FalkorGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        let queries = falkor_schema_queries(schema, &self.config)?;
         let mut connection = self.connection()?;
-        for query in falkor_schema_queries(schema, &self.config)? {
+        for query in queries {
             self.query(&mut connection, &query)?;
         }
         Ok(())
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
-        let mut connection = self.connection()?;
         let query = falkor_node_query(node, &self.config)?;
+        let mut connection = self.connection()?;
         self.query(&mut connection, &query)?;
         Ok(PutOutcome::Upserted)
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
-        let mut connection = self.connection()?;
         let query = falkor_edge_query(edge, &self.config)?;
+        let mut connection = self.connection()?;
         self.query(&mut connection, &query)?;
         Ok(PutOutcome::Upserted)
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        // Validate the entire graph before attempting a connection so a late
+        // unsafe label or property key cannot leave a partially written graph.
+        validate_falkor_graph(graph, &self.config)?;
         let mut connection = self.connection()?;
         let batch_size = self.config.batch_size.max(1);
         let mut report = LoadReport::default();
@@ -203,36 +202,38 @@ impl GraphAdminStore for FalkorGraphStore {
 fn falkor_node_query(node: &Node, config: &FalkorConfig) -> Result<String> {
     let labels = falkor_labels(node, config)?;
     validate_label_path(&labels)?;
+    let id_property = falkor_property_identifier(&config.id_property)?;
     Ok(format!(
         "MERGE (n:{} {{{}:{}}}) SET n += {}",
         labels,
-        config.id_property,
+        id_property,
         cypher_string(node.id.as_str()),
-        cypher_map(&node.props, config)
+        cypher_map(&node.props, config, true)?
     ))
 }
 
 fn falkor_edge_query(edge: &Edge, config: &FalkorConfig) -> Result<String> {
     let relationship = relationship_type(edge.label.as_str());
     validate_label(&relationship)?;
+    let id_property = falkor_property_identifier(&config.id_property)?;
     if edge.props.is_empty() {
         Ok(format!(
             "MATCH (a {{{}:{}}}), (b {{{}:{}}}) MERGE (a)-[:{}]->(b)",
-            config.id_property,
+            id_property,
             cypher_string(edge.from.as_str()),
-            config.id_property,
+            id_property,
             cypher_string(edge.to.as_str()),
             relationship
         ))
     } else {
         Ok(format!(
             "MATCH (a {{{}:{}}}), (b {{{}:{}}}) MERGE (a)-[r:{}]->(b) SET r += {}",
-            config.id_property,
+            id_property,
             cypher_string(edge.from.as_str()),
-            config.id_property,
+            id_property,
             cypher_string(edge.to.as_str()),
             relationship,
-            cypher_map(&edge.props, config)
+            cypher_map(&edge.props, config, false)?
         ))
     }
 }
@@ -242,21 +243,21 @@ fn falkor_nodes_batch_query(
     nodes: &[&Node],
     config: &FalkorConfig,
 ) -> Result<String> {
+    let id_property = falkor_property_identifier(&config.id_property)?;
     let rows = nodes
         .iter()
         .map(|node| {
             Ok(format!(
-                "{{{}:{},props:{}}}",
-                config.id_property,
+                "{{id:{},props:{}}}",
                 cypher_string(node.id.as_str()),
-                cypher_map(&node.props, config)
+                cypher_map(&node.props, config, true)?
             ))
         })
         .collect::<Result<Vec<_>>>()?
         .join(",");
     Ok(format!(
-        "UNWIND [{}] AS row MERGE (n:{} {{{}: row.{}}}) SET n += row.props",
-        rows, labels, config.id_property, config.id_property
+        "UNWIND [{}] AS row MERGE (n:{} {{{}: row.id}}) SET n += row.props",
+        rows, labels, id_property
     ))
 }
 
@@ -265,6 +266,7 @@ fn falkor_edges_batch_query(
     edges: &[&Edge],
     config: &FalkorConfig,
 ) -> Result<String> {
+    let id_property = falkor_property_identifier(&config.id_property)?;
     let rows = edges
         .iter()
         .map(|edge| {
@@ -272,36 +274,64 @@ fn falkor_edges_batch_query(
                 "{{from:{},to:{},props:{}}}",
                 cypher_string(edge.from.as_str()),
                 cypher_string(edge.to.as_str()),
-                cypher_map(&edge.props, config)
+                cypher_map(&edge.props, config, false)?
             ))
         })
         .collect::<Result<Vec<_>>>()?
         .join(",");
     Ok(format!(
         "UNWIND [{}] AS row MATCH (a {{{}: row.from}}), (b {{{}: row.to}}) MERGE (a)-[r:{}]->(b) SET r += row.props",
-        rows, config.id_property, config.id_property, relationship
+        rows, id_property, id_property, relationship
     ))
 }
 
 fn falkor_schema_queries(schema: &GraphSchema, config: &FalkorConfig) -> Result<Vec<String>> {
-    let mut queries = Vec::new();
+    let id_property = falkor_property_identifier(&config.id_property)?;
+    let mut claims = Vec::new();
     for node_type in &schema.nodes {
         let label = schema_identifier(node_type.label.as_str())?;
-        queries.push(format!(
-            "CREATE INDEX ON :{}({})",
-            label, config.id_property
+        claims.push((
+            "node label".to_string(),
+            label.clone(),
+            format!("node type '{}'", node_type.label.as_str()),
+        ));
+        let namespace = format!("property index on node label '{label}'");
+        claims.push((
+            namespace.clone(),
+            id_property.clone(),
+            format!("structural id property '{}'", config.id_property),
         ));
         for field in &node_type.fields {
-            queries.push(format!(
-                "CREATE INDEX ON :{}({})",
-                label,
-                schema_identifier(&field.name)?
+            let property = falkor_property_identifier(&field.name)?;
+            claims.push((
+                namespace.clone(),
+                property,
+                format!("node field '{}.{}'", node_type.label.as_str(), field.name),
             ));
         }
     }
     for edge_type in &schema.edges {
         let relationship = relationship_type(edge_type.label.as_str());
         validate_label(&relationship)?;
+        claims.push((
+            "relationship type".to_string(),
+            relationship,
+            format!("edge type '{}'", edge_type.label.as_str()),
+        ));
+    }
+    validate_physical_identifier_claims("FalkorDB", claims)?;
+
+    let mut queries = Vec::new();
+    for node_type in &schema.nodes {
+        let label = schema_identifier(node_type.label.as_str())?;
+        queries.push(format!("CREATE INDEX ON :{}({})", label, id_property));
+        for field in &node_type.fields {
+            queries.push(format!(
+                "CREATE INDEX ON :{}({})",
+                label,
+                falkor_property_identifier(&field.name)?
+            ));
+        }
     }
     Ok(queries)
 }
@@ -318,53 +348,122 @@ fn falkor_labels(node: &Node, config: &FalkorConfig) -> Result<String> {
         .map(|labels| labels.join(":"))
 }
 
-fn cypher_map(props: &Props, config: &FalkorConfig) -> String {
+fn validate_falkor_graph(graph: &Graph, config: &FalkorConfig) -> Result<()> {
+    falkor_property_identifier(&config.id_property)?;
+    let mut claims = Vec::new();
+    for node in &graph.nodes {
+        let logical_labels = node
+            .props
+            .get(&config.labels_property)
+            .and_then(Value::as_string_array)
+            .map(|labels| labels.iter().map(String::as_str).collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![node.label.as_str()]);
+        for logical in logical_labels {
+            claims.push((
+                "node label".to_string(),
+                schema_identifier(logical)?,
+                format!("node label '{logical}'"),
+            ));
+        }
+        let labels = falkor_labels(node, config)?;
+        validate_label_path(&labels)?;
+        cypher_map(&node.props, config, true)?;
+    }
+    for edge in &graph.edges {
+        let relationship = relationship_type(edge.label.as_str());
+        validate_label(&relationship)?;
+        claims.push((
+            "relationship type".to_string(),
+            relationship,
+            format!("edge label '{}'", edge.label.as_str()),
+        ));
+        cypher_map(&edge.props, config, false)?;
+    }
+    // Repeated records may intentionally share one logical label; collapse
+    // those identical claims while retaining lossy-normalization collisions.
+    claims.sort();
+    claims.dedup();
+    validate_physical_identifier_claims("FalkorDB graph", claims)?;
+    Ok(())
+}
+
+fn cypher_map(props: &Props, config: &FalkorConfig, reserve_id: bool) -> Result<String> {
     let body = props
         .iter()
-        .filter(|(key, _)| key.as_str() != config.labels_property)
-        .map(|(key, value)| match value {
-            Value::Null => format!("{key}:null"),
-            Value::Bool(value) => format!("{key}:{value}"),
-            Value::Int(value) => format!("{key}:{value}"),
-            Value::Float(value) => format!("{key}:{value}"),
-            Value::String(value) => format!("{key}:{}", cypher_string(value)),
-            Value::DateTime(value) => format!("{key}:{}", cypher_string(value.as_str())),
-            Value::Decimal(value) => {
-                format!("{key}:{}", cypher_string(&value.to_canonical_string()))
-            }
-            Value::Duration(value) => format!("{key}:{}", cypher_string(&value.to_iso_string())),
-            Value::IntArray(values) => format!(
-                "{key}:[{}]",
-                values
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            Value::FloatArray(values) => format!(
-                "{key}:[{}]",
-                values
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            Value::StringArray(values) => format!(
-                "{key}:[{}]",
-                values
-                    .iter()
-                    .map(|value| cypher_string(value))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            ),
-            Value::Path(_) | Value::Graph(_) => {
-                format!("{key}:{}", cypher_string(&value.to_json().to_string()))
-            }
-            Value::Json(value) => format!("{key}:{}", cypher_string(&value.to_string())),
+        .filter(|(key, _)| {
+            key.as_str() != config.labels_property
+                && (!reserve_id || key.as_str() != config.id_property)
         })
-        .collect::<Vec<_>>()
+        .map(|(key, value)| {
+            let key = falkor_property_identifier(key)?;
+            Ok(match value {
+                Value::Null => format!("{key}:null"),
+                Value::Bool(value) => format!("{key}:{value}"),
+                Value::Int(value) => format!("{key}:{value}"),
+                Value::Float(value) => format!("{key}:{value}"),
+                Value::String(value) => format!("{key}:{}", cypher_string(value)),
+                Value::DateTime(value) => format!("{key}:{}", cypher_string(value.as_str())),
+                Value::Decimal(value) => {
+                    format!("{key}:{}", cypher_string(&value.to_canonical_string()))
+                }
+                Value::Duration(value) => {
+                    format!("{key}:{}", cypher_string(&value.to_iso_string()))
+                }
+                Value::IntArray(values) => format!(
+                    "{key}:[{}]",
+                    values
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                Value::FloatArray(values) => format!(
+                    "{key}:[{}]",
+                    values
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                Value::StringArray(values) => format!(
+                    "{key}:[{}]",
+                    values
+                        .iter()
+                        .map(|value| cypher_string(value))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                Value::Path(_) | Value::Graph(_) => {
+                    format!("{key}:{}", cypher_string(&value.to_json().to_string()))
+                }
+                Value::Json(value) => format!("{key}:{}", cypher_string(&value.to_string())),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?
         .join(",");
-    format!("{{{body}}}")
+    Ok(format!("{{{body}}}"))
+}
+
+/// Quotes a FalkorDB property identifier without changing its physical name.
+///
+/// FalkorDB 4.20 accepts backtick-delimited spaces and punctuation, but does
+/// not accept openCypher's doubled-backtick escape. Rejecting backticks and
+/// control characters is therefore the conservative, injection-safe contract.
+fn falkor_property_identifier(value: &str) -> Result<String> {
+    if value.is_empty() || value.chars().any(|ch| ch == '`' || ch.is_control()) {
+        return Err(GrustError::Backend(format!(
+            "unsafe FalkorDB property identifier: {value:?}"
+        )));
+    }
+    Ok(format!("`{value}`"))
+}
+
+fn falkor_pool_error() -> GrustError {
+    GrustError::Backend("failed to acquire FalkorDB Redis connection from pool".to_string())
+}
+
+fn falkor_query_error() -> GrustError {
+    GrustError::Backend("FalkorDB query failed".to_string())
 }
 
 fn cypher_string(value: &str) -> String {

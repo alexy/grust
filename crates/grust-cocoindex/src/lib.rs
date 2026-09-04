@@ -62,6 +62,11 @@ pub fn cocoindex_export_to_graph(export: CocoIndexGraphExport) -> Result<Graph> 
 }
 
 pub fn graph_to_cocoindex_export(graph: &Graph) -> Result<CocoIndexGraphExport> {
+    // Reject every ambiguous relationship identity before constructing any
+    // portion of the target-state export.
+    for edge in &graph.edges {
+        validate_edge_key_components(edge)?;
+    }
     let labels = graph
         .nodes
         .iter()
@@ -129,7 +134,7 @@ pub fn edge_to_state(
             label: target_label.as_str().to_string(),
             key: id_key(edge.to.as_str()),
         },
-        key: id_key(&edge_key(edge)),
+        key: id_key(&checked_edge_key(edge)?),
         properties: props_to_json_object(&edge.props)?,
     })
 }
@@ -147,10 +152,11 @@ pub fn edge_from_state(
     let edge_key_id = id_from_key(&relationship.key, "relationship")?;
     let props = props_from_json_object(relationship.properties);
     let mut edge = Edge::new(label, from, to, props);
-    let structural_key = edge_key(&edge);
+    let structural_key = checked_edge_key(&edge)?;
     if edge_key_id.as_str() != structural_key {
         edge.id = Some(EdgeId::new(edge_key_id.into_string()));
     }
+    validate_edge_key_components(&edge)?;
     Ok(edge)
 }
 
@@ -333,6 +339,35 @@ mod tests {
     }
 
     #[test]
+    fn export_rejects_ambiguous_and_explicit_delimiter_edge_keys() {
+        let first = Edge::new("b\u{1f}c", "a", "d", Props::new());
+        let second = Edge::new("c", "a\u{1f}b", "d", Props::new());
+        assert_eq!(edge_key(&first), edge_key(&second));
+
+        let graph = Graph::new(
+            vec![
+                Node::new("Node", "a", Props::new()),
+                Node::new("Node", "a\u{1f}b", Props::new()),
+                Node::new("Node", "d", Props::new()),
+            ],
+            vec![first, second],
+        );
+        let error = graph
+            .to_cocoindex_export()
+            .expect_err("ambiguous structural keys must not be exported");
+        assert!(error.to_string().contains("U+001F"));
+
+        let explicit = Graph::new(
+            vec![
+                Node::new("Node", "a", Props::new()),
+                Node::new("Node", "d", Props::new()),
+            ],
+            vec![Edge::new("KNOWS", "a", "d", Props::new()).with_id("edge\u{1f}one")],
+        );
+        assert!(explicit.to_cocoindex_export().is_err());
+    }
+
+    #[test]
     fn export_allows_graph_with_zero_edges() {
         let graph = Graph::new(
             vec![Node::new("Person", "person:ada", Props::new())],
@@ -408,6 +443,41 @@ mod tests {
         let graph = cocoindex_export_to_graph(export).expect("import");
 
         assert_eq!(graph.edges[0].id, Some(EdgeId::new("rsvp:1")));
+    }
+
+    #[test]
+    fn import_rejects_explicit_relationship_key_with_delimiter() {
+        let export = CocoIndexGraphExport {
+            nodes: vec![
+                CocoIndexNodeState {
+                    label: "Person".to_string(),
+                    key: id_key("person:ada"),
+                    properties: JsonMap::new(),
+                },
+                CocoIndexNodeState {
+                    label: "Event".to_string(),
+                    key: id_key("event:123"),
+                    properties: JsonMap::new(),
+                },
+            ],
+            relationships: vec![CocoIndexRelationshipState {
+                rel_type: "RSVPED".to_string(),
+                source: CocoIndexEndpoint {
+                    label: "Person".to_string(),
+                    key: id_key("person:ada"),
+                },
+                target: CocoIndexEndpoint {
+                    label: "Event".to_string(),
+                    key: id_key("event:123"),
+                },
+                key: id_key("rsvp\u{1f}1"),
+                properties: JsonMap::new(),
+            }],
+        };
+
+        let error = cocoindex_export_to_graph(export)
+            .expect_err("ambiguous explicit relationship key must fail import");
+        assert!(error.to_string().contains("U+001F"));
     }
 
     #[test]

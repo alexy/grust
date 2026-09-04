@@ -3,13 +3,11 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-use arrow::array::Array as _;
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field as ArrowField, Schema as ArrowSchema};
 use arrow::ipc::reader::StreamReader;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use grust_core::prelude::*;
 use tonic::transport::Channel;
 
 use super::*;
@@ -23,7 +21,11 @@ async fn store() -> SailGraphStore {
         sail_available(),
         "live Sail integration tests require a Sail server on 127.0.0.1:50051; run scripts/integration-test.sh --backend sail"
     );
-    let store = SailGraphStore::connect(SailConfig::default())
+    let config = SailConfig {
+        warehouse: SailWarehouse::LocalSessionScoped,
+        ..SailConfig::default()
+    };
+    let store = SailGraphStore::connect(config)
         .await
         .expect("connect to Sail");
     store.bootstrap().await.expect("bootstrap Sail tables");
@@ -63,6 +65,20 @@ fn query_string_rows(chunks: Vec<Vec<u8>>, columns: usize) -> Vec<Vec<String>> {
         }
     }
     rows
+}
+
+async fn cypher_rows(store: &SailGraphStore, query: &str) -> Vec<Vec<Value>> {
+    store
+        .run_read_query(query, &CypherParameters::new())
+        .await
+        .expect("run Cypher read")
+        .rows
+}
+
+fn string_value_rows(rows: &[&[&str]]) -> Vec<Vec<Value>> {
+    rows.iter()
+        .map(|row| row.iter().map(|value| Value::from(*value)).collect())
+        .collect()
 }
 
 fn ipc_bytes(batch: &RecordBatch) -> Result<Vec<u8>> {
@@ -113,20 +129,40 @@ fn person_schema() -> GraphSchema {
         .build()
 }
 
+fn person_schema_with_declared_identity() -> GraphSchema {
+    GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::required("id", FieldType::String),
+                Field::required("name", FieldType::String),
+            ],
+        )
+        .build()
+}
+
 #[test]
 fn schema_sql_creates_typed_delta_tables() {
     let sql = sail_schema_sql(&person_schema()).unwrap();
 
-    assert!(sql.iter().any(|statement| statement.contains(
-        "CREATE TABLE IF NOT EXISTS grust_node_person (id STRING NOT NULL, `name` STRING, `age` BIGINT) USING delta"
-    )));
+    assert!(sql.iter().any(|statement| {
+        statement.contains("CREATE TABLE IF NOT EXISTS grust_node_person USING delta")
+            && statement.contains("CAST(NULL AS STRING) AS id")
+            && statement.contains("CAST(NULL AS STRING) AS `name`")
+            && statement.contains("CAST(NULL AS BIGINT) AS `age`")
+            && statement.contains("'delta.constraints.grust_node_id_not_null'")
+            && statement.contains("'`id` IS NOT NULL'")
+    }));
     assert!(sql.iter().any(|statement| {
         statement.contains("'grust.graph.kind' = 'node'")
             && statement.contains("'grust.graph.label' = 'Person'")
     }));
     assert!(sql.iter().any(|statement| {
         statement.contains("CREATE TABLE IF NOT EXISTS grust_edge_presents")
-            && statement.contains("`source` STRING")
+            && statement.contains("CAST(NULL AS STRING) AS `source`")
+            && statement.contains("'delta.constraints.grust_edge_key_not_null'")
+            && statement.contains("'delta.constraints.grust_edge_src_id_not_null'")
+            && statement.contains("'delta.constraints.grust_edge_dst_id_not_null'")
     }));
     assert!(sql.iter().any(|statement| {
         statement.contains("'grust.graph.kind' = 'edge'")
@@ -169,6 +205,47 @@ fn graph_schema_typed_table_contract_is_public() {
 }
 
 #[test]
+fn typed_schema_rejects_normalized_table_and_column_collisions() {
+    let table_collision = GraphSchema::builder()
+        .node("a-b", Vec::new())
+        .node("a_b", Vec::new())
+        .build();
+    let error = sail_graph_schema_typed_tables(&table_collision)
+        .expect_err("colliding typed table names must fail");
+    assert!(error.to_string().contains("grust_node_a_b"));
+
+    let column_collision = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::optional("given-name", FieldType::String),
+                Field::optional("given_name", FieldType::String),
+            ],
+        )
+        .build();
+    let error = sail_graph_schema_typed_tables(&column_collision)
+        .expect_err("colliding typed column names must fail");
+    assert!(error.to_string().contains("given_name"));
+
+    let duplicate_label = GraphSchema::builder()
+        .node("Person", Vec::new())
+        .node("Person", Vec::new())
+        .build();
+    assert!(sail_graph_schema_typed_tables(&duplicate_label).is_err());
+
+    let duplicate_identity = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                Field::required("id", FieldType::String),
+                Field::required("id", FieldType::String),
+            ],
+        )
+        .build();
+    assert!(sail_graph_schema_typed_tables(&duplicate_identity).is_err());
+}
+
+#[test]
 fn typed_node_merge_extracts_fields_from_staged_json() {
     let schema = person_schema();
     let node_type = schema.node_type(&Label::new("Person")).unwrap();
@@ -179,6 +256,44 @@ fn typed_node_merge_extracts_fields_from_staged_json() {
     assert!(sql.contains("FROM grust_stage_nodes s WHERE s.label = 'Person'"));
     assert!(sql.contains("GET_JSON_OBJECT(s.props, '$.name') AS `name`"));
     assert!(sql.contains("CAST(GET_JSON_OBJECT(s.props, '$.age') AS BIGINT) AS `age`"));
+}
+
+#[test]
+fn typed_node_identity_field_reuses_the_structural_column() {
+    let schema = person_schema_with_declared_identity();
+    let node_type = schema.node_type(&Label::new("Person")).unwrap();
+
+    assert_eq!(sail_typed_node_columns(node_type).unwrap(), ["id", "name"]);
+
+    let schema_sql = sail_schema_sql(&schema).unwrap();
+    let node_sql = schema_sql
+        .iter()
+        .find(|statement| statement.contains("grust_node_person"))
+        .unwrap();
+    assert_eq!(node_sql.matches("CAST(NULL AS STRING) AS id").count(), 1);
+    assert!(!node_sql.contains("AS `id`"));
+
+    let merge_sql = typed_node_merge_from_view_sql(node_type).unwrap();
+    assert_eq!(merge_sql.matches("s.id AS id").count(), 1);
+    assert!(!merge_sql.contains("GET_JSON_OBJECT(s.props, '$.id')"));
+    assert!(merge_sql.contains("INSERT (id, `name`) VALUES (s.id, s.`name`)"));
+}
+
+#[test]
+fn typed_node_identity_field_requires_string_type() {
+    let schema = GraphSchema::builder()
+        .node("Person", vec![Field::required("id", FieldType::Int)])
+        .build();
+    let node_type = schema.node_type(&Label::new("Person")).unwrap();
+
+    let error = sail_typed_node_columns(node_type).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("typed Sail node identity field 'id' must use FieldType::String")
+    );
+    assert!(sail_schema_sql(&schema).is_err());
+    assert!(typed_node_merge_from_view_sql(node_type).is_err());
 }
 
 #[test]
@@ -323,6 +438,19 @@ fn staged_edge_batch_preserves_explicit_arrow_edge_id() {
 }
 
 #[test]
+fn staged_edge_batch_rejects_ambiguous_and_explicit_delimiter_keys() {
+    let node_labels = std::collections::BTreeMap::new();
+    let first = Edge::new("b\u{1f}c", "a", "d", Props::new());
+    let second = Edge::new("c", "a\u{1f}b", "d", Props::new());
+    assert_eq!(edge_key(&first), edge_key(&second));
+    assert!(edges_record_batch(&[first], &node_labels).is_err());
+    assert!(edges_record_batch(&[second], &node_labels).is_err());
+
+    let explicit = Edge::new("KNOWS", "a", "d", Props::new()).with_id("edge\u{1f}one");
+    assert!(edges_record_batch(&[explicit], &node_labels).is_err());
+}
+
+#[test]
 fn generic_edge_arrow_results_preserve_explicit_edge_id() {
     let schema = Arc::new(ArrowSchema::new(vec![
         ArrowField::new("id", DataType::Utf8, true),
@@ -449,16 +577,31 @@ fn sql_str_escapes_backslashes_and_quotes() {
 }
 
 #[test]
-fn cypher_constraint_registry_sql_escapes_values() {
+fn cypher_constraint_registry_staging_preserves_values() {
     let create = create_cypher_constraint_registry_table_sql();
     assert!(create.contains(CYPHER_CONSTRAINT_REGISTRY_TABLE));
-    assert!(create.contains("registry_json STRING NOT NULL"));
+    assert!(create.contains("CAST(NULL AS STRING) AS registry_json"));
+    assert!(create.contains("'delta.constraints.grust_registry_name_not_null'"));
+    assert!(create.contains("'delta.constraints.grust_registry_json_not_null'"));
 
-    let upsert =
-        upsert_cypher_constraint_registry_sql("default's", r#"{"name":"person's"}"#).unwrap();
+    let batch =
+        cypher_constraint_registry_record_batch("default's", r#"{"name":"person's"}"#).unwrap();
+    let names = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    let registries = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(names.value(0), "default's");
+    assert_eq!(registries.value(0), r#"{"name":"person's"}"#);
+
+    let upsert = upsert_cypher_constraint_registry_sql();
     assert!(upsert.contains("MERGE INTO grust_cypher_constraint_registry AS t"));
-    assert!(upsert.contains("'default''s' AS name"));
-    assert!(upsert.contains(r#"'{"name":"person''s"}' AS registry_json"#));
+    assert!(upsert.contains("USING grust_stage_constraint_registry AS s"));
 
     let select = select_cypher_constraint_registry_sql("default's").unwrap();
     assert_eq!(
@@ -466,7 +609,7 @@ fn cypher_constraint_registry_sql_escapes_values() {
         "SELECT registry_json FROM grust_cypher_constraint_registry WHERE name = 'default''s' LIMIT 1"
     );
 
-    assert!(upsert_cypher_constraint_registry_sql(" ", "{}").is_err());
+    assert!(cypher_constraint_registry_record_batch(" ", "{}").is_err());
     assert!(select_cypher_constraint_registry_sql("").is_err());
 }
 
@@ -1118,7 +1261,7 @@ async fn test_execute_cypher_mutations() {
 
     let report = store
         .execute_cypher_mutation(
-            "DELETE (:Person {id: 'person-1'})-[:KNOWS]->(:Person {id: 'person-2'})",
+            "MATCH (:Person {id: 'person-1'})-[e:KNOWS]->(:Person {id: 'person-2'}) DELETE e",
         )
         .await
         .expect("delete edge");
@@ -1144,7 +1287,7 @@ async fn test_execute_cypher_mutations() {
     );
 
     let report = store
-        .execute_cypher_mutation("DELETE (:Person {id: 'person-1'})")
+        .execute_cypher_mutation("MATCH (n:Person {id: 'person-1'}) DELETE n")
         .await
         .expect("delete node");
     assert_eq!(
@@ -1253,6 +1396,7 @@ async fn test_execute_cypher_row_producing_match_create_and_merge_edges() {
             matched_rows: 1,
             changed_edges: 1,
             edge_upserts: 1,
+            edge_inserts: 1,
             ..GraphMutationReport::default()
         }
     );
@@ -1273,6 +1417,7 @@ async fn test_execute_cypher_row_producing_match_create_and_merge_edges() {
             matched_rows: 4,
             changed_edges: 4,
             edge_upserts: 4,
+            edge_inserts: 4,
             ..GraphMutationReport::default()
         }
     );
@@ -1293,6 +1438,7 @@ async fn test_execute_cypher_row_producing_match_create_and_merge_edges() {
             matched_rows: 4,
             changed_edges: 4,
             edge_upserts: 4,
+            edge_updates: 4,
             ..GraphMutationReport::default()
         }
     );
@@ -1358,6 +1504,7 @@ async fn test_execute_cypher_returning_row_producing_edges() {
             matched_rows: 2,
             changed_edges: 2,
             edge_upserts: 2,
+            edge_inserts: 2,
             ..GraphMutationReport::default()
         }
     );
@@ -1511,7 +1658,7 @@ async fn test_execute_cypher_returning_broad_match_delete_edges() {
             CREATE (:Person {id: 'bob', status: 'active'});
             CREATE (:Person {id: 'eve', status: 'inactive'});
             CREATE (:Person {id: 'ada'})-[e:KNOWS {id: 'edge-1', weight: 3}]->(:Person {id: 'bob'});
-            CREATE (:Person {id: 'ada'})-[e:KNOWS {id: 'edge-2', weight: 7}]->(:Person {id: 'eve'});
+            CREATE (:Person {id: 'ada'})-[other:KNOWS {id: 'edge-2', weight: 7}]->(:Person {id: 'eve'});
             ",
         )
         .await
@@ -2307,76 +2454,62 @@ async fn test_cypher_match_over_grust_backend_tables() {
 
     store.put_graph(&graph).await.expect("put graph");
 
-    let outgoing = query_string_rows(
-        store
-            .query_arrow_ipc(
-                "MATCH (a:Person {age: '42'})-[e:KNOWS {since: '2020'}]->(b:Person) \
-                 RETURN a.id, e.id, b.name \
-                 ORDER BY b.name",
-            )
-            .await
-            .expect("outgoing Cypher query"),
-        3,
+    let outgoing = cypher_rows(
+        &store,
+        "MATCH (a:Person {age: '42'})-[e:KNOWS {since: '2020'}]->(b:Person) \
+         RETURN a.id, id(e), b.name \
+         ORDER BY b.name",
+    )
+    .await;
+    assert_eq!(
+        outgoing,
+        string_value_rows(&[&["person-1", "edge-1", "Bob"]])
     );
-    assert_eq!(outgoing, vec![vec!["person-1", "edge-1", "Bob"]]);
 
-    let incoming = query_string_rows(
-        store
-            .query_arrow_ipc(
-                "MATCH (a)<-[e]-(b) \
-                 RETURN a.id, e.id, b.id \
-                 ORDER BY e.id",
-            )
-            .await
-            .expect("incoming Cypher query"),
-        3,
-    );
+    let incoming = cypher_rows(
+        &store,
+        "MATCH (a)<-[e]-(b) \
+         RETURN a.id, id(e), b.id \
+         ORDER BY id(e)",
+    )
+    .await;
     assert_eq!(
         incoming,
-        vec![
-            vec!["person-2", "edge-1", "person-1"],
-            vec!["person-1", "edge-2", "person-2"],
-            vec!["person-2", "edge-3", "doc-1"],
-        ]
+        string_value_rows(&[
+            &["person-2", "edge-1", "person-1"],
+            &["person-1", "edge-2", "person-2"],
+            &["person-2", "edge-3", "doc-1"],
+        ])
     );
 
-    let undirected = query_string_rows(
-        store
-            .query_arrow_ipc(
-                "MATCH (a)-[e]-(b) \
-                 RETURN a.id, e.id, b.id \
-                 ORDER BY e.id, a.id",
-            )
-            .await
-            .expect("undirected Cypher query"),
-        3,
-    );
+    let undirected = cypher_rows(
+        &store,
+        "MATCH (a)-[e]-(b) \
+         RETURN a.id, id(e), b.id \
+         ORDER BY id(e), a.id",
+    )
+    .await;
     assert_eq!(
         undirected,
-        vec![
-            vec!["person-1", "edge-1", "person-2"],
-            vec!["person-2", "edge-1", "person-1"],
-            vec!["person-1", "edge-2", "person-2"],
-            vec!["person-2", "edge-2", "person-1"],
-            vec!["doc-1", "edge-3", "person-2"],
-            vec!["person-2", "edge-3", "doc-1"],
-        ]
+        string_value_rows(&[
+            &["person-1", "edge-1", "person-2"],
+            &["person-2", "edge-1", "person-1"],
+            &["person-1", "edge-2", "person-2"],
+            &["person-2", "edge-2", "person-1"],
+            &["doc-1", "edge-3", "person-2"],
+            &["person-2", "edge-3", "doc-1"],
+        ])
     );
 
-    let limit_all = query_string_rows(
-        store
-            .query_arrow_ipc(
-                "MATCH (a:Person)-->(b:Person) \
-                 RETURN b.name \
-                 ORDER BY b.name \
-                 SKIP 1 \
-                 LIMIT ALL",
-            )
-            .await
-            .expect("LIMIT ALL Cypher query"),
-        1,
-    );
-    assert_eq!(limit_all, vec![vec!["Bob"]]);
+    let after_skip = cypher_rows(
+        &store,
+        "MATCH (a:Person)-->(b:Person) \
+         RETURN b.name \
+         ORDER BY b.name \
+         SKIP 1",
+    )
+    .await;
+    assert_eq!(after_skip, string_value_rows(&[&["Bob"]]));
 }
 
 #[tokio::test]

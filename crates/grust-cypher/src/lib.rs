@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use grust_core::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -35,7 +35,11 @@ mod catalog;
 pub use catalog::{CypherCatalogSnapshot, NamedGraphCatalog, cypher_catalog_procedure};
 pub mod pushdown;
 pub mod read;
+mod read_budget;
+pub mod read_policy;
 pub use read::run_read_query_on_named_graph;
+pub use read_budget::MAX_RANGE_ITEMS;
+pub use read_policy::{ReadQueryPolicy, run_bounded_read_query, validate_read_query};
 pub mod semantics;
 pub mod session;
 pub mod transaction;
@@ -66,45 +70,30 @@ pub enum CypherCreateMode {
     ErrorIfExists,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CypherNodeIdPolicy {
+    #[default]
     ExplicitOnly,
     GenerateForCreate,
 }
 
-impl Default for CypherNodeIdPolicy {
-    fn default() -> Self {
-        Self::ExplicitOnly
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CypherRelationshipIdPolicy {
+    #[default]
     ExplicitOnly,
     GenerateForRowCreate,
     GenerateForRowCreateAndMerge,
 }
 
-impl Default for CypherRelationshipIdPolicy {
-    fn default() -> Self {
-        Self::ExplicitOnly
-    }
-}
-
 pub type CypherParameters = BTreeMap<String, Value>;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum CypherNullAssignment {
     /// Preserve Grust's value model: `SET n.key = null` stores `Value::Null`.
+    #[default]
     StoreNull,
     /// Cypher-compatibility mode: `SET n.key = null` lowers to `REMOVE n.key`.
     RemoveProperty,
-}
-
-impl Default for CypherNullAssignment {
-    fn default() -> Self {
-        Self::StoreNull
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -1570,7 +1570,7 @@ mod tests {
 
     #[test]
     fn trailing_input_is_rejected() {
-        assert!(parse_query("RETURN 1 RETURN 2 garbage").is_ok() == false);
+        assert!(parse_query("RETURN 1 RETURN 2 garbage").is_err());
     }
 
     #[test]

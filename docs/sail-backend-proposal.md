@@ -70,6 +70,13 @@ external Grust clients do not drift:
   generic edge-to-source/destination node join needed by GrustFrames triplet
   filters, motifs, and aggregate-message lowerings
 
+A node schema may declare `id` as a required string property because
+`Node::new` exposes structural identity through that property map. Typed Sail
+tables materialize that declaration once: the schema property reuses the
+physical structural `id` column in descriptors, Delta DDL, and staged MERGE
+statements. It is never extracted into a second column from `props`; a
+non-string `id` declaration fails before SQL reaches Sail.
+
 ### 1.2 Props Serialization
 
 `grust_core::Value` is serialized as JSON via `serde_json::to_string` and
@@ -373,26 +380,48 @@ crates/grust-sail/
     build.rs                    -- no-op; proto compilation skipped
     proto/spark/connect/        -- proto files kept for reference
     src/
-        lib.rs                  -- SailConfig, SailGraphStore, all logic
+        lib.rs                  -- SailGraphStore and graph execution
+        config.rs               -- validated public SailConfig
+        session_config.rs       -- Spark Connect session configuration
+        temp_view.rs            -- validated temp-view cleanup SQL
         spark_connect.rs        -- pre-generated protobuf + gRPC client types
         tests.rs
 ```
 
-All SQL building, Arrow parsing, and traversal lowering live in `lib.rs`.
-The proposal's `client.rs` / `sql.rs` / `traversal.rs` split was collapsed
-into private functions in `lib.rs` to keep the crate surface small.
+Graph SQL building, Arrow parsing, and traversal lowering remain private to
+`lib.rs`. Configuration, session negotiation, and temp-view cleanup are focused
+modules with sibling test modules; the split keeps distinct lifecycle concerns
+out of the already broad graph executor.
 
 ### 3.2 SailConfig
 
 ```rust
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SailConfig {
-    pub endpoint: String,    // default "http://127.0.0.1:50051"
-    pub user_id: String,     // default "grust"
-    pub session_id: String,  // UUID generated at construction
-    pub batch_size: usize,   // default 1000
+    pub endpoint: String,             // default "http://127.0.0.1:50051"
+    pub user_id: String,              // default "grust"
+    pub session_id: String,           // UUID generated at construction
+    pub batch_size: usize,            // default 1000
+    pub warehouse: SailWarehouse,     // default ServerManaged
+}
+
+pub enum SailWarehouse {
+    ServerManaged,
+    LocalSessionScoped,
+    ExplicitPath(PathBuf),
 }
 ```
+
+The default leaves warehouse and catalog ownership with Sail. It sends no
+client path, so remote connections do not accidentally redirect persistence
+and a new client does not silently select a different warehouse. A co-located
+test or development server opts into `LocalSessionScoped`; Grust derives its
+absolute path beneath the client's temporary directory from the session ID.
+The path is reused with that ID and caller-managed because Grust does not
+delete it. Durable callers can choose `ExplicitPath` with a stable absolute
+path that Sail can resolve. For either override, connection fails closed unless
+the Config RPC reads back the exact value in the same server session. Reopening
+tables also requires persistent server-side catalog metadata.
 
 The proposal included `table_prefix`, `table_format` (`Delta`/`Iceberg`/
 `Parquet`), `catalog`, and `database`. These were deferred:

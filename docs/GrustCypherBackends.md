@@ -1,6 +1,9 @@
 # Grust Cypher Backend Portability Plan
 
-Status: planning document.
+Status: **historical planning document.** The backend work has moved beyond the
+baseline below. Use `docs/GQL_PROFILE_STATEMENT.md`,
+`GqlBackend::descriptor()`, and each backend's integration tests for current
+capabilities; keep this file as rationale, not as an implementation checklist.
 
 This document describes how to implement as much of Grust Cypher across Grust
 backends as is reasonable, while preserving backend-specific truth. The goal is

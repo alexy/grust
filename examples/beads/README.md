@@ -60,6 +60,6 @@ published crates instead:
 
 ```toml
 [dependencies]
-grust-core = "0.11.0"
-grust-cypher = "0.11.0"
+grust-core = "0.13.0"
+grust-cypher = "0.13.0"
 ```

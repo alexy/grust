@@ -1,8 +1,9 @@
 # Grust Pushdown 2 Goal — lowering the Full39075 read features into backend SQL
 
-Status: **implementation COMPLETE (P0–P6, 2026-07-04) on branch `pushdown2`; PM4 docs are consolidated and the branch awaits human review before merge.** This is the agreed next goal after the
-Full39075 completion goal (`docs/GQL_FULL39075_GOAL.md`, done 2026-07-03). It
-plans the lowering of the newer read features — table-valued functions,
+Status: **COMPLETE (P0–P6, 2026-07-04) and merged to `main` on 2026-07-04.**
+This is the historical execution record for the follow-on to the Full39075
+completion goal (`docs/GQL_FULL39075_GOAL.md`, done 2026-07-03). It records the
+lowering of the newer read features — table-valued functions,
 `CALL { … }` subqueries, and shortest-path matching — into the backend-neutral
 read pushdown (`crates/grust-cypher/src/pushdown.rs`, Unit 15), so they
 execute in backend SQL instead of only on the Memory reference.
@@ -82,12 +83,12 @@ Memory-only execution of these features is a bottleneck, not before.
   (2026-07-04)** — correlated inner WHEREs push into the JOIN ON; shortest
   path pushes on SQLite with the rowid-sequence determinism argument; Spark
   scoped out for recursive CTEs via the dialect gate. Oracle +2 tests.
-- **PM4 Claim + docs:** **docs done (2026-07-04)** — the Unit 15 checkpoint
+- **PM4 Claim + docs:** **done and merged (2026-07-04)** — the Unit 15 checkpoint
   section carries a PUSHDOWN2 addendum, the profile statement's per-backend
   section describes the widened pushed subset, and backend descriptors needed
   no change (Sail's `read_pushdown` flag already held; dialect gates are
-  planner-level). **STOPPED for human review before merging** — the branch is
-  five commits on `pushdown2`, each green and oracle-backed; three latent
+  planner-level). The five green, oracle-backed implementation commits were
+  reviewed and merged; three latent
   bugs (an F10 shortestPath lowering leak, DISTINCT-over-computed dedup, and
   the no-`*` shortestPath unbounded search) were found and fixed along the
   way.

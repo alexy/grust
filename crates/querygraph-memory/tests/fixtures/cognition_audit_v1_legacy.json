@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "operationId": "legacy-job",
+  "subject": "did:key:legacy",
+  "spaceId": "memory/user:legacy/semantic",
+  "purpose": "research",
+  "proposalDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "bindingDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "sourceManifestDigest": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "typedidRequestDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "governedScanDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "snapshotDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "authorizationReceiptDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+  "policyDecisionId": "legacy-policy-decision",
+  "evidenceDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "affectedIds": ["legacy-source"],
+  "authorityRevalidatedAt": "2026-08-05T12:00:00Z",
+  "preparedAt": "2026-08-05T12:00:01Z"
+}

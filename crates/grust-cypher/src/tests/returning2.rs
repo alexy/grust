@@ -2632,6 +2632,49 @@ fn cypher_returning_projects_broad_edge_rows_on_memory_facade() {
 }
 
 #[test]
+fn cypher_returning_rejects_ambiguous_edge_keys_before_capture_or_refetch() {
+    let store = MemoryGraphStore::new();
+    let left = Edge::new("KNOWS", "a", "b\u{1f}KNOWS\u{1f}c", Props::new());
+    let right = Edge::new("KNOWS", "a\u{1f}KNOWS\u{1f}b", "c", Props::new());
+    let collision_key = edge_key(&left);
+    assert_eq!(collision_key, edge_key(&right));
+
+    futures_executor::block_on(store.put_graph(&Graph::new(
+        vec![
+            Node::new("Person", "a", Props::new()),
+            Node::new("Person", "b\u{1f}KNOWS\u{1f}c", Props::new()),
+            Node::new("Person", "a\u{1f}KNOWS\u{1f}b", Props::new()),
+            Node::new("Person", "c", Props::new()),
+        ],
+        vec![left, right],
+    )))
+    .unwrap();
+
+    let error =
+        futures_executor::block_on(execute_cypher_mutation_returning_with_options_on_store(
+            &store,
+            "MATCH (:Person)-[e:KNOWS]->(:Person) SET e.seen = true RETURN e.label;",
+            CypherMutationOptions::default(),
+        ))
+        .expect_err("ambiguous relationship identity must fail before mutation");
+    assert!(matches!(error, GrustError::CypherExecution(_)));
+    assert!(error.to_string().contains("reserved U+001F"));
+    assert!(
+        futures_executor::block_on(store.get_edges(EdgeQuery::default()))
+            .unwrap()
+            .iter()
+            .all(|edge| !edge.props.contains_key("seen")),
+        "capture rejection must happen before the write"
+    );
+
+    let mut captured = HashMap::new();
+    captured.insert("e".to_string(), vec![collision_key]);
+    let error = futures_executor::block_on(row_edge_match_return_values_on_store(&store, captured))
+        .expect_err("refetch must reject invalid stored components instead of taking first match");
+    assert!(error.to_string().contains("reserved U+001F"));
+}
+
+#[test]
 fn cypher_returning_projects_deleted_broad_edge_rows_on_memory_facade() {
     let store = MemoryGraphStore::new();
 

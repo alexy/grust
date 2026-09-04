@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 2,
+  "proposalDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "preparedDigest": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "priorVersion": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "resultingVersion": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "auditNodeId": "cog-audit:legacy",
+  "auditDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "completedJobDigest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "outboxNodeIds": [
+    "cog-outbox:1111111111111111111111111111111111111111111111111111111111111111"
+  ],
+  "envelopeDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+}

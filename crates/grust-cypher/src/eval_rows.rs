@@ -72,11 +72,27 @@ pub(crate) struct CypherWriteResultRows<'a> {
     pub(crate) row_paths: &'a HashMap<String, CypherRowProducedPathBinding>,
 }
 
+/// Shared inputs and identity caches for one writable `RETURN` evaluation.
+///
+/// Keeping these values together makes the aggregate helpers consume one
+/// coherent row scope and prevents their signatures from drifting as new
+/// projection sources are added.
+pub(crate) struct CypherReturnEvaluation<'a, S> {
+    pub(crate) store: &'a S,
+    pub(crate) node_bindings: &'a HashMap<String, NodeId>,
+    pub(crate) edge_bindings: &'a HashMap<String, CypherBoundEdgeIdentity>,
+    pub(crate) row_node_values: &'a HashMap<String, Vec<Node>>,
+    pub(crate) row_edge_values: &'a HashMap<String, Vec<Edge>>,
+    pub(crate) row_path_bindings: &'a HashMap<String, CypherRowProducedPathBinding>,
+    pub(crate) nodes: &'a mut HashMap<String, Node>,
+    pub(crate) edges: &'a mut HashMap<String, Edge>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CypherWriteResultBindingKind {
-    RowNode,
-    RowEdge,
-    RowPath,
+    Node,
+    Edge,
+    Path,
 }
 
 impl<'a> CypherWriteResultRows<'a> {
@@ -120,11 +136,11 @@ impl<'a> CypherWriteResultRows<'a> {
 
     pub(crate) fn binding_kind(&self, variable: &str) -> Option<CypherWriteResultBindingKind> {
         if self.row_nodes.contains_key(variable) {
-            Some(CypherWriteResultBindingKind::RowNode)
+            Some(CypherWriteResultBindingKind::Node)
         } else if self.row_edges.contains_key(variable) {
-            Some(CypherWriteResultBindingKind::RowEdge)
+            Some(CypherWriteResultBindingKind::Edge)
         } else if self.row_paths.contains_key(variable) {
-            Some(CypherWriteResultBindingKind::RowPath)
+            Some(CypherWriteResultBindingKind::Path)
         } else {
             None
         }
@@ -231,21 +247,19 @@ where
         .iter()
         .all(|projection| projection.element == CypherReturnElement::Aggregate)
     {
+        let mut evaluation = CypherReturnEvaluation {
+            store,
+            node_bindings,
+            edge_bindings,
+            row_node_values,
+            row_edge_values,
+            row_path_bindings,
+            nodes: &mut nodes,
+            edges: &mut edges,
+        };
         let mut row = Vec::with_capacity(return_clause.projections.len());
         for projection in &return_clause.projections {
-            let value = evaluate_return_aggregate(
-                store,
-                node_bindings,
-                edge_bindings,
-                row_node_values,
-                row_edge_values,
-                row_path_bindings,
-                &mut nodes,
-                &mut edges,
-                projection,
-                row_count,
-            )
-            .await?;
+            let value = evaluate_return_aggregate(&mut evaluation, projection, row_count).await?;
             row.push(value);
         }
         let mut rows = vec![row];

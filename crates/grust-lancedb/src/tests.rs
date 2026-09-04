@@ -1,4 +1,3 @@
-use grust_core::prelude::*;
 use tempfile::tempdir;
 
 use super::*;
@@ -99,6 +98,49 @@ async fn apply_schema_creates_typed_tables_and_mirrors_writes() {
 }
 
 #[tokio::test]
+async fn apply_schema_rejects_physical_table_and_field_collisions() {
+    let store = store().await;
+    let table_collision = GraphSchema::builder()
+        .node("a-b", Vec::new())
+        .node("a_b", Vec::new())
+        .build();
+    let error = store
+        .apply_schema(&table_collision)
+        .await
+        .expect_err("colliding typed table names must fail");
+    assert!(error.to_string().contains("test_graph_node_a_b"));
+
+    let field_collision = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![grust_core::Field::optional("id", FieldType::String)],
+        )
+        .build();
+    let error = store
+        .apply_schema(&field_collision)
+        .await
+        .expect_err("declared field must not shadow structural id");
+    assert!(error.to_string().contains("structural node field 'id'"));
+
+    let duplicate_label = GraphSchema::builder()
+        .node("Person", Vec::new())
+        .node("Person", Vec::new())
+        .build();
+    assert!(store.apply_schema(&duplicate_label).await.is_err());
+
+    let duplicate_field = GraphSchema::builder()
+        .node(
+            "Person",
+            vec![
+                grust_core::Field::optional("name", FieldType::String),
+                grust_core::Field::optional("name", FieldType::String),
+            ],
+        )
+        .build();
+    assert!(store.apply_schema(&duplicate_field).await.is_err());
+}
+
+#[tokio::test]
 async fn applied_schema_rejects_wrong_typed_property() {
     let store = store().await;
     let schema = GraphSchema::builder()
@@ -119,6 +161,50 @@ async fn applied_schema_rejects_wrong_typed_property() {
         .expect_err("wrong field type should fail");
 
     assert!(error.to_string().contains("field 'age' expected Int"));
+}
+
+#[tokio::test]
+async fn put_edge_validates_applied_schema_before_any_table_write() {
+    let store = store().await;
+    let schema = GraphSchema::builder()
+        .edge(
+            "PRESENTS",
+            vec![Label::new("Person")],
+            vec![Label::new("Talk")],
+            vec![grust_core::Field::required("rank", FieldType::Int)],
+        )
+        .build();
+    store.apply_schema(&schema).await.expect("apply_schema");
+
+    let mut props = Props::new();
+    props.insert("rank".to_string(), Value::from("first"));
+    let edge = Edge::new("PRESENTS", "person-1", "talk-1", props);
+    let error = store
+        .put_edge(&edge)
+        .await
+        .expect_err("wrong edge property type must fail");
+    assert!(error.to_string().contains("field 'rank' expected Int"));
+
+    assert_eq!(
+        store
+            .open_edges()
+            .await
+            .expect("universal edge table")
+            .count_rows(None)
+            .await
+            .expect("universal edge row count"),
+        0
+    );
+    assert_eq!(
+        store
+            .open_table(&store.typed_edge_table_name("PRESENTS").unwrap())
+            .await
+            .expect("typed edge table")
+            .count_rows(None)
+            .await
+            .expect("typed edge row count"),
+        0
+    );
 }
 
 #[tokio::test]
@@ -324,6 +410,48 @@ fn edge_key_prefers_explicit_id() {
 
     let edge = Edge::new("KNOWS", "a", "b", Props::new());
     assert_eq!(edge_key(&edge), "a\u{1f}KNOWS\u{1f}b");
+}
+
+#[test]
+fn edge_batch_rejects_ambiguous_and_explicit_delimiter_keys() {
+    let first = Edge::new("b\u{1f}c", "a", "d", Props::new());
+    let second = Edge::new("c", "a\u{1f}b", "d", Props::new());
+    assert_eq!(edge_key(&first), edge_key(&second));
+    assert!(edge_batch_reader(&[first]).is_err());
+    assert!(edge_batch_reader(&[second]).is_err());
+
+    let explicit = Edge::new("KNOWS", "a", "b", Props::new()).with_id("edge\u{1f}one");
+    assert!(edge_batch_reader(&[explicit]).is_err());
+}
+
+#[tokio::test]
+async fn put_graph_preflights_all_edge_keys_before_writing_nodes() {
+    let store = store().await;
+    let graph = Graph::new(
+        vec![Node::new("Person", "person-1", Props::new())],
+        vec![Edge::new(
+            "KNOWS\u{1f}INJECTED",
+            "person-1",
+            "person-1",
+            Props::new(),
+        )],
+    );
+
+    let error = store
+        .put_graph(&graph)
+        .await
+        .expect_err("ambiguous edge identity must fail before loading");
+    assert!(error.to_string().contains("U+001F"));
+    assert_eq!(
+        store
+            .open_nodes()
+            .await
+            .expect("universal node table")
+            .count_rows(None)
+            .await
+            .expect("universal node row count"),
+        0
+    );
 }
 
 #[tokio::test]

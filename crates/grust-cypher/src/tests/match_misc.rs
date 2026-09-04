@@ -395,10 +395,9 @@ fn cypher_match_remove_lowers_resolved_node_and_edge_properties() {
 
 #[test]
 fn cypher_match_set_rejects_deferred_patch_forms() {
-    for cypher in ["MATCH (n:Person {id: 'person-1'}) SET m += {name: 'Ada'}"] {
-        let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH SET must fail");
-        assert!(is_cypher_planning_error(&error));
-    }
+    let cypher = "MATCH (n:Person {id: 'person-1'}) SET m += {name: 'Ada'}";
+    let error = sail_cypher_mutation_plan(cypher).expect_err("unsupported MATCH SET must fail");
+    assert!(is_cypher_planning_error(&error));
 }
 
 #[test]

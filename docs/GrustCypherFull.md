@@ -1,6 +1,10 @@
 # Grust Cypher Full GQL Plan
 
-Status: planning document.
+Status: **historical plan, completed through `docs/GQL_GOAL.md` and
+`docs/GQL_FULL39075_GOAL.md` on 2026-07-03.** Use
+`docs/GQL_PROFILE_STATEMENT.md` and the feature manifest for current behavior;
+the estimates and future-tense implementation notes below are preserved as the
+design record.
 
 This document describes the path from the current strict Grust Cypher subset to
 a complete Grust implementation of ISO/IEC 39075:2024 GQL. The goal is not to

@@ -132,10 +132,24 @@ Doctor reports:
 The defaults are pinned for reproducibility:
 
 ```sh
-SURREAL_IMAGE=surrealdb/surrealdb:v3.1
-FALKOR_IMAGE=falkordb/falkordb:v4.18.10
-PGGRAPH_IMAGE=ghcr.io/evokoa/pggraph:0.1.7
+SURREAL_IMAGE=surrealdb/surrealdb:v3.2.4
+FALKOR_IMAGE=falkordb/falkordb:v4.20.4
+PGGRAPH_IMAGE=ghcr.io/evokoa/pggraph:1.2.0
 ```
+
+The matching 0.13 client qualification uses Redis 1.6.0, SurrealDB 3.2.4 with
+reqwest 0.13.4, tokio-postgres 0.7.18, and stable Turso 0.7.2. The FalkorDB
+v4.20.4, SurrealDB v3.2.4, and pgGraph 1.2.0 live gates passed; that verifies
+adapter compatibility, not inclusion in the LSQB portable-query matrix.
+
+LanceDB is deliberately held at 0.30.0. The attempted 0.38.0 default-feature
+local build fails within upstream `lancedb` because `job.rs` references the
+remote-only `Error::Http` variant when `remote` is disabled. The internal
+Helix adapter is held at exact `helix-db` 2.0.0: 3.0.0 removed
+`DynamicQueryRequest` and `dynamic_query`, changed `Client::query`, and targets
+`/v2/query`, while the checked Helix v3.0.1 server still exposes `/v1/query`.
+See [`benchmarks/lsqb/BACKENDS.md`](../benchmarks/lsqb/BACKENDS.md) for the
+complete qualification record and exact live evidence.
 
 To intentionally test against latest backend images:
 
@@ -179,9 +193,12 @@ SAIL_SOURCE= scripts/integration-test.sh --profile all
 
 ## Backend Notes
 
-Sail currently runs through a local Sail checkout, an installed `sail` binary,
-or `hatch run sail spark server`. Add a Docker Compose service only after a
-pinned Sail image and command have been verified.
+Sail currently runs through the configured checkout's
+`target/release/sail`, through that checkout's Hatch environment, or through
+an explicit absolute `SAIL_TEST_BIN`. The launcher deliberately does not use
+an arbitrary `sail` from `PATH`, because that could silently test a different
+version than `SAIL_SOURCE`. Add a Docker Compose service only after a pinned
+Sail image and command have been verified.
 
 HelixDB currently runs through a local Helix checkout or installed `helix`
 binary. The launcher creates a disposable Helix project under the integration

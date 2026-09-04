@@ -11,7 +11,7 @@
 //!
 //! ```text
 //! (:MemoryRecord {record: <json>})-[:MENTIONS]->(:MemoryEntity {name, kind})
-//! (:MemoryEntity)-[:RELATES {rel, fact_id}]->(:MemoryEntity)
+//! (:MemoryEntity)-[:RELATES]->(:MemoryRelation {rel, fact_id})-[:RELATES]->(:MemoryEntity)
 //! ```
 //!
 //! The full [`StoredRecord`] rides in one JSON property. Space scoping is
@@ -29,12 +29,14 @@
 //!
 //! ## Security posture
 //!
-//! This crate is *storage*: it never reads record content (the field is
-//! crate-private in typesec-memory; records round-trip through serde), and
-//! authorization stays where it always was — in the capability-gated vault.
-//! Passing `typesec_memory::conformance` is the compatibility bar.
+//! The store adapter round-trips [`StoredRecord`] as an opaque value; it does
+//! not inspect protected content to make authorization decisions. Cognition
+//! receives only the transient [`typesec_memory::AuthorizedCognitionInput`]
+//! that the capability-gated vault already released, and it returns inert
+//! proposals to that vault. Passing `typesec_memory::conformance` is the
+//! storage compatibility bar.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 
 use chrono::{DateTime, Utc};
@@ -42,10 +44,12 @@ use grust_core::prelude::{
     Direction, Edge, EdgeQuery, GraphMutation, GraphMutationStore, Node, NodeId, Start, Step,
     Traversal, Value,
 };
+use sha2::{Digest, Sha256};
 use typesec_memory::{MemoryId, MemoryStore, StoreBatchOp, StoreError, StoreQuery, StoredRecord};
 
 const RECORD_LABEL: &str = "MemoryRecord";
 const ENTITY_LABEL: &str = "MemoryEntity";
+const RELATION_LABEL: &str = "MemoryRelation";
 const MENTIONS: &str = "MENTIONS";
 const RELATES: &str = "RELATES";
 
@@ -83,28 +87,65 @@ impl<G: GraphMutationStore> GraphStoreMemoryStore<G> {
         node.map(|node| decode_record(&node)).transpose()
     }
 
-    /// Reachable entity node ids within `hops` RELATES steps (both directions).
+    /// Reachable entity node ids within `hops` logical RELATES steps.
+    ///
+    /// Current relationships use an assertion node so identical endpoint pairs
+    /// can retain independent fact lineage. The one-edge traversal remains for
+    /// durable stores written by the pre-0.13 representation.
     fn reachable_entities(&self, entity: &str, hops: u8) -> Result<Vec<NodeId>, StoreError> {
         let start = entity_node_id(entity);
-        let mut seen: Vec<NodeId> = vec![start.clone()];
-        for k in 1..=hops {
-            let step = Step {
-                direction: Direction::Both,
-                edge: Some(RELATES.into()),
-                node: None,
-            };
-            let traversal = Traversal {
-                start: Start::Node(start.clone()),
-                steps: vec![step; usize::from(k)],
-                limit: None,
-            };
-            for node in self.run(self.graph.traverse(traversal))? {
-                if !seen.contains(&node.id) {
-                    seen.push(node.id);
+        let mut ordered = vec![start.clone()];
+        let mut seen = BTreeSet::from([start.clone()]);
+        let mut frontier = vec![start];
+
+        // Expand one *logical* relationship hop at a time. Running an all-old
+        // path and an all-new path from the origin misses durable graphs whose
+        // migration boundary falls in the middle of the requested radius.
+        for _ in 0..hops {
+            let mut next = BTreeSet::new();
+            for current in frontier {
+                let traversals = [
+                    vec![Step {
+                        direction: Direction::Both,
+                        edge: Some(RELATES.into()),
+                        node: Some(ENTITY_LABEL.into()),
+                    }],
+                    vec![
+                        Step {
+                            direction: Direction::Both,
+                            edge: Some(RELATES.into()),
+                            node: Some(RELATION_LABEL.into()),
+                        },
+                        Step {
+                            direction: Direction::Both,
+                            edge: Some(RELATES.into()),
+                            node: Some(ENTITY_LABEL.into()),
+                        },
+                    ],
+                ];
+                for steps in traversals {
+                    let traversal = Traversal {
+                        start: Start::Node(current.clone()),
+                        steps,
+                        limit: None,
+                    };
+                    for node in self.run(self.graph.traverse(traversal))? {
+                        if !seen.contains(&node.id) {
+                            next.insert(node.id);
+                        }
+                    }
                 }
             }
+            if next.is_empty() {
+                break;
+            }
+            for id in &next {
+                seen.insert(id.clone());
+                ordered.push(id.clone());
+            }
+            frontier = next.into_iter().collect();
         }
-        Ok(seen)
+        Ok(ordered)
     }
 
     /// The graph mutations that persist one record: the record node plus its
@@ -212,41 +253,80 @@ impl<G: GraphMutationStore> MemoryStore for GraphStoreMemoryStore<G> {
         if !existed {
             return Ok(false);
         }
-        // delete_node removes the record and its incident MENTIONS edges;
-        // RELATES edges asserted by this record are pruned by fact_id.
-        self.run(self.graph.delete_node(&record_node_id(id)))?;
+        // Discover current assertion nodes and legacy direct facts, then delete
+        // that set with the record in one mutation batch. Transactional stores
+        // can roll the deletion batch back, but discovery precedes it; callers
+        // must synchronize concurrent link and tombstone operations.
+        let assertions = self.run(self.graph.traverse(Traversal {
+            start: Start::NodesByProperty {
+                label: RELATION_LABEL.into(),
+                key: "fact_id".into(),
+                value: Value::String(id.as_str().to_string()),
+            },
+            steps: Vec::new(),
+            limit: None,
+        }))?;
         let relates = self.run(self.graph.get_edges(EdgeQuery {
             from: None,
             to: None,
             label: Some(RELATES.into()),
         }))?;
-        for edge in relates {
-            if edge.props.get("fact_id") == Some(&Value::String(id.as_str().to_string())) {
-                self.run(self.graph.delete_edge(&edge.from, &edge.label, &edge.to))?;
-            }
-        }
+        let fact_id = Value::String(id.as_str().to_string());
+        let mut mutations = vec![GraphMutation::DeleteNode(record_node_id(id))];
+        mutations.extend(
+            assertions
+                .into_iter()
+                .map(|assertion| GraphMutation::DeleteNode(assertion.id)),
+        );
+        mutations.extend(
+            relates
+                .into_iter()
+                .filter(|edge| edge.props.get("fact_id") == Some(&fact_id))
+                .map(|edge| GraphMutation::DeleteEdge {
+                    from: edge.from,
+                    label: edge.label,
+                    to: edge.to,
+                }),
+        );
+        self.run(self.graph.apply_mutations(&mutations))?;
         Ok(true)
     }
 
     fn link(&self, from: &str, rel: &str, to: &str, record: &MemoryId) -> Result<(), StoreError> {
+        let assertion_id = relation_node_id(from, rel, to, record);
+        let mut assertion_props: BTreeMap<String, Value> = BTreeMap::new();
+        assertion_props.insert("from".into(), Value::String(from.to_string()));
+        assertion_props.insert("rel".into(), Value::String(rel.to_string()));
+        assertion_props.insert("to".into(), Value::String(to.to_string()));
+        assertion_props.insert("fact_id".into(), Value::String(record.as_str().to_string()));
+        let mut mutations = Vec::with_capacity(5);
         for name in [from, to] {
             let mut props: BTreeMap<String, Value> = BTreeMap::new();
             props.insert("name".into(), Value::String(name.to_string()));
-            self.run(
-                self.graph
-                    .put_node(&Node::new(ENTITY_LABEL, entity_node_id(name), props)),
-            )?;
+            mutations.push(GraphMutation::UpsertNode(Node::new(
+                ENTITY_LABEL,
+                entity_node_id(name),
+                props,
+            )));
         }
-        let mut props: BTreeMap<String, Value> = BTreeMap::new();
-        props.insert("rel".into(), Value::String(rel.to_string()));
-        props.insert("fact_id".into(), Value::String(record.as_str().to_string()));
-        self.run(self.graph.put_edge(&Edge::new(
+        mutations.push(GraphMutation::UpsertNode(Node::new(
+            RELATION_LABEL,
+            assertion_id.clone(),
+            assertion_props,
+        )));
+        mutations.push(GraphMutation::UpsertEdge(Edge::new(
             RELATES,
             entity_node_id(from),
+            assertion_id.clone(),
+            BTreeMap::new(),
+        )));
+        mutations.push(GraphMutation::UpsertEdge(Edge::new(
+            RELATES,
+            assertion_id,
             entity_node_id(to),
-            props,
-        )))?;
-        Ok(())
+            BTreeMap::new(),
+        )));
+        self.run(self.graph.apply_mutations(&mutations))
     }
 
     fn neighborhood(&self, entity: &str, hops: u8) -> Result<Vec<MemoryId>, StoreError> {
@@ -342,6 +422,17 @@ fn entity_node_id(name: &str) -> NodeId {
     NodeId::from(format!("ent:{name}").as_str())
 }
 
+fn relation_node_id(from: &str, relation: &str, to: &str, record: &MemoryId) -> NodeId {
+    let mut digest = Sha256::new();
+    for value in [from, relation, to, record.as_str()] {
+        // A fixed-width prefix keeps ids stable across 32- and 64-bit hosts.
+        let length = u64::try_from(value.len()).expect("relationship component length fits u64");
+        digest.update(length.to_le_bytes());
+        digest.update(value.as_bytes());
+    }
+    NodeId::new(format!("rel:{:x}", digest.finalize()))
+}
+
 fn encode_record(record: &StoredRecord) -> Result<Node, StoreError> {
     let json = serde_json::to_value(record)
         .map_err(|err| StoreError::Backend(format!("record serialization failed: {err}")))?;
@@ -363,6 +454,7 @@ fn decode_record(node: &Node) -> Result<StoredRecord, StoreError> {
 }
 
 pub mod analytics;
+pub mod cognition;
 #[cfg(feature = "turso")]
 pub mod turso;
 pub mod vector;

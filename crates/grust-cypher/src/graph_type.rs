@@ -119,14 +119,15 @@ pub fn validate_node(schema: &GraphSchema, mode: GraphTypeMode, node: &Node) -> 
         }
     }
     for constraint in &schema.constraints {
-        if let GraphConstraint::NodePropertyRequired { label, key } = constraint {
-            if &node.label == label && !node.props.contains_key(key) {
-                return Err(gql_cardinality(format!(
-                    "node '{}' is missing required property '{}'",
-                    node.id.as_str(),
-                    key
-                )));
-            }
+        if let GraphConstraint::NodePropertyRequired { label, key } = constraint
+            && &node.label == label
+            && !node.props.contains_key(key)
+        {
+            return Err(gql_cardinality(format!(
+                "node '{}' is missing required property '{}'",
+                node.id.as_str(),
+                key
+            )));
         }
     }
     Ok(())
@@ -187,14 +188,15 @@ pub fn validate_edge(schema: &GraphSchema, mode: GraphTypeMode, edge: &Edge) -> 
         }
     }
     for constraint in &schema.constraints {
-        if let GraphConstraint::EdgePropertyRequired { label, key } = constraint {
-            if &edge.label == label && !edge.props.contains_key(key) {
-                return Err(gql_cardinality(format!(
-                    "relationship '{}' is missing required property '{}'",
-                    edge.label.as_str(),
-                    key
-                )));
-            }
+        if let GraphConstraint::EdgePropertyRequired { label, key } = constraint
+            && &edge.label == label
+            && !edge.props.contains_key(key)
+        {
+            return Err(gql_cardinality(format!(
+                "relationship '{}' is missing required property '{}'",
+                edge.label.as_str(),
+                key
+            )));
         }
     }
     Ok(())

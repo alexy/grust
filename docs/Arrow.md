@@ -18,27 +18,22 @@ Arrow has two different compatibility stories:
   `RecordBatch` from Arrow 55 is not the same Rust type as a `RecordBatch` from
   Arrow 58, even though both represent Arrow data.
 
-That matters in Grust today because the embedded LadybugDB crate (`lbug`) uses
-Arrow 55 for its native Arrow API, while Sail currently uses Arrow 58 through
-Spark Connect. An exact type-version match would make users coordinate those
-versions by hand. Arrow IPC avoids that. Each backend decodes IPC into the
-Arrow version it needs internally and emits IPC for callers to decode with
-their own Arrow runtime.
+That matters in Grust today because the embedded LadybugDB crate (`lbug`
+0.20.2) uses Arrow 55 for its native Arrow API, while Sail currently uses Arrow
+58 through Spark Connect. An exact type-version match would make users
+coordinate those versions by hand. Arrow IPC avoids that. Each backend decodes
+IPC into the Arrow version it needs internally and emits IPC for callers to
+decode with their own Arrow runtime.
 
-## LadybugDB
+## LadybugDB (workspace-only)
 
-Enable the Arrow API through the facade:
-
-```toml
-[dependencies]
-grust = { package = "grust-graph", version = "0.10.0", features = ["ladybug-arrow"] }
-```
-
-Or depend on the backend crate directly:
+`grust-ladybug` is currently an internal `publish = false` workspace crate. It
+is not a `grust-graph` facade feature and is not installable from crates.io.
+Repository experiments can enable its Arrow API with a path dependency:
 
 ```toml
 [dependencies]
-grust-ladybug = { version = "0.10.0", features = ["arrow"] }
+grust-ladybug = { path = "crates/grust-ladybug", features = ["arrow"] }
 ```
 
 The Ladybug support is built on the embedded Rust `lbug` crate directly. No
@@ -112,7 +107,7 @@ Spark Connect. Grust exposes that path directly:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.10.0", features = ["sail"] }
+grust = { package = "grust-graph", version = "0.13.0", features = ["sail"] }
 ```
 
 ### Arbitrary Arrow Sources
@@ -127,10 +122,37 @@ store.stage_arrow_ipc_view("people_arrow", &people_ipc).await?;
 let chunks = store
     .query_arrow_ipc("SELECT id, name FROM people_arrow ORDER BY id")
     .await?;
+
+store.drop_arrow_ipc_view("people_arrow").await?;
 ```
 
 The view name must be a safe lower_snake SQL identifier. The view is scoped to
 the Sail Spark Connect session owned by that `SailGraphStore`.
+`drop_arrow_ipc_view` validates the same identifier and is idempotent, so
+cleanup may run after success, failure, or an uncertain response.
+
+`SailGraphStore::connect` leaves the warehouse server-managed by default. This
+does not send a client filesystem path to a remote Sail endpoint. A co-located
+development process can opt into an isolated local warehouse explicitly:
+
+```rust
+use grust_sail::{SailConfig, SailWarehouse};
+
+let config = SailConfig {
+    warehouse: SailWarehouse::LocalSessionScoped,
+    ..SailConfig::default()
+};
+```
+
+The local path is derived from `session_id`, is reused when that ID is reused,
+and is not deleted by Grust. For durable storage, use
+`SailWarehouse::ExplicitPath` with a stable absolute path that the server can
+resolve. Grust sets and reads back explicit and local overrides in the same
+Spark Connect session. A server-managed warehouse or explicit path is
+necessary but not sufficient for reopening tables: Sail must also persist the
+corresponding catalog metadata. Sail versions that fall back to a relative
+`spark-warehouse` path need an absolute server setting or one of these explicit
+overrides before Grust creates managed Delta tables.
 
 `SailGraphStore::query_arrow_ipc` runs Spark SQL and returns the Arrow IPC
 streams emitted by Spark Connect. This is the direct query-engine-over-Arrow

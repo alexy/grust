@@ -142,8 +142,8 @@ impl LanceDbGraphStore {
         if edges.is_empty() {
             return Ok(());
         }
-        let table = self.open_edges().await?;
         let data = edge_batch_reader(edges)?;
+        let table = self.open_edges().await?;
         let mut merge = table.merge_insert(&["key"]);
         merge
             .when_matched_update_all(None)
@@ -158,6 +158,7 @@ impl LanceDbGraphStore {
 #[async_trait]
 impl GraphStore for LanceDbGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        self.validate_schema_identifiers(schema)?;
         self.bootstrap().await?;
         for node_type in &schema.nodes {
             let table = self.typed_node_table_name(node_type.label.as_str())?;
@@ -207,6 +208,15 @@ impl GraphStore for LanceDbGraphStore {
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
+        if let Some(schema) = self
+            .schema
+            .read()
+            .expect("LanceDB schema lock poisoned")
+            .as_ref()
+        {
+            schema.validate_edge_props(edge)?;
+        }
+        validate_edge_key_components(edge)?;
         self.put_edges_batch(std::slice::from_ref(edge)).await?;
         self.put_typed_edges_batch(std::slice::from_ref(edge))
             .await?;
@@ -221,6 +231,11 @@ impl GraphStore for LanceDbGraphStore {
             .as_ref()
         {
             schema.validate_graph(graph)?;
+        }
+        // Validate every persisted edge identity before writing the first node
+        // or edge so a late invalid key cannot leave a partially loaded graph.
+        for edge in &graph.edges {
+            validate_edge_key_components(edge)?;
         }
         let batch_size = self.config.batch_size.max(1);
         let mut report = LoadReport::default();
@@ -372,6 +387,55 @@ impl LanceDbGraphStore {
             self.config.table_prefix,
             schema_identifier(label)?
         ))
+    }
+
+    fn validate_schema_identifiers(&self, schema: &GraphSchema) -> Result<()> {
+        let mut claims = Vec::new();
+        for node_type in &schema.nodes {
+            let table = self.typed_node_table_name(node_type.label.as_str())?;
+            claims.push((
+                "table".to_string(),
+                table.clone(),
+                format!("node type '{}'", node_type.label.as_str()),
+            ));
+            let namespace = format!("Arrow field in table '{table}'");
+            claims.push((
+                namespace.clone(),
+                "id".to_string(),
+                "structural node field 'id'".to_string(),
+            ));
+            for field in &node_type.fields {
+                claims.push((
+                    namespace.clone(),
+                    field.name.clone(),
+                    format!("node field '{}.{}'", node_type.label.as_str(), field.name),
+                ));
+            }
+        }
+        for edge_type in &schema.edges {
+            let table = self.typed_edge_table_name(edge_type.label.as_str())?;
+            claims.push((
+                "table".to_string(),
+                table.clone(),
+                format!("edge type '{}'", edge_type.label.as_str()),
+            ));
+            let namespace = format!("Arrow field in table '{table}'");
+            for field in ["key", "id", "from_id", "to_id"] {
+                claims.push((
+                    namespace.clone(),
+                    field.to_string(),
+                    format!("structural edge field '{field}'"),
+                ));
+            }
+            for field in &edge_type.fields {
+                claims.push((
+                    namespace.clone(),
+                    field.name.clone(),
+                    format!("edge field '{}.{}'", edge_type.label.as_str(), field.name),
+                ));
+            }
+        }
+        validate_physical_identifier_claims("LanceDB", claims)
     }
 
     async fn put_typed_nodes_batch(&self, nodes: &[Node]) -> Result<()> {
@@ -534,7 +598,10 @@ fn edge_batch_reader(edges: &[Edge]) -> Result<Box<dyn arrow::array::RecordBatch
         .iter()
         .map(|edge| props_to_json(&edge.props))
         .collect::<Result<Vec<_>>>()?;
-    let keys = edges.iter().map(edge_key).collect::<Vec<_>>();
+    let keys = edges
+        .iter()
+        .map(checked_edge_key)
+        .collect::<Result<Vec<_>>>()?;
     let batch = RecordBatch::try_new(
         schema.clone(),
         vec![
@@ -597,7 +664,10 @@ fn typed_edge_batch_reader(
     edges: &[&Edge],
 ) -> Result<Box<dyn arrow::array::RecordBatchReader + Send>> {
     let schema = typed_edge_schema(edge_type);
-    let keys = edges.iter().map(|edge| edge_key(edge)).collect::<Vec<_>>();
+    let keys = edges
+        .iter()
+        .map(|edge| checked_edge_key(edge))
+        .collect::<Result<Vec<_>>>()?;
     let mut arrays: Vec<Arc<dyn arrow::array::Array>> = vec![
         Arc::new(StringArray::from_iter_values(
             keys.iter().map(String::as_str),

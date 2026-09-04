@@ -1,12 +1,12 @@
 services:
   falkor:
-    image: ${FALKOR_IMAGE:-falkordb/falkordb:v4.18.10}
+    image: ${FALKOR_IMAGE:-falkordb/falkordb:v4.20.4}
     ports:
       - "6379:6379"
       - "3000:3000"
 
   surreal:
-    image: ${SURREAL_IMAGE:-surrealdb/surrealdb:v3.1}
+    image: ${SURREAL_IMAGE:-surrealdb/surrealdb:v3.2.4}
     command:
       - start
       - --log
@@ -20,7 +20,7 @@ services:
       - "8000:8000"
 
   pggraph:
-    image: ${PGGRAPH_IMAGE:-ghcr.io/evokoa/pggraph:0.1.7}
+    image: ${PGGRAPH_IMAGE:-ghcr.io/evokoa/pggraph:1.2.0}
     environment:
       POSTGRES_USER: ${PGGRAPH_USER:-postgres}
       POSTGRES_PASSWORD: ${PGGRAPH_PASSWORD:-postgres}

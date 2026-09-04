@@ -1,0 +1,3 @@
+MATCH (n)
+UNWIND range(1, 10001) AS i
+RETURN i LIMIT 1

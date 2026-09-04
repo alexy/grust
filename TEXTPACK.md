@@ -1,170 +1,65 @@
-# Preparing a Ulysses TextPack from a Grust blog post
+# Preparing a Grust Blog TextPack
 
-How to turn a Markdown blog post that uses fenced `mermaid` diagrams (e.g.
-`docs/blog/grust-<release>/post.md`) into a self-contained **`.textpack`** that
-imports cleanly into Ulysses — including on iOS, where external image paths and
-`mermaid` code blocks do not render.
+Grust owns each release post and its assets. FirstPair owns the shared,
+provenance-aware TextPack implementation and delivery workflow. The
+authoritative rules are in `~/src/firstpair/AGENTS.md`; this file records only
+the Grust source layout and handoff.
 
-A `.textpack` is the right deliverable because it bundles the Markdown text *and*
-the image assets into one importable package. Pasting raw Markdown into Ulysses
-(or Ghost) instead tends to produce two problems this guide also fixes:
+## Source layout
 
-- **Ragged lines with big vertical gaps** — caused by hard-wrapped prose; the
-  editor treats every newline as a line break. Fix: reflow to one line per
-  paragraph.
-- **Missing diagrams** — Ulysses/Ghost do not render `mermaid`. Fix: pre-render
-  diagrams to PNG and reference the images.
-
-## Format
-
-A TextBundle is a folder; a TextPack is that folder zipped:
-
-```
-<name>.textbundle/
-  text.markdown          # the post (Markdown / Markdown XL)
-  info.json              # {"version":2,"type":"net.daringfireball.markdown","transient":false}
-  assets/<diagram>.png   # bundled images, referenced as assets/<diagram>.png
+```text
+docs/blog/grust-<release>/
+  post.md
+  diagrams/                 # only when the post needs figures
+    <figure>.mmd             # committed Mermaid source
+    <figure>.png             # committed rendered asset
+  dist/                     # generated after source is committed and pushed
+    grust-<release>.textpack
+    grust-<release> (<version>-<commit>).textpack
+    VERSION.md
 ```
 
-Zip the `.textbundle` directory (with the directory as the top-level entry) to
-`<name>.textpack`. Ulysses imports the `.textpack` via the share sheet or
-**＋ → Import**.
+The canonical post should use one line per prose paragraph and reference local
+images as `diagrams/<figure>.png`. Do not put raw Mermaid fences in a post that
+will be handed to Ulysses or Ghost. Keep code fences, lists, tables, and image
+lines structurally intact.
 
-## Quick build
+## Required sequence
 
-The manual steps below are automated by `scripts/textpack.py` (Python 3, stdlib only):
+1. Begin from the real Grust repository with a clean branch exactly synchronized
+   with its upstream.
+2. Edit `post.md` and every local asset. Render Mermaid sources to PNG with a
+   white background and inspect the result.
+3. Commit and push those finished source inputs.
+4. From the clean, pushed Grust repository, run FirstPair's stamper:
 
-```sh
-python3 scripts/textpack.py docs/blog/grust-crab   # -> docs/blog/grust-crab/dist/grust-crab.textpack
-```
+   ```sh
+   REPO_ROOT="$PWD" \
+   BLOG_DOMAIN=querygraph.ai \
+   BLOG_TAGS=rust,graphs,grust \
+   BLOG_EXCERPT="Grust's latest backend-neutral property-graph release." \
+   "$HOME/src/firstpair/publishing/scripts/stamp-versioned-blog.sh" \
+     "docs/blog/grust-<release>"
+   ```
 
-The script reflows prose (bundled copy only — the repo post is untouched),
-collects the post's local images into `assets/`, and stamps `info.json` with
-Omnighost publishing metadata (`--blog querygraph.ai` by default, plus
-`--slug`, `--tags`, `--excerpt`; `--render` re-renders stale `diagrams/*.mmd`).
-The output lands in `dist/` next to the post.
+5. Verify the generated archive, provenance, versioned link, and marker:
 
-To publish: in Obsidian, run the Omnighost command **Import textpack** — the
-post and its images land in the blog's folder with Ghost frontmatter set,
-ready to sync to querygraph.ai. Ulysses imports the same pack unchanged.
+   ```sh
+   unzip -t "docs/blog/grust-<release>/dist/grust-<release>.textpack"
+   unzip -p "docs/blog/grust-<release>/dist/grust-<release>.textpack" \
+     '*/info.json'
+   cat "docs/blog/grust-<release>/dist/VERSION.md"
+   git status --short
+   ```
 
-## Prerequisites
+6. Commit and push the generated `dist/` handoff. The pack must use the
+   `omnighost-textpack-v1` provenance schema and contain both `payloadSha256`
+   and the full pushed source-changing Git commit.
+7. Only after that second clean, pushed handoff may an authorized operator run
+   FirstPair's `publish-versioned-blog.sh` to copy the already-built versioned
+   archive to `~/icloud/blogs`.
 
-- `mmdc` — the Mermaid CLI (`@mermaid-js/mermaid-cli`). Renders fenced mermaid to
-  PNG. No puppeteer config is normally needed; if Chrome sandbox errors appear,
-  pass `--puppeteerConfigFile docs/book/puppeteer-config.json` (it sets
-  `--no-sandbox`).
-- `python3` — for the reflow and bundling steps below (no third-party packages).
-
-## Steps
-
-### 1. Reflow prose to one line per paragraph
-
-Hard wrapping is what makes the text render ragged with paragraph gaps. Collapse
-each prose paragraph to a single soft-wrapping line; leave code fences, lists,
-headings, blockquotes, tables, and image lines untouched.
-
-```python
-import re
-src = "docs/blog/grust-crab/post.md"
-lines = open(src).read().split("\n")
-out, para, in_code = [], [], False
-def flush():
-    if para: out.append(" ".join(para)); para.clear()
-struct = re.compile(r"^(#|>|\||!\[|\s*[-*+] |\s*\d+\. |(---|\*\*\*|___)\s*$)")
-for ln in lines:
-    s = ln.strip()
-    if s.startswith("```"):
-        flush(); out.append(ln); in_code = not in_code; continue
-    if in_code: out.append(ln); continue          # code verbatim
-    if s == "": flush(); out.append(""); continue # blank = paragraph break
-    if struct.match(s): flush(); out.append(ln)   # structural line: keep as-is
-    else: para.append(s)                           # prose: accumulate
-flush()
-open(src, "w").write("\n".join(out).rstrip("\n") + "\n")
-```
-
-Sanity checks: the fence count (`grep -c '```'`) must be unchanged, and code
-blocks must remain multi-line.
-
-### 2. Render the diagrams to PNG
-
-Keep `mermaid` sources in a `diagrams/` directory (one `.mmd` per diagram, synced
-with the post). Render each at 2× on a **white** background (safe for both
-light and dark editors):
-
-```sh
-cd docs/blog/grust-crab
-for n in diagrams/*.mmd; do
-  mmdc -i "$n" -o "${n%.mmd}.png" -b white -s 2
-done
-```
-
-If you edit a diagram's content (e.g. adding a new component to the architecture
-map), edit the `.mmd` source and re-render. To extract the post's inline
-`mermaid` blocks back into `.mmd` files (so source and rendered images stay in
-sync), classify each block by a keyword and write it out before rendering.
-
-### 3. Point the post at the images
-
-In the canonical post, replace each inline `mermaid` block with an image
-reference (`![caption](diagrams/<name>.png)`). For the TextPack the bundler
-rewrites `diagrams/...` to `assets/...` (next step), so the repo post keeps the
-`diagrams/` path and the bundle is self-contained.
-
-### 4. Build the `.textpack`
-
-```python
-import re, os, json, zipfile, shutil
-base = "docs/blog/grust-crab"
-post = open(f"{base}/post.md").read()
-ddir = f"{base}/diagrams"
-scratch = "/tmp"                               # temporary .textbundle workspace
-dist = f"{base}/dist"; os.makedirs(dist, exist_ok=True)  # committed output, next to the post
-tb   = f"{scratch}/grust-crab.textbundle"
-shutil.rmtree(tb, ignore_errors=True); os.makedirs(f"{tb}/assets", exist_ok=True)
-imgs = set(re.findall(r"!\[[^\]]*\]\(diagrams/([a-z0-9-]+\.png)\)", post))
-text = re.sub(r"\(diagrams/([a-z0-9-]+\.png)\)", r"(assets/\1)", post)  # diagrams/ -> assets/
-open(f"{tb}/text.markdown", "w").write(text)
-json.dump({"version": 2, "type": "net.daringfireball.markdown", "transient": False},
-          open(f"{tb}/info.json", "w"))
-for n in imgs: shutil.copy(f"{ddir}/{n}", f"{tb}/assets/{n}")
-pack = f"{dist}/grust-crab.textpack"
-if os.path.exists(pack): os.remove(pack)
-with zipfile.ZipFile(pack, "w", zipfile.ZIP_DEFLATED) as z:
-    for root, _, files in os.walk(tb):
-        for fn in files:
-            p = os.path.join(root, fn); z.write(p, os.path.relpath(p, scratch))
-```
-
-The `.textpack` is committed at `docs/blog/<name>/dist/<name>.textpack` next to
-the post; the `.textbundle` is a temporary workspace (build it under `/tmp`).
-
-The zip's top entry must be `<name>.textbundle/` (verify with
-`zipfile.ZipFile(pack).namelist()`).
-
-## Fallback: a single self-contained Markdown file
-
-If a `.textpack` is inconvenient, embed the PNGs as base64 data URIs in one
-Markdown file (`![alt](data:image/png;base64,...)`). It is fully self-contained
-but heavier, and not every editor renders data-URI images — the `.textpack` is
-the more reliable bundle for Ulysses.
-
-## Gotchas
-
-- **Reflow first.** Ragged lines / vertical gaps are a hard-wrapping artifact, not
-  a Ulysses/Ghost bug.
-- **Render mermaid.** Neither Ulysses nor Ghost renders `mermaid` blocks; ship PNGs.
-- **White background, 2× scale** for crisp, paste-anywhere images.
-- **iOS:** relative image paths in pasted Markdown do not resolve — only the
-  bundled `.textpack` (or base64) shows images inline.
-- **Keep the `.textpack` in `dist/`.** Commit the built `.textpack` at
-  `docs/blog/<name>/dist/<name>.textpack` next to the post, so it ships in the open
-  alongside `post.md` + `diagrams/`. The intermediate `.textbundle` is scratch
-  (build under `/tmp`), and the base64 `.md` fallback stays an ad-hoc deliverable.
-
-## Relation to releases
-
-Per `AGENTS.md`, each release ships a blog post at
-`docs/blog/grust-<release>/post.md` with diagrams under `diagrams/`. This guide is
-the last-mile step to hand that post to a writing/publishing app.
+Do not use the repository's former `scripts/textpack.py` shortcut for a release.
+It produces a hash-only legacy pack and bypasses the current pushed-source
+provenance gate. Do not build a release TextPack from dirty or merely local
+inputs, and do not manually copy an unstamped pack to its delivery target.

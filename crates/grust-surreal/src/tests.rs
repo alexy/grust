@@ -6,7 +6,6 @@ use async_trait::async_trait;
 
 fn sample_graph() -> Graph {
     let mut talk_props = Props::new();
-    talk_props.insert("id".to_string(), Value::from("talk-1"));
     talk_props.insert("title".to_string(), Value::from("A Talk"));
     talk_props.insert(
         "tags".to_string(),
@@ -14,7 +13,6 @@ fn sample_graph() -> Graph {
     );
 
     let mut person_props = Props::new();
-    person_props.insert("id".to_string(), Value::from("person-1"));
     person_props.insert("name".to_string(), Value::from("Ada Lovelace"));
 
     Graph {
@@ -85,7 +83,8 @@ fn upsert_nodes_preserves_arrays() {
     let graph = sample_graph();
     let query = surreal_upsert_nodes_query(&graph.nodes).unwrap();
     assert!(query.contains("UPSERT type::record(\"talk\", \"talk-1\")"));
-    assert!(query.contains("tags = [\"rust\",\"graphs\"]"));
+    assert!(query.contains("`tags` = [\"rust\",\"graphs\"]"));
+    assert!(!query.contains("`id` ="));
 }
 
 #[test]
@@ -128,12 +127,15 @@ fn traverse_steps_follow_edges_and_filter_target_label() {
 
 #[test]
 fn relate_edges_are_idempotent_by_endpoints() {
-    let graph = sample_graph();
+    let mut graph = sample_graph();
+    graph.edges[0].id = Some(EdgeId::new("edge-1"));
     let id_tables = surreal_id_tables(&graph.nodes).unwrap();
-    let query = surreal_relate_edges_query(&graph.edges, &id_tables).unwrap();
-    assert!(query.contains("DELETE presents WHERE in = type::record(\"person\", \"person-1\")"));
-    assert!(query.contains("RELATE (type::record(\"person\", \"person-1\"))->presents->(type::record(\"talk\", \"talk-1\"))"));
-    assert!(query.contains("relationship = \"presents\""));
+    let query =
+        surreal_relate_edges_query(&graph.edges, &id_tables, &SurrealConfig::default()).unwrap();
+    assert!(query.contains("DELETE `presents` WHERE in = type::record(\"person\", \"person-1\")"));
+    assert!(query.contains("RELATE (type::record(\"person\", \"person-1\"))->`presents`->(type::record(\"talk\", \"talk-1\"))"));
+    assert!(query.contains("`relationship` = \"presents\""));
+    assert!(query.contains("`edge_id` = \"edge-1\""));
 }
 
 #[test]
@@ -167,11 +169,11 @@ fn mutation_batch_query_wraps_ordered_mutations_in_transaction() {
     assert!(query.ends_with("\nCOMMIT TRANSACTION;"));
     assert!(query.contains("UPSERT type::record(\"person\", \"person-1\")"));
     assert!(query.contains("RELATE"));
-    assert!(query.contains("UPDATE type::record(\"person\", \"person-1\") SET name = \"Ada\";"));
-    assert!(query.contains("->presents->"));
+    assert!(query.contains("UPDATE type::record(\"person\", \"person-1\") SET `name` = \"Ada\";"));
+    assert!(query.contains("->`presents`->"));
     assert!(query.contains("type::record(\"person\", \"person-1\")"));
     assert!(query.contains("type::record(\"talk\", \"talk-1\")"));
-    assert!(query.contains("DELETE presents WHERE"));
+    assert!(query.contains("DELETE `presents` WHERE"));
     assert!(query.contains("DELETE type::record(\"person\", \"person-1\");"));
 }
 
@@ -207,9 +209,10 @@ fn delete_edge_query_uses_candidate_endpoint_tables() {
         &Label::new("presents"),
         &NodeId::new("talk-1"),
         &config,
-    );
+    )
+    .unwrap();
 
-    assert!(query.starts_with("DELETE presents WHERE"));
+    assert!(query.starts_with("DELETE `presents` WHERE"));
     assert!(query.contains("type::record(\"person\", \"person-1\")"));
     assert!(query.contains("type::record(\"talk\", \"talk-1\")"));
 }
@@ -220,10 +223,10 @@ fn get_node_query_scans_candidate_tables_in_one_statement() {
         labels: vec!["Talk".to_string(), "Person".to_string()],
         ..SurrealConfig::default()
     };
-    let query = surreal_get_node_query(&NodeId::new("talk-1"), &config);
+    let query = surreal_get_node_query(&NodeId::new("talk-1"), &config).unwrap();
 
     assert!(query.starts_with("SELECT *, meta::tb(id) AS __grust_label FROM "));
-    assert!(query.contains("person, record, talk"));
+    assert!(query.contains("`person`, `record`, `talk`"));
     assert!(query.contains("id = type::record(\"talk\", \"talk-1\")"));
     assert_eq!(query.matches("SELECT").count(), 1);
 }
@@ -234,10 +237,11 @@ fn get_nodes_query_batches_candidate_records_in_one_statement() {
         labels: vec!["Talk".to_string(), "Person".to_string()],
         ..SurrealConfig::default()
     };
-    let query = surreal_get_nodes_query(&[NodeId::new("person-1"), NodeId::new("talk-1")], &config);
+    let query = surreal_get_nodes_query(&[NodeId::new("person-1"), NodeId::new("talk-1")], &config)
+        .unwrap();
 
     assert!(query.starts_with("SELECT *, meta::tb(id) AS __grust_label FROM "));
-    assert!(query.contains("person, record, talk"));
+    assert!(query.contains("`person`, `record`, `talk`"));
     assert!(query.contains("id = type::record(\"person\", \"person-1\")"));
     assert!(query.contains("id = type::record(\"talk\", \"talk-1\")"));
     assert_eq!(query.matches("SELECT").count(), 1);
@@ -251,7 +255,7 @@ fn get_edges_query_uses_relationship_tables_in_one_statement() {
     };
     let query = surreal_get_edges_query(&EdgeQuery::default(), &config).unwrap();
 
-    assert!(query.contains("FROM member_of, presents"));
+    assert!(query.contains("FROM `member_of`, `presents`"));
     assert_eq!(query.matches("SELECT").count(), 1);
 }
 
@@ -277,7 +281,7 @@ fn get_edges_query_accepts_explicit_label_without_relationship_config() {
     )
     .unwrap();
 
-    assert!(query.contains("FROM presents"));
+    assert!(query.contains("FROM `presents`"));
 }
 
 #[test]
@@ -352,11 +356,13 @@ fn graph_schema_defines_schemafull_tables_and_fields() {
 
     let query = surreal_schema_query(&schema).unwrap();
 
-    assert!(query.contains("DEFINE TABLE person SCHEMAFULL"));
-    assert!(query.contains("DEFINE FIELD name ON TABLE person TYPE string"));
-    assert!(query.contains("DEFINE FIELD age ON TABLE person TYPE int"));
-    assert!(query.contains("DEFINE TABLE presents TYPE RELATION SCHEMAFULL"));
-    assert!(query.contains("DEFINE FIELD source ON TABLE presents TYPE string"));
+    assert!(query.contains("DEFINE TABLE `person` SCHEMAFULL"));
+    assert!(query.contains("DEFINE FIELD `name` ON TABLE `person` TYPE string"));
+    assert!(query.contains("DEFINE FIELD `age` ON TABLE `person` TYPE int"));
+    assert!(query.contains("DEFINE TABLE `presents` TYPE RELATION SCHEMAFULL"));
+    assert!(query.contains("DEFINE FIELD `relationship` ON TABLE `presents` TYPE string"));
+    assert!(query.contains("DEFINE FIELD `edge_id` ON TABLE `presents` TYPE option<string>"));
+    assert!(query.contains("DEFINE FIELD `source` ON TABLE `presents` TYPE string"));
 }
 
 #[test]

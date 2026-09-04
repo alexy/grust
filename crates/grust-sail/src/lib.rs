@@ -44,24 +44,19 @@ use sc::{
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
-#[derive(Clone, Debug)]
-pub struct SailConfig {
-    pub endpoint: String,
-    pub user_id: String,
-    pub session_id: String,
-    pub batch_size: usize,
-}
+mod arrow_ipc;
+mod config;
+pub use config::{SailConfig, SailWarehouse};
 
-impl Default for SailConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: "http://127.0.0.1:50051".to_string(),
-            user_id: "grust".to_string(),
-            session_id: uuid::Uuid::new_v4().to_string(),
-            batch_size: 1000,
-        }
-    }
-}
+mod session_config;
+mod spark_client;
+pub use spark_client::{
+    MAX_ARROW_IPC_PAYLOAD_BYTES, MAX_SPARK_CONNECT_DECODING_MESSAGE_BYTES,
+    SPARK_CONNECT_PROTOBUF_HEADROOM_BYTES,
+};
+mod temp_view;
+
+const CLIENT_TYPE: &str = concat!("grust-sail/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SailDegreeRow {
@@ -95,6 +90,7 @@ pub enum SailGraphPatternDirection {
 /// Session-scoped temp views used to stage Arrow batches before MERGE.
 const NODE_STAGE_VIEW: &str = "grust_stage_nodes";
 const EDGE_STAGE_VIEW: &str = "grust_stage_edges";
+const CONSTRAINT_REGISTRY_STAGE_VIEW: &str = "grust_stage_constraint_registry";
 const DELETE_NODE_STAGE_VIEW: &str = "grust_delete_node_ids";
 const DELETE_EDGE_STAGE_VIEW: &str = "grust_delete_edges";
 pub const GRUST_NODES_TABLE: &str = "grust_nodes";
@@ -176,10 +172,100 @@ pub fn sail_edge_table(label: &str) -> Result<String> {
     Ok(format!("grust_edge_{}", schema_identifier(label)?))
 }
 
-pub fn sail_typed_node_columns(node_type: &NodeType) -> Result<Vec<String>> {
-    let mut columns = vec![NODE_ID_COLUMN.to_string()];
+fn validate_sail_schema_identifiers(schema: &GraphSchema) -> Result<()> {
+    let mut claims = Vec::new();
+    for node_type in &schema.nodes {
+        let table = sail_node_table(node_type.label.as_str())?;
+        claims.push((
+            "table".to_string(),
+            table.clone(),
+            format!("node type '{}'", node_type.label.as_str()),
+        ));
+        let namespace = format!("column in table '{table}'");
+        claims.push((
+            namespace.clone(),
+            NODE_ID_COLUMN.to_string(),
+            format!("structural node column '{NODE_ID_COLUMN}'"),
+        ));
+        let logical_field_namespace = format!(
+            "field declaration in node type '{}'",
+            node_type.label.as_str()
+        );
+        for field in &node_type.fields {
+            claims.push((
+                logical_field_namespace.clone(),
+                field.name.clone(),
+                format!("node field '{}.{}'", node_type.label.as_str(), field.name),
+            ));
+        }
+        for field in node_type
+            .fields
+            .iter()
+            .filter(|field| field.name != NODE_ID_COLUMN)
+        {
+            claims.push((
+                namespace.clone(),
+                schema_identifier(&field.name)?,
+                format!("node field '{}.{}'", node_type.label.as_str(), field.name),
+            ));
+        }
+    }
+    for edge_type in &schema.edges {
+        let table = sail_edge_table(edge_type.label.as_str())?;
+        claims.push((
+            "table".to_string(),
+            table.clone(),
+            format!("edge type '{}'", edge_type.label.as_str()),
+        ));
+        let namespace = format!("column in table '{table}'");
+        for column in [
+            EDGE_KEY_COLUMN,
+            EDGE_ID_COLUMN,
+            EDGE_SRC_ID_COLUMN,
+            EDGE_DST_ID_COLUMN,
+        ] {
+            claims.push((
+                namespace.clone(),
+                column.to_string(),
+                format!("structural edge column '{column}'"),
+            ));
+        }
+        for field in &edge_type.fields {
+            claims.push((
+                namespace.clone(),
+                schema_identifier(&field.name)?,
+                format!("edge field '{}.{}'", edge_type.label.as_str(), field.name),
+            ));
+        }
+    }
+    validate_physical_identifier_claims("Sail", claims)
+}
+
+/// Returns the schema fields that need their own typed-node columns.
+///
+/// [`Node::new`] exposes structural identity through the `id` property too.
+/// A typed Sail table therefore stores a declared `id` field in its existing
+/// physical identity column rather than materializing a duplicate column from
+/// JSON properties.
+fn typed_node_property_fields(node_type: &NodeType) -> Result<impl Iterator<Item = &Field>> {
     for field in &node_type.fields {
         sql_ident(&field.name)?;
+        if field.name == NODE_ID_COLUMN && field.ty != FieldType::String {
+            return Err(GrustError::Schema(format!(
+                "typed Sail node identity field '{}' must use FieldType::String",
+                NODE_ID_COLUMN
+            )));
+        }
+    }
+    Ok(node_type
+        .fields
+        .iter()
+        .filter(|field| field.name != NODE_ID_COLUMN))
+}
+
+pub fn sail_typed_node_columns(node_type: &NodeType) -> Result<Vec<String>> {
+    let mut columns = vec![NODE_ID_COLUMN.to_string()];
+    for field in typed_node_property_fields(node_type)? {
         columns.push(field.name.clone());
     }
     Ok(columns)
@@ -200,6 +286,7 @@ pub fn sail_typed_edge_columns(edge_type: &EdgeType) -> Result<Vec<String>> {
 }
 
 pub fn sail_graph_schema_typed_tables(schema: &GraphSchema) -> Result<Vec<SailGraphTypedTable>> {
+    validate_sail_schema_identifiers(schema)?;
     let mut tables = Vec::new();
     for node_type in &schema.nodes {
         tables.push(SailGraphTypedTable {
@@ -292,6 +379,108 @@ where
     missing
 }
 
+struct MutationRowCapture<'a, Binding, Captured> {
+    bindings: &'a HashMap<String, Binding>,
+    values: &'a mut HashMap<String, Vec<Captured>>,
+}
+
+impl<'a, Binding, Captured> MutationRowCapture<'a, Binding, Captured> {
+    fn new(
+        bindings: &'a HashMap<String, Binding>,
+        values: &'a mut HashMap<String, Vec<Captured>>,
+    ) -> Self {
+        Self { bindings, values }
+    }
+}
+
+/// Mutable outputs collected while Sail applies one Cypher mutation plan.
+///
+/// Most callers only need the report. Writable `RETURN` additionally captures
+/// row identities and pre-delete values, while mutation-result APIs may collect
+/// written identities. Grouping those optional channels keeps the executor's
+/// contract explicit without passing a parallel list of nullable tuples.
+struct CypherMutationExecution<'a> {
+    report: &'a mut CypherMutationReport,
+    written_node_identities: Option<&'a mut Vec<CypherWrittenNodeIdentity>>,
+    written_edge_identities: Option<&'a mut Vec<CypherWrittenEdgeIdentity>>,
+    row_nodes: Option<MutationRowCapture<'a, GraphNodeMatch, NodeId>>,
+    row_edges: Option<MutationRowCapture<'a, GraphRelationshipMatch, String>>,
+    pre_delete_nodes: Option<MutationRowCapture<'a, GraphNodeMatch, Node>>,
+    pre_delete_edges: Option<MutationRowCapture<'a, GraphRelationshipMatch, Edge>>,
+}
+
+impl<'a> CypherMutationExecution<'a> {
+    fn new(report: &'a mut CypherMutationReport) -> Self {
+        Self {
+            report,
+            written_node_identities: None,
+            written_edge_identities: None,
+            row_nodes: None,
+            row_edges: None,
+            pre_delete_nodes: None,
+            pre_delete_edges: None,
+        }
+    }
+
+    fn with_written_identities(
+        mut self,
+        nodes: Option<&'a mut Vec<CypherWrittenNodeIdentity>>,
+        edges: Option<&'a mut Vec<CypherWrittenEdgeIdentity>>,
+    ) -> Self {
+        self.written_node_identities = nodes;
+        self.written_edge_identities = edges;
+        self
+    }
+
+    fn capture_return_rows(
+        mut self,
+        row_nodes: MutationRowCapture<'a, GraphNodeMatch, NodeId>,
+        row_edges: MutationRowCapture<'a, GraphRelationshipMatch, String>,
+        pre_delete_nodes: MutationRowCapture<'a, GraphNodeMatch, Node>,
+        pre_delete_edges: MutationRowCapture<'a, GraphRelationshipMatch, Edge>,
+    ) -> Self {
+        self.row_nodes = Some(row_nodes);
+        self.row_edges = Some(row_edges);
+        self.pre_delete_nodes = Some(pre_delete_nodes);
+        self.pre_delete_edges = Some(pre_delete_edges);
+        self
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MatchingNodePropertyUpdate<'a> {
+    label: Option<&'a Label>,
+    props: &'a Props,
+    predicates: &'a [GraphPropertyPredicate],
+    target_key: &'a str,
+    source_key: &'a str,
+    op: GraphNumericOp,
+    operand: &'a Value,
+}
+
+#[derive(Clone, Copy)]
+struct NodeMatchEdgeUpsert<'a> {
+    kind: GraphMutationPlanKind,
+    from: &'a GraphNodeMatch,
+    to: &'a GraphNodeMatch,
+    label: &'a Label,
+    props: &'a Props,
+    edge_id_policy: GraphRowEdgeIdPolicy,
+}
+
+impl<'a> From<&'a CypherRowProducedEdgeBinding> for NodeMatchEdgeUpsert<'a> {
+    fn from(binding: &'a CypherRowProducedEdgeBinding) -> Self {
+        Self {
+            kind: binding.kind,
+            from: &binding.from,
+            to: &binding.to,
+            label: &binding.label,
+            props: &binding.props,
+            edge_id_policy: binding.edge_id_policy,
+        }
+    }
+}
+
 pub struct SailGraphStore {
     config: SailConfig,
     client: SparkConnectServiceClient<Channel>,
@@ -300,11 +489,15 @@ pub struct SailGraphStore {
 
 impl SailGraphStore {
     pub async fn connect(config: SailConfig) -> Result<Self> {
-        let client = SparkConnectServiceClient::connect(config.endpoint.clone())
-            .await
-            .map_err(|e| {
-                GrustError::Backend(format!("connect to Sail at {}: {e}", config.endpoint))
-            })?;
+        config.validate()?;
+        let mut client = spark_client::with_decoding_limit(
+            SparkConnectServiceClient::connect(config.endpoint.clone())
+                .await
+                .map_err(|e| {
+                    GrustError::Backend(format!("connect to Sail at {}: {e}", config.endpoint))
+                })?,
+        );
+        session_config::configure_warehouse(&mut client, &config).await?;
         Ok(Self {
             config,
             client,
@@ -324,18 +517,10 @@ impl SailGraphStore {
         .await
     }
 
-    /// Executes Spark SQL through Sail and returns result batches as Arrow IPC streams.
-    ///
-    /// Each item in the returned vector is the complete IPC stream emitted by
-    /// one Spark Connect `ArrowBatch` response.
-    pub async fn query_arrow_ipc(&self, sql: &str) -> Result<Vec<Vec<u8>>> {
-        let mut chunks = Vec::new();
-        self.run_plan(self.query_request(sql, vec![])?, |data| {
-            chunks.push(data.to_vec());
-            Ok(())
-        })
-        .await?;
-        Ok(chunks)
+    /// Drops a session-scoped Arrow view previously created by
+    /// [`Self::stage_arrow_ipc_view`]. Missing views are accepted.
+    pub async fn drop_arrow_ipc_view(&self, name: &str) -> Result<()> {
+        self.run_command(&temp_view::drop_sql(name)?, vec![]).await
     }
 
     /// Persists a named Cypher constraint registry JSON blob in Sail.
@@ -353,11 +538,13 @@ impl SailGraphStore {
         let registry_json = registry.to_json()?;
         self.run_command(&create_cypher_constraint_registry_table_sql(), vec![])
             .await?;
-        self.run_command(
-            &upsert_cypher_constraint_registry_sql(name, &registry_json)?,
-            vec![],
+        self.stage_record_batch(
+            CONSTRAINT_REGISTRY_STAGE_VIEW,
+            cypher_constraint_registry_record_batch(name, &registry_json)?,
         )
-        .await
+        .await?;
+        self.run_command(&upsert_cypher_constraint_registry_sql(), vec![])
+            .await
     }
 
     /// Loads a named Cypher constraint registry JSON blob from Sail.
@@ -429,18 +616,13 @@ impl SailGraphStore {
             collect_written_node_identities.then_some(&mut written_node_identities);
         let identity_collector =
             collect_written_edge_identities.then_some(&mut written_edge_identities);
-        self.apply_cypher_mutation_plan(
-            &plan,
-            &mut report,
-            node_identity_collector,
-            identity_collector,
-            None,
-            None,
-            None,
-            None,
-        )
-        .await
-        .map_err(cypher_execution_error)?;
+        {
+            let mut execution = CypherMutationExecution::new(&mut report)
+                .with_written_identities(node_identity_collector, identity_collector);
+            self.apply_cypher_mutation_plan(&plan, &mut execution)
+                .await
+                .map_err(cypher_execution_error)?;
+        }
         Ok(CypherMutationResult {
             report,
             generated_node_ids,
@@ -494,21 +676,25 @@ impl SailGraphStore {
         let mut row_edge_keys = HashMap::new();
         let mut row_node_pre_delete_values = HashMap::new();
         let mut row_edge_pre_delete_values = HashMap::new();
-        self.apply_cypher_mutation_plan(
-            &planned.plan,
-            &mut report,
-            node_identity_collector,
-            identity_collector,
-            Some((&planned.row_node_bindings, &mut row_node_ids)),
-            Some((&planned.row_edge_match_bindings, &mut row_edge_keys)),
-            Some((&planned.row_node_bindings, &mut row_node_pre_delete_values)),
-            Some((
-                &planned.row_edge_match_bindings,
-                &mut row_edge_pre_delete_values,
-            )),
-        )
-        .await
-        .map_err(cypher_execution_error)?;
+        {
+            let mut execution = CypherMutationExecution::new(&mut report)
+                .with_written_identities(node_identity_collector, identity_collector)
+                .capture_return_rows(
+                    MutationRowCapture::new(&planned.row_node_bindings, &mut row_node_ids),
+                    MutationRowCapture::new(&planned.row_edge_match_bindings, &mut row_edge_keys),
+                    MutationRowCapture::new(
+                        &planned.row_node_bindings,
+                        &mut row_node_pre_delete_values,
+                    ),
+                    MutationRowCapture::new(
+                        &planned.row_edge_match_bindings,
+                        &mut row_edge_pre_delete_values,
+                    ),
+                );
+            self.apply_cypher_mutation_plan(&planned.plan, &mut execution)
+                .await
+                .map_err(cypher_execution_error)?;
+        }
         let mut row_node_values = row_node_return_values_on_store(self, row_node_ids)
             .await
             .map_err(cypher_execution_error)?;
@@ -557,41 +743,46 @@ impl SailGraphStore {
     async fn apply_cypher_mutation_plan(
         &self,
         plan: &GraphMutationPlan,
-        report: &mut CypherMutationReport,
-        mut written_node_identities: Option<&mut Vec<CypherWrittenNodeIdentity>>,
-        mut written_edge_identities: Option<&mut Vec<CypherWrittenEdgeIdentity>>,
-        mut row_node_capture: Option<(
-            &HashMap<String, GraphNodeMatch>,
-            &mut HashMap<String, Vec<NodeId>>,
-        )>,
-        mut row_edge_capture: Option<(
-            &HashMap<String, GraphRelationshipMatch>,
-            &mut HashMap<String, Vec<String>>,
-        )>,
-        mut row_node_pre_delete_capture: Option<(
-            &HashMap<String, GraphNodeMatch>,
-            &mut HashMap<String, Vec<Node>>,
-        )>,
-        mut row_edge_pre_delete_capture: Option<(
-            &HashMap<String, GraphRelationshipMatch>,
-            &mut HashMap<String, Vec<Edge>>,
-        )>,
+        execution: &mut CypherMutationExecution<'_>,
     ) -> Result<()> {
         for operation in &plan.operations {
-            if let Some((bindings, values)) = row_node_pre_delete_capture.as_mut() {
-                collect_deleted_row_node_values_for_operation(self, operation, bindings, values)
-                    .await?;
+            if let Some(capture) = execution.pre_delete_nodes.as_mut() {
+                collect_deleted_row_node_values_for_operation(
+                    self,
+                    operation,
+                    capture.bindings,
+                    &mut *capture.values,
+                )
+                .await?;
             }
-            if let Some((bindings, values)) = row_edge_pre_delete_capture.as_mut() {
-                collect_deleted_row_edge_values_for_operation(self, operation, bindings, values)
-                    .await?;
+            if let Some(capture) = execution.pre_delete_edges.as_mut() {
+                collect_deleted_row_edge_values_for_operation(
+                    self,
+                    operation,
+                    capture.bindings,
+                    &mut *capture.values,
+                )
+                .await?;
             }
-            if let Some((bindings, values)) = row_node_capture.as_mut() {
-                collect_row_node_ids_for_operation(self, operation, bindings, values).await?;
+            if let Some(capture) = execution.row_nodes.as_mut() {
+                collect_row_node_ids_for_operation(
+                    self,
+                    operation,
+                    capture.bindings,
+                    &mut *capture.values,
+                )
+                .await?;
             }
-            if let Some((bindings, values)) = row_edge_capture.as_mut() {
-                collect_row_edge_keys_for_operation(self, operation, bindings, values).await?;
+            if let Some(capture) = execution.row_edges.as_mut() {
+                collect_row_edge_keys_for_operation(
+                    self,
+                    operation,
+                    capture.bindings,
+                    &mut *capture.values,
+                )
+                .await?;
             }
+            let report = &mut *execution.report;
             match operation {
                 GraphMutationPlanOp::PatchMatchingNodes {
                     label,
@@ -620,13 +811,15 @@ impl SailGraphStore {
                     ..
                 } => {
                     self.apply_update_matching_node_property(
-                        label.as_ref(),
-                        props,
-                        predicates,
-                        target_key,
-                        source_key,
-                        *op,
-                        operand,
+                        MatchingNodePropertyUpdate {
+                            label: label.as_ref(),
+                            props,
+                            predicates,
+                            target_key,
+                            source_key,
+                            op: *op,
+                            operand,
+                        },
                         report,
                     )
                     .await?;
@@ -716,14 +909,16 @@ impl SailGraphStore {
                     ..
                 } => {
                     self.apply_upsert_edges_from_node_matches(
-                        *kind,
-                        from,
-                        to,
-                        label,
-                        props,
-                        *edge_id_policy,
+                        NodeMatchEdgeUpsert {
+                            kind: *kind,
+                            from,
+                            to,
+                            label,
+                            props,
+                            edge_id_policy: *edge_id_policy,
+                        },
                         report,
-                        written_edge_identities.as_deref_mut(),
+                        execution.written_edge_identities.as_deref_mut(),
                     )
                     .await?;
                 }
@@ -748,12 +943,12 @@ impl SailGraphStore {
                         classification.record(report);
                     }
                     if let (Some(collector), GraphMutationPlanOp::UpsertNode { kind, node }) =
-                        (written_node_identities.as_deref_mut(), operation)
+                        (execution.written_node_identities.as_deref_mut(), operation)
                     {
                         collector.push(cypher_written_node_identity(*kind, node));
                     }
                     if let (Some(collector), GraphMutationPlanOp::UpsertEdge { kind, edge }) =
-                        (written_edge_identities.as_deref_mut(), operation)
+                        (execution.written_edge_identities.as_deref_mut(), operation)
                     {
                         collector.push(cypher_written_edge_identity(*kind, edge));
                     }
@@ -764,6 +959,7 @@ impl SailGraphStore {
     }
 
     async fn strict_create_edge_exists(&self, edge: &Edge) -> Result<bool> {
+        validate_edge_key_components(edge)?;
         let mut existing = self
             .get_edges(EdgeQuery {
                 from: Some(edge.from.clone()),
@@ -776,6 +972,10 @@ impl SailGraphStore {
             let sql = "SELECT id, src_id, src_label, dst_id, dst_label, edge_type, props \
                        FROM grust_edges WHERE id = ? LIMIT 1";
             existing.extend(self.run_edge_query(sql, vec![lit_str(id.as_str())]).await?);
+        }
+
+        for existing_edge in &existing {
+            validate_edge_key_components(existing_edge)?;
         }
 
         Ok(strict_create_edge_conflicts(edge, &existing))
@@ -814,15 +1014,18 @@ impl SailGraphStore {
 
     async fn apply_update_matching_node_property(
         &self,
-        label: Option<&Label>,
-        props: &Props,
-        predicates: &[GraphPropertyPredicate],
-        target_key: &str,
-        source_key: &str,
-        op: GraphNumericOp,
-        operand: &Value,
+        update: MatchingNodePropertyUpdate<'_>,
         report: &mut CypherMutationReport,
     ) -> Result<()> {
+        let MatchingNodePropertyUpdate {
+            label,
+            props,
+            predicates,
+            target_key,
+            source_key,
+            op,
+            operand,
+        } = update;
         let (sql, args) = matching_nodes_sql(label, props, predicates)?;
         let mut nodes = self.run_query(&sql, args).await?;
         report.matched_rows += nodes.len();
@@ -1002,14 +1205,7 @@ impl SailGraphStore {
         let mut values = HashMap::new();
         for (variable, binding) in bindings {
             let edges = self
-                .edges_from_node_matches(
-                    binding.kind,
-                    &binding.from,
-                    &binding.to,
-                    &binding.label,
-                    &binding.props,
-                    binding.edge_id_policy,
-                )
+                .edges_from_node_matches(NodeMatchEdgeUpsert::from(binding))
                 .await?;
             match binding.kind {
                 GraphMutationPlanKind::Create | GraphMutationPlanKind::Merge => {}
@@ -1021,22 +1217,15 @@ impl SailGraphStore {
 
     async fn apply_upsert_edges_from_node_matches(
         &self,
-        kind: GraphMutationPlanKind,
-        from: &GraphNodeMatch,
-        to: &GraphNodeMatch,
-        label: &Label,
-        props: &Props,
-        edge_id_policy: GraphRowEdgeIdPolicy,
+        upsert: NodeMatchEdgeUpsert<'_>,
         report: &mut CypherMutationReport,
         written_edge_identities: Option<&mut Vec<CypherWrittenEdgeIdentity>>,
     ) -> Result<()> {
-        let edges = self
-            .edges_from_node_matches(kind, from, to, label, props, edge_id_policy)
-            .await?;
+        let edges = self.edges_from_node_matches(upsert).await?;
         report.matched_rows += edges.len();
         report.edge_upserts += edges.len();
         report.changed_edges += edges.len();
-        match kind {
+        match upsert.kind {
             GraphMutationPlanKind::Create => {}
             GraphMutationPlanKind::Merge => {}
         }
@@ -1056,28 +1245,27 @@ impl SailGraphStore {
             collector.extend(
                 edges
                     .iter()
-                    .map(|edge| cypher_written_edge_identity(kind, edge)),
+                    .map(|edge| cypher_written_edge_identity(upsert.kind, edge)),
             );
         }
         Ok(())
     }
 
-    async fn edges_from_node_matches(
-        &self,
-        kind: GraphMutationPlanKind,
-        from: &GraphNodeMatch,
-        to: &GraphNodeMatch,
-        label: &Label,
-        props: &Props,
-        edge_id_policy: GraphRowEdgeIdPolicy,
-    ) -> Result<Vec<Edge>> {
-        let (from_sql, from_args) =
-            matching_nodes_sql(from.label.as_ref(), &from.props, &from.predicates)?;
-        let (to_sql, to_args) = matching_nodes_sql(to.label.as_ref(), &to.props, &to.predicates)?;
+    async fn edges_from_node_matches(&self, upsert: NodeMatchEdgeUpsert<'_>) -> Result<Vec<Edge>> {
+        let (from_sql, from_args) = matching_nodes_sql(
+            upsert.from.label.as_ref(),
+            &upsert.from.props,
+            &upsert.from.predicates,
+        )?;
+        let (to_sql, to_args) = matching_nodes_sql(
+            upsert.to.label.as_ref(),
+            &upsert.to.props,
+            &upsert.to.predicates,
+        )?;
         let from_nodes = self.run_query(&from_sql, from_args).await?;
         let to_nodes = self.run_query(&to_sql, to_args).await?;
         let mut edges = Vec::with_capacity(from_nodes.len().saturating_mul(to_nodes.len()));
-        let edge_id = edge_id_from_props(props)?;
+        let edge_id = edge_id_from_props(upsert.props)?;
         if edge_id.is_some() && edges.capacity() > 1 {
             return Err(cypher_unsupported_cardinality(
                 "row-producing MATCH ... CREATE/MERGE with an explicit relationship id must produce exactly one edge",
@@ -1086,14 +1274,14 @@ impl SailGraphStore {
         for from_node in &from_nodes {
             for to_node in &to_nodes {
                 let mut edge = Edge::new(
-                    label.clone(),
+                    upsert.label.clone(),
                     from_node.id.clone(),
                     to_node.id.clone(),
-                    props.clone(),
+                    upsert.props.clone(),
                 );
                 if let Some(id) = edge_id.clone() {
                     edge = edge.with_id(id);
-                } else if row_edge_id_policy_generates(kind, edge_id_policy) {
+                } else if row_edge_id_policy_generates(upsert.kind, upsert.edge_id_policy) {
                     let generated_id =
                         generated_row_edge_id(&edge.from, &edge.label, &edge.to, &edge.props);
                     edge = edge.with_id(generated_id);
@@ -1105,6 +1293,9 @@ impl SailGraphStore {
     }
 
     async fn validate_and_load_edges(&self, edges: &[Edge]) -> Result<()> {
+        for edge in edges {
+            validate_edge_key_components(edge)?;
+        }
         let schema = self.current_schema();
         let endpoint_ids = edges
             .iter()
@@ -1172,7 +1363,10 @@ impl SailGraphStore {
         ids.dedup();
 
         let mut edge_keys = if delete_edges {
-            edges.iter().map(edge_key).collect::<Vec<_>>()
+            edges
+                .iter()
+                .map(checked_edge_key)
+                .collect::<Result<Vec<_>>>()?
         } else {
             Vec::new()
         };
@@ -1182,7 +1376,8 @@ impl SailGraphStore {
                 all_edges
                     .iter()
                     .filter(|edge| ids.iter().any(|id| id == &edge.from || id == &edge.to))
-                    .map(edge_key),
+                    .map(checked_edge_key)
+                    .collect::<Result<Vec<_>>>()?,
             );
         }
         edge_keys.sort();
@@ -1223,10 +1418,11 @@ impl SailGraphStore {
                     kind: GraphMutationPlanKind::Create,
                     edge,
                 } => {
+                    validate_edge_key_components(edge)?;
                     if self.strict_create_edge_exists(edge).await? {
                         return Err(GrustError::Unsupported(format!(
                             "Cypher CREATE would overwrite existing edge '{}'",
-                            edge_key(edge)
+                            checked_edge_key(edge)?
                         )));
                     }
                 }
@@ -1240,20 +1436,23 @@ impl SailGraphStore {
                     ..
                 } => {
                     let edges = self
-                        .edges_from_node_matches(
-                            GraphMutationPlanKind::Create,
+                        .edges_from_node_matches(NodeMatchEdgeUpsert {
+                            kind: GraphMutationPlanKind::Create,
                             from,
                             to,
                             label,
                             props,
-                            *edge_id_policy,
-                        )
+                            edge_id_policy: *edge_id_policy,
+                        })
                         .await?;
+                    for edge in &edges {
+                        validate_edge_key_components(edge)?;
+                    }
                     for edge in &edges {
                         if self.strict_create_edge_exists(edge).await? {
                             return Err(GrustError::Unsupported(format!(
                                 "Cypher CREATE would overwrite existing edge '{}'",
-                                edge_key(edge)
+                                checked_edge_key(edge)?
                             )));
                         }
                     }
@@ -1379,7 +1578,7 @@ impl SailGraphStore {
     async fn run_text_query(&self, sql: &str) -> Result<Vec<Vec<Option<String>>>> {
         let mut rows = Vec::new();
         self.run_plan(self.query_request(sql, vec![])?, |data| {
-            rows.extend(parse_text_rows_from_arrow(data)?);
+            rows.extend(parse_text_rows_from_arrow(&data)?);
             Ok(())
         })
         .await?;
@@ -1408,7 +1607,7 @@ impl SailGraphStore {
         self.run_plan(
             self.query_request(sail_degree_pairs_sql(), vec![])?,
             |data| {
-                rows.extend(parse_degree_pairs_from_arrow(data)?);
+                rows.extend(parse_degree_pairs_from_arrow(&data)?);
                 Ok(())
             },
         )
@@ -1432,7 +1631,7 @@ impl SailGraphStore {
         self.run_plan(
             self.query_request(sail_triplets_sql_for_direction(direction), vec![])?,
             |data| {
-                rows.extend(parse_triplets_from_arrow(data)?);
+                rows.extend(parse_triplets_from_arrow(&data)?);
                 Ok(())
             },
         )
@@ -1443,11 +1642,7 @@ impl SailGraphStore {
     // ── helpers ───────────────────────────────────────────────────────────────
 
     fn user_context(&self) -> UserContext {
-        UserContext {
-            user_id: self.config.user_id.clone(),
-            user_name: self.config.user_id.clone(),
-            extensions: vec![],
-        }
+        sail_user_context(&self.config)
     }
 
     fn request_with_plan(&self, plan: Plan) -> ExecutePlanRequest {
@@ -1456,7 +1651,7 @@ impl SailGraphStore {
             user_context: Some(self.user_context()),
             operation_id: Some(uuid::Uuid::new_v4().to_string()),
             plan: Some(plan),
-            client_type: Some("grust-sail/0.1.0".to_string()),
+            client_type: Some(CLIENT_TYPE.to_string()),
             request_options: vec![execute_plan_request::RequestOption {
                 request_option: Some(
                     execute_plan_request::request_option::RequestOption::ReattachOptions(
@@ -1521,7 +1716,7 @@ impl SailGraphStore {
     async fn run_plan(
         &self,
         req: ExecutePlanRequest,
-        mut on_batch: impl FnMut(&[u8]) -> Result<()> + Send,
+        mut on_batch: impl FnMut(Vec<u8>) -> Result<()> + Send,
     ) -> Result<()> {
         let mut client = self.client.clone();
         let mut stream = client
@@ -1537,7 +1732,7 @@ impl SailGraphStore {
                         resp.response_type
                         && batch.row_count > 0
                     {
-                        on_batch(&batch.data)?;
+                        on_batch(batch.data)?;
                     }
                 }
                 Err(e) => return Err(GrustError::Backend(format!("Sail stream error: {e}"))),
@@ -1559,7 +1754,7 @@ impl SailGraphStore {
     async fn run_query(&self, sql: &str, args: Vec<expression::Literal>) -> Result<Vec<Node>> {
         let mut nodes = Vec::new();
         self.run_plan(self.query_request(sql, args)?, |data| {
-            nodes.extend(parse_nodes_from_arrow(data)?);
+            nodes.extend(parse_nodes_from_arrow(&data)?);
             Ok(())
         })
         .await?;
@@ -1569,7 +1764,7 @@ impl SailGraphStore {
     async fn run_edge_query(&self, sql: &str, args: Vec<expression::Literal>) -> Result<Vec<Edge>> {
         let mut edges = Vec::new();
         self.run_plan(self.query_request(sql, args)?, |data| {
-            edges.extend(parse_edges_from_arrow(data)?);
+            edges.extend(parse_edges_from_arrow(&data)?);
             Ok(())
         })
         .await?;
@@ -1579,7 +1774,7 @@ impl SailGraphStore {
     async fn run_degree_query(&self, sql: &str) -> Result<Vec<SailDegreeRow>> {
         let mut rows = Vec::new();
         self.run_plan(self.query_request(sql, vec![])?, |data| {
-            rows.extend(parse_degrees_from_arrow(data)?);
+            rows.extend(parse_degrees_from_arrow(&data)?);
             Ok(())
         })
         .await?;
@@ -1690,6 +1885,9 @@ impl SailGraphStore {
         constraints: &[GraphConstraint],
         edges: &[Edge],
     ) -> Result<()> {
+        for edge in edges {
+            validate_edge_key_components(edge)?;
+        }
         for constraint in constraints {
             let GraphConstraint::EdgePropertyUnique { label, key } = constraint else {
                 continue;
@@ -1706,11 +1904,14 @@ impl SailGraphStore {
                     ..EdgeQuery::default()
                 })
                 .await?;
+            for existing_edge in &existing {
+                validate_edge_key_components(existing_edge)?;
+            }
             for edge in edges {
                 if let Some(conflict) = unique_edge_conflict(&existing, edge, label, key) {
                     return Err(GrustError::Schema(format!(
                         "edge '{}' violates unique constraint on property '{}' of label '{}' (conflicts with persisted edge '{}')",
-                        edge_key(edge),
+                        checked_edge_key(edge)?,
                         key,
                         label.as_str(),
                         conflict
@@ -1722,11 +1923,20 @@ impl SailGraphStore {
     }
 }
 
+fn sail_user_context(config: &SailConfig) -> UserContext {
+    UserContext {
+        user_id: config.user_id.clone(),
+        user_name: config.user_id.clone(),
+        extensions: vec![],
+    }
+}
+
 // ── GraphStore ────────────────────────────────────────────────────────────────
 
 #[async_trait]
 impl GraphStore for SailGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
+        validate_sail_schema_identifiers(schema)?;
         self.bootstrap().await?;
         for statement in sail_schema_sql(schema)? {
             self.run_command(&statement, vec![]).await?;
@@ -1763,6 +1973,7 @@ impl GraphStore for SailGraphStore {
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
+        validate_edge_key_components(edge)?;
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {
             schema.validate_edge_props(edge)?;
@@ -1779,6 +1990,11 @@ impl GraphStore for SailGraphStore {
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
+        // Reject a late ambiguous identity before constraint reads or the first
+        // staged node batch, preventing a partially loaded graph.
+        for edge in &graph.edges {
+            validate_edge_key_components(edge)?;
+        }
         let schema = self.current_schema();
         if let Some(schema) = schema.as_ref() {
             schema.validate_graph(graph)?;
@@ -1966,9 +2182,12 @@ impl CypherMutationExecutor for SailGraphStore {
         plan: &GraphMutationPlan,
     ) -> Result<GraphMutationReport> {
         let mut report = plan.report();
-        self.apply_cypher_mutation_plan(plan, &mut report, None, None, None, None, None, None)
-            .await
-            .map_err(cypher_execution_error)?;
+        {
+            let mut execution = CypherMutationExecution::new(&mut report);
+            self.apply_cypher_mutation_plan(plan, &mut execution)
+                .await
+                .map_err(cypher_execution_error)?;
+        }
         Ok(report)
     }
 }
@@ -2020,6 +2239,10 @@ fn edges_record_batch(
         .iter()
         .map(|edge| props_to_json(&edge.props))
         .collect::<Result<Vec<_>>>()?;
+    let edge_keys = edges
+        .iter()
+        .map(checked_edge_key)
+        .collect::<Result<Vec<_>>>()?;
     let label_of = |id: &NodeId| {
         node_labels
             .get(id)
@@ -2047,7 +2270,9 @@ fn edges_record_batch(
             Arc::new(StringArray::from_iter_values(
                 props.iter().map(String::as_str),
             )),
-            Arc::new(StringArray::from_iter_values(edges.iter().map(edge_key))),
+            Arc::new(StringArray::from_iter_values(
+                edge_keys.iter().map(String::as_str),
+            )),
             Arc::new(StringArray::from(
                 edges
                     .iter()
@@ -2110,6 +2335,26 @@ fn edge_keys_record_batch(keys: &[String]) -> Result<RecordBatch> {
         ))],
     )
     .map_err(|e| GrustError::Backend(format!("Arrow edge-key delete batch build failed: {e}")))
+}
+
+fn cypher_constraint_registry_record_batch(name: &str, registry_json: &str) -> Result<RecordBatch> {
+    validate_cypher_constraint_registry_name(name)?;
+    let schema = Arc::new(ArrowSchema::new(vec![
+        ArrowField::new("name", DataType::Utf8, false),
+        ArrowField::new("registry_json", DataType::Utf8, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values([name])),
+            Arc::new(StringArray::from_iter_values([registry_json])),
+        ],
+    )
+    .map_err(|error| {
+        GrustError::Backend(format!(
+            "Arrow Cypher constraint registry batch build failed: {error}"
+        ))
+    })
 }
 
 fn ipc_bytes(batch: &RecordBatch) -> Result<Vec<u8>> {
@@ -2263,59 +2508,69 @@ pub fn sail_triplets_sql_for_direction(direction: SailGraphPatternDirection) -> 
 }
 
 fn sail_schema_sql(schema: &GraphSchema) -> Result<Vec<String>> {
+    validate_sail_schema_identifiers(schema)?;
+    // The pinned Sail revision loses user-facing field names while resolving
+    // Delta MERGE constraints for explicit-schema tables. Zero-row CTAS keeps
+    // those names; constraint properties preserve structural non-null checks.
     let mut statements = Vec::new();
     for node_type in &schema.nodes {
-        let fields = node_type
-            .fields
-            .iter()
-            .map(|field| {
-                Ok(format!(
-                    "{} {}",
-                    sql_ident(&field.name)?,
-                    sail_sql_type(&field.ty)
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .join(", ");
-        let fields = if fields.is_empty() {
-            String::new()
-        } else {
-            format!(", {fields}")
-        };
+        let mut columns = vec!["CAST(NULL AS STRING) AS id".to_string()];
+        columns.extend(
+            typed_node_property_fields(node_type)?
+                .map(|field| {
+                    Ok(format!(
+                        "CAST(NULL AS {}) AS {}",
+                        sail_sql_type(&field.ty),
+                        sql_ident(&field.name)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
         statements.push(format!(
-            "CREATE TABLE IF NOT EXISTS {} (id STRING NOT NULL{fields}) USING delta TBLPROPERTIES ({} = {}, {} = {})",
+            "CREATE TABLE IF NOT EXISTS {} USING delta TBLPROPERTIES ({} = {}, {} = {}, {}) AS SELECT {} WHERE FALSE",
             sail_node_table(node_type.label.as_str())?,
             sql_str(GRAPH_TABLE_KIND_PROPERTY),
             sql_str(GRAPH_TABLE_KIND_NODE),
             sql_str(GRAPH_TABLE_LABEL_PROPERTY),
-            sql_str(node_type.label.as_str())
+            sql_str(node_type.label.as_str()),
+            delta_not_null_property("grust_node_id_not_null", NODE_ID_COLUMN),
+            columns.join(", "),
         ));
     }
     for edge_type in &schema.edges {
-        let fields = edge_type
-            .fields
-            .iter()
-            .map(|field| {
-                Ok(format!(
-                    "{} {}",
-                    sql_ident(&field.name)?,
-                    sail_sql_type(&field.ty)
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?
-            .join(", ");
-        let fields = if fields.is_empty() {
-            String::new()
-        } else {
-            format!(", {fields}")
-        };
+        let mut columns = vec![
+            "CAST(NULL AS STRING) AS edge_key".to_string(),
+            "CAST(NULL AS STRING) AS id".to_string(),
+            "CAST(NULL AS STRING) AS src_id".to_string(),
+            "CAST(NULL AS STRING) AS dst_id".to_string(),
+        ];
+        columns.extend(
+            edge_type
+                .fields
+                .iter()
+                .map(|field| {
+                    Ok(format!(
+                        "CAST(NULL AS {}) AS {}",
+                        sail_sql_type(&field.ty),
+                        sql_ident(&field.name)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?,
+        );
         statements.push(format!(
-            "CREATE TABLE IF NOT EXISTS {} (edge_key STRING NOT NULL, id STRING, src_id STRING NOT NULL, dst_id STRING NOT NULL{fields}) USING delta TBLPROPERTIES ({} = {}, {} = {})",
+            "CREATE TABLE IF NOT EXISTS {} USING delta TBLPROPERTIES ({} = {}, {} = {}, {}) AS SELECT {} WHERE FALSE",
             sail_edge_table(edge_type.label.as_str())?,
             sql_str(GRAPH_TABLE_KIND_PROPERTY),
             sql_str(GRAPH_TABLE_KIND_EDGE),
             sql_str(GRAPH_TABLE_LABEL_PROPERTY),
-            sql_str(edge_type.label.as_str())
+            sql_str(edge_type.label.as_str()),
+            [
+                delta_not_null_property("grust_edge_key_not_null", EDGE_KEY_COLUMN),
+                delta_not_null_property("grust_edge_src_id_not_null", EDGE_SRC_ID_COLUMN),
+                delta_not_null_property("grust_edge_dst_id_not_null", EDGE_DST_ID_COLUMN),
+            ]
+            .join(", "),
+            columns.join(", "),
         ));
     }
     Ok(statements)
@@ -2339,7 +2594,7 @@ fn props_field_expr(props_column: &str, field: &Field) -> Result<String> {
 fn typed_node_merge_from_view_sql(node_type: &NodeType) -> Result<String> {
     let mut select_columns = vec!["s.id AS id".to_string()];
     let mut insert_columns = vec!["id".to_string()];
-    for field in &node_type.fields {
+    for field in typed_node_property_fields(node_type)? {
         let column = sql_ident(&field.name)?;
         select_columns.push(format!(
             "{} AS {column}",
@@ -3198,6 +3453,14 @@ fn sql_str(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "''"))
 }
 
+fn delta_not_null_property(name: &str, column: &str) -> String {
+    format!(
+        "{} = {}",
+        sql_str(&format!("delta.constraints.{name}")),
+        sql_str(&format!("`{column}` IS NOT NULL")),
+    )
+}
+
 fn validate_cypher_constraint_registry_name(name: &str) -> Result<()> {
     if name.trim().is_empty() {
         return Err(GrustError::Schema(
@@ -3208,25 +3471,31 @@ fn validate_cypher_constraint_registry_name(name: &str) -> Result<()> {
 }
 
 fn create_cypher_constraint_registry_table_sql() -> String {
+    // Use the same CTAS compatibility shape as typed graph tables until Sail
+    // resolves explicit-schema Delta MERGE constraints by user-facing name.
     format!(
-        "CREATE TABLE IF NOT EXISTS {} \
-         (name STRING NOT NULL, registry_json STRING NOT NULL) USING delta",
-        CYPHER_CONSTRAINT_REGISTRY_TABLE
+        "CREATE TABLE IF NOT EXISTS {} USING delta TBLPROPERTIES ({}) AS \
+         SELECT CAST(NULL AS STRING) AS name, \
+                CAST(NULL AS STRING) AS registry_json \
+         WHERE FALSE",
+        CYPHER_CONSTRAINT_REGISTRY_TABLE,
+        [
+            delta_not_null_property("grust_registry_name_not_null", "name"),
+            delta_not_null_property("grust_registry_json_not_null", "registry_json"),
+        ]
+        .join(", "),
     )
 }
 
-fn upsert_cypher_constraint_registry_sql(name: &str, registry_json: &str) -> Result<String> {
-    validate_cypher_constraint_registry_name(name)?;
-    Ok(format!(
+fn upsert_cypher_constraint_registry_sql() -> String {
+    format!(
         "MERGE INTO {table} AS t \
-         USING (SELECT {name} AS name, {registry_json} AS registry_json) AS s \
+         USING {CONSTRAINT_REGISTRY_STAGE_VIEW} AS s \
          ON t.name = s.name \
          WHEN MATCHED THEN UPDATE SET t.registry_json = s.registry_json \
          WHEN NOT MATCHED THEN INSERT (name, registry_json) VALUES (s.name, s.registry_json)",
         table = CYPHER_CONSTRAINT_REGISTRY_TABLE,
-        name = sql_str(name),
-        registry_json = sql_str(registry_json),
-    ))
+    )
 }
 
 fn select_cypher_constraint_registry_sql(name: &str) -> Result<String> {

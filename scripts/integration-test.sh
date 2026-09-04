@@ -14,11 +14,17 @@ if [[ -f "$CONFIG" ]]; then
   source "$CONFIG"
 fi
 
+# Keep the pgGraph readiness helpers safe even when a caller supplies a
+# minimal alternate config instead of the repository default.
+PGGRAPH_HOST="${PGGRAPH_HOST:-127.0.0.1}"
+PGGRAPH_PORT="${PGGRAPH_PORT:-55432}"
+
 BACKENDS=()
 NO_START=0
 KEEP_RUNNING=0
 MODE="${GRUST_INTEGRATION_MODE:-auto}"
 PROFILE="${GRUST_INTEGRATION_PROFILE:-}"
+SAIL_TEST_TIMEOUT_SECONDS="${GRUST_SAIL_TEST_TIMEOUT_SECONDS:-120}"
 
 ALL_BACKENDS=(sail surreal falkor helix ladybug lancedb cocoindex pggraph postgres-pgq)
 DOCKER_BACKENDS=(surreal falkor ladybug lancedb cocoindex pggraph)
@@ -167,6 +173,18 @@ wait_port() {
   done
 }
 
+run_sail_test() {
+  if ! [[ "$SAIL_TEST_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "GRUST_SAIL_TEST_TIMEOUT_SECONDS must be a positive integer" >&2
+    return 2
+  fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "the Sail integration gate requires a timeout command" >&2
+    return 2
+  fi
+  timeout "$SAIL_TEST_TIMEOUT_SECONDS" "$@"
+}
+
 wait_pggraph() {
   local deadline=$((SECONDS + 120))
   until pg_isready -h "$PGGRAPH_HOST" -p "$PGGRAPH_PORT" -U "${PGGRAPH_USER:-postgres}" -d "${PGGRAPH_DB:-graph}" >/dev/null 2>&1; do
@@ -234,15 +252,24 @@ start_sail() {
     return
   fi
   [[ "$NO_START" -eq 0 ]] || return
-  if can_use_source && [[ -n "${SAIL_SOURCE:-}" && -d "$SAIL_SOURCE" ]]; then
+  if can_use_source && [[ -n "${SAIL_TEST_BIN:-}" ]]; then
+    if [[ "$SAIL_TEST_BIN" != /* ]]; then
+      echo "SAIL_TEST_BIN must be an absolute path: $SAIL_TEST_BIN" >&2
+      return 1
+    fi
+    if [[ ! -x "$SAIL_TEST_BIN" ]]; then
+      echo "SAIL_TEST_BIN is not executable: $SAIL_TEST_BIN" >&2
+      return 1
+    fi
+    start_process sail "${SAIL_SOURCE:-.}" "$SAIL_TEST_BIN" spark server --ip "$SAIL_HOST" --port "$SAIL_PORT"
+  elif can_use_source && [[ -n "${SAIL_SOURCE:-}" && -d "$SAIL_SOURCE" ]]; then
     if [[ -x "$SAIL_SOURCE/target/release/sail" ]]; then
-      start_process sail "$SAIL_SOURCE" "$SAIL_SOURCE/target/release/sail" spark server --port "$SAIL_PORT"
-    elif command -v sail >/dev/null 2>&1; then
-      start_process sail "$SAIL_SOURCE" sail spark server --port "$SAIL_PORT"
+      start_process sail "$SAIL_SOURCE" "$SAIL_SOURCE/target/release/sail" spark server --ip "$SAIL_HOST" --port "$SAIL_PORT"
     elif command -v hatch >/dev/null 2>&1; then
-      start_process sail "$SAIL_SOURCE" hatch run sail spark server --port "$SAIL_PORT"
+      start_process sail "$SAIL_SOURCE" hatch run sail spark server --ip "$SAIL_HOST" --port "$SAIL_PORT"
     else
-      echo "no Sail launcher found; build / install Sail or start it manually" >&2
+      echo "no current-source Sail launcher found; set SAIL_TEST_BIN, build $SAIL_SOURCE/target/release/sail, or install Hatch" >&2
+      return 1
     fi
   elif [[ "$MODE" == "docker" ]]; then
     echo "sail has no configured Docker Compose service; use --mode auto/source with SAIL_SOURCE or start Sail manually" >&2
@@ -529,7 +556,9 @@ run_backend() {
     sail)
       start_sail
       wait_port sail "$SAIL_HOST" "$SAIL_PORT"
-      cargo test -p grust-sail -- --ignored --test-threads=1
+      export SAIL_ENDPOINT="http://${SAIL_HOST}:${SAIL_PORT}"
+      run_sail_test cargo test -p grust-sail -- --ignored --test-threads=1
+      run_sail_test cargo test -p querygraph-memory --features sail --test sail_cognition_live -- --ignored --test-threads=1
       ;;
     surreal)
       start_surreal

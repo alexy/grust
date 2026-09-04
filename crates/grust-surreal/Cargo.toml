@@ -11,7 +11,7 @@ categories.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-grust-core = { version = "0.12.0", path = "../grust-core" }
+grust-core = { version = "0.13.0", path = "../grust-core" }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 surrealdb = { workspace = true }

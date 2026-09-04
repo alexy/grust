@@ -5,7 +5,7 @@
   <meta name="generator" content="pandoc" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
-  <meta name="dcterms.date" content="2026-07-15" />
+  <meta name="dcterms.date" content="2026-08-06" />
   <title>8. Backend Architecture</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
@@ -15,8 +15,12 @@
     ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
     */
     span.smallcaps{font-variant: small-caps;}
-    div.columns{display: flex; gap: min(4vw, 1.5em);}
-    div.column{flex: auto; overflow-x: auto;}
+    div.columns{display: flex; gap: 1.5em;}
+    div.column{flex: auto;}
+    @media screen {
+    div.columns{gap: min(4vw, 1.5em);}
+    div.column{overflow-x: auto;}
+    }
     div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
     /* The extra [class] is a hack that increases specificity enough to
        override a similar rule in reveal.js */
@@ -383,21 +387,121 @@ contradiction, and importance analyzers likewise make no writes. They
 consume already-recalled views and emit inert
 <code>ConsolidationPlan</code> values that must return through the
 capability-gated vault.</p>
-<p>The durable v1 proof has explicit limits.
+<p>The governed cognition path extends that rule instead of bypassing
+it. A <code>CognitionRequest</code> contains one TypeSec-authorized
+input, its canonical binding, its optional vault-verified governed
+source scope, the exact LakeCat snapshot and policy-narrowed projection,
+the field mapping used by governed ingestion to derive the selected
+memory records, a durable job identity, and either the deduplicate or
+reconcile operation. The trusted host selects a fixed reference or
+native Sail profile before protected input is loaded; public engine
+implementations cannot report their own trusted identity. Both
+asynchronous engines return a bound <code>CognitionProposal</code>,
+never a store handle or direct write.</p>
+<p>Every bound proposal uses TypeSec proposal schema version 4. That
+wire contract identifies <code>input_snapshot</code> with the canonical
+immutable snapshot digest, keeps the LakeCat grant digest as separate
+binding evidence, and carries an explicit <code>mutated</code> or
+<code>no_change</code> effect. Reference and Sail derive that effect
+from the complete proposal: zero drafts and zero plan steps means
+no-change; every nonempty plan is mutating. Earlier bound schema
+versions fail closed; unbound schema version 1 remains only an inert
+local planning value. This wire version is independent of the operation
+algorithm version below.</p>
+<p>Deduplicate and reconcile each own an explicit version-2 semantic
+contract. Reference and Sail profiles bind the same per-operation
+version because they must produce the same canonical plan. Crate,
+package, and build versions remain useful implementation metadata, but
+never substitute for the algorithm version in signed TypeDID authority.
+Previously signed version-1 or package-bound intents are deliberately
+incompatible and must be authorized again; no native profile silently
+upgrades their authority.</p>
+<p>Live Sail does not re-read LakeCat rows or reinterpret the ingestion
+mapping. It derives and stages only authorized IDs, normalized text
+keys, contradiction prefix/tail keys, and validity timestamps under a
+collision-safe session view; it does not stage the raw text column.
+Planning has independent finite operation, abort, and cleanup deadlines,
+and cleanup is attempted after success, failure, timeout, or caller
+cancellation. The Spark client and cognition decoder reuse the same
+public 16 MiB Arrow IPC payload limit; the decoded protobuf message has
+one additional MiB of bounded envelope headroom. Normalized and
+contradiction keys remain content-derived rather than anonymized, so the
+Sail endpoint belongs inside the processing boundary authorized for that
+protected input. Arrow framing, schemas, declared rows, buffers,
+compressed expansion, result counts, and local reconciliation work are
+checked before Arrow result-array allocation and then rechecked against
+the complete result. The reference and Sail engines use the same
+deterministic planning functions, so input permutation and timestamp
+ties produce canonical output.</p>
+<p>Durability is a separate storage capability.
+<code>GraphCommitStore</code> combines exact node or absence
+expectations, a mutation batch, an idempotency digest, and a backend
+receipt in one transaction. Turso mints the receipt’s canonical UTC RFC
+3339 timestamp at nanosecond precision immediately before inserting that
+receipt into the same transaction. It is backend-issued
+transaction-boundary evidence, not a wall-clock observation taken after
+storage fsync, and recovery returns those exact persisted bytes or fails
+closed on malformed time. The cognition scheduler stores only scoped
+digests, issues bounded renewable bearer leases, persists only the
+canonical proposal digest, and survives reopen. During application,
+TypeSec supplies the opaque prepared commit; Grust atomically checks
+source revisions, applies its exact memory operations and ID-only index
+outbox, writes the audit record, persists the outcome, and completes the
+job. A no-change token has empty operations, affected IDs, and outbox,
+and retains the prior memory version, but the exact source guards, job,
+audit, outcome, and guarded ledger still commit as one decision.
+Recovery is read-only and cross-validates the job, audit, outcome,
+authority scope, optional governed source scope, proposal, effect, and
+backend receipt. Durable outcome schema version 3 requires TypeSec audit
+schema version 2, which carries the same typed effect, distinct grant
+and snapshot digests, and the trusted authority-revalidation and
+preparation times. Audit and commit-envelope digests use version-3
+domains so this evidence layout cannot be confused with either
+predecessor. TypeSec owns scope selection and authoritative reload
+checks; Grust preserves that evidence and atomically enforces the
+prepared full-record preconditions. Tests exercise concurrent identical
+decisions and commit-then-response loss and prove that retry plus reopen
+retain exactly one job, audit record, outcome, guarded ledger, and the
+exact mutation/outbox shape required by the effect.</p>
+<p>The scheduler’s <code>transitionedAt</code> is a caller-supplied
+logical transition time; for <code>Completed</code> it is explicitly the
+TypeSec audit’s <code>preparedAt</code>. It is not a backend commit
+timestamp. A completed job’s <code>completionDigest</code> is exactly
+the canonical TypeSec prepared digest for either effect, never the
+resulting memory version; this avoids collapsing no-change into an
+unchanged memory version. Recovery checks durable schema versions before
+deserialization, rejects incompatible historical outcome and audit
+layouts, and requires affected IDs to retain TypeSec’s strict canonical
+order. Authoritative <code>committedAt</code> evidence exists only in
+the outcome and receipt, must be canonical RFC 3339, and cannot predate
+preparation. Grust rejects malformed or regressive backend time on
+initial return and recovery instead of substituting a timestamp from
+another phase.</p>
+<p>The scheduler and outbox APIs are storage primitives behind
+Marciana’s authenticated scheduler and trusted worker pool. A worker
+intentionally need not equal the submitter, which lets expired work move
+safely, but canonical owner strings and scoped job keys are not
+credentials. Once issued, lease and claim tokens are bearer credentials
+for worker transitions. Marciana must authorize acquisition and
+cancellation and keep those tokens confidential; only a freshly prepared
+opaque TypeSec commit can authorize memory mutation.</p>
+<p>This is a native Grust, TypeSec, LakeCat, and Sail composition.
+Cognee supplied design inspiration only; no Cognee runtime, adapter, or
+storage dependency is present.</p>
+<p>The durable proof still has explicit limits.
 <code>MemoryId::next()</code> uses a process-local counter, so a
-restarted writer can collide with persisted <code>mem-N</code>
-identifiers; a hosted or multi-process system needs collision-resistant
-durable IDs and idempotency. <code>VectorIndex</code> is not a
-persistent LanceDB ANN implementation, memory predicates beyond space
-are not fully pushed into GQL, and the reference analytics are not
-distributed Sail cognition. TypeDID request verification is present at
-the QueryGraph service boundary, but durable anti-replay state shared
-across replicas is post-v1. Grust’s structural edge identity remains
+restarted ordinary writer can collide with persisted <code>mem-N</code>
+identifiers; a hosted or multi-process service should mint
+collision-resistant IDs at its boundary. <code>VectorIndex</code> is not
+a persistent LanceDB ANN implementation, and memory predicates beyond
+space are not fully pushed into GQL. Cognition job idempotency does not
+replace durable TypeDID nonce replay protection shared across gateway
+replicas. Grust’s structural edge identity remains
 <code>(from, label, to)</code>, so changing <code>fact_id</code> cannot
 preserve parallel <code>RELATES</code> assertions between the same
 endpoints; assertion nodes or a multi-edge identity surface are still
 needed for full lineage. Finally, vault-level tenant checks, restart
-persistence, and an end-to-end local demonstration do not by themselves
+persistence, and running-service conformance do not by themselves
 constitute a hosted multi-tenant service with quotas, migrations,
 backups, deletion propagation, and service-level objectives.</p>
 <h2 data-number="9.7" id="sail"><span
@@ -406,6 +510,24 @@ class="header-section-number">9.7</span> Sail</h2>
 gRPC. It stores graph data in Spark DataFrames backed by Delta tables.
 SQL commands and reads are sent as Spark Connect SQL relation plans, and
 read results are decoded from Arrow IPC streams.</p>
+<p>Connection establishment validates the client configuration. The
+default <code>SailWarehouse::ServerManaged</code> policy does not set
+<code>spark.sql.warehouse.dir</code>; Sail’s catalog and warehouse
+configuration remain authoritative, which is safe across a remote client
+boundary and does not silently select a new client-local persistence
+path. Co-located development can opt into
+<code>SailWarehouse::LocalSessionScoped</code>, which derives a path
+beneath the client’s temporary directory from the session ID. Grust does
+not delete that directory; callers own cleanup, and reusing the session
+ID reuses the path. Durable callers can use
+<code>SailWarehouse::ExplicitPath</code> with a stable absolute path
+visible to the server; Grust sets and reads that override back through
+the same Spark Connect session. Reopening tables across sessions
+additionally requires Sail to provide persistent catalog metadata. If
+Sail’s unconfigured warehouse fallback is the relative
+<code>spark-warehouse</code> path, the server needs an absolute setting
+or the client must select one of the explicit Grust overrides before
+creating managed Delta tables.</p>
 <p>Bulk writes stage Arrow IPC batches as Spark Connect
 <code>LocalRelation</code> temp views and then merge from those views.
 That avoids building one giant SQL literal per row, keeps user values
@@ -423,12 +545,17 @@ Spark SQL, collect Spark SQL results as Arrow IPC chunks, or load
 Grust-shaped node and edge IPC streams through the normal graph write
 path. This gives Sail the same data-source role as Ladybug while keeping
 Sail’s internal Arrow 58 dependency separate from Ladybug’s Arrow 55
-dependency.</p>
+dependency. Staged views can be dropped through a validated, idempotent
+helper, allowing protected batch inputs to be cleaned up on success,
+execution failure, or an uncertain retry.</p>
 <p>When a schema is applied, Sail creates typed Delta tables per node
 and edge label and mirrors writes into them with
 <code>MERGE INTO</code>. The universal Spark tables keep traversal
 simple and portable; the typed tables make declared graph labels
-available as ordinary Spark columns.</p>
+available as ordinary Spark columns. Their declared names survive table
+creation, while Delta constraints reject null structural node and edge
+identities. Constraint-registry values likewise enter through staged
+Arrow rather than SQL string interpolation.</p>
 <p>Sail also has reusable graph analytics helpers over the persisted
 generic tables. <code>read_graph</code> collects the generic
 <code>grust_nodes</code> and <code>grust_edges</code> tables back into a

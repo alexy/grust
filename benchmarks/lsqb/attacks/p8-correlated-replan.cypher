@@ -1,0 +1,1 @@
+MATCH (a), (b) CALL { MATCH (a) RETURN a AS m LIMIT 1 } RETURN a LIMIT 1

@@ -2,11 +2,8 @@ name: querygraph-memory
 
 # Targeted CI for the querygraph-memory crate (Marciana at scale).
 #
-# querygraph-memory implements typesec-memory's `MemoryStore` over Grust, so it
-# has a *path* dependency on the sibling typesec repo
-# (`../../../typesec/crates/typesec-memory`). This is the mirror image of
-# typesec's own CI, which checks out Grust as a sibling; here we check out
-# typesec as a sibling of Grust so the path resolves.
+# querygraph-memory implements typesec-memory's `MemoryStore` over Grust and
+# pins the reviewed TypeSec Git revision in Cargo.toml.
 #
 # Scoped to `-p querygraph-memory` on purpose. Its default production feature
 # now exercises the durable Turso backend, including the shared SQL/Cypher
@@ -22,8 +19,11 @@ on:
       - "crates/grust-core/**"
       - "crates/grust-cypher/**"
       - "crates/grust-memory/**"
+      - "crates/grust-sail/**"
       - "crates/grust-sql-core/**"
       - "crates/grust-turso/**"
+      - "integration/backends.conf"
+      - "scripts/integration-test.sh"
       - ".github/workflows/querygraph-memory.yml"
   pull_request:
     paths:
@@ -33,8 +33,11 @@ on:
       - "crates/grust-core/**"
       - "crates/grust-cypher/**"
       - "crates/grust-memory/**"
+      - "crates/grust-sail/**"
       - "crates/grust-sql-core/**"
       - "crates/grust-turso/**"
+      - "integration/backends.conf"
+      - "scripts/integration-test.sh"
       - ".github/workflows/querygraph-memory.yml"
 
 env:
@@ -46,23 +49,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out Grust
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: grust
-
-      # querygraph-memory depends on typesec-memory through a local *path*
-      # dependency (`../../../typesec/crates/...`). CI must place a typesec
-      # checkout as a sibling of the Grust checkout so the path resolves.
-      - name: Check out typesec (path dependency)
-        uses: actions/checkout@v4
-        with:
-          repository: querygraph/typesec
-          path: typesec
-          # Pin to the typesec ref that provides the MemoryStore contract this
-          # crate implements; bump deliberately when the contract changes.
-          # querygraph/typesec is private, so pass a token with read access:
-          #   token: ${{ secrets.TYPESEC_CHECKOUT_TOKEN }}
-          ref: main
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -72,6 +61,10 @@ jobs:
       - name: rustfmt
         working-directory: grust
         run: cargo fmt --check -p querygraph-memory
+
+      - name: integration launcher syntax
+        working-directory: grust
+        run: bash -n scripts/integration-test.sh
 
       - name: clippy
         working-directory: grust

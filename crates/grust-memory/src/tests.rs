@@ -22,6 +22,89 @@ impl TypedNode for Person {
     }
 }
 
+fn assert_adjacency_consistent(store: &MemoryGraphStore) {
+    let inner = store.inner.read().expect("memory graph lock poisoned");
+    for (key, edge) in &inner.edges {
+        assert_eq!(key, &MemoryEdgeKey::from_edge(edge));
+        assert!(
+            inner
+                .outgoing_edges
+                .get(&key.from)
+                .is_some_and(|keys| keys.contains(key))
+        );
+        assert!(
+            inner
+                .incoming_edges
+                .get(&key.to)
+                .is_some_and(|keys| keys.contains(key))
+        );
+    }
+    for (node, keys) in &inner.outgoing_edges {
+        assert!(!keys.is_empty());
+        assert!(
+            keys.iter()
+                .all(|key| &key.from == node && inner.edges.contains_key(key))
+        );
+    }
+    for (node, keys) in &inner.incoming_edges {
+        assert!(!keys.is_empty());
+        assert!(
+            keys.iter()
+                .all(|key| &key.to == node && inner.edges.contains_key(key))
+        );
+    }
+}
+
+#[test]
+fn adjacency_indexes_follow_edge_and_node_mutations() {
+    let store = MemoryGraphStore::new();
+    let graph = Graph::new(
+        vec![
+            Node::new("Person", "a", Props::new()),
+            Node::new("Person", "b", Props::new()),
+            Node::new("Person", "c", Props::new()),
+        ],
+        vec![
+            Edge::new("KNOWS", "a", "b", Props::new()).with_id("edge-1"),
+            Edge::new("KNOWS", "a", "b", Props::new()).with_id("edge-2"),
+            Edge::new("KNOWS", "c", "a", Props::new()).with_id("edge-3"),
+        ],
+    );
+    futures_executor::block_on(store.put_graph(&graph)).unwrap();
+    assert_adjacency_consistent(&store);
+
+    let outgoing = futures_executor::block_on(store.get_edges(EdgeQuery {
+        from: Some(NodeId::new("a")),
+        ..EdgeQuery::default()
+    }))
+    .unwrap();
+    assert_eq!(outgoing.len(), 2);
+
+    futures_executor::block_on(store.delete_edge(
+        &NodeId::new("a"),
+        &Label::new("KNOWS"),
+        &NodeId::new("b"),
+    ))
+    .unwrap();
+    assert_adjacency_consistent(&store);
+    assert!(
+        futures_executor::block_on(store.get_edges(EdgeQuery {
+            from: Some(NodeId::new("a")),
+            ..EdgeQuery::default()
+        }))
+        .unwrap()
+        .is_empty()
+    );
+
+    futures_executor::block_on(store.delete_node(&NodeId::new("a"))).unwrap();
+    assert_adjacency_consistent(&store);
+    assert!(
+        futures_executor::block_on(store.get_edges(EdgeQuery::default()))
+            .unwrap()
+            .is_empty()
+    );
+}
+
 #[test]
 fn stores_graph_and_traverses_one_step() {
     let mut builder = GraphBuilder::new();
@@ -89,6 +172,42 @@ fn applied_schema_validates_memory_graph_writes() {
             .expect_err("missing required field should fail");
 
     assert!(error.to_string().contains("missing required field 'name'"));
+}
+
+#[test]
+fn node_label_updates_revalidate_incident_edge_endpoints() {
+    let schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .node("Project", Vec::<Field>::new())
+        .edge(
+            "WORKS_ON",
+            vec![Label::new("Person")],
+            vec![Label::new("Project")],
+            Vec::<Field>::new(),
+        )
+        .build();
+    let store = MemoryGraphStore::new();
+    futures_executor::block_on(store.apply_schema(&schema)).unwrap();
+    futures_executor::block_on(store.put_graph(&Graph::new(
+        vec![
+            Node::new("Person", "person-1", Props::new()),
+            Node::new("Project", "project-1", Props::new()),
+        ],
+        vec![Edge::new("WORKS_ON", "person-1", "project-1", Props::new())],
+    )))
+    .unwrap();
+
+    let error =
+        futures_executor::block_on(store.put_node(&Node::new("Project", "person-1", Props::new())))
+            .expect_err("label update must preserve incident edge validity");
+    assert!(error.to_string().contains("cannot start from node label"));
+    assert_eq!(
+        futures_executor::block_on(store.get_node(&NodeId::new("person-1")))
+            .unwrap()
+            .unwrap()
+            .label,
+        Label::new("Person")
+    );
 }
 
 #[test]
@@ -172,10 +291,17 @@ fn memory_reports_constraint_capabilities_and_validates_constraints() {
             .contains("missing required constrained property 'email'")
     );
 
-    let mut first_props = Props::new();
-    first_props.insert("email".to_string(), Value::from("ada@example.com"));
-    futures_executor::block_on(store.put_node(&Node::new("Person", "person-1", first_props)))
-        .unwrap();
+    let first = Node::new(
+        "Person",
+        "person-1",
+        Props::from([("email".to_string(), Value::from("ada@example.com"))]),
+    );
+    futures_executor::block_on(store.put_node(&first)).unwrap();
+    assert_eq!(
+        futures_executor::block_on(store.put_node(&first)).unwrap(),
+        PutOutcome::Updated,
+        "a unique value does not conflict with the record it replaces"
+    );
 
     let mut duplicate_props = Props::new();
     duplicate_props.insert("email".to_string(), Value::from("ada@example.com"));
@@ -190,6 +316,19 @@ fn memory_reports_constraint_capabilities_and_validates_constraints() {
             .to_string()
             .contains("duplicates unique constrained property 'email'")
     );
+
+    let moved = Node::new(
+        "Person",
+        "person-1",
+        Props::from([("email".to_string(), Value::from("grace@example.com"))]),
+    );
+    futures_executor::block_on(store.put_node(&moved)).unwrap();
+    futures_executor::block_on(store.put_node(&Node::new(
+        "Person",
+        "person-2",
+        Props::from([("email".to_string(), Value::from("ada@example.com"))]),
+    )))
+    .expect("replacing a unique value releases its previous index entry");
 }
 
 #[test]
@@ -267,15 +406,18 @@ fn memory_validates_unique_edge_constraints_before_writes() {
     futures_executor::block_on(store.put_node(&Node::new("Project", "project-2", Props::new())))
         .unwrap();
 
-    let mut first_props = Props::new();
-    first_props.insert("role".to_string(), Value::from("maintainer"));
-    futures_executor::block_on(store.put_edge(&Edge::new(
+    let first = Edge::new(
         "WORKS_ON",
         "person-1",
         "project-1",
-        first_props,
-    )))
-    .unwrap();
+        Props::from([("role".to_string(), Value::from("maintainer"))]),
+    );
+    futures_executor::block_on(store.put_edge(&first)).unwrap();
+    assert_eq!(
+        futures_executor::block_on(store.put_edge(&first)).unwrap(),
+        PutOutcome::Updated,
+        "a unique value does not conflict with the edge it replaces"
+    );
 
     let mut duplicate_props = Props::new();
     duplicate_props.insert("role".to_string(), Value::from("maintainer"));
@@ -291,6 +433,77 @@ fn memory_validates_unique_edge_constraints_before_writes() {
             .to_string()
             .contains("duplicates unique constrained property 'role'")
     );
+
+    let moved = Edge::new(
+        "WORKS_ON",
+        "person-1",
+        "project-1",
+        Props::from([("role".to_string(), Value::from("reviewer"))]),
+    );
+    futures_executor::block_on(store.put_edge(&moved)).unwrap();
+    futures_executor::block_on(store.put_edge(&Edge::new(
+        "WORKS_ON",
+        "person-2",
+        "project-2",
+        Props::from([("role".to_string(), Value::from("maintainer"))]),
+    )))
+    .expect("replacing a unique edge value releases its previous index entry");
+}
+
+#[test]
+fn memory_edge_uniqueness_uses_directed_and_undirected_endpoint_semantics() {
+    let nodes = vec![
+        Node::new("Person", "a", Props::new()),
+        Node::new("Person", "b", Props::new()),
+    ];
+
+    let directed_schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .edge(
+            "KNOWS",
+            vec![Label::new("Person")],
+            vec![Label::new("Person")],
+            Vec::<Field>::new(),
+        )
+        .build();
+    let directed = MemoryGraphStore::new();
+    futures_executor::block_on(directed.apply_schema(&directed_schema)).unwrap();
+    futures_executor::block_on(directed.put_graph(&Graph::new(nodes.clone(), Vec::new()))).unwrap();
+    futures_executor::block_on(
+        directed.put_edge(&Edge::new("KNOWS", "a", "b", Props::new()).with_id("first")),
+    )
+    .unwrap();
+    futures_executor::block_on(
+        directed.put_edge(&Edge::new("KNOWS", "b", "a", Props::new()).with_id("reverse")),
+    )
+    .expect("directed reverse endpoints are distinct");
+    futures_executor::block_on(
+        directed.put_edge(&Edge::new("KNOWS", "a", "b", Props::new()).with_id("duplicate")),
+    )
+    .expect_err("directed parallel endpoints must remain unique");
+
+    let undirected_schema = GraphSchema::builder()
+        .node("Person", Vec::<Field>::new())
+        .edge_type(EdgeType {
+            label: Label::new("KNOWS"),
+            from: vec![Label::new("Person")],
+            to: vec![Label::new("Person")],
+            fields: Vec::new(),
+            directed: false,
+            uniqueness: EdgeUniqueness::FromLabelTo,
+        })
+        .build();
+    let undirected = MemoryGraphStore::new();
+    futures_executor::block_on(undirected.apply_schema(&undirected_schema)).unwrap();
+    futures_executor::block_on(undirected.put_graph(&Graph::new(nodes, Vec::new()))).unwrap();
+    futures_executor::block_on(
+        undirected.put_edge(&Edge::new("KNOWS", "a", "b", Props::new()).with_id("first")),
+    )
+    .unwrap();
+    futures_executor::block_on(
+        undirected.put_edge(&Edge::new("KNOWS", "b", "a", Props::new()).with_id("reverse")),
+    )
+    .expect_err("undirected reverse endpoints must conflict");
 }
 
 #[test]
@@ -428,7 +641,7 @@ fn preserves_parallel_edges_with_distinct_explicit_ids() {
 #[test]
 fn get_nodes_reads_multiple_ids() {
     let store = MemoryGraphStore::new();
-    let nodes = vec![
+    let nodes = [
         Node::new("Person", "a", Props::new()),
         Node::new("Person", "b", Props::new()),
     ];
@@ -1348,6 +1561,7 @@ fn executes_matching_edge_mutations() {
         .unwrap()
         .is_empty()
     );
+    assert_adjacency_consistent(&store);
 }
 
 #[test]
@@ -1586,4 +1800,5 @@ fn executor_classifies_inserts_and_updates_precisely() {
     assert_eq!(report.node_updates, 1);
     assert_eq!(report.edge_inserts, 0);
     assert_eq!(report.edge_updates, 1);
+    assert_adjacency_consistent(&store);
 }

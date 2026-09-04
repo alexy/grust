@@ -94,10 +94,10 @@ impl Scope {
     /// Bind a variable. Re-binding to the same kind is fine; re-binding to a
     /// different entity/value kind is a semantic error the caller surfaces.
     fn bind(&mut self, name: &str, kind: ElementKind) -> std::result::Result<(), ElementKind> {
-        if let Some(existing) = self.vars.get(name) {
-            if *existing != kind {
-                return Err(*existing);
-            }
+        if let Some(existing) = self.vars.get(name)
+            && *existing != kind
+        {
+            return Err(*existing);
         }
         self.vars.insert(name.to_string(), kind);
         Ok(())
@@ -143,15 +143,15 @@ fn analyze_single_scoped(
     let has_return = query.clauses.iter().any(|c| matches!(c, Clause::Return(_)));
 
     // Read-only MATCH ... RETURN (no updating clause) is not executable yet.
-    if has_return && !has_update {
-        if let Some(span) = query
+    if has_return
+        && !has_update
+        && let Some(span) = query
             .clauses
             .iter()
             .find(|c| matches!(c, Clause::Match(_)))
             .map(|c| c.span())
-        {
-            report.note(GqlFeature::ReadOnlyMatchReturn, span);
-        }
+    {
+        report.note(GqlFeature::ReadOnlyMatchReturn, span);
     }
 
     let mut return_scope = None;
@@ -196,14 +196,13 @@ fn analyze_clause(clause: &Clause, scope: &mut Scope, report: &mut SemanticRepor
         Clause::Delete(d) => {
             for target in &d.targets {
                 check_expr_bound(target, scope)?;
-                if let Expr::Variable(name) = target {
-                    if let Some(kind) = scope.get(name) {
-                        if kind == ElementKind::Value {
-                            return Err(type_error(format!(
-                                "cannot DELETE `{name}`: it is bound to a value, not a node, relationship, or path"
-                            )));
-                        }
-                    }
+                if let Expr::Variable(name) = target
+                    && let Some(kind) = scope.get(name)
+                    && kind == ElementKind::Value
+                {
+                    return Err(type_error(format!(
+                        "cannot DELETE `{name}`: it is bound to a value, not a node, relationship, or path"
+                    )));
                 }
             }
         }
@@ -252,14 +251,14 @@ fn analyze_clause(clause: &Clause, scope: &mut Scope, report: &mut SemanticRepor
             // subquery's RETURN scope joins onto the outer scope; the first
             // arm is authoritative (execution enforces column agreement).
             for part in &s.query.parts {
-                if let Some(Clause::Return(r)) = part.query.clauses.last() {
-                    if r.projection.star {
-                        return Err(crate::gql::unsupported_gql_feature(
-                            GqlFeature::Subquery,
-                            crate::gql::GqlConformanceProfile::PortableGql,
-                            "RETURN * inside CALL { … } is not supported (it would re-project the imported outer scope)",
-                        ));
-                    }
+                if let Some(Clause::Return(r)) = part.query.clauses.last()
+                    && r.projection.star
+                {
+                    return Err(crate::gql::unsupported_gql_feature(
+                        GqlFeature::Subquery,
+                        crate::gql::GqlConformanceProfile::PortableGql,
+                        "RETURN * inside CALL { … } is not supported (it would re-project the imported outer scope)",
+                    ));
                 }
             }
             let mut returned: Option<Scope> = None;
@@ -460,13 +459,13 @@ fn check_set_item(item: &SetItem, scope: &Scope) -> Result<()> {
         }
         SetItem::Labels { variable, .. } => {
             require_bound(variable, scope)?;
-            if let Some(kind) = scope.get(variable) {
-                if kind != ElementKind::Node {
-                    return Err(type_error(format!(
-                        "cannot SET labels on `{variable}`: it is a {}, not a node",
-                        kind.label()
-                    )));
-                }
+            if let Some(kind) = scope.get(variable)
+                && kind != ElementKind::Node
+            {
+                return Err(type_error(format!(
+                    "cannot SET labels on `{variable}`: it is a {}, not a node",
+                    kind.label()
+                )));
             }
         }
     }
@@ -483,13 +482,13 @@ fn check_remove_item(item: &RemoveItem, scope: &Scope) -> Result<()> {
         }
         RemoveItem::Labels { variable, .. } => {
             require_bound(variable, scope)?;
-            if let Some(kind) = scope.get(variable) {
-                if kind != ElementKind::Node {
-                    return Err(type_error(format!(
-                        "cannot REMOVE labels from `{variable}`: it is a {}, not a node",
-                        kind.label()
-                    )));
-                }
+            if let Some(kind) = scope.get(variable)
+                && kind != ElementKind::Node
+            {
+                return Err(type_error(format!(
+                    "cannot REMOVE labels from `{variable}`: it is a {}, not a node",
+                    kind.label()
+                )));
             }
         }
     }

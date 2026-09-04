@@ -30,28 +30,34 @@ crate that pulls in the `cxx` bridge crate.
 
 ### Fix
 
-`.cargo/config.toml` at the workspace root adds the SDK's C++ path via
-`CXXFLAGS`:
+Use the SDK selected by the active Apple developer toolchain. Do not commit an
+absolute SDK path to `.cargo/config.toml`: Xcode and Command Line Tools can be
+installed side by side, and mixing headers from the inactive installation
+causes missing `intmax_t`, `uint*_t`, and `_CTYPE_*` declarations.
 
-```toml
-[env]
-CXXFLAGS = "-isystem /Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk/usr/include/c++/v1"
+Most current Xcode installations require no override. If a C++ bridge still
+cannot find libc++, derive the include path for that shell invocation:
+
+```sh
+active_sdk="$(xcrun --show-sdk-path)"
+CXXFLAGS="-isystem ${active_sdk}/usr/include/c++/v1" cargo build --workspace --all-features
 ```
-
-This is already committed. The `[env]` table only applies when the variable is
-not already set in the shell, so it does not interfere with CI or Docker
-environments that supply their own `CXXFLAGS`.
 
 ### cargo publish --verify
 
-`cargo publish --verify` spawns a clean build in a temp directory and inherits
-the shell environment. The `.cargo/config.toml` fix applies there, so
-`grust-ladybug` can now be published without `--no-verify`. Before this fix,
-the workaround was `cargo publish -p grust-ladybug --no-verify`.
+`cargo publish --verify` spawns a clean build in a temporary directory and
+inherits the shell environment. Apply the dynamic fallback to the publish
+invocation only if the default toolchain lookup fails. `grust-ladybug` remains
+`publish = false`; published Grust crates must never bypass verification.
 
-### If the SDK version changes
+### Diagnose the selected SDK
 
-The path above is pinned to `MacOSX26.5.sdk`. If a newer Tahoe seed updates
-the SDK to `MacOSX26.6.sdk` or similar, update the path in
-`.cargo/config.toml`. Run `ls /Library/Developer/CommandLineTools/SDKs/` to
-see which SDKs are installed.
+```sh
+xcode-select -p
+xcrun --show-sdk-path
+clang++ --version
+```
+
+If those commands point at different installations, select the intended
+developer directory before retrying. Keep that machine-specific choice out of
+the repository.

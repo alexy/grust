@@ -1,13 +1,14 @@
 # Grust Full39075 Completion Goal
 
 Status: **COMPLETE (2026-07-03).** All 11 tasks (F1–F11) and the FM5 claim flip
-are done: every non-rejected manifest feature is `Supported` (69 of 74; the
-other 5 are intentional strict-write rejections), and `Full39075` is the
-**realized** profile per `docs/GQL_PROFILE_STATEMENT.md`, pinned by
+are done: every non-rejected Grust-manifest feature is `Supported` (69 of 74;
+the other 5 are intentional strict-write rejections), and `Full39075` is the
+**realized internal** profile per `docs/GQL_PROFILE_STATEMENT.md`, pinned by
 `gql::tests::full_profile_claim_is_backed`. This file originally sequenced the
 11 remaining non-supported features into an executable plan for turning the
 `PortableGql` implementation into the `Full39075` profile; it is kept as the
-record of that plan and its completion.
+record of that plan and its completion. The profile name is not a formal or
+exhaustive claim of ISO/IEC 39075 certification.
 
 Source of truth:
 
@@ -16,7 +17,7 @@ Source of truth:
 - The completion test `gql::tests::full_profile_claim_is_backed` must keep this
   file, the profile statement, and the manifest honest.
 
-## Guardrails
+## Historical guardrails for this completed goal
 
 1. **No release or publish unless explicitly requested.** Do not run
    `cargo publish`, release `cargo package`, `cargo info` registry verification,

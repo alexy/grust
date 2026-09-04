@@ -127,7 +127,7 @@ fn strict_create_edge_conflicts_on_sail_write_identity() {
 
     assert!(strict_create_edge_conflicts(
         &structural,
-        &[same_structural_different_id.clone()]
+        std::slice::from_ref(&same_structural_different_id)
     ));
     assert!(strict_create_edge_conflicts(
         &explicit,
@@ -138,6 +138,42 @@ fn strict_create_edge_conflicts_on_sail_write_identity() {
         &[same_structural_different_id]
     ));
     assert!(!strict_create_edge_conflicts(&explicit, &[unrelated]));
+}
+
+#[test]
+fn unique_edge_conflicts_ignore_updates_to_the_same_stable_key() {
+    let props = Props::from([("role".to_owned(), Value::from("admin"))]);
+    let candidate = Edge::new("MEMBER_OF", "ada", "group-1", props.clone());
+    let same_key = Edge::new("MEMBER_OF", "ada", "group-1", props.clone());
+    assert_eq!(
+        unique_edge_conflict(&[same_key], &candidate, &candidate.label, "role"),
+        None
+    );
+
+    let conflicting = Edge::new("MEMBER_OF", "bob", "group-1", props);
+    assert_eq!(
+        unique_edge_conflict(
+            std::slice::from_ref(&conflicting),
+            &candidate,
+            &candidate.label,
+            "role",
+        ),
+        Some(edge_key(&conflicting))
+    );
+
+    let legacy_collision = Edge::new("MEMBER_OF", "mallory", "group-2", candidate.props.clone())
+        .with_id(edge_key(&candidate));
+    assert_eq!(edge_key(&legacy_collision), edge_key(&candidate));
+    assert_eq!(
+        unique_edge_conflict(
+            std::slice::from_ref(&legacy_collision),
+            &candidate,
+            &candidate.label,
+            "role",
+        ),
+        Some(edge_key(&legacy_collision)),
+        "an unrelated legacy explicit id must not impersonate the candidate's structural owner"
+    );
 }
 
 #[test]
@@ -183,6 +219,18 @@ fn strict_create_plan_conflicts_reject_duplicate_concrete_create_targets() {
     let error = check_strict_create_plan_conflicts(&duplicate_explicit_edges)
         .expect_err("duplicate CREATE explicit edge id should fail");
     assert!(error.to_string().contains("duplicate edge 'edge-1'"));
+}
+
+#[test]
+fn strict_create_plan_rejects_reserved_edge_key_components() {
+    let plan = GraphMutationPlan::new(vec![GraphMutationPlanOp::UpsertEdge {
+        kind: GraphMutationPlanKind::Create,
+        edge: Edge::new("KNOWS", "a\u{1f}b", "c", Props::new()),
+    }]);
+
+    let error = check_strict_create_plan_conflicts(&plan)
+        .expect_err("strict CREATE must validate before rendering edge-key diagnostics");
+    assert!(error.to_string().contains("reserved U+001F"));
 }
 
 #[test]

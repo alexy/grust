@@ -46,6 +46,7 @@ crates/
   grust/          Public facade package (`grust-graph`) and prelude
   grust-cocoindex/ CocoIndex-style graph target-state export adapter
   grust-core/     Core model, builder, schema, traversal IR, GraphStore trait
+  grust-cypher/   Portable GQL/Cypher parser, planner, and reference executor
   grust-falkor/   FalkorDB writer using Redis GRAPH.QUERY
   grust-helix/    HelixDB writer using HTTP or the Rust SDK
   grust-ladybug/  Embedded LadybugDB store using the Rust lbug crate
@@ -59,6 +60,7 @@ crates/
   grust-sql-core/ Shared SQL generation helpers for SQL table backends
   grust-surreal/  SurrealDB writer using HTTP or the Rust SDK
   grust-turso/    Turso store using the Rust SDK over SQLite-compatible tables
+  querygraph-memory/ Private TypeSec-governed memory integration
 ```
 
 The backend crates expose reads and traversal as they mature behind the same
@@ -69,6 +71,20 @@ Shared backend-lowering helpers such as `relationship_type`,
 `schema_identifier`, and `edge_key` live in `grust-core` so database adapters do
 not drift on relationship names, typed table identifiers, or structural edge
 keys.
+
+Adapters that persist or export the compatibility `edge_key` use
+`checked_edge_key`. It rejects U+001F in an edge's source ID, relationship
+label, target ID, or explicit ID before delimiter-based structural identities
+can alias. `GraphValue` has a separate in-memory deduplication format: its
+relationship identity components are length-framed, so arbitrary payload text
+does not require a reserved delimiter. Ladybug's internal metadata index also
+uses U+001F framing, so that adapter rejects the delimiter in node IDs before
+the node can alias a metadata entry.
+
+`validate_physical_identifier_claims` gives schema-lowering backends one
+namespace-aware collision check. FalkorDB, Helix, LadybugDB, LanceDB, and Sail
+use it to reject both different logical names that lower to the same physical
+object and exact duplicate declarations before any schema operation is sent.
 
 `GraphIndex` also lives in `grust-core`. It is the shared dense adjacency layer
 for local analytics, backend planning, and adapter crates that need validated
@@ -128,6 +144,18 @@ leave services up for debugging. See [docs/INTEGRATION.md](docs/INTEGRATION.md)
 for profiles, modes, Docker image pins, source-checkout configuration, and the
 CI strategy.
 
+The 0.13 qualification pass advances the Redis client to 1.6.0 and the
+FalkorDB service to v4.20.4, SurrealDB to 3.2.4 with reqwest 0.13.4, the
+SurrealDB service to v3.2.4, pgGraph's service to 1.2.0, tokio-postgres to
+0.7.18, and Turso from a prerelease to stable 0.7.2. LanceDB remains at 0.30.0
+because the attempted 0.38.0 local-mode build references its
+remote-feature-only `Error::Http` variant when `remote` is disabled. The
+internal Helix adapter remains on exact `helix-db` 2.0.0 because 3.0.0 removed
+the dynamic-query APIs it uses and targets `/v2/query`, while the checked
+Helix v3.0.1 server still exposes `/v1/query`. See the
+[backend qualification record](benchmarks/lsqb/BACKENDS.md) for the complete
+matrix and live-gate evidence.
+
 ## Core Benchmarks
 
 The facade crate includes a dependency-free benchmark harness for core graph
@@ -141,6 +169,36 @@ It uses the same synthetic graph families as GrustFrames, including
 Graph500/GAP-style deterministic R-MAT cases. The harness measures graph
 cloning, shared index construction, degree scans, endpoint scans, and structural
 edge-key generation.
+
+The separate [LSQB compatibility harness](benchmarks/lsqb/README.md) provides
+a Docker-reproducible backend check. Its unchanged upstream baseline pins Graph
+Data Council LSQB commit `242cb2fd31340ca688954cb94794d74c0d5b6f92`,
+LadybugDB 0.19.0, and a digest-pinned Python 3.12.11 image. Five repetitions of
+the 28-node/72-edge `sfexample` fixture match all nine expected query counts,
+for 45/45 successful count checks. The clearly separated Grust adapter is
+configured to reload that fixture for each repetition on Memory, Turso, and
+PostgreSQL 18.6. The adversari.al extension adds eight
+exact-count attacks per backend and nine backend-neutral policy-rejection
+attacks, for 17 attacks in two explicitly separate tracks. Each storage cell
+therefore has 17 count oracles—the nine LSQB-derived queries plus eight
+adversarial count queries—while policy is reported once as its own track. Run
+the two sides with:
+
+```sh
+benchmarks/lsqb/run-upstream.sh
+benchmarks/lsqb/run-grust.sh
+```
+
+This is a small conformance and reproducibility workload, not a performance
+ranking. LSQB is maintained by the Graph Data Council but is not an official
+LDBC benchmark.
+
+These are not LDBC Benchmark Results.
+
+The durable benchmark hub is [adversari.al/graph](https://adversari.al/graph).
+Tracked evidence covers the unchanged upstream 45/45 run plus a clean
+`2680c451` Grust matrix: all 135 LSQB-derived compatibility observations, all
+120 adversarial count observations, and all nine policy rejections passed.
 
 ## Core Model
 
@@ -180,7 +238,14 @@ pub enum Value {
     Int(i64),
     Float(f64),
     String(String),
+    DateTime(RfcDate),
+    Decimal(Decimal),
+    Duration(Duration),
     StringArray(Vec<String>),
+    IntArray(Vec<i64>),
+    FloatArray(Vec<f64>),
+    Path(PathValue),
+    Graph(GraphValue),
     Json(serde_json::Value),
 }
 ```
@@ -233,7 +298,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.10.0", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.13.0", features = ["memory"] }
 ```
 
 The facade re-exports the full `grust-memory` crate surface when the feature is
@@ -269,7 +334,8 @@ assert_eq!(speakers.len(), 1);
 
 ## GraphStore
 
-Backends implement `GraphStore`:
+Backends implement `GraphStore` (capability and native-constraint methods are
+omitted here for brevity):
 
 ```rust
 #[async_trait::async_trait]
@@ -317,40 +383,101 @@ pub trait GraphAdminStore: GraphStore {
 }
 ```
 
+## Bounded Reference Reads
+
+With the `cypher` feature, applications that expose a deliberately small read
+surface can validate and execute it through `ReadQueryPolicy`:
+
+```rust
+use grust::prelude::*;
+
+let policy = ReadQueryPolicy {
+    max_result_rows: 25,
+    max_candidate_work: 10_000,
+    max_intermediate_bytes: 64 * 1024 * 1024,
+    max_output_bytes: 256 * 1024,
+    ..ReadQueryPolicy::default()
+};
+
+let table = run_bounded_read_query(
+    &projected_graph,
+    "MATCH (n:Person) RETURN n.id LIMIT 25",
+    &CypherParameters::new(),
+    &policy,
+)?;
+```
+
+The parser-backed gate rejects updating clauses and unsafe query shapes, then
+the in-memory reference executor enforces query, parameter, graph, candidate
+work, cumulative-intermediate-byte, result-row, output-byte, range-allocation,
+cumulative path-hop, and
+cooperative wall-clock limits. Scalar and table-valued ranges also retain the
+library-wide `MAX_RANGE_ITEMS` ceiling. Correlated `CALL { ... }` subqueries
+also charge each node/adjacency index build, and catalog procedures charge each
+graph scan, so repeated per-outer-row work cannot bypass the candidate-work or
+cooperative deadline budget.
+
+This is bounded reference execution, not authorization or an operating-system
+hard cancellation boundary. Callers still own graph projection, tenancy,
+deadlines around remote work, and process-level resource isolation. Backend
+pushdown uses each store's separately documented capabilities.
+
 ## Backend Stores
 
 Backend crates are optional facade features:
 
 ```toml
-[dependencies]
-grust = { package = "grust-graph", version = "0.10.0", features = ["falkor", "helix", "ladybug", "lancedb", "postgres", "pggraph", "sail", "surreal", "turso"] }
+[dependencies.grust]
+package = "grust-graph"
+version = "0.13.0"
+features = [
+  "cocoindex", "cypher", "falkor", "lancedb", "memory", "postgres",
+  "postgres-pgq", "pggraph", "sail", "surreal", "turso",
+]
 ```
 
-For Arrow-native data sources, enable `ladybug-arrow` to use embedded
-LadybugDB over Arrow IPC tables, or enable `sail` to stage Arrow IPC streams as
-Spark temp views. See
+The internal `grust-helix` and `grust-ladybug` workspace crates are
+`publish = false` and deliberately are not facade features. Workspace users can
+exercise them directly; crates.io consumers should not request `helix`,
+`ladybug`, or `ladybug-arrow` from `grust-graph`.
+The additional `turso-sync` feature enables Turso Cloud synchronization and
+implies `turso`; `typed-garde` and `typed-zod-rs` enable typed ingestion rather
+than storage backends.
+
+For Arrow-native data sources, enable `sail` to stage Arrow IPC streams as
+Spark temp views. The internal Ladybug adapter also has an Arrow IPC surface
+for workspace testing. See
 [docs/Arrow.md](https://github.com/querygraph/grust/blob/main/docs/Arrow.md)
 for the full contract and the Arrow-version compatibility rationale.
 
 `grust-falkor` writes nodes and edges through Redis/FalkorDB Cypher queries and
-supports graph replacement with `GRAPH.DELETE`.
+supports graph replacement with `GRAPH.DELETE`. Configurable identity-property
+names and generated label, relationship, and property identifiers are checked
+before Cypher construction; property names are losslessly quoted where
+FalkorDB permits them, normalized-name collisions in schemas and complete graph
+loads fail closed, and pool/query errors do not include the configured Redis
+URL or credentials.
 
 `grust-helix` provides both `HelixHttpGraphStore` and `HelixSdkGraphStore`.
 Both batch node and edge writes, preserve supported scalar and array properties,
-and use configured labels for replacement.
+and use configured labels for replacement. Both paths reject unsafe schema
+names, normalized relationship-name collisions, and attempts to overwrite
+structural node or edge metadata before sending a write. Transport errors omit
+the configured URL and any embedded credentials or query secrets.
 
-`grust-ladybug` embeds LadybugDB directly through the Rust `lbug` crate. It
-creates Grust-managed Ladybug node and relationship tables from graph labels,
+`grust-ladybug` embeds LadybugDB directly through the Rust `lbug` 0.20.2 crate.
+It creates Grust-managed Ladybug node and relationship tables from graph labels,
 persists label/table metadata for readback, writes graph loads in transactions,
 and exposes backend-neutral reads and bounded traversal without starting a
 daemon.
 The default `LadybugGraphMode::Untyped` accepts ordinary Grust graphs and
 creates the needed Ladybug tables from labels on write. `LadybugGraphMode::Typed`
 requires `apply_schema` or `put_typed_graph` before writes and validates later
-writes against the applied `GraphSchema`.
-With the `ladybug-arrow` facade feature, the backend can also register Arrow
+writes against the applied `GraphSchema`. Node IDs containing U+001F are
+rejected because Ladybug's managed metadata index reserves that delimiter.
+With the internal crate's `arrow` feature, the backend can also register Arrow
 IPC node, relationship, and CSR relationship tables directly with Ladybug and
-return query results as Arrow IPC chunks.
+return query results as Arrow IPC chunks for workspace experiments.
 
 `grust-cocoindex` converts `Graph` values into serializable node and
 relationship states with stable keys, endpoint labels, and plain JSON
@@ -394,8 +521,21 @@ identifier quoting, and literal escaping. The dialect layer stays narrow and
 performance-sensitive: PostgreSQL keeps JSONB operators, `ON CONFLICT`,
 `CREATE OR REPLACE VIEW`, and lateral joins, while Turso keeps JSON text,
 `json_extract`, `json_patch`, and SQLite-compatible view and join forms.
+The dialect contract also exposes an optional generated-identifier byte limit
+through `GraphSqlDialect::max_identifier_bytes`. PostgreSQL sets its real
+63-byte ceiling, so schema-derived typed views and property indexes fail with
+`GrustError::Schema` before server-side truncation can create an ambiguous or
+colliding name; other dialects keep no limit unless they declare one.
 `grust-postgres-core` remains the PostgreSQL-specific execution and connection
 layer reused by `grust-postgres`, `grust-postgres-pgq`, and `grust-pggraph`.
+Recursive SQL walk plans encode arbitrary node IDs as hexadecimal tokens before
+building their visited sets; dialects without a delimiter-free encoding hook
+do not claim that pushdown. PostgreSQL's public raw `execute` method is
+autocommit-only and lexically rejects transaction-control batches. Explicit
+transaction helpers mark the connection before `BEGIN`, serialize every user
+of it, and make the next caller roll back work left uncertain if a future is
+cancelled during `BEGIN`, a statement, or `COMMIT`; the PGQ wrapper inherits
+the same guard and recovery path.
 Sail is intentionally outside this shared SQL core because its lowering targets
 Spark Connect, Arrow IPC staging, and distributed Spark SQL rather than direct
 row-store SQL.
@@ -405,9 +545,25 @@ server, lowers traversal IR to Spark SQL joins, and can mirror schema-labeled
 rows into typed Delta tables. SQL filters bind user values through Spark
 Connect named arguments; delete mutations stage their values as Arrow temp views
 before running argument-free SQL commands.
+`SailConfig::default()` leaves `spark.sql.warehouse.dir` under server control,
+so a remote client neither injects a client-local path nor changes the
+server's persistence identity. `SailWarehouse::LocalSessionScoped` explicitly
+chooses a client temporary directory derived from the session ID for a
+co-located development server; Grust does not delete it, so callers own
+cleanup. `SailWarehouse::ExplicitPath` sets and reads back a stable absolute
+path that the server can resolve. Reopening managed tables still depends on
+Sail providing a persistent catalog and warehouse; Grust does not infer that
+server-side lifecycle from a client path. Sail versions whose unconfigured
+warehouse fallback is the relative `spark-warehouse` path must be given an
+absolute server setting or one of the explicit Grust overrides before managed
+Delta tables are created.
+Typed Delta tables retain their declared column names and enforce structural
+identity with Delta constraints.
 It also exposes Sail's Arrow IPC path directly for staging arbitrary Arrow
 streams as session temp views, collecting Spark SQL results as IPC chunks, and
 loading Grust-shaped node/edge IPC streams through the graph write path.
+`drop_arrow_ipc_view` removes a staged view idempotently, including on worker
+failure paths that handled protected input.
 For graph analytics over the persisted generic Sail tables, it provides
 `read_graph`, `in_degrees`, `out_degrees`, `degrees`, and `degree_pairs`
 helpers backed by Spark SQL.
@@ -418,218 +574,33 @@ backend writes.
 Typed-table descriptor helpers and directional triplet SQL helpers cover the
 common GrustFrames-style needs of selecting schema-backed Sail tables and
 lowering triplet filters, motifs, and aggregate-message passes.
-Writable Cypher is implemented in `grust-cypher` as a strict, backend-neutral
-planning surface with Sail compatibility wrappers:
-`sail_cypher_mutation_plan` and the generic `cypher_mutation_plan` parse
-explicit-ID node `CREATE`/`MERGE`, resolved endpoint edge `CREATE`/`MERGE`, and
-resolved node/edge `DELETE` into Grust mutation plans. They also accept ordered
-multi-statement batches and local node variables bound from explicit-ID node
-patterns, plus ID-resolved
-`MATCH ... DELETE`, edge `MATCH ... CREATE` / `MATCH ... MERGE`, and
-cardinality-aware broad node
-`MATCH ... DELETE` / `MATCH ... SET n += { ... }` / `MATCH ... SET n.key = value`
-/ `MATCH ... REMOVE n.key` forms plus ID-resolved edge
-`MATCH ... SET e += { ... }`, literal property assignment, and explicit
-property `REMOVE` for resolved node or edge identities, row-producing edge
-`MATCH ... CREATE` and `MATCH ... MERGE` when both endpoints come from matched
-node variables, plus broad relationship `MATCH ... DELETE` / `MATCH ... SET e += { ... }` /
-`MATCH ... SET e.key = value` / `MATCH ... REMOVE e.key` over endpoint
-predicates plus relationship-row deletes such as `DELETE e, a` that can delete
-matched relationship rows and endpoint nodes from one captured row set, while
-`SailGraphStore::execute_cypher_mutation` executes those plans through
-`GraphMutationStore` and the existing Sail staging and `MERGE INTO` paths.
-For stricter Cypher compatibility, callers can use
-`execute_cypher_mutation_with_options` with
-`CypherCreateMode::ErrorIfExists` to make `CREATE` perform a read-before-write
-existence check instead of following the default upsert-compatible path; it
-also rejects duplicate concrete node or edge `CREATE` identities inside the
-same planned batch before any writes run.
-Generated node IDs are also opt-in: `CypherNodeIdPolicy::GenerateForCreate`
-allows node `CREATE` without an `id`, and
-`execute_cypher_mutation_result_with_options` returns the generated IDs in
-`CypherMutationResult::generated_node_ids` while leaving
-`CypherMutationReport` count-oriented. Callers can also set
-`CypherMutationOptions::collect_written_node_identities` and
-`CypherMutationOptions::collect_written_edge_identities` to collect accepted
-node and edge write identities in
-`CypherMutationResult::written_node_identities` and
-`CypherMutationResult::written_edge_identities`; edge payloads cover both
-resolved and row-producing edge writes. These identities describe accepted
-writes, not exact insert-versus-update outcomes on upsert backends.
-`MERGE` and edge endpoint patterns still require resolved IDs before writing.
-For the first table-returning write slice,
-`execute_cypher_mutation_returning_with_options` accepts a final `RETURN`
-containing element or property projections over node variables and concrete
-relationship variables already resolved by the write plan, including concrete
-edge upserts and edge patches. Sail and the backend-neutral Memory/Sail helper
-can also return rows for relationship variables produced by restricted
-row-producing `MATCH ... CREATE/MERGE` edge writes, plus portable broad node
-rows for restricted `MATCH ... SET/REMOVE` forms such as
-`MATCH (n:Person {status: 'active'}) SET n.seen = true RETURN n.id, n.seen`
-and portable broad relationship rows for restricted `MATCH ... SET/REMOVE`
-forms such as `MATCH (a)-[e:KNOWS]->(b) SET e.seen = true RETURN e.id, e.seen`.
-The physical `id` and `label` fields are supported alongside stored
-properties, and whole elements are returned as `Value::Json` in the Grust
-`Node` / `Edge` serde shape. Examples include
-`RETURN n.id, n.label, n.seen`, `RETURN e.id, e.label, e.weight`,
-`RETURN n AS node, e AS relationship`, and `RETURN e.label, e.source` after a
-row-producing edge write. It returns a
-`CypherMutationTableResult` with the usual mutation result plus a
-`CypherResultTable`; aggregation, paths, ordering, limiting, arbitrary
-read-query features, unrestricted broad row materialization, and path-style
-row projections remain rejected. Scalar projections and aggregate bodies share
-one restricted return-target parser for the supported literal, map/list,
-path-helper, introspection, string, numeric, conversion, `coalesce`, and `CASE`
-forms. Restricted aggregate bodies also share the scalar projection
-materializer for literal, map/list, introspection, string, numeric, conversion,
-`coalesce`, `CASE`, and list-helper targets, while `*`, whole elements,
-properties, and path functions keep their aggregate-specific paths. Restricted
-`COUNT(...)` scalar targets use the same projection-materializer
-classification before applying non-null and `DISTINCT` count semantics.
-Grouped aggregate row materialization reuses that same scalar evaluator for
-classifier-covered targets while keeping aggregate-specific shapes explicit.
-Internally, writable `RETURN` target materialization is classified into star,
-whole-element, direct-property, scalar-projection, element-function, and
-path-function paths before aggregate and count routing. Scalar projection
-evaluation also classifies restricted target shapes into literal, map, list,
-conditional, coalesce, introspection, list-access, list-predicate, numeric,
-conversion, string, element-function, and path-function kinds before routing
-special cases. The scalar evaluator now routes through a small internal scalar
-AST over those restricted shapes rather than matching the public return-target
-enum directly, and list-helper expressions have a dedicated
-internal evaluator boundary. String-helper expressions now use the same kind
-of dedicated internal evaluator boundary, as do numeric and conversion helper
-expressions. Literal/composite, `CASE`/`coalesce`, and introspection scalar
-expressions use dedicated evaluator boundaries too, and binding plus
-element/path wrapper scalar routes now sit behind the same expression-family
-dispatcher style. The top-level scalar dispatcher also uses an internal
-scalar AST-family classifier before routing to binding, wrapper, value,
-control, introspection, list, numeric, conversion, or string evaluators.
-Nested `coalesce(...)` arguments can reuse those already-supported restricted
-scalar targets while keeping coalesce arguments on one variable and rejecting
-nested list/map composites. Restricted `CASE` branch values use the same
-scalar AST path for same-variable properties, literals, and already-supported
-scalar helper targets while keeping CASE predicates equality-only. Restricted
-list predicate equality values use that scalar AST path while keeping haystacks
-property-only and item predicates equality-only. Restricted list projection
-items use the same scalar AST path for direct properties, literals, and
-already-supported scalar helper targets while still rejecting nested list/map
-composites and cross-variable lists. Restricted map projection values use that
-scalar AST path for same-variable properties, literals, and already-supported
-scalar helper targets while still rejecting nested list/map composites and
-cross-variable values. `toLower(...)` and `toUpper(...)` now use the same
-bounded scalar argument path, so they can wrap direct properties, literals, or
-already-supported restricted scalar targets without enabling general expression
-evaluation. `trim(...)`, `lTrim(...)`, and `rTrim(...)` use that same bounded
-scalar argument path while preserving existing string-only trim semantics.
-`reverse(...)` uses the same bounded scalar argument path while preserving
-existing string-or-array reverse semantics. `isEmpty(...)` also uses the
-bounded scalar argument path while preserving existing string, array, and JSON
-collection emptiness semantics. `split(...)` uses the same bounded first
-argument path while keeping delimiters literal-or-parameter only and preserving
-string-only split semantics. `substring(...)` uses the same bounded first
-argument path while keeping offsets literal-or-parameter only and preserving
-string-only substring semantics. `left(...)` and `right(...)` use the same
-bounded first argument path while keeping lengths literal-or-parameter only and
-preserving string-only slice semantics. `startsWith(...)`, `endsWith(...)`,
-and `contains(...)` use that same bounded first argument path while keeping
-needles literal-or-parameter only and preserving string-only predicate
-semantics. `replace(...)` uses the same bounded first argument path while
-keeping search and replacement strings literal-or-parameter only and preserving
-string-only replacement semantics. `toString(...)` also uses the bounded
-argument path while preserving scalar-only string conversion semantics.
-`abs(...)` uses that same bounded argument path while preserving numeric-only
-absolute-value semantics. `ceil(...)` and `floor(...)` use that same bounded
-argument path while preserving numeric-only rounding semantics. `sign(...)`
-uses that same bounded argument path while preserving finite numeric sign
-semantics. `toInteger(...)` and `toFloat(...)` use that same bounded argument
-path while preserving numeric and numeric-string conversion semantics.
-`toBoolean(...)` uses that same bounded argument path while preserving boolean
-and boolean-string conversion semantics. `head(...)`, `last(...)`, and
-`tail(...)` use that same bounded argument path while preserving array-only
-list access semantics. List index expressions and slice bounds use that same
-bounded argument path while preserving non-negative-integer subscript
-semantics. `toStringList(...)`, `toIntegerList(...)`, `toFloatList(...)`, and
-`toBooleanList(...)` use that same bounded argument path while preserving
-array-only list conversion semantics.
+Writable Cypher lives in `grust-cypher`, which parses accepted text into
+backend-neutral mutation plans. The supported surface covers explicit and
+matched node/relationship `CREATE`, `MERGE`, `DELETE`, `SET`, and `REMOVE`
+forms, including bounded row-producing relationship writes. Identity
+generation, strict-create behavior, parameters, null assignment, and collection
+of accepted write identities are explicit `CypherMutationOptions` choices.
+
+Restricted write-with-`RETURN` operations can project supported element,
+property, scalar, aggregate, and path shapes into a `CypherResultTable`.
+Arbitrary read-query clauses and unbounded row materialization remain outside
+that helper; use the read executor for reads and consult
+[the profile statement](docs/GQL_PROFILE_STATEMENT.md) for exact language scope.
+The restricted scalar evaluator covers literals, maps/lists, `CASE`,
+`coalesce`, introspection, list access and conversion, string helpers, numeric
+helpers, type conversion, element functions, and path functions. Aggregates
+reuse those scalar families where their row/group semantics permit it. This
+surface is intentionally classified through a small internal AST rather than
+opening write projection to arbitrary expression evaluation.
 `CypherMutationOptions::parameters` lets callers bind Grust `Value`s to
 `$name` placeholders in literal positions such as IDs, property maps, and
 literal property assignments; quoted `'$name'` remains ordinary string text.
-Mutating `MATCH` clauses can also use a small `WHERE` predicate grammar:
-property comparisons against literals or parameters joined with `AND`, such as
-`WHERE n.status = 'inactive' AND n.score >= $min`. Predicates lower to
-backend-neutral `GraphPropertyPredicate` values, so Memory evaluates the same
-plan that Sail lowers to SQL. Missing properties never match; `null` only
-matches equality or inequality against `Value::Null`, and ordered comparisons
-are limited to numbers or strings. The bounded grammar also supports null
-checks, string predicates, scalar membership, same-property `OR` folds, and
-restricted `AND` / `OR` groups parsed through an internal boolean AST. The AST
-lowerer accepts factored `OR` branches whose `AND` groups share common
-predicates and differ by one foldable same-property predicate, including
-unparenthesized factored groups that lower to the same backend-neutral shape.
-Common terms inside those factored branches may themselves be foldable `OR`
-groups, and nested parenthesized foldable `OR` terms flatten into the same
-grouped predicates when every leaf stays bounded. Exact duplicate bounded
-predicates are de-duplicated after parsing and folding, including inside each
-factored `OR` branch before branch comparison. Factored branch `AND` groups
-also run the same bounded-predicate canonicalization pipeline as top-level
-`AND`, so branch-local equality, membership, inequality, and range
-combinations can expose a flat foldable shape. Impossible factored `OR`
-branches are pruned after canonicalization, and all-impossible factored groups
-collapse to the existing empty `IN` no-match predicate. Branches subsumed by a
-broader sibling branch are pruned too, so `(A AND B) OR A` lowers to `A`.
-Conservative same-property predicate implication also prunes narrower branches
-covered by broader sibling membership, exclusion, inequality, or ordered-bound
-predicates, including stricter same-direction range bounds and ordered bounds
-that exclude a sibling inequality value or every value in a sibling grouped
-exclusion. Simple bounded `OR` terms that cannot use the direct same-property
-fold can also collapse through that same conservative branch-subsumption path,
-for example when a broader `IS NOT NULL` sibling covers a narrower string
-predicate. Negated simple `OR` terms can use that path too, but only when the
-positive disjunction first collapses to one backend-neutral predicate that can
-then be inverted. Negated factored `OR` groups can do the same only when the
-positive factored group collapses all the way to one non-empty bounded
-predicate. Negated `AND` groups can also reuse conservative branch subsumption
-when the disjunction of negated terms collapses to one non-empty bounded
-predicate. Negated same-property `OR` groups with a null branch can lower to a
-bounded conjunction of `IS NOT NULL` plus negated equality or membership
-terms. Folded `OR` value lists also drop exact duplicate alternatives while
-preserving first-seen order, and repeated same-property membership predicates
-are canonicalized when they can still be represented as one backend-neutral
-membership predicate.
-Empty positive membership intersections lower to an empty `IN` predicate,
-which matches no rows. Same-property equality and membership combinations
-collapse to equality, narrowed `IN`, or empty `IN` no-match predicates when
-that preserves the `AND` semantics. Double negation over an otherwise bounded
-predicate collapses back to the positive bounded predicate. Negated foldable
-`AND` groups such as `NOT (n.status <> 'active' AND n.status <> 'pending')`
-lower to the same grouped membership path when each negated term stays on one
-property, and matching string exclusions such as
-`NOT (NOT n.name STARTS WITH 'Ad' AND NOT n.name STARTS WITH 'Gr')` lower to
-the grouped string path. Duplicate negated `AND` terms such as
-`NOT (n.status = 'blocked' AND n.status = 'blocked')` collapse to the single
-negated bounded predicate they represent. Nested negated string `AND` groups
-can merge an already-grouped string predicate with another matching
-same-property string predicate without adding a general boolean evaluator.
-Factored `OR` branch pruning also recognizes exact string predicates covered
-by sibling grouped string predicates over the same property, and negated
-string branches covered by sibling grouped negated string predicates over the
-same property. It also recognizes bounded predicates that imply broader
-`IS NOT NULL` branches, plus exact-null predicates that imply `IS NULL`
-without reversing missing-property semantics. Exact inequality branches can
-also be pruned when a sibling branch already accepts the equivalent singleton
-leading-`NOT` membership exclusion, and singleton membership branches can be
-pruned when a sibling branch already accepts the equivalent exact equality;
-equivalent singleton membership/equality branches keep the equality form.
-Ordered-bound branches can also be pruned when the bound excludes the sibling
-inequality value.
-Scalar inequality combinations can similarly narrow `IN`, widen `NOT IN`, or
-collapse contradictions to empty `IN`. Same-property ordered bounds keep the
-stricter lower or upper bound and
-collapse impossible ranges to empty `IN`. Equality combined with ordered
-bounds collapses to equality when the value is inside the range, or empty
-`IN` when it is outside. Positive `IN` lists combined with ordered bounds are
-filtered to the surviving values, or to empty `IN` when no value remains.
+Mutating `MATCH` clauses accept a bounded `WHERE` grammar covering property
+comparisons, null and string predicates, scalar membership, and restricted
+boolean groups. The planner canonicalizes representable same-property
+combinations, removes duplicate or subsumed branches, and collapses
+contradictions to a no-match predicate. Shapes that cannot lower without
+semantic loss are rejected; missing properties retain Cypher null semantics.
 `CypherMutationOptions::null_assignment` defaults to storing
 `SET x.key = null` as `Value::Null`, but callers can select
 `CypherNullAssignment::RemoveProperty` to lower explicit null assignment to
@@ -654,8 +625,15 @@ persistence, while preserving the `sail_cypher_*` names as compatibility
 wrappers.
 Mutation batch atomicity is explicit through `GraphMutationAtomicity`: the
 default mutation path is ordered but not atomic, while backends with proven
-transaction wrappers, currently pgGraph and SurrealDB, can report
-`Transactional`.
+transaction wrappers—PostgreSQL, PostgreSQL SQL/PGQ, pgGraph, SurrealDB, and
+Turso—report `Transactional` for one `apply_mutations` batch. Higher-level
+executors must establish their own whole-statement transaction boundary before
+claiming statement atomicity. The PostgreSQL and Turso Cypher executors resolve
+their supported non-returning plan first, then execute its operations in source
+order inside one isolated transaction. The generic write-with-`RETURN` helper
+intentionally preserves intermediate bindings through sequential execution and
+is not a whole-statement atomicity boundary; use the explicit
+transaction-script API when an atomic supported batch is required.
 Writable Cypher also lowers ID-resolved and broad node
 `MATCH ... SET n += { ... }` map patches into backend-neutral node patch
 mutations; `null` is stored as a graph value rather than interpreted as
@@ -693,12 +671,18 @@ the parser accepts top-level mutation keywords case-insensitively while
 stripping Cypher comments outside string literals.
 Cypher planning and execution failures use structured `GrustError` variants
 for syntax, unresolved identity, unsupported cardinality, and execution errors;
-execution remains Sail-specific over backend-neutral mutation plans.
+concrete executors advertise their own backend-neutral plan support rather than
+silently accepting unsupported operations.
 
 `grust-surreal` provides both `SurrealHttpGraphStore` and
 `SurrealSdkGraphStore`. It bootstraps namespaces/databases, maps labels and
 relationships to Surreal tables, upserts nodes, and relates edges through
 relation tables. Reads and traversal batch target-node lookups where possible.
+SurrealQL identifiers are quoted without lossy property-name rewriting;
+configuration, schema, normalized table claims, and complete graph batches are
+validated before I/O. Reserved node/edge storage fields cannot be overwritten,
+and optional Grust edge IDs persist separately as `edge_id`. HTTP/WebSocket
+errors omit URL userinfo and query material.
 Generic edge reads need `SurrealConfig.relationships`; if that list is empty,
 the backend returns a configuration error instead of silently scanning no
 relation tables. Explicit edge-label reads can still address a known relation
@@ -826,6 +810,33 @@ The current backends use schema differently:
 - FalkorDB uses schema declarations to create label/property indexes.
 - Memory uses schema for validation tests and local conformance.
 
+### Semantic Model Graphs
+
+The facade also provides `semantic_model_graph` for turning a versioned
+`SemanticModelProjection` into ordinary Grust nodes and edges. A projection
+contains datasets, fields, metrics, named dataset relationships, a positive
+model version, and SHA-256 identities for the source artifact and metric
+expressions.
+
+The conversion is deterministic and validates names, hashes, references, and
+per-scope uniqueness before building anything. Length-prefixed identity
+components prevent delimiter collisions, and semantic relationships carry
+explicit edge IDs, so two differently named relationships between the same
+dataset pair remain distinct in the constructed `Graph`. The result is just a
+`Graph`: callers can inspect, query, or persist it through the same
+backend-neutral APIs as application data. As with every id-bearing multi-edge,
+preserving both relationships after persistence requires a backend that
+supports explicit edge IDs; structurally keyed stores collapse edges sharing
+the same endpoints and label.
+
+The release proof parses the packaged Apache Ossie TPC-DS YAML from pinned
+upstream commit `ddb19f1b135a61c65603f4823a3526e2fab00cf1`, verifies its
+SHA-256 before parsing, and checks deterministic projection of its five
+datasets, 31 fields, five metrics, and four relationships. The published
+`grust-graph` archive carries the upstream `NOTICE` and Apache-2.0 text beside
+that fixture, and `scripts/verify-package-attribution.sh` checks the archive
+contents during release packaging.
+
 ## Backend Mapping
 
 ### SurrealDB
@@ -943,7 +954,9 @@ backend-specific extension traits later.
 
 ## Status
 
-Grust is pre-release.
+Grust 0.13.0 "Prawn" is the current release line. The core model and reference
+execution paths are stable enough for real use, while backend-native feature
+parity remains intentionally explicit rather than implied by the common trait.
 
 Implemented:
 
@@ -956,38 +969,49 @@ Implemented:
 - async `GraphStore` trait
 - ordered `GraphMutationStore` trait, with transactional batch overrides where
   the backend can provide them
+- parser-backed, resource-bounded in-memory GQL/Cypher reads
+- a versioned semantic-model-to-property-graph projection
+- the scoped `Full39075` Grust language profile and reference executor
 - CocoIndex-style graph export adapter
 - in-memory backend
-- FalkorDB, HelixDB, LadybugDB, LanceDB, pgGraph, Sail, and SurrealDB backend
-  crates
+- published FalkorDB, LanceDB, PostgreSQL, PostgreSQL SQL/PGQ, pgGraph, Sail,
+  SurrealDB, and Turso adapters
+- internal HelixDB and LadybugDB workspace adapters
 
-Planned:
+Active follow-up areas:
 
-- richer validation in `GraphBuilder`
-- import/export helpers
-- backend-specific schema lowering
-- more traversal result shapes
-- query and index helpers
+- deeper native read/write parity across persistent backends
+- streaming or paginated result surfaces for graphs larger than in-memory
+  materialization
+- persistent vector search for the LanceDB integration
+- production hosting, quotas, and the remaining Marciana cognition cutover
+
+See [the GQL profile statement](docs/GQL_PROFILE_STATEMENT.md) for language
+scope and [the integration guide](docs/INTEGRATION.md) for backend-specific
+live verification.
 
 ## Development
 
 Run the full test suite:
 
 ```sh
-cargo test
+cargo test --workspace --all-features
 ```
 
 Format the workspace:
 
 ```sh
-cargo fmt
+cargo fmt --all -- --check
 ```
 
 Run checks for all crates:
 
 ```sh
-cargo check --workspace --all-targets
+cargo check --workspace --all-features --all-targets
 ```
+
+Release packaging and publication have additional mandatory gates in
+[PUBLISH.md](PUBLISH.md).
 
 ## License
 
