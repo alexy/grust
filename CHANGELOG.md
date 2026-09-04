@@ -11,6 +11,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   BSD/GNU `chmod` argument ordering for authenticated dataset snapshots, and
   accept the stock macOS Python 3.9 interpreter for external-service
   qualification.
+- Added concrete opt-in qualification records for PostgreSQL 19 Beta 3 SQL/PGQ
+  and the isolated Helix local runtime, while retaining fail-closed defaults
+  and documenting why Sail still needs a registry-published immutable image.
 
 ## 0.13.1 "Crayfish" - 2026-09-04
 

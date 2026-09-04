@@ -20,10 +20,10 @@ is never rewritten as an unavailable core-runner fallback.
 | FalkorDB | `redis 1.6.0`; FalkorDB 4.20.4 | executable | Digest-pinned service and backend-native openCypher aggregate. It remains a separate execution class from the reference and hybrid row-source paths admitted at downloaded scales. |
 | SurrealDB | `surrealdb 3.2.4`, `reqwest 0.13.4`; SurrealDB 3.2.4 | executable at `sfexample` | Digest-pinned service; source-label node/edge multiset validation plus shared reference evaluation. |
 | LanceDB | `lancedb 0.30.0`, Arrow `58.3.0` | executable at `sfexample` | Local storage in the runner's writable temporary filesystem; source-label node/edge multiset validation plus shared reference evaluation. |
-| Sail | Arrow `58.3.0` | unavailable by default; externally qualifiable | The feature image is built, but no canonical Sail service image/startup contract is known. An explicitly qualified, resource-limited local Docker service enables its portable query executor. |
+| Sail | Arrow `58.3.0`; Sail 0.7.1 service candidate | unavailable by default; externally qualifiable after an immutable image is published | Sail documents an official production Docker build but does not publish a vendor registry image. An operator-built image must be pushed and selected by platform-manifest and config digests before the harness will enable the portable query executor. |
 | pgGraph | pgGraph 1.2.0 | executable at `sfexample` | Fresh digest-pinned PostgreSQL/pgGraph service; source-label node/edge multiset validation plus shared reference evaluation. |
-| PostgreSQL PGQ | PostgreSQL 19 beta API | unavailable by default; externally qualifiable | The feature image is built, but there is no canonical PostgreSQL 19 PGQ service image. An explicitly qualified, resource-limited local Docker service can be supplied separately. |
-| Helix | `helix-db =2.0.0` | unavailable by default; externally qualifiable | The feature image is built, but a generic image is insufficient because the HTTP adapter requires a service with Grust's query contract. An explicitly qualified, resource-limited local Docker service can be supplied without touching unrelated Helix containers. |
+| PostgreSQL PGQ | PostgreSQL 19 beta API; PostgreSQL 19 Beta 3 | unavailable by default; externally qualifiable at `sfexample` | PostgreSQL 19 Beta 3's official image includes SQL/PGQ. A fresh, explicitly qualified service can exercise the adapter; downloaded scales still reject its whole-store materialization path. |
+| Helix | `helix-db =2.0.0`; local runtime v0.9.0 | unavailable by default; externally qualifiable at `sfexample` | The official CLI uses the `enterprise-dev` runtime and dynamic `/v1/query` endpoint. Qualification requires a fresh isolated container. The runtime image reports a proprietary license identifier even though the public Helix repository is AGPL-3.0, so evidence discloses the exact artifact rather than generalizing its license. |
 | CocoIndex | export adapter | not applicable | Target-state export is not a queryable graph storage backend; all query cells say `not_applicable`. |
 
 “Externally qualifiable” requires an endpoint on an explicit
@@ -33,6 +33,18 @@ attestations bind that port to a stable container start/restart identity, a
 digest-pinned Linux image of the runner architecture, no cpuset pinning, and
 the matrix CPU quota plus memory/no-swap limits; the publication receipt
 validates the canonical attestation records.
+
+The 2026-09-04 arm64 qualification candidates are PostgreSQL
+`19beta3-bookworm` platform manifest `sha256:787973…` with config
+`sha256:3a837e…`, and Helix `enterprise-dev` v0.9.0 platform manifest
+`sha256:931be7…` with config `sha256:355616…`. The corresponding amd64 pairs
+are `sha256:d0df95…` / `sha256:404945…` and `sha256:f9cf29…` /
+`sha256:ef5411…`. The complete values belong in each run's receipt, not in a
+mutable alias. Primary operational references are PostgreSQL's
+[SQL/PGQ announcement](https://www.postgresql.org/about/news/postgresql-19-beta-1-released-3313/),
+[PostgreSQL 19 graph-query documentation](https://www.postgresql.org/docs/19/queries-graph.html),
+[Sail production-image guide](https://docs.lakesail.com/sail/latest/guide/deployment/docker-images/production.html),
+and the [Helix repository](https://github.com/HelixDB/helix-db).
 
 For scales other than `example`, the runner admits the in-process reference,
 backend row-source plus Rust projection, and backend-native aggregate classes,

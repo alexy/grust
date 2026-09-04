@@ -183,11 +183,14 @@ python3 benchmarks/lsqb/validate-matrix-publication.py verify \
 Missing receipts, discovery/manual output, symlinks, extra files, mutations,
 and report/image identity drift are rejected.
 
-PostgreSQL, FalkorDB, SurrealDB, and pgGraph have pinned service images. Sail,
-PostgreSQL PGQ, and Helix have no pinned Docker startup contract, so their
-feature images are built but the default run records service unavailability.
-Ladybug and LanceDB are embedded. Set `SMOKE=1` for a one-run Memory-only
-infrastructure check:
+PostgreSQL, FalkorDB, SurrealDB, and pgGraph have pinned, orchestrator-owned
+service images. Sail, PostgreSQL PGQ, and Helix remain unavailable by default,
+so a run cannot silently discover or reuse a local service. PostgreSQL 19 Beta
+3 and the Helix local-development runtime now provide explicit opt-in image
+contracts; Sail still requires an operator-built and registry-published image.
+The exact qualified candidates and their platform/config digests are recorded
+in [`BACKENDS.md`](BACKENDS.md). Ladybug and LanceDB are embedded. Set
+`SMOKE=1` for a one-run Memory-only infrastructure check:
 
 ```sh
 CELL_TIMEOUT_MS=600000 SMOKE=1 \
@@ -208,8 +211,8 @@ endpoint is absent. This keeps credentials out of unrelated backend cells.
 
 The orchestrator resolves the image manifest and inspects the running container
 and its local image before and after each cell. It requires the image ID,
-Linux/runner architecture, CPU and memory limits, disabled swap, unrestricted
-CPU set, published-port binding, immutable container ID/start time, and restart
+Linux/runner architecture, CPU and memory limits, disabled swap, no cpuset
+pinning, published-port binding, immutable container ID/start time, and restart
 count to remain exact. Canonical sanitized inspections go to receipt-bound
 service logs, and the publication verifier parses and binds them to the report
 and image manifest. The endpoint itself is never recorded because it can
