@@ -651,6 +651,10 @@ backend-neutral `portable-policy` check and is never counted as twelve storage
 backend measurements. See [`BACKENDS.md`](BACKENDS.md) for exact qualification
 and service gaps.
 
+A separate [native Neo4j lane](NEO4J.md) is under implementation using the
+Neo4j Labs Rust driver. It is not yet a completed benchmark or an additional
+Grust adapter cell; existing twelve-backend receipts remain unchanged.
+
 See [`results/2026-09-03`](results/2026-09-03) for the historical schema-v1,
 three-backend bounded evidence. The receipt-backed schema-v3 evidence and its
 canonical presentation belong at

@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Begin a native Neo4j comparison lane using the pinned Neo4j Labs Rust driver,
+  with isolated service qualification; benchmark execution and publication are
+  pending and are not represented as completed results.
+
 - Benchmark-only: use 10,000-row Sail bulk-write batches and expose aggregate
   completed-chunk/node/edge counters during projected coordinator loading.
   Worker setup remains private and query observations remain separately recorded.
