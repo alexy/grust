@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Gate native qualification startup on a retained, fail-closed host CPU screen.
+  Preserve the completed 264-pass SF0.3 diagnostic as performance-excluded;
+  publish the timing correction without changing frozen correctness evidence.
+
 - Stop the three confirmed orphaned test loops after user authorization. Replace
   unbounded timeout-test spinners with five-second self-expiring fixtures and
   bound escaped-worker readiness polling; the original leak cause remains open.

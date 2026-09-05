@@ -1,5 +1,12 @@
 # Native Neo4j comparison lane
 
+**Performance correction (September 5):** the published example and SF0.1
+timings overlap orphaned CPU-spinning test workers and are diagnostic only,
+not clean-host comparisons. Counts and immutable evidence remain available.
+The repeated SF0.3 diagnostic also completed all 264 observations successfully
+but remains performance-excluded. See the
+[incident record](PERFORMANCE-INCIDENT-2026-09-05.md); clean reruns are pending.
+
 The example and SF0.1 rotating W2/R10 runs are now published at
 [adversari.al/graph](https://adversari.al/graph/), with independently verified
 counts, observations, runtime metadata and timing summaries. This is a native
@@ -26,8 +33,16 @@ query time includes scalar consumption and rollback completion. Raw samples
 and every query summary are published alongside the bundle, not pooled with
 legacy query-major runs or translated into concurrent throughput.
 
-SF0.3 rotating repeated qualification remains pending. The earlier SF0.3
-single-run diagnostic below is not substituted for that comparison.
+SF0.3 clean-host rotating repeated qualification remains pending. Neither the
+quarantined repeated run nor the earlier single-run diagnostic below substitutes
+for that comparison.
+
+Native qualification now records a three-sample host CPU preflight before
+creating the client and refuses startup under detected contention. For a
+standalone read-only check, use `python3 host_preflight.py --output <new-file>`
+from this directory. Exit 1 means the screen failed; do not bypass it by relabeling
+a run. Passing is only a startup screen, not proof of quiet conditions throughout
+measurement. The check does not terminate unrelated jobs.
 
 ## Startup readiness
 

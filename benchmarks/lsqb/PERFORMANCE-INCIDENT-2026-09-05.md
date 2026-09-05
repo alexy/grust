@@ -63,3 +63,25 @@ cargo test --manifest-path benchmarks/lsqb/Cargo.toml --lib observation_process:
 Post-test process inspection found no remaining fixture spinners or unbounded
 shell busy-loops. This limits fixture damage if a coordinator disappears; it is
 not proof of production cleanup under every parent-termination scenario.
+
+## Diagnostic completion and rerun gate
+
+The quarantined SF0.3 job exited successfully. Its retained runtime and rotating
+W2/R10 sampling audit verifies all 264 observations (44 warm-ups and 220 measured
+passes), with no mismatches, timeouts or errors. It remains performance-excluded.
+The owned Neo4j server was stopped after completion; data was not deleted.
+
+The public correction is deployed at `https://adversari.al/graph/` (site commit
+`c580b84`). All 205 site tests passed and remote verification confirmed the
+warning plus all 261 unchanged September 5 evidence payloads.
+
+New native qualification launches retain `host-preflight.json` and refuse to
+create a client if the host CPU screen fails. Three one-second-spaced `ps`
+samples reject any process at or above one CPU core, or aggregate activity at
+or above two CPU cores. These are conservative startup thresholds, not proof
+of isolation or a substitute for monitoring throughout the run. No command
+arguments or environments are collected. The check never stops processes.
+
+After orphan cleanup, this gate detected unrelated `et` embedding workers
+consuming several cores. They were left untouched; a quiet host window is still
+needed before the clean performance reruns.

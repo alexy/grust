@@ -147,6 +147,13 @@ def main():
             stream.flush()
             os.fsync(stream.fileno())
 
+    if args.mode == 'qualify':
+        preflight = subprocess.run(
+            [sys.executable, str(root / 'host_preflight.py'), '--output',
+             str(output / 'host-preflight.json')], check=False, timeout=45)
+        if preflight.returncode != 0:
+            parser.error('host CPU preflight failed; no benchmark client created')
+
     project = f'grust-lsqb-native-{os.getpid()}'
     container = project + '-neo4j-cell'
     command = ['docker', 'create', '--name', container, '--init',
