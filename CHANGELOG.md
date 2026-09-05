@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Bound cleanup of the book diagram renderer's owned browser after a successful
+  render. Validate a fresh PNG before atomically replacing a diagram, and retain
+  explicit render/cleanup progress rather than waiting indefinitely on shutdown.
+
 - Add recorded, private-network Helix SDK startup probes with a bounded
   readiness window, restart detection and isolated probe-container cleanup.
 

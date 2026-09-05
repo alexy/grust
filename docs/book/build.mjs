@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 const root = path.resolve(import.meta.dirname);
@@ -76,13 +77,10 @@ const renderedMarkdown = source.replace(
     const stem = `diagram-${String(diagramIndex).padStart(2, "0")}`;
     const input = path.join(diagramDir, `${stem}.mmd`);
     const output = path.join(diagramDir, `${stem}.png`);
-    spawnSync("bash", ["-lc", `cat > "$1"`, "bash", input], {
-      input: `${diagram.trim()}\n`,
-      stdio: ["pipe", "inherit", "inherit"],
-    });
+    writeFileSync(input, `${diagram.trim()}\n`);
     const result = spawnSync(
-      "mmdc",
-      ["-i", input, "-o", output, "-b", "transparent", "-p", puppeteerConfig, "-s", "2"],
+      process.execPath,
+      [path.join(root, "render-mermaid.mjs"), input, output, puppeteerConfig],
       { stdio: "inherit" },
     );
     if (result.status !== 0) {
