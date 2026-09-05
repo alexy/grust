@@ -13,6 +13,8 @@ grust_external_endpoint_name() {
         sail) printf 'SAIL_ENDPOINT\n' ;;
         postgres-pgq) printf 'POSTGRES_PGQ_URL\n' ;;
         helix) printf 'HELIX_QUERY_URL\n' ;;
+        helix-sdk) printf 'HELIX_SDK_BASE_URL\n' ;;
+        surreal-sdk) printf 'SURREAL_SDK_URL\n' ;;
         *) return 1 ;;
     esac
 }
@@ -80,8 +82,10 @@ def url_port(value: str, schemes: Set[str]) -> int:
     return require_host_port(parsed.hostname, port)
 
 
-if backend in {"sail", "helix"}:
+if backend in {"sail", "helix", "helix-sdk"}:
     result = url_port(endpoint, {"http", "https"})
+elif backend == "surreal-sdk":
+    result = url_port(endpoint, {"ws", "wss"})
 elif backend == "postgres-pgq":
     if endpoint.lower().startswith(("postgres://", "postgresql://")):
         try:
