@@ -15,6 +15,34 @@ require = matrix.require
 REVISION = '79ee978411f4803ed5ae2dbbbb7d1507e8507490'
 CLIENT = 'sha256:4a61a35c1c2a84389a4fc74366dd3d29f6a0fe1b9dc506b1dda85c1f22137341'
 SERVER = 'sha256:344977c0f59f87e776822858f5b9f9e9b48373035db6e1becb7ed63e5823e14a'
+ROW_SOURCE = {'q1', 'q4', 'a1-reversed-chain', 'a7-cartesian-count',
+              'a8-union-dedup', 'a12-parser-comment-trivia', 'a13-resource-edge-scan'}
+
+
+def validate_query_plan(query, reference, scale):
+    """Pin the executed Spark plan, not merely a self-declared skip reason."""
+    row_source = query['id'] in ROW_SOURCE
+    expected_class = 'backend-row-source-rust-projection' if row_source else 'backend-materialize-rust-reference'
+    execution = query['execution']
+    require(execution['class'] == expected_class and execution['language'] == 'Grust portable Cypher',
+            'Sail execution plan differs from pinned client')
+    plan = reference['rust_rows']['row_source' if row_source else 'in_process']
+    rows = dict(kind=plan['kind'], rows=plan['rows'][scale])
+    require(query['rust_rows'] == rows, 'Rust-row admission evidence differs')
+    refusal = None
+    if scale != 'example':
+        if not row_source:
+            refusal = 'performance.materialization-disallowed'
+        elif rows['rows'] > 1_000_000:
+            refusal = 'performance.rust-row-limit'
+        elif rows['kind'] == 'lower_bound':
+            refusal = 'performance.rust-row-bound-unavailable'
+    require((query['outcome'] == 'unsupported') == (refusal is not None), 'query admission differs')
+    require(execution['transport'] == ('not executed' if refusal else 'Spark Connect'), 'query transport differs')
+    if refusal:
+        require(query.get('reason_code') == refusal and not query['warmups'] and not query['measurements'],
+                'refused query has wrong reason or fabricated observations')
+    return refusal
 
 
 def validate(directory):
@@ -57,8 +85,7 @@ def validate(directory):
         for field in ('source_sha256', 'adapter_sha256'):
             require(query[field] == reference[field], 'query digest differs')
         require(query['expected_count'] == reference['expected_count'][scale], 'oracle differs')
-        if query['outcome'] == 'unsupported':
-            require(scale != 'example' and not query['warmups'] and not query['measurements'], 'invalid unsupported sample')
+        if validate_query_plan(query, reference, scale):
             continue
         require(len(query['warmups']) == 2 and len(query['measurements']) == 10, 'incomplete samples')
         for phase, key in [('warmup', 'warmups'), ('measurement', 'measurements')]:

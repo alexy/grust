@@ -17,6 +17,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   The source-built private-network Docker example run now passes all 264 W2/R10
   observations, with retained runtime snapshots and an independent diagnostic
   count/journal/timing audit. Public evidence admission remains pending.
+  Freeze source-built Sail handoff bundles with build provenance and structured
+  observations; reject arbitrary skipped queries or relabeled execution plans.
 
 - Derive receipt-bound performance summaries with measured query/setup/recovery
   distributions, per-sample boundary totals, and separate coordinator loading.

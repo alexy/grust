@@ -52,6 +52,40 @@ class ServerContract(unittest.TestCase):
                     runner.validate_server(candidate, self.build)
 
 
+class QueryAdmission(unittest.TestCase):
+    def setUp(self):
+        self.reference = dict(rust_rows={key: dict(kind='exact', rows={'example': 8, '0.1': 1_000_001})
+                                        for key in ('row_source', 'in_process')})
+        self.query = dict(id='q1', execution=dict(**{'class': 'backend-row-source-rust-projection'},
+                                                language='Grust portable Cypher', transport='not executed'),
+                          rust_rows=dict(kind='exact', rows=1_000_001), outcome='unsupported',
+                          reason_code='performance.rust-row-limit', warmups=[], measurements=[])
+
+    def test_large_row_refusal(self):
+        self.assertEqual(audit.validate_query_plan(self.query, self.reference, '0.1'),
+                         'performance.rust-row-limit')
+
+    def test_refusal_requires_real_admission_evidence(self):
+        for key, value in [('reason_code', 'arbitrary'), ('rust_rows', dict(kind='exact', rows=0)),
+                           ('measurements', [{}]), ('outcome', 'pass')]:
+            with self.subTest(key=key):
+                query = copy.deepcopy(self.query)
+                query[key] = value
+                with self.assertRaises(audit.matrix.PublicationError):
+                    audit.validate_query_plan(query, self.reference, '0.1')
+
+    def test_cannot_skip_admitted_query(self):
+        self.reference['rust_rows']['row_source']['rows']['0.1'] = 100
+        self.query['rust_rows']['rows'] = 100
+        with self.assertRaises(audit.matrix.PublicationError):
+            audit.validate_query_plan(self.query, self.reference, '0.1')
+
+    def test_cannot_claim_native_aggregation(self):
+        self.query['execution']['class'] = 'backend-native-aggregate'
+        with self.assertRaises(audit.matrix.PublicationError):
+            audit.validate_query_plan(self.query, self.reference, '0.1')
+
+
 @unittest.skipUnless(os.environ.get('GRUST_SAIL_AUDIT_FIXTURE'), 'set a retained example evidence directory')
 class RetainedEvidenceMutations(unittest.TestCase):
     def setUp(self):

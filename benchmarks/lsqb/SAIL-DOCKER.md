@@ -117,6 +117,14 @@ captures container snapshots, journals observations incrementally, emits
 not issue a publication receipt. The pinned recipe revision and newer client
 revision are intentionally distinct.
 
+For site handoff, `bundle-sail-source.py` freezes a completed suite before
+auditing it. Pass the raw suite directory, a new output directory, and
+`--source-build` / `--client-build` directories containing retained build
+receipts. The bundle includes checksummed component reports, structured
+observations, container snapshots, measured summaries, the public Dockerfile,
+and both build logs. Raw runtime logs are not exported. A bundle manifest
+proves transport integrity only; independent site admission must still pass.
+
 Stop the owned service when finished:
 
 ```sh
