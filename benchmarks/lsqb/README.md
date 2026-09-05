@@ -506,8 +506,15 @@ must not be pooled or published as a completed comparison. A machine power loss
 can still lose buffered filesystem writes; a Docker process failure does not
 erase records already captured by the host logger.
 
-`load_ns` is diagnostic and is not compared across adapter classes. At
-downloaded scales Memory decodes bounded node-first/edge-next chunks directly
+`load_ns` is diagnostic and is not compared across adapter classes.
+Sail's benchmark configuration uses 10,000-row write batches (the adapter
+default is 1,000), reducing small Delta transactions during bulk loading.
+Projected-chunk coordinator loads emit `load_chunk_complete` telemetry after
+each successful chunk, with cumulative nodes, edges, chunks, and elapsed time.
+Worker stderr remains private; these counters describe coordinator loading,
+not worker setup or query completion. They do not constitute a receipt.
+
+At downloaded scales Memory decodes bounded node-first/edge-next chunks directly
 into its single owned in-process graph. Turso, PostgreSQL, a qualified Sail
 service, and FalkorDB decode and insert the same bounded chunks inside their
 load intervals; none of these query phases retains a duplicate Rust source

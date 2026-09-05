@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod dataset;
+mod load_progress;
 pub mod matrix_args;
 pub mod matrix_catalog;
 pub mod matrix_progress;

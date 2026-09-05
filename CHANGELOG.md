@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Benchmark-only: use 10,000-row Sail bulk-write batches and expose aggregate
+  completed-chunk/node/edge counters during projected coordinator loading.
+  Worker setup remains private and query observations remain separately recorded.
+
 ## 0.13.2 "Krill" - 2026-09-05
 
 Krill is a scoped patch for `grust-cypher`, `grust-sail`, and `grust-graph`.

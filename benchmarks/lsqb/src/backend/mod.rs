@@ -738,6 +738,8 @@ async fn prepare_lancedb(graph: &Graph) -> Result<PreparedBackend, String> {
 async fn prepare_sail(graph: &Graph) -> Result<PreparedBackend, String> {
     let store = SailGraphStore::connect(SailConfig {
         endpoint: env::var("SAIL_ENDPOINT").unwrap_or_else(|_| "http://sail:50051".to_string()),
+        // Match the projected loader chunk size; avoid ten Delta commits per chunk.
+        batch_size: 10_000,
         ..SailConfig::default()
     })
     .await
@@ -765,6 +767,7 @@ where
 {
     let store = SailGraphStore::connect(SailConfig {
         endpoint: env::var("SAIL_ENDPOINT").unwrap_or_else(|_| "http://sail:50051".to_string()),
+        batch_size: 10_000,
         ..SailConfig::default()
     })
     .await
@@ -785,6 +788,7 @@ where
     I: IntoIterator<Item = Result<Graph, String>>,
 {
     let mut loading_edges = false;
+    let mut progress = super::load_progress::LoadProgress::new();
     for chunk in chunks {
         let chunk = chunk.map_err(|error| format!("dataset.load: {error}"))?;
         if !chunk.nodes.is_empty() && loading_edges {
@@ -797,6 +801,7 @@ where
             .put_graph(&chunk)
             .await
             .map_err(|err| err.to_string())?;
+        progress.completed(chunk.nodes.len(), chunk.edges.len());
     }
     Ok(())
 }

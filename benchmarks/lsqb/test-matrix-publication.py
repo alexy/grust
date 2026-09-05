@@ -706,6 +706,8 @@ class MatrixPublicationTests(unittest.TestCase):
         output = make_bundle(case_root, self.revision)
         run_log = output / "logs/baseline-memory.log"
         run_log.write_text(
+            'grust-lsqb-progress {"event":"load_chunk_complete","chunks":3,'
+            '"nodes":20000,"edges":10000,"elapsed_ms":1000}\n'
             "grust-lsqb-progress "
             '{"event":"query_start","backend":"memory","suite":"baseline",'
             '"scale":"example","phase":"measurement","iteration":1,'
