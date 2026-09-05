@@ -76,8 +76,8 @@ deadline observed at2.009seconds, SIGTERM/reap5.6ms, server absence and scalar
 verification260ms, next isolated result42. No transaction remained after
 process death in this probe, so no termination acknowledgement was needed.
 The separate `recovery-probe` above exercises the targeted-termination branch.
-These probes are diagnostics; Docker qualification of this new process boundary
-and independent publication receipts are still required.
+These probes are diagnostics; independent publication receipts are still
+required.
 
 The host-client/Docker-server example rerun with isolated workers passed all
 22 cases. Each observation records a normal worker exit, zero remaining owned
@@ -85,6 +85,18 @@ server transactions and a successful independent scalar probe; the flushed
 journal exactly matches the final diagnostic. Output:
 `out/neo4j-native-process-example`. This rerun is not the earlier Docker-client
 run and the two timing boundaries must not be pooled.
+
+Docker qualification of source `aaf0999706fa8cfdb7eeb10e8349b9a471229857`
+subsequently passed both recovery probes and all22 example cases. The2second
+deadline was observed at2.0085seconds with SIGTERM/reap11.6ms, server recovery
+792.5ms and next isolated scalar42. The separate targeted-termination probe
+observed the stress query running and completed recovery in384ms. The example
+watchdog completed in16.261seconds; all22 transaction tags were distinct, all
+server-recovery checks passed and journal/report observations matched exactly.
+The Docker client platform manifest is
+`sha256:c32f508bd0f86f63fb97fdbcffbd0e6f101552b6db0ace4dc3d757dd40468b9d`.
+Artifacts are the three `out/neo4j-native-docker-example-*-aaf0999` directories.
+No published ranking or larger-scale result is implied by example qualification.
 
 ## Required completion gates
 
