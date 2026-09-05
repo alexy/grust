@@ -1,8 +1,35 @@
 # Native Neo4j comparison lane
 
-This lane is under implementation, not published benchmark evidence. It adds
-Neo4j as a native engine comparator; it does not invent a Grust Neo4j adapter.
-The existing twelve-backend Grust receipts remain unchanged.
+The example and SF0.1 rotating W2/R10 runs are now published at
+[adversari.al/graph](https://adversari.al/graph/), with independently verified
+counts, observations, runtime metadata and timing summaries. This is a native
+engine comparator, not a Grust Neo4j adapter. Existing Grust receipts remain
+unchanged; earlier diagnostics below retain their original qualification limits.
+
+## Published comparison evidence
+
+Both runs use client source `4995115ad95e7e12215e86bcc13e60a78ddcea00`, a
+60-second query deadline, rotating query order and fresh isolated workers.
+Each passes all264 samples (44 warm-ups and220 measurements), with zero
+mismatches, timeouts or errors. Each Docker component has8CPU/6GiB without swap;
+the host is shared. These are not LDBC Benchmark Results.
+
+| Dataset | Frozen bundle SHA-256 |
+| --- | --- |
+| Example | `88d82a42e516f8e7746dccb2cb7d93dd7c11eb8ad94116ac1ec92850d95353b8` |
+| SF0.1 | `7191d265ca6f1a6e602cd98509447ba9e6fd23fa8baf44dd35c29a5c687c6289` |
+
+SF0.1 contains432,235 nodes and2,080,404 edges. Import took70.403seconds.
+Measured q4 median is1.975seconds (range1.843–3.162); the reversed-chain attack
+median is19.015seconds (range18.020–19.964). Setup and recovery are separate;
+query time includes scalar consumption and rollback completion. Raw samples
+and every query summary are published alongside the bundle, not pooled with
+legacy query-major runs or translated into concurrent throughput.
+
+SF0.3 rotating repeated qualification remains pending. The earlier SF0.3
+single-run diagnostic below is not substituted for that comparison.
+
+## Startup readiness
 
 The Docker wrapper now waits for `cypher-shell` to return the exact scalar42
 before creating the benchmark client. Readiness has a120second total deadline,
