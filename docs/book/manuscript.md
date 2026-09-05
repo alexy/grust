@@ -1553,8 +1553,10 @@ repetitions per query in rotating order. It measures backend materialization
 plus Rust reference execution, not native Surreal query-engine performance.
 Load, worker setup, query, and recovery timings remain separate. Helix's SDK3
 source-built `/v2/query` service also passes all 264 example observations under
-the same sampling protocol. Its independent publication admission is still
-pending; the public build guide and recipe alone do not establish a result.
+the same sampling protocol. Both SDK cohorts are independently admitted on
+adversari.al/graph. Helix's frozen bundles retain client and server build
+receipts, recipes and logs alongside the observations and runtime records.
+Neither a build guide nor a matching image label alone establishes a result.
 
 Reports name the measured execution class as `in-process-reference`,
 `backend-native-aggregate`, `backend-row-source-rust-projection`,
@@ -1583,7 +1585,7 @@ resource-limited external service.
 
 This is a conformance and reproducibility microbenchmark, and LSQB is not an
 official LDBC benchmark. A complete Grust matrix requires a valid publication
-receipt; separate native Neo4j, source-built Sail and Surreal SDK cohorts use
+receipt; separate native Neo4j, source-built Sail, Helix SDK and Surreal SDK cohorts use
 immutable evidence bundles admitted by an independent site verifier. A bundle
 manifest's hashes alone do not establish qualification. Unadmitted diagnostic
 and discovery runs are not publication evidence. The matrix receipt inventories one normalized watchdog record
