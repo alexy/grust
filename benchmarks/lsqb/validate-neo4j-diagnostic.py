@@ -81,6 +81,15 @@ def summarize_measurements(report):
     return summaries
 
 
+def validate_network_record(record):
+    """Validate a retained pre-run network inspection, not historical isolation."""
+    require(set(record) == {'Name', 'Id', 'Internal'}, 'network record fields differ')
+    require(record['Name'] == 'grust-lsqb-neo4j-qualification'
+            and record['Internal'] is True, 'network was not internal')
+    require(isinstance(record['Id'], str) and re.fullmatch(r'[0-9a-f]{64}', record['Id']),
+            'invalid network identity')
+
+
 def validate_runtime(directory):
     """Validate retained records, not registry availability or measurement isolation."""
     records = {name: json.loads((directory / f'{name}.json').read_text()) for name in

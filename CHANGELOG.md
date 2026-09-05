@@ -8,6 +8,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 - Require the native Neo4j runner's network to be internal and the server to
   attach exclusively to that exact network; retain the inspected network identity.
+  Include that record in frozen exports and require it for SF0.3 publication;
+  flush evidence payloads to disk before writing the completed bundle manifest.
 
 - Publish independently verified Helix Rust SDK example evidence at
   adversari.al/graph: 108 baseline and 156 adversarial observations, with

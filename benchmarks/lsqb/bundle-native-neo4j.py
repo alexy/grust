@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 
@@ -26,7 +27,11 @@ def canonical(value):
 
 def payloads(directory):
     result = {}
-    for name in FILES:
+    names = list(FILES)
+    network = directory / 'network-before.json'
+    if network.exists() or network.is_symlink():
+        names.append('network-before.json')
+    for name in names:
         path = directory / name
         if path.is_symlink() or not path.is_file() or path.parent.is_symlink():
             raise ValueError('not a regular evidence file: ' + name)
@@ -47,6 +52,12 @@ def export(directory, output, upstream=ROOT / 'upstream/lsqb', attacks=ROOT / 'a
         checked = audit.validate(frozen, upstream, attacks)
         checked['runtime_verified'] = audit.validate_runtime(frozen)
         report = json.loads(captured['result/diagnostic.json'])
+        if report['scale'] == '0.3':
+            audit.require('network-before.json' in captured,
+                          'SF0.3 publication requires retained internal-network provenance')
+        if 'network-before.json' in captured:
+            audit.validate_network_record(json.loads(captured['network-before.json']))
+            checked['internal_network_verified'] = True
         audit.require_matched_sampling(report)
         checked['matched_sampling_verified'] = True
         checked['query_summaries'] = audit.summarize_measurements(report)
@@ -63,9 +74,13 @@ def export(directory, output, upstream=ROOT / 'upstream/lsqb', attacks=ROOT / 'a
         target.parent.mkdir(parents=True, exist_ok=True)
         with target.open('xb') as stream:
             stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
     # Written last: an interrupted export never has a completed manifest.
     with (output / 'bundle.json').open('xb') as stream:
         stream.write(canonical(manifest))
+        stream.flush()
+        os.fsync(stream.fileno())
     return manifest
 
 
