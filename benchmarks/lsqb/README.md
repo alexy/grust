@@ -462,7 +462,7 @@ LanceDB, which therefore reload inside each observation worker. Persistent
 PostgreSQL-family services load once; workers attach with a unique
 `application_name` and server `statement_timeout`, and forced recovery polls
 `pg_stat_activity` until those sessions disappear. FalkorDB's native TIMEOUT
-reserves ten percent of the coordinator cutoff, capped at one second, for its
+reserves ten percent of the coordinator cutoff, capped at five seconds, for its
 timeout acknowledgement and fresh connection; successful queries still use
 the common coordinator deadline. An unacknowledged Falkor forced kill fails
 closed. Sail, SurrealDB, and Helix likewise fail closed after forced

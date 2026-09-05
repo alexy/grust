@@ -45,7 +45,8 @@ workers carry a unique server session name and `statement_timeout`, allowing a
 forced timeout to be followed by an exact `pg_stat_activity` disappearance
 check. Falkor's acknowledged native TIMEOUT is accepted when it returns
 normally; its server cutoff reserves ten percent of the coordinator deadline,
-capped at one second, for the acknowledgement and reconnect. Falkor, Sail,
+capped at five seconds, for the acknowledgement and reconnect (one second
+was not enough for q9 at SF0.1). Falkor, Sail,
 SurrealDB, and Helix fail the cell if the coordinator
 must forcibly kill a worker because those services do not expose a sufficient
 post-kill quiescence proof through the current adapters. They never continue

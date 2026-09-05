@@ -449,13 +449,16 @@ pub fn recovery_contract(id: &str, executed: bool) -> RecoveryContractV3 {
 
 /// Leave a small, deterministic part of the coordinator deadline for
 /// FalkorDB to return its native TIMEOUT acknowledgement and reconnect. The
-/// reserve is ten percent for short cutoffs and never exceeds one second, so
-/// successful-query timing remains governed by the common hard deadline.
+/// reserve is ten percent for short cutoffs and never exceeds five seconds,
+/// so successful-query timing remains governed by the common hard deadline.
+/// One second was not enough at SF0.1: FalkorDB checks its TIMEOUT between
+/// operators and overshot it on q9, so the coordinator killed the worker
+/// unacknowledged and the cell could not prove quiescence.
 pub fn worker_query_timeout_ms(id: &str, coordinator_timeout_ms: u64) -> u64 {
     if id != "falkor" || coordinator_timeout_ms <= 1 {
         return coordinator_timeout_ms;
     }
-    let acknowledgement_reserve_ms = (coordinator_timeout_ms / 10).clamp(1, 1_000);
+    let acknowledgement_reserve_ms = (coordinator_timeout_ms / 10).clamp(1, 5_000);
     coordinator_timeout_ms
         .saturating_sub(acknowledgement_reserve_ms)
         .max(1)
@@ -1386,8 +1389,9 @@ mod tests {
     #[test]
     fn falkor_native_timeout_reserves_a_bounded_acknowledgement_window() {
         assert_eq!(worker_query_timeout_ms("memory", 30_000), 30_000);
-        assert_eq!(worker_query_timeout_ms("falkor", 30_000), 29_000);
-        assert_eq!(worker_query_timeout_ms("falkor", 600_000), 599_000);
+        assert_eq!(worker_query_timeout_ms("falkor", 30_000), 27_000);
+        assert_eq!(worker_query_timeout_ms("falkor", 60_000), 55_000);
+        assert_eq!(worker_query_timeout_ms("falkor", 600_000), 595_000);
         assert_eq!(worker_query_timeout_ms("falkor", 10), 9);
         assert_eq!(worker_query_timeout_ms("falkor", 1), 1);
     }
