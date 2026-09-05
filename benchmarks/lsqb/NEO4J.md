@@ -204,6 +204,13 @@ load guard and must not be relabeled as exercising it.
 
 ## Required completion gates
 
+`bundle-native-neo4j.py INPUT OUTPUT` freezes the eight allowlisted structured
+records, audits those exact bytes including runtime and matched sampling, and
+exports a checksummed manifest plus measured-only summaries. It refuses to
+overwrite an existing output and writes the manifest last. Raw Docker logs are
+not exported. This transport bundle remains `publication_qualified: false`;
+independent site admission and a publication receipt are still required.
+
 1. Reuse the Rust dataset fingerprint/oracle loaders and bounded graph chunks.
    Preserve Message/Post/Comment inheritance and relationship multiplicity.
 2. Run native baseline Cypher and the thirteen adversarial cases. Disclose
