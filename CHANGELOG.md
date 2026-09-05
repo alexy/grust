@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Add recorded, private-network Helix SDK startup probes with a bounded
+  readiness window, restart detection and isolated probe-container cleanup.
+
 - Document the separate source-built Helix SDK3 server candidate, pinned Docker
   recipe and private-network qualification requirements; preserve the HTTP/v1
   service and disclose that live SDK3 qualification is still pending.

@@ -57,6 +57,14 @@ and 6 GiB RAM without swap. Leave HTTP and unrelated application services
 untouched. The server listens on port 8080; probe `/healthz` and `/readyz`
 from that private network before running a cell. Both must return success.
 
+`check-helix-sdk-ready.py --server NAME --server-image sha256:... \
+--server-source-revision FULL_SHA --output NEW_DIRECTORY` performs those probes
+using a digest-pinned, resource-bounded curl container on that internal network.
+It requires both endpoints to succeed within a 120-second startup window,
+records each attempt incrementally, and rejects server restarts. It removes
+only its temporary probe container, leaving the selected service and failure
+state available for inspection. Readiness is not a benchmark observation.
+
 Build a matching client from a clean Grust source containing the SDK3
 migration using `build-sdk.py --backend helix-sdk`. Then use `run-sdk.py`
 with `--server-image sha256:...`, the concrete `--server-version 0.1.0`, and
