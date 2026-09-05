@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Document the separate source-built Helix SDK3 server candidate, pinned Docker
+  recipe and private-network qualification requirements; preserve the HTTP/v1
+  service and disclose that live SDK3 qualification is still pending.
+
 - Publish the independently verified Surreal Rust SDK example comparison at
   adversari.al/graph: 108 baseline and 156 adversarial observations, separate
   load/setup/query/recovery timings, and preserved HTTP lane identity.

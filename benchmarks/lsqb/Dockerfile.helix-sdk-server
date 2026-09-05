@@ -1,0 +1,21 @@
+# Benchmark qualification recipe derived from HelixDB 0ef3cee0 Dockerfile.
+# Bound compiler parallelism; pin both base images and retain source identity.
+# syntax=docker/dockerfile:1.7
+FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
+WORKDIR /workspace
+RUN apt-get update && apt-get install -y --no-install-recommends binutils build-essential ca-certificates clang cmake git libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,id=grust-helix-sdk3-server,target=/workspace/target \
+    cargo build --locked --release --package server --bin server -j2 \
+    && cp target/release/server /tmp/helix-server
+FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9ae6393649d0c55122c66fe6d4803b0d85b2d7b60b2b09b690ce80c086f40a83
+COPY --from=builder /tmp/helix-server /bin/helix-server
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt HELIX_HTTP_ADDR=0.0.0.0:8080 HELIX_GRPC_ADDR=127.0.0.1:8081 DB_PATH=db/ RUST_LOG=server=info,db=info,slatedb=info
+LABEL org.opencontainers.image.revision="0ef3cee0faf28bb81072fb149b982dcdb166d60a" org.opencontainers.image.source="https://github.com/HelixDB/helix-db" io.adversarial.purpose="helix-sdk3-qualification"
+WORKDIR /home/nonroot
+USER 65532:65532
+EXPOSE 8080
+STOPSIGNAL SIGTERM
+ENTRYPOINT ["/bin/helix-server"]

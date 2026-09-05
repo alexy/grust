@@ -37,6 +37,9 @@ HTTP lane's old receipt.
 
 ## Isolated Docker qualification
 
+The [Helix SDK 3 Docker guide](HELIX-SDK-DOCKER.md) identifies the separate
+source-built `/v2/query` server candidate and pinned public build recipe.
+
 Build a client from a clean, immutable checkout with `build-sdk.py --checkout
 CHECKOUT --backend surreal-sdk --output NEW_BUILD_DIRECTORY` (or `helix-sdk`).
 It retains30second build progress, the exact Dockerfile, source and feature
