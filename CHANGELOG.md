@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Publish the independently verified Surreal Rust SDK example comparison at
+  adversari.al/graph: 108 baseline and 156 adversarial observations, separate
+  load/setup/query/recovery timings, and preserved HTTP lane identity.
+
 - Freeze audited SDK observations and client build provenance in hashed evidence
   bundles, without treating diagnostic verification as publication admission.
 

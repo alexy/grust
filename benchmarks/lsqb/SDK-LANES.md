@@ -2,9 +2,9 @@
 
 The matrix executable has distinct `helix-sdk` and `surreal-sdk` backend IDs.
 The existing `helix` and `surreal` IDs retain their HTTP implementation and
-historical evidence. SDK support in the executable is not yet a qualified
-Docker comparison: the full-matrix launcher and independent publication
-contracts still need the new lane identities and pinned service receipts.
+historical evidence. Surreal SDK now has a separately admitted example Docker
+comparison on [adversari.al/graph](https://adversari.al/graph/). Helix SDK live
+qualification and the full-matrix launcher's SDK integration remain pending.
 
 | Lane | Grust store | Transport | Endpoint variable |
 | --- | --- | --- | --- |
@@ -83,8 +83,10 @@ adversarial passing observations. `validate-sdk.py OUTPUT_DIRECTORY` checks
 that pinned cohort against the canonical dataset/query/count contract, timing,
 rotation, incremental journal and retained runtime lifecycle. Its mutation
 tests reject altered counts, transport labels, ownership and sample records.
-This diagnostic audit does not issue a publication receipt; site admission and
-larger-scale SDK evidence remain pending.
+This diagnostic audit does not issue a publication receipt. The site now
+independently admits both frozen example bundles, recomputing summaries and
+checking counts, rotation, query identities, runtime lifecycle and transport.
+Larger-scale SDK evidence remains pending.
 
 Freeze a checked cohort with `bundle-sdk.py RAW_DIRECTORY NEW_BUNDLE_DIRECTORY
 --client-build BUILD_DIRECTORY`. It audits captured bytes, exports only the
@@ -114,7 +116,8 @@ status. This wrapper is for setup work, not timed benchmark observations.
   `945dfa7` benchmark source predates this migration; retain its identity.
 - Build pinned Docker clients/services and run both SDK lanes, including
   example W2/R10/60-second performance sampling and larger-scale admission.
-- Extend the Docker launcher and independent receipt/site verifiers before
-  admitting any SDK result as public comparison evidence.
+- Extend the full Docker launcher and receipt contracts for SDK lanes. Site
+  admission currently permits only the pinned Surreal example bundles, not
+  arbitrary SDK sources or larger scales.
 - Add the separate native Ladybug Rust-binding lane. It must not be confused
   with either Grust's Ladybug materialization lane or the upstream Python run.
