@@ -56,6 +56,15 @@ server receive8CPU/6GiB limits without swap. Helix uses container port8080 and
 Surreal uses8000. The runner records each actual image identity and selected
 server version independently of the HTTP lanes.
 
+For a locally source-built server, create the container using its exact
+`sha256:...` image ID and pass that ID as `--server-image`, together with
+`--server-source-revision FULL_SHA`. The runner checks the actual image's
+revision label, Linux ARM64 platform and content identity, not just labels
+on the container. Retain the source checkout, pinned Dockerfile, build log
+and build receipt separately: a matching label alone is not proof of a build
+or independent publication admission. Registry images continue to require a
+repository digest and do not accept a source override.
+
 Provide `--backend`, `--server`, `--server-image`, `--server-version`, `--image`,
 `--source-revision`, `--suite` and a fresh `--output` directory; `--scale`
 defaults to `example`. The client image must carry the exact source revision

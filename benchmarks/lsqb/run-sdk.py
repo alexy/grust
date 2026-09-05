@@ -27,8 +27,10 @@ LANES = {
 
 
 def validate_server(server, lane, pinned_image):
-    if not re.fullmatch(r'[^\s@]+@sha256:[0-9a-f]{64}', pinned_image):
+    if not re.fullmatch(r'(?:[^\s@]+@)?sha256:[0-9a-f]{64}', pinned_image):
         raise ValueError('server image must be digest-pinned')
+    if pinned_image.startswith('sha256:') and server['Image'] != pinned_image:
+        raise ValueError('source-built server content identity differs')
     state, host = server['State'], server['HostConfig']
     if server['Config']['Image'] != pinned_image or not state['Running'] or state['OOMKilled']:
         raise ValueError('server image or running state differs')
@@ -42,6 +44,20 @@ def validate_server(server, lane, pinned_image):
     return networks[NETWORK]['IPAddress']
 
 
+def validate_source_image(image, pinned_image, revision):
+    """Local images need an explicit source pin, checked on the image itself."""
+    if not pinned_image.startswith('sha256:'):
+        if revision is not None:
+            raise ValueError('source revision is only accepted for a local image ID')
+        return
+    if not revision or not re.fullmatch(r'[0-9a-f]{40}', revision):
+        raise ValueError('source-built server requires a full source revision')
+    if image['Id'] != pinned_image or image['Architecture'] != 'arm64' or image['Os'] != 'linux':
+        raise ValueError('source-built image identity or platform differs')
+    if image['Config'].get('Labels', {}).get('org.opencontainers.image.revision') != revision:
+        raise ValueError('source-built image revision differs')
+
+
 def endpoint(lane, address):
     _, variable, scheme, port = LANES[lane]
     return f'{variable}={scheme}://{address}:{port}'
@@ -53,6 +69,7 @@ def main():
     parser.add_argument('--server', required=True)
     parser.add_argument('--server-image', required=True)
     parser.add_argument('--server-version', required=True)
+    parser.add_argument('--server-source-revision')
     parser.add_argument('--image', required=True)
     parser.add_argument('--source-revision', required=True)
     parser.add_argument('--output', type=Path, required=True)
@@ -67,6 +84,8 @@ def main():
         parser.error('concrete server version required')
     server = runtime.inspect(args.server)
     address = validate_server(server, args.backend, args.server_image)
+    validate_source_image(runtime.inspect(server['Image'], image=True),
+                          args.server_image, args.server_source_revision)
     network = json.loads(subprocess.check_output(['docker', 'network', 'inspect', NETWORK], timeout=20))[0]
     if not network['Internal']:
         parser.error('SDK network must be internal')
@@ -114,6 +133,7 @@ def main():
                 '--attacks-dir', '/opt/grust-attacks', '--output', '/out/component.json']
     save('invocation.json', dict(publication_qualified=False, command=command,
                                source_revision=args.source_revision, backend=args.backend,
+                               server_source_revision=args.server_source_revision,
                                scale=args.scale, suite=args.suite, client_image_id=image['Id']))
     save('supervisor.json', dict(files={name: hashlib.sha256((ROOT / name).read_bytes()).hexdigest()
                                       for name in ('run-sdk.py', 'run-native-neo4j.py', 'cell-watchdog.py')},

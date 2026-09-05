@@ -50,6 +50,33 @@ class SdkRunnerTests(unittest.TestCase):
         self.assertEqual(sdk.endpoint('surreal-sdk', '172.30.0.3'),
                          'SURREAL_SDK_URL=ws://172.30.0.3:8000')
 
+    def test_local_source_image_requires_matching_content_and_revision(self):
+        pinned = 'sha256:' + 'b' * 64
+        revision = 'c' * 40
+        image = {'Id': pinned, 'Architecture': 'arm64', 'Os': 'linux',
+                 'Config': {'Labels': {'org.opencontainers.image.revision': revision}}}
+        sdk.validate_source_image(image, pinned, revision)
+        self.server['Image'] = pinned
+        self.server['Config']['Image'] = pinned
+        sdk.validate_server(self.server, 'helix-sdk', pinned)
+        for value in (None, 'short', 'd' * 40):
+            with self.subTest(revision=value), self.assertRaises(ValueError):
+                sdk.validate_source_image(image, pinned, value)
+        for key, value in [('Id', 'sha256:' + 'e' * 64),
+                           ('Architecture', 'amd64'), ('Os', 'windows')]:
+            broken = copy.deepcopy(image)
+            broken[key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                sdk.validate_source_image(broken, pinned, revision)
+        self.server['Image'] = 'sha256:' + 'f' * 64
+        with self.assertRaises(ValueError):
+            sdk.validate_server(self.server, 'helix-sdk', pinned)
+
+    def test_registry_image_does_not_accept_source_override(self):
+        sdk.validate_source_image({}, self.image, None)
+        with self.assertRaises(ValueError):
+            sdk.validate_source_image({}, self.image, 'c' * 40)
+
 
 if __name__ == '__main__':
     unittest.main()

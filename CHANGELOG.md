@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Accept content-addressed, source-pinned local SDK server images for Docker
+  qualification, with image-level revision and platform checks. Registry
+  services retain their digest pinning; publication admission remains separate.
+
 - Migrate the private Helix Rust SDK adapter to `helix-db` 3.0.0 and its typed
   nested-AST query requests. Preserve the separate direct HTTP/v1 adapter and
   its existing predicate semantics. Unit tests pass; SDK/v2 service runtime
