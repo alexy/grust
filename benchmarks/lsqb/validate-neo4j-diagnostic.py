@@ -36,6 +36,7 @@ CLIENT_PROFILES = {
         'sha256:7e20f8504f9ad0a04aa72226d4493c501cdaa2ebc62cd8041824fbcd2333f27e',
 }
 SAMPLED_SOURCES = {'4c385e26135547f1771577f20a90234f830488b6', '242b6b842836e64fb76e667f8ad5609e7cb2c115'}
+ROTATING_SOURCES = set()  # Registered after a matching Docker build is pinned.
 SERVER_IMAGE = 'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d'
 
 
@@ -86,6 +87,9 @@ def validate_runtime(directory):
         if report.get('schema') == 'grust-neo4j-native-diagnostic-v2':
             require(revision in SAMPLED_SOURCES, 'source does not qualify the sampling protocol')
             sampling = report['sampling']
+            expected_order = ('suite-major-phase-major-rotating' if revision in ROTATING_SOURCES
+                              else 'query-major-warmups-then-measurements')
+            require(sampling.get('order') == expected_order, 'source does not implement the declared sampling order')
             command = invocation.get('command', [])
             require(isinstance(command, list) and len(command) >= 7 and command[-7] == 'qualify' and
                     command[-4] == report['scale'] and command[-3] == '/out/result' and
@@ -179,7 +183,7 @@ def validate(directory, upstream, attacks):
         warmups, runs = sampling.get('warmups_per_query'), sampling.get('measurements_per_query')
         require(type(warmups) is int and 0 <= warmups <= 5 and type(runs) is int and 1 <= runs <= 10,
                 'invalid sampling counts')
-        require(sampling.get('order') == 'query-major-warmups-then-measurements' and
+        require(sampling.get('order') in ('query-major-warmups-then-measurements', 'suite-major-phase-major-rotating') and
                 sampling.get('worker_lifecycle') == 'fresh-process-per-sample', 'sampling protocol differs')
         schedule = [('warmup', i) for i in range(warmups)] + [('measurement', i) for i in range(runs)]
     else:
@@ -211,7 +215,15 @@ def validate(directory, upstream, attacks):
         query_id = f'a{number}-{suffix}'
         digest = hashlib.sha256((attacks / f'{query_id}.cypher').read_bytes()).hexdigest()
         expected.append(('adversarial', query_id, count, digest))
-    expected = [(*case, phase, index) for case in expected for phase, index in schedule]
+    if sampled and sampling['order'] == 'suite-major-phase-major-rotating':
+        references, expected = expected, []
+        for suite in ('baseline', 'adversarial'):
+            group = [case for case in references if case[0] == suite]
+            for phase, index in schedule:
+                expected.extend((*group[(position + index) % len(group)], phase, index)
+                                for position in range(len(group)))
+    else:
+        expected = [(*case, phase, index) for case in expected for phase, index in schedule]
     observations = report['observations']
     require(len(observations) == len(expected), 'incomplete observation set')
     tags = set()
@@ -254,6 +266,8 @@ def validate(directory, upstream, attacks):
     measurements = [x for x in observations if not sampled or x['phase'] == 'measurement']
     warmup_samples = [x for x in observations if sampled and x['phase'] == 'warmup']
     return {'diagnostic_verified': True, 'publication_qualified': False, 'scale': scale,
+            'sampling_order': sampling['order'] if sampled else 'single-pass-canonical',
+            'query_timeout_ms': 60000,
             'warmups_per_query': warmups, 'measurements_per_query': runs,
             'measurement_outcomes': {key: sum(x['outcome'] == key for x in measurements)
                                      for key in ('pass', 'mismatch', 'timeout', 'error')},

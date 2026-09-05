@@ -109,40 +109,50 @@ pub(super) async fn run(args: &[String]) -> Result<(), &'static str> {
     }
     drop(graph);
     let mut observations = Vec::new();
-    for (suite, case) in cases {
-        for (phase, sample_index) in sampling.plan() {
-            let mut start_event =
-                json!({"event":"query-start", "suite":suite,"id":case.id,"complete":false});
-            if !sampling.legacy {
-                start_event["phase"] = json!(phase);
-                start_event["sample_index"] = json!(sample_index);
+    let mut schedule = Vec::new();
+    for suite in ["baseline", "adversarial"] {
+        let indices: Vec<_> = cases
+            .iter()
+            .enumerate()
+            .filter_map(|(index, (case_suite, _))| (*case_suite == suite).then_some(index))
+            .collect();
+        for (position, phase, index) in sampling.suite_plan(indices.len()) {
+            schedule.push((indices[position], phase, index));
+        }
+    }
+    for (case_index, phase, sample_index) in schedule {
+        let (suite, case) = &cases[case_index];
+        let mut start_event =
+            json!({"event":"query-start", "suite":suite,"id":case.id,"complete":false});
+        if !sampling.legacy {
+            start_event["phase"] = json!(phase);
+            start_event["sample_index"] = json!(sample_index);
+        }
+        record(&mut journal, &start_event)?;
+        let (result, recovery) = super::process::run(&case.executable, 60_000).await?;
+        let outcome = match result.outcome {
+            grust_lsqb_runner::observation_process::WorkerOutcome::Pass
+                if result.actual_count == Some(case.expected_count) =>
+            {
+                "pass"
             }
-            record(&mut journal, &start_event)?;
-            let (result, recovery) = super::process::run(&case.executable, 60_000).await?;
-            let outcome = match result.outcome {
-                grust_lsqb_runner::observation_process::WorkerOutcome::Pass
-                    if result.actual_count == Some(case.expected_count) =>
-                {
-                    "pass"
-                }
-                grust_lsqb_runner::observation_process::WorkerOutcome::Pass => "mismatch",
-                grust_lsqb_runner::observation_process::WorkerOutcome::Timeout => "timeout",
-                grust_lsqb_runner::observation_process::WorkerOutcome::Error => "error",
-            };
-            let mut observation = json!({"event":"observation-recorded", "complete":false,"suite":suite,
+            grust_lsqb_runner::observation_process::WorkerOutcome::Pass => "mismatch",
+            grust_lsqb_runner::observation_process::WorkerOutcome::Timeout => "timeout",
+            grust_lsqb_runner::observation_process::WorkerOutcome::Error => "error",
+        };
+        let mut observation = json!({"event":"observation-recorded", "complete":false,"suite":suite,
             "id":case.id,"expected_count":case.expected_count,"actual_count":result.actual_count,
             "outcome":outcome,"elapsed_ns":result.elapsed_ns,"source_sha256":case.source_sha256,
             "query_sha256":queries::sha256(case.executable.as_bytes()),
             "timing_boundary":"coordinator-go-through-scalar-consumption-and-rollback-result",
             "setup_ns":result.setup_ns,"process_recovery_ns":result.recovery_ns,
             "termination":result.termination,"server_recovery":recovery,"query_timeout_ms":60_000});
-            if !sampling.legacy {
-                observation["phase"] = json!(phase);
-                observation["sample_index"] = json!(sample_index);
-            }
-            record(&mut journal, &observation)?;
-            observations.push(observation);
+        if !sampling.legacy {
+            observation["phase"] = json!(phase);
+            observation["sample_index"] = json!(sample_index);
         }
+        record(&mut journal, &observation)?;
+        observations.push(observation);
     }
     let mut report = json!({"schema":"grust-neo4j-native-diagnostic-v1", "complete":false,
         "warning":"These are not LDBC Benchmark Results.","scale":scale,"dataset":identity,
@@ -152,7 +162,7 @@ pub(super) async fn run(args: &[String]) -> Result<(), &'static str> {
         report["schema"] = json!("grust-neo4j-native-diagnostic-v2");
         report["load_timeout_ms"] = json!(600_000);
         report["sampling"] = json!({"warmups_per_query":sampling.warmups,"measurements_per_query":sampling.runs,
-            "order":"query-major-warmups-then-measurements","worker_lifecycle":"fresh-process-per-sample"});
+            "order":"suite-major-phase-major-rotating","worker_lifecycle":"fresh-process-per-sample"});
     }
     safe_output::write_new(
         &output.join("diagnostic.json"),

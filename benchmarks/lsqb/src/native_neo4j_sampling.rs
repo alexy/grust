@@ -36,6 +36,29 @@ impl Sampling {
             .chain((0..self.runs).map(|i| ("measurement", i)))
             .collect()
     }
+
+    /// Match Grust's phase-major round-robin schedule within each suite.
+    /// Sample indices are zero based; rotation restarts for measurements.
+    pub fn suite_plan(self, queries: usize) -> Vec<(usize, &'static str, u32)> {
+        let mut plan = Vec::new();
+        if queries == 0 {
+            return plan;
+        }
+        for (phase, index) in self.plan() {
+            for position in 0..queries {
+                plan.push((
+                    grust_lsqb_runner::sample_schedule::rotated_index(
+                        position,
+                        index as usize,
+                        queries,
+                    ),
+                    phase,
+                    index,
+                ));
+            }
+        }
+        plan
+    }
 }
 
 #[cfg(test)]
@@ -65,5 +88,28 @@ mod tests {
             assert!(Sampling::parse(&[warmups.into(), runs.into()]).is_err());
         }
         assert!(Sampling::parse(&["2".into()]).is_err());
+    }
+
+    #[test]
+    fn suite_schedule_rotates_each_round_and_resets_after_warmup() {
+        let sampling = Sampling::parse(&["2".into(), "2".into()]).unwrap();
+        assert_eq!(
+            sampling.suite_plan(3),
+            vec![
+                (0, "warmup", 0),
+                (1, "warmup", 0),
+                (2, "warmup", 0),
+                (1, "warmup", 1),
+                (2, "warmup", 1),
+                (0, "warmup", 1),
+                (0, "measurement", 0),
+                (1, "measurement", 0),
+                (2, "measurement", 0),
+                (1, "measurement", 1),
+                (2, "measurement", 1),
+                (0, "measurement", 1),
+            ]
+        );
+        assert!(sampling.suite_plan(0).is_empty());
     }
 }

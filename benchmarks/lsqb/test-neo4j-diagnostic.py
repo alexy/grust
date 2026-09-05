@@ -155,6 +155,30 @@ class JournalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.audit()
 
+    def test_rotating_suite_schedule_and_wrong_rotation(self):
+        self.sampled_fixture()
+        self.report['sampling']['order'] = 'suite-major-phase-major-rotating'
+        items = {(item['suite'], item['id'], item['phase'], item['sample_index']): item
+                 for item in self.report['observations']}
+        ordered = []
+        for suite, names in [('baseline', [f'q{i}' for i in range(1, 10)]),
+                             ('adversarial', [f'a{i}-{name}' for i, name in enumerate(check.ATTACKS, 1)])]:
+            for phase, index in [('warmup', 0), ('measurement', 0), ('measurement', 1)]:
+                for name in names[index:] + names[:index]:
+                    ordered.append(items[(suite, name, phase, index)])
+        self.report['observations'] = ordered
+        self.events = self.events[:1]
+        for item in ordered:
+            self.events += [dict(event='query-start', complete=False, **{key: item[key]
+                            for key in ('suite', 'id', 'phase', 'sample_index')}), item]
+        self.assertEqual(self.audit()['measurement_outcomes']['pass'], 44)
+        self.assertEqual(ordered[18]['id'], 'q2')
+        # A consistent report/journal with the wrong rotation must still fail.
+        ordered[18], ordered[19] = ordered[19], ordered[18]
+        self.events[37:41] = self.events[39:41] + self.events[37:39]
+        with self.assertRaises(ValueError):
+            self.audit()
+
     def test_mislabeled_and_omitted_samples_are_rejected(self):
         self.sampled_fixture()
         self.report['observations'][0]['phase'] = 'measurement'
@@ -241,7 +265,8 @@ class RuntimeTests(unittest.TestCase):
         folder.mkdir()
         (folder / 'diagnostic.json').write_text(json.dumps(dict(
             schema='grust-neo4j-native-diagnostic-v2', scale='example',
-            sampling=dict(warmups_per_query=2, measurements_per_query=10))))
+            sampling=dict(warmups_per_query=2, measurements_per_query=10,
+                          order='query-major-warmups-then-measurements'))))
         self.records['invocation']['command'] = ['qualify', '/opt/lsqb-mounted', '/opt/grust-attacks',
                                                  'example', '/out/result', '2', '10']
         with self.assertRaises(ValueError):

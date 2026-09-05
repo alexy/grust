@@ -19,6 +19,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   repetitions, with per-sample process isolation, recovery, and durable progress.
   The independent audit rejects missing, reordered, or mislabeled samples and
   reports warm-up failures separately from measured outcomes.
+  Align subsequent native runs with Grust's phase-major rotating query schedule;
+  preserve earlier query-major runs as a separate diagnostic cohort.
 
 - Benchmark-only: use 10,000-row Sail bulk-write batches and expose aggregate
   completed-chunk/node/edge counters during projected coordinator loading.

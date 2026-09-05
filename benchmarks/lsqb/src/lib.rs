@@ -12,3 +12,4 @@ pub mod provenance;
 pub mod queries;
 pub mod report;
 pub mod safe_output;
+pub mod sample_schedule;

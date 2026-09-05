@@ -18,6 +18,7 @@ use grust_lsqb_runner::report::{
     QueryOutcomeV3, SuiteIdentityV2, TimeoutEnforcementV3, TimingBoundaryV3, TimingProtocolV3,
 };
 use grust_lsqb_runner::safe_output;
+use grust_lsqb_runner::sample_schedule::rotated_index;
 
 const WARNING: &str = "These are not LDBC Benchmark Results.";
 const MATERIALIZATION_DISALLOWED: &str = "performance.materialization-disallowed";
@@ -405,10 +406,6 @@ async fn run_phase(
         }
     }
     Ok(())
-}
-
-fn rotated_index(position: usize, rotation: usize, query_count: usize) -> usize {
-    (position + rotation) % query_count
 }
 
 fn requires_backend_recovery(

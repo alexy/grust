@@ -155,12 +155,17 @@ The native binary accepts optional `WARMUPS RUNS` after its four qualification
 arguments. The Docker runner exposes these as paired `--warmups` and `--runs`
 options. Bounds are0–5 warm-ups and1–10 measurements per query. Without them,
 the legacy W0/R1 protocol is unchanged. With them, schema v2 records an explicit
-query-major schedule: warm-ups first, then measurements, each in a fresh worker
+schedule. The initial4c385e2/242b6b8 builds group samples by query; these are
+within-backend diagnostic cohorts, not matched Grust comparisons. Subsequent
+builds match Grust's suite/phase-major schedule: run every query in each round,
+rotate the starting query by the round index, and reset rotation when moving
+from warm-ups to measurements. Both runners use the same rotation helper.
+Each sample executes in a fresh worker
 with its own server-recovery proof. Phase and zero-based sample index appear
 in every start/observation record. No warm-up sample enters measurement totals;
 warm-up failures remain visible separately and do not get silently dropped.
 
-The full comparison cohort will use W2/R10 and the explicitly selected
+The full comparison cohort will use that rotating schedule, W2/R10 and the explicitly selected
 60second query deadline. Grust matrix defaults are W2/R10 but30seconds, so its
 deadline must be overridden to match; existing W0/R1 results are a separate
 qualification cohort. For repeated runs, the runner computes an emergency outer
@@ -168,10 +173,14 @@ ceiling from the import allowance and all per-sample bounds. This ceiling is not
 an expected duration;30second heartbeats and flushed per-sample records continue
 throughout. The W2/R10 example Docker run of source
 `4c385e26135547f1771577f20a90234f830488b6` passed all44 warm-ups and220 measured
-samples in60.812seconds. Its sampling, oracle/journal and runtime audits passed.
+samples in60.812seconds. Its query-major sampling, oracle/journal and runtime
+audits passed; it must not be pooled into the rotating comparison cohort.
 Output: `out/neo4j-sampled-example-4c385e2`. The client platform manifest is
 `sha256:2f68b1f5e47a3627124ec02390de3088660059c860c2ab2461cf133ba9af3aca`.
 Matched repeated larger-scale runs and publication receipts remain pending.
+The validator supports both historical and rotating schedules and binds each
+declared order to source-image capability. Identical repetition counts alone
+do not establish a matched comparison protocol.
 
 The diagnostic validator's `--summaries` option emits measured-only raw timing
 series and minimum/median/maximum. It withholds a query's timing summary if any
