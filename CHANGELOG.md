@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Require the native Neo4j runner's network to be internal and the server to
+  attach exclusively to that exact network; retain the inspected network identity.
+
 - Publish independently verified Helix Rust SDK example evidence at
   adversari.al/graph: 108 baseline and 156 adversarial observations, with
   load/query/setup/recovery timings and both client/server build provenance.

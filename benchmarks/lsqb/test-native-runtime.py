@@ -13,6 +13,19 @@ spec.loader.exec_module(runtime)
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_private_network_is_internal_exclusive_and_identity_bound(self):
+        name = 'grust-lsqb-neo4j-qualification'
+        network = dict(Name=name, Id='a' * 64, Internal=True)
+        server = dict(HostConfig=dict(NetworkMode=name),
+                      NetworkSettings=dict(Networks={name: dict(NetworkID='a' * 64)}))
+        runtime.validate_network(server, network)
+        for field, value in [('Internal', False), ('Name', 'foreign'), ('Id', 'b' * 64)]:
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                runtime.validate_network(server, {**network, field: value})
+        server['NetworkSettings']['Networks']['another'] = {}
+        with self.assertRaises(ValueError):
+            runtime.validate_network(server, network)
+
     def test_exit_snapshot_is_written_before_wrapper_returns(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(runtime.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)), \

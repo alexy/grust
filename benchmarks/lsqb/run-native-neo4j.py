@@ -18,6 +18,17 @@ MEMORY = 6 * 1024**3
 NANO_CPUS = 8_000_000_000
 
 
+def validate_network(server, network):
+    name = 'grust-lsqb-neo4j-qualification'
+    if network.get('Name') != name or network.get('Internal') is not True:
+        raise ValueError('Neo4j qualification network must be internal')
+    attached = server['NetworkSettings']['Networks']
+    if set(attached) != {name} or server['HostConfig']['NetworkMode'] != name:
+        raise ValueError('server must be attached only to the qualification network')
+    if attached[name].get('NetworkID') != network.get('Id'):
+        raise ValueError('server network identity differs')
+
+
 def inspect(target, image=False):
     command = ['docker', 'image', 'inspect'] if image else ['docker', 'inspect']
     return json.loads(subprocess.check_output([*command, target], timeout=20))[0]
@@ -116,6 +127,12 @@ def main():
     if labels.get('org.opencontainers.image.revision') != args.source_revision or labels.get('io.adversarial.grust.benchmark-feature') != 'neo4j-native':
         parser.error('client image source/feature labels differ')
     network = 'grust-lsqb-neo4j-qualification'
+    network_record = json.loads(subprocess.check_output(
+        ['docker', 'network', 'inspect', network], timeout=20))[0]
+    try:
+        validate_network(server, network_record)
+    except ValueError as error:
+        parser.error(str(error))
     address = server['NetworkSettings']['Networks'].get(network, {}).get('IPAddress')
     if not address:
         parser.error('server must be on the private qualification network')
@@ -147,6 +164,7 @@ def main():
     save('invocation.json', dict(diagnostic_only=True, command=command, source_revision=args.source_revision,
                                  client_image_id=image['Id'], client_labels=labels, server_image=SERVER_IMAGE))
     save('server-before.json', snapshot(server))
+    save('network-before.json', {key: network_record[key] for key in ('Name', 'Id', 'Internal')})
     # No client exists yet and no dataset has been touched. A startup failure
     # therefore cannot be mistaken for a query failure or a measured sample.
     try:
