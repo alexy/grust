@@ -70,5 +70,11 @@ def summarize(directory):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
+    parser.add_argument('--output', type=Path, help='write a new summary file; never overwrite')
     args = parser.parse_args()
-    print(json.dumps(summarize(args.directory), indent=2))
+    result = json.dumps(summarize(args.directory), indent=2) + '\n'
+    if args.output:
+        with args.output.open('x') as stream:
+            stream.write(result)
+    else:
+        print(result, end='')

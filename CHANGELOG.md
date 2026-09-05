@@ -8,6 +8,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 - Publish the Sail Docker reproduction guide with pinned public base/wheel inputs,
   explicit Grust-built provenance, and source-built comparison admission requirements.
+  Add retained source-build evidence and a fresh-process shared-session qualification
+  probe. The probe verifies borrower reads, owner-only release, and server health;
+  shared-session benchmark execution is not enabled by the probe itself.
 
 - Derive receipt-bound performance summaries with measured query/setup/recovery
   distributions, per-sample boundary totals, and separate coordinator loading.

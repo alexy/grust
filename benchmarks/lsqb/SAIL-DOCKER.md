@@ -39,6 +39,21 @@ The version command must return `sail 0.7.1`. Preserve the plain build log and
 image inspection with the evidence. No GHCR login or package visibility change
 is needed for these steps.
 
+For retained build evidence, the current Grust checkout also provides
+`build-sail-source.py`. Run it against the clean pinned checkout above, choosing
+a new output directory whose parent already exists:
+
+```sh
+python3 benchmarks/lsqb/build-sail-source.py \
+  --checkout /path/to/grust-sail-reproduction \
+  --output /path/to/evidence/sail-source-build
+```
+
+Run this command from a current checkout containing the helper (the pinned
+recipe checkout predates it). It records progress every 30 seconds, the build
+log, recipe, actual image identity, and an isolated runtime version check. Its
+build receipt is provenance evidence, not a completed benchmark receipt.
+
 ## Start a disposable service
 
 Choose an unused local port and container name. This example exposes the service
