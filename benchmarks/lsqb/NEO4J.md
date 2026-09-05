@@ -112,6 +112,16 @@ to audit these new Docker diagnostics. Its mutation tests are in
 `publication_qualified: false`: it does not authenticate the complete
 container/source/resource provenance or issue a publication receipt.
 
+`run-native-neo4j.py` provides a reusable Docker entry point for subsequent
+qualification. It requires an explicitly selected disposable service, checks
+the pinned server image and8CPU/6GiB/no-swap limits, addresses that exact
+server's private IP, and creates the client from its immutable inspected image
+identity. Client and server before/after metadata are retained without exporting
+arbitrary environment variables. Failed cells stop the selected server; exited
+client containers remain available for inspection. This runner's live integration
+qualification is pending; earlier diagnostic directories used the temporary
+runner and must not be represented as having these additional records.
+
 ## Required completion gates
 
 1. Reuse the Rust dataset fingerprint/oracle loaders and bounded graph chunks.
