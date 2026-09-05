@@ -6,6 +6,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Derive receipt-bound performance summaries with measured query/setup/recovery
+  distributions, per-sample boundary totals, and separate coordinator loading.
+  Retain raw samples and failures; suppress timing summaries after failed
+  warm-ups or measurements and do not label reciprocal latency as throughput.
+
 - Begin a native Neo4j comparison lane using the pinned Neo4j Labs Rust driver,
   with Docker example, SF0.1 and SF0.3 qualification (nine baseline queries and thirteen attacks),
   incremental observations, isolated query processes, coordinator deadlines,
