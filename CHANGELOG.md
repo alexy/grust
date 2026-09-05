@@ -7,11 +7,13 @@ reconstructed from Git history, release commits, and the shipped docs.
 ## Unreleased
 
 - Begin a native Neo4j comparison lane using the pinned Neo4j Labs Rust driver,
-  with Docker example and SF0.1 qualification (nine baseline queries and thirteen attacks),
+  with Docker example, SF0.1 and SF0.3 qualification (nine baseline queries and thirteen attacks),
   incremental observations, isolated query processes, coordinator deadlines,
   independently checked server recovery, and an oracle/journal diagnostic audit.
-  SF0.3 qualification and
-  publication receipts remain pending; diagnostics are not published rankings.
+  Retain Docker runtime metadata before watchdog cleanup and distinguish a
+  transaction disappearing after worker exit from acknowledged termination.
+  Race-fix Docker qualification and publication receipts remain pending;
+  diagnostics are not published rankings.
 
 - Benchmark-only: use 10,000-row Sail bulk-write batches and expose aggregate
   completed-chunk/node/edge counters during projected coordinator loading.

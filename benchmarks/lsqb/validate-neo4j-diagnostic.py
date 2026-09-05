@@ -23,6 +23,9 @@ ATTACKS = ('reversed-chain', 'reordered-join', 'split-match', 'optional-fanout',
            'negated-pattern', 'range-expansion', 'cartesian-count', 'union-dedup',
            'path-zero-hop', 'unicode-literal', 'schema-null-probe',
            'parser-comment-trivia', 'resource-edge-scan')
+SOURCE_REVISION = 'aaf0999706fa8cfdb7eeb10e8349b9a471229857'
+CLIENT_IMAGE_ID = 'sha256:ff4f6c185f1d10a6ee63a815f823c0dfa48d917bcb25a0e2998d20c6291717b6'
+SERVER_IMAGE = 'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d'
 
 
 def require(condition, message):
@@ -32,6 +35,50 @@ def require(condition, message):
 
 def integer(value):
     return type(value) is int and value >= 0
+
+
+def validate_runtime(directory):
+    """Validate retained records, not registry availability or measurement isolation."""
+    records = {name: json.loads((directory / f'{name}.json').read_text()) for name in
+               ('invocation', 'watchdog', 'client-before', 'client-after', 'server-before', 'server-after')}
+    invocation, watchdog = records['invocation'], records['watchdog']
+    require(invocation.get('diagnostic_only') is True, 'runtime lane is not diagnostic')
+    require(invocation.get('source_revision') == SOURCE_REVISION and
+            invocation.get('client_image_id') == CLIENT_IMAGE_ID and
+            invocation.get('server_image') == SERVER_IMAGE, 'runtime source/image identity differs')
+    labels = invocation.get('client_labels', {})
+    require(labels.get('org.opencontainers.image.revision') == SOURCE_REVISION and
+            labels.get('io.adversarial.grust.benchmark-feature') == 'neo4j-native', 'client source labels differ')
+    for role in ('client', 'server'):
+        before, after = records[f'{role}-before'], records[f'{role}-after']
+        require(isinstance(before.get('container_id'), str) and
+                re.fullmatch(r'[0-9a-f]{64}', before['container_id']), 'invalid runtime container identity')
+        for key in ('container_id', 'image_id', 'name', 'resources', 'labels'):
+            require(before.get(key) == after.get(key), f'{role} runtime identity/resources changed')
+        resource = before['resources']
+        require(resource.get('Memory') == resource.get('MemorySwap') == 6 * 1024**3 and
+                resource.get('NanoCpus') == 8_000_000_000 and
+                resource.get('NetworkMode') == 'grust-lsqb-neo4j-qualification', 'runtime limits differ')
+        for record in (before, after):
+            require(record['state'].get('OOMKilled') is False and
+                    type(record['state'].get('ExitCode')) is int and record['state']['ExitCode'] == 0,
+                    'runtime OOM or nonzero exit')
+        if role == 'client':
+            require(before['image_id'] == CLIENT_IMAGE_ID and resource.get('ReadonlyRootfs') is True,
+                    'client runtime image/filesystem differs')
+            require(before['state'].get('Status') == 'created' and before['state'].get('Running') is False and
+                    after['state'].get('Status') == 'exited' and after['state'].get('Running') is False,
+                    'client lifecycle incomplete')
+            require(watchdog.get('container_id') == before['container_id'] and
+                    watchdog.get('container_name') == before['name'].lstrip('/') and
+                    watchdog.get('project') == before['labels'].get('com.docker.compose.project') and
+                    watchdog.get('service') == before['labels'].get('com.docker.compose.service'),
+                    'watchdog/client ownership differs')
+        else:
+            require(before['image_id'] == SERVER_IMAGE.rsplit('@', 1)[1], 'server runtime image differs')
+            require(before['state'].get('Running') is True and after['state'].get('Running') is True and
+                    before['state'].get('StartedAt') == after['state'].get('StartedAt'), 'server restarted or stopped')
+    return True
 
 
 def check_observation(item, expected, seen_tags):
@@ -73,6 +120,10 @@ def check_observation(item, expected, seen_tags):
             'invalid targeted termination identity')
     require(type(recovery.get('targeted_termination_count')) is int and
             recovery['targeted_termination_count'] == len(ids), 'termination count differs')
+    disappeared = recovery.get('disappeared_before_termination_ids', [])
+    require(isinstance(disappeared, list) and len(disappeared) + len(ids) <= 1 and
+            all(isinstance(x, str) and x and x not in ids for x in disappeared),
+            'invalid disappeared transaction identity')
 
 
 def validate(directory, upstream, attacks):
@@ -145,5 +196,9 @@ if __name__ == '__main__':
     parser.add_argument('directory', type=Path)
     parser.add_argument('--upstream', type=Path, default=Path(__file__).parent / 'upstream/lsqb')
     parser.add_argument('--attacks', type=Path, default=Path(__file__).parent / 'attacks')
+    parser.add_argument('--runtime', action='store_true', help='also require retained runtime evidence')
     args = parser.parse_args()
-    print(json.dumps(validate(args.directory, args.upstream, args.attacks)))
+    result = validate(args.directory, args.upstream, args.attacks)
+    if args.runtime:
+        result['runtime_verified'] = validate_runtime(args.directory)
+    print(json.dumps(result))

@@ -118,9 +118,20 @@ the pinned server image and8CPU/6GiB/no-swap limits, addresses that exact
 server's private IP, and creates the client from its immutable inspected image
 identity. Client and server before/after metadata are retained without exporting
 arbitrary environment variables. Failed cells stop the selected server; exited
-client containers remain available for inspection. This runner's live integration
-qualification is pending; earlier diagnostic directories used the temporary
-runner and must not be represented as having these additional records.
+client metadata is captured before the watchdog removes the container. The live
+targeted-recovery probe passed through this runner, and retained runtime records
+passed the independent runtime audit. Earlier diagnostic directories used the
+temporary runner and must not be represented as having these additional records.
+
+SF0.3 also passed all22 cases, with no timeouts, mismatches or OOM:
+1,179,535 nodes and6,183,839 edges, import241.602seconds, whole run367.018seconds.
+The independent diagnostic audit passed. A subsequent process-deadline probe
+exposed a possible SHOW/TERMINATE race after worker exit. The runner failed closed
+and stopped the owned server. Neo4j confirms `Transaction not found.` for an
+absent transaction; the fix distinguishes disappearance from acknowledged
+termination and still requires independent absence and next-query proof.
+Regression tests cover both responses and reject wrong transaction identities.
+Docker qualification of that race-handling change remains pending.
 
 ## Required completion gates
 

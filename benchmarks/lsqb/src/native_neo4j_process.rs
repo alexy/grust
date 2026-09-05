@@ -147,8 +147,14 @@ pub(super) async fn run(
     let recovery = tokio::time::timeout(Duration::from_secs(15), async {
         let observer = super::connect()?;
         let ids = super::recovery::owned(&observer, &tag, false).await?;
+        let mut terminated = Vec::new();
+        let mut disappeared = Vec::new();
         for id in &ids {
-            super::recovery::terminate(&observer, id).await?;
+            if super::recovery::terminate(&observer, id).await? {
+                terminated.push(id.clone());
+            } else {
+                disappeared.push(id.clone());
+            }
         }
         while !super::recovery::owned(&observer, &tag, false)
             .await?
@@ -161,7 +167,8 @@ pub(super) async fn run(
         }
         Ok(
             json!({"transaction_tag":tag,"owned_transactions_remaining":0,
-            "targeted_termination_count":ids.len(),"terminated_transaction_ids":ids,
+            "targeted_termination_count":terminated.len(),"terminated_transaction_ids":terminated,
+            "disappeared_before_termination_ids":disappeared,
             "subsequent_scalar":42,"server_recovery_ns":started.elapsed().as_nanos()}),
         )
     })

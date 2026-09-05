@@ -33,6 +33,26 @@ def snapshot(raw):
                 labels=raw['Config'].get('Labels', {}))
 
 
+def stop_owned(client_id, server_id):
+    """Always attempt remote shutdown, even if stopping the client fails."""
+    try:
+        subprocess.run(['docker', 'stop', client_id], check=True, timeout=30)
+    finally:
+        subprocess.run(['docker', 'stop', server_id], check=True, timeout=30)
+
+
+def start_recorded(client_id, output):
+    """Capture exit metadata before the watchdog removes its owned container."""
+    if not re.fullmatch(r'[0-9a-f]{64}', client_id):
+        raise ValueError('invalid client identity')
+    status = subprocess.run(['docker', 'start', '--attach', client_id]).returncode
+    with (Path(output) / 'client-after.json').open('x') as stream:
+        json.dump(snapshot(inspect(client_id)), stream, sort_keys=True)
+        stream.flush()
+        os.fsync(stream.fileno())
+    return status
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--server', required=True)
@@ -98,7 +118,8 @@ def main():
             supervised = [sys.executable, str(root / 'cell-watchdog.py'), '--timeout-ms', str(timeout),
                           '--heartbeat-ms', '30000', '--container', container, '--project', project,
                           '--service', 'benchmark', '--record-fd', str(watchdog.fileno()),
-                          '--', 'docker', 'start', '--attach', client_id]
+                          '--', sys.executable, str(Path(__file__).resolve()),
+                          '_start-recorded', client_id, str(output)]
             process = subprocess.Popen(supervised, pass_fds=(watchdog.fileno(),), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             for line in process.stdout:
                 log.write(line)
@@ -107,16 +128,29 @@ def main():
                 sys.stdout.buffer.flush()
             status = process.wait()
     finally:
-        # Keep the exited client for inspection, including after watchdog failure.
-        # No container is removed before its runtime evidence can be retained.
+        # The child wrapper captures a normal exit before watchdog cleanup.
+        # Missing evidence after an outer timeout is never forged into a snapshot.
+        try:
+            client_after = json.loads((output / 'client-after.json').read_text())
+        except Exception:
+            try:
+                stop_owned(client_id, server['Id'])
+            finally:
+                save('client-after.json', dict(container_id=client_id,
+                                               capture_error='container inspection unavailable'))
+                save('server-after.json', snapshot(inspect(server['Id'])))
+            raise
+        state = client_after['state']
+        if status == 0 and (state['Running'] or state['OOMKilled'] or state['ExitCode'] != 0):
+            status = 125
         if status:
-            subprocess.run(['docker', 'stop', client_id], check=True, timeout=30)
             subprocess.run(['docker', 'stop', server['Id']], check=True, timeout=30)
-        save('client-after.json', snapshot(inspect(client_id)))
         save('server-after.json', snapshot(inspect(server['Id'])))
     print(json.dumps(dict(event='native-cell-finished', exit=status, output=str(output))), flush=True)
     return status
 
 
 if __name__ == '__main__':
+    if len(sys.argv) == 4 and sys.argv[1] == '_start-recorded':
+        raise SystemExit(start_recorded(sys.argv[2], sys.argv[3]))
     raise SystemExit(main())

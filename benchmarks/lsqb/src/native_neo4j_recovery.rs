@@ -36,7 +36,21 @@ pub(super) async fn owned(
     Ok(ids)
 }
 
-pub(super) async fn terminate(graph: &Graph, id: &str) -> Result<(), &'static str> {
+fn termination_ack(expected: &str, actual: &str, message: &str) -> Result<bool, &'static str> {
+    if expected != actual {
+        return Err("termination acknowledgement identified another transaction");
+    }
+    match message {
+        "Transaction terminated." => Ok(true),
+        // A reaped worker's Bolt disconnect can remove the transaction after
+        // SHOW and before TERMINATE. This is not a termination acknowledgement;
+        // callers must still independently prove absence before proceeding.
+        "Transaction not found." => Ok(false),
+        _ => Err("termination acknowledgement did not confirm the owned transaction"),
+    }
+}
+
+pub(super) async fn terminate(graph: &Graph, id: &str) -> Result<bool, &'static str> {
     let mut tx = graph
         .start_txn()
         .await
@@ -48,17 +62,13 @@ pub(super) async fn terminate(graph: &Graph, id: &str) -> Result<(), &'static st
         .await
         .map_err(|_| "termination acknowledgement failed")?
         .ok_or("termination acknowledgement missing")?;
-    if row
-        .get::<String>("transactionId")
-        .map_err(|_| "termination identity missing")?
-        != id
-        || row
-            .get::<String>("message")
-            .map_err(|_| "termination result missing")?
-            != "Transaction terminated."
-    {
-        return Err("termination acknowledgement did not confirm the owned transaction");
-    }
+    let acknowledged = termination_ack(
+        id,
+        &row.get::<String>("transactionId")
+            .map_err(|_| "termination identity missing")?,
+        &row.get::<String>("message")
+            .map_err(|_| "termination result missing")?,
+    )?;
     if rows
         .next(&mut tx)
         .await
@@ -69,7 +79,8 @@ pub(super) async fn terminate(graph: &Graph, id: &str) -> Result<(), &'static st
     }
     tx.commit()
         .await
-        .map_err(|_| "termination acknowledgement commit failed")
+        .map_err(|_| "termination acknowledgement commit failed")?;
+    Ok(acknowledged)
 }
 
 pub(super) async fn probe() -> Result<(), &'static str> {
@@ -115,7 +126,9 @@ pub(super) async fn probe() -> Result<(), &'static str> {
         tokio::time::sleep(Duration::from_millis(20)).await;
     };
     let recovery_started = Instant::now();
-    terminate(&observer, &ids[0]).await?;
+    if !terminate(&observer, &ids[0]).await? {
+        return Err("stress transaction disappeared before targeted termination was acknowledged");
+    }
     let failed = tokio::time::timeout(Duration::from_secs(10), worker)
         .await
         .map_err(|_| "terminated worker did not return; stop the dedicated service")?
@@ -149,4 +162,23 @@ pub(super) async fn probe() -> Result<(), &'static str> {
         "subsequent_scalar":42,"recovery_ns":recovery_started.elapsed().as_nanos(),"benchmark_complete":false})
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::termination_ack;
+
+    #[test]
+    fn disappearance_is_not_claimed_as_acknowledged_termination() {
+        assert_eq!(
+            termination_ack("owned", "owned", "Transaction terminated."),
+            Ok(true)
+        );
+        assert_eq!(
+            termination_ack("owned", "owned", "Transaction not found."),
+            Ok(false)
+        );
+        assert!(termination_ack("owned", "other", "Transaction terminated.").is_err());
+        assert!(termination_ack("owned", "owned", "unknown response").is_err());
+    }
 }

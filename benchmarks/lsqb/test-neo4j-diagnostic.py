@@ -125,6 +125,7 @@ class JournalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.audit()
 
+
     def test_watchdog_failure_and_false_completion_are_rejected(self):
         self.watchdog['child_exit_status'] = 124
         with self.assertRaises(ValueError):
@@ -134,6 +135,53 @@ class JournalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.audit()
 
+
+class RuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        resources = dict(Memory=6 * 1024**3, MemorySwap=6 * 1024**3, NanoCpus=8_000_000_000,
+                         ReadonlyRootfs=True, NetworkMode='grust-lsqb-neo4j-qualification')
+        labels = {'com.docker.compose.project': 'owned', 'com.docker.compose.service': 'benchmark'}
+        client = dict(container_id='a' * 64, image_id=check.CLIENT_IMAGE_ID, name='/client',
+                      resources=resources, labels=labels,
+                      state=dict(Status='created', Running=False, OOMKilled=False, ExitCode=0, StartedAt='zero'))
+        server = copy.deepcopy(client)
+        server.update(container_id='b' * 64, image_id=check.SERVER_IMAGE.rsplit('@', 1)[1], name='/server')
+        server['state'].update(Status='running', Running=True, StartedAt='start')
+        self.records = {'client-before': client, 'client-after': copy.deepcopy(client),
+                        'server-before': server, 'server-after': copy.deepcopy(server),
+                        'watchdog': dict(container_id='a' * 64, container_name='client', project='owned', service='benchmark'),
+                        'invocation': dict(diagnostic_only=True, source_revision=check.SOURCE_REVISION,
+                                           client_image_id=check.CLIENT_IMAGE_ID, server_image=check.SERVER_IMAGE,
+                                           client_labels={'org.opencontainers.image.revision': check.SOURCE_REVISION,
+                                                          'io.adversarial.grust.benchmark-feature': 'neo4j-native'})}
+        self.records['client-after']['state'].update(Status='exited', StartedAt='start')
+
+    def audit(self):
+        for name, value in self.records.items():
+            (self.root / f'{name}.json').write_text(json.dumps(value))
+        return check.validate_runtime(self.root)
+
+    def test_consistent_records_pass(self):
+        self.assertTrue(self.audit())
+
+    def test_restart_oom_changed_resources_and_wrong_watchdog_fail(self):
+        original = copy.deepcopy(self.records)
+        mutations = [('server-after', 'state', 'StartedAt', 'new-start'),
+                     ('client-after', 'state', 'OOMKilled', True),
+                     ('server-after', 'resources', 'Memory', 1),
+                     ('client-after', 'state', 'Running', True)]
+        for record, group, key, value in mutations:
+            self.records = copy.deepcopy(original)
+            self.records[record][group][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.audit()
+        self.records = copy.deepcopy(original)
+        self.records['watchdog']['container_id'] = 'c' * 64
+        with self.assertRaises(ValueError):
+            self.audit()
 
 if __name__ == '__main__':
     unittest.main()
