@@ -3831,30 +3831,55 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
-name = "helix-db"
-version = "2.0.0"
+name = "helix-ast"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7a199b5e9519748ce2f99d51ec8258c31268d66b18005ac8e3d35bf2daee845"
+checksum = "e88673f1f93419fc23ef45968e079ba333dc818651d5dd2388b82a8bba84b10e"
 dependencies = [
  "chrono",
+ "serde",
+ "sonic-rs",
+]
+
+[[package]]
+name = "helix-db"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41ae6e6dce5e00f5208ab3573f800b34ba36260cad1d2d9d68e925aef771f234"
+dependencies = [
+ "chrono",
+ "helix-ast",
  "helix-dsl-macros",
- "inventory",
+ "helix-graph-algorithms",
  "reqwest 0.13.4",
  "serde",
+ "serde_json",
  "sonic-rs",
  "thiserror",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
 name = "helix-dsl-macros"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4708418e04e017cf1f4169591923697f270382f7cc86e53a2d44838218164354"
+checksum = "584488c46431f04a796b49cf70ee367f496018c9f1ec309b9ceb1a9ac854c74d"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "helix-graph-algorithms"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "458c6e6b54b4c83b6f51ba701ba809421b1c96ceac7c650728ee889156a79268"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
@@ -4356,15 +4381,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "189d0897e4cbe8c75efedf3502c18c887b05046e59d28404d4d8e46cbc4d1e86"
 dependencies = [
  "memoffset",
-]
-
-[[package]]
-name = "inventory"
-version = "0.3.24"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
-dependencies = [
- "rustversion",
 ]
 
 [[package]]

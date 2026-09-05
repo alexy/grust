@@ -83,10 +83,10 @@ Each output directory must be new. `command.log` retains compiler/test output;
 `progress.jsonl` records elapsed time, output bytes, latest activity and exit
 status. This wrapper is for setup work, not timed benchmark observations.
 
-- Upgrade and test Grust's Helix SDK dependency against the updated HelixDB
-  checkout. Its SDK3 uses `/v2/query`; the historical HTTP service/API must not
-  be presumed compatible. Current Grust dependency remains SDK2 pending this
-  migration.
+- Qualify Grust's migrated Helix SDK3 dependency against a matching `/v2/query`
+  runtime. Typed query-builder and existing HTTP unit tests pass, but the
+  historical HTTP service/API must not be presumed compatible. The frozen
+  `945dfa7` benchmark source predates this migration; retain its identity.
 - Build pinned Docker clients/services and run both SDK lanes, including
   example W2/R10/60-second performance sampling and larger-scale admission.
 - Extend the Docker launcher and independent receipt/site verifiers before

@@ -3,13 +3,15 @@ use std::time::Duration;
 use async_trait::async_trait;
 use grust_core::prelude::*;
 use helix_db::{
-    Client as HelixClient, DynamicQueryRequest,
+    Client as HelixClient, QueryRequest,
     dsl::prelude::{
         DateTime as HelixDateTime, NodeRef, PropertyInput, PropertyValue, SourcePredicate, g,
         write_batch,
     },
 };
 use serde_json::json;
+
+mod sdk_read;
 
 #[derive(Clone, Debug)]
 pub struct HelixHttpConfig {
@@ -233,22 +235,21 @@ impl GraphStore for HelixSdkGraphStore {
     }
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {
-        let response = send_helix_sdk_read(&self.client, helix_get_node_request(id)).await?;
+        let response = send_helix_sdk_read(&self.client, sdk_read::node(id)).await?;
         Ok(helix_nodes_from_response(&response, "nodes")?
             .into_iter()
             .next())
     }
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
-        let response = send_helix_sdk_read(&self.client, helix_get_edges_request(&query)?).await?;
+        let response = send_helix_sdk_read(&self.client, sdk_read::edges(&query)).await?;
         let mut edges = helix_edges_from_response(&response, "edges")?;
         helix_filter_edges(&mut edges, &query);
         Ok(edges)
     }
 
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
-        let response =
-            send_helix_sdk_read(&self.client, helix_traversal_request(&traversal)?).await?;
+        let response = send_helix_sdk_read(&self.client, sdk_read::traversal(&traversal)?).await?;
         let mut nodes = helix_nodes_from_response(&response, "nodes")?;
         if let Some(limit) = traversal.limit {
             nodes.truncate(limit as usize);
@@ -421,10 +422,9 @@ async fn post_helix_sdk_nodes(client: &HelixClient, nodes: &[Node]) -> Result<()
         );
         returns.push(name);
     }
-    let request = DynamicQueryRequest::write(batch.returning(returns));
+    let request = QueryRequest::write(batch.returning(returns));
     let _: serde_json::Value = client
-        .query::<serde_json::Value>()
-        .dynamic_query(request)
+        .query::<serde_json::Value>(request)
         .send()
         .await
         .map_err(|_| helix_transport_error("Helix SDK node write failed"))?;
@@ -467,10 +467,9 @@ async fn post_helix_sdk_edges(client: &HelixClient, edges: &[Edge]) -> Result<()
             );
         returns.push(linked_name);
     }
-    let request = DynamicQueryRequest::write(batch.returning(returns));
+    let request = QueryRequest::write(batch.returning(returns));
     let _: serde_json::Value = client
-        .query::<serde_json::Value>()
-        .dynamic_query(request)
+        .query::<serde_json::Value>(request)
         .send()
         .await
         .map_err(|_| helix_transport_error("Helix SDK edge write failed"))?;
@@ -534,15 +533,10 @@ fn helix_property_input(value: &Value) -> Result<PropertyInput> {
 
 async fn send_helix_sdk_read(
     client: &HelixClient,
-    request: serde_json::Value,
+    request: QueryRequest,
 ) -> Result<serde_json::Value> {
-    let mut sdk_request = request;
-    sdk_request["request_type"] = json!("Read");
-    let sdk_request: DynamicQueryRequest = serde_json::from_value(sdk_request)
-        .map_err(|err| GrustError::Serialization(format!("invalid Helix SDK read: {err}")))?;
     client
-        .query::<serde_json::Value>()
-        .dynamic_query(sdk_request)
+        .query::<serde_json::Value>(request)
         .send()
         .await
         .map_err(|_| helix_transport_error("Helix SDK read failed"))
@@ -811,10 +805,9 @@ async fn post_helix_sdk_drop_labels(client: &HelixClient, labels: &[String]) -> 
                 .drop(),
         );
     }
-    let request = DynamicQueryRequest::write(batch.returning(Vec::<String>::new()));
+    let request = QueryRequest::write(batch.returning(Vec::<String>::new()));
     let _: serde_json::Value = client
-        .query::<serde_json::Value>()
-        .dynamic_query(request)
+        .query::<serde_json::Value>(request)
         .send()
         .await
         .map_err(|_| helix_transport_error("Helix SDK replace/drop failed"))?;

@@ -33,7 +33,7 @@ categories = ["database", "data-structures"]
 
 [workspace.dependencies]
 async-trait = "0.1.89"
-helix-db = "=2.0.0"
+helix-db = "=3.0.0"
 lbug = "0.20.2"
 lancedb = "0.30.0"
 redis = "1.6.0"

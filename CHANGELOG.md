@@ -6,6 +6,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Migrate the private Helix Rust SDK adapter to `helix-db` 3.0.0 and its typed
+  nested-AST query requests. Preserve the separate direct HTTP/v1 adapter and
+  its existing predicate semantics. Unit tests pass; SDK/v2 service runtime
+  qualification remains pending and is not inferred from HTTP evidence.
+
 - Retain long-running build/test output with durable periodic progress and
   terminal exit records, without imposing a guessed job completion timeout.
 

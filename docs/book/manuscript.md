@@ -1511,13 +1511,16 @@ SDK and service 3.2.4 with reqwest 0.13.4, pgGraph service 1.2.0,
 tokio-postgres 0.7.18, and stable Turso 0.7.2. These are tested compatibility
 updates, not claims that every adapter implements the portable Cypher executor.
 
-Two attempted upgrades remain intentionally held. LanceDB stays at 0.30.0:
+LanceDB stays at 0.30.0:
 the attempted 0.38.0 default-feature local build fails within upstream
 `lancedb` because `job.rs` references the remote-only `Error::Http` variant
-when `remote` is disabled. The unpublished Helix adapter stays at exact
-`helix-db` 2.0.0: 3.0.0 removed `DynamicQueryRequest` and `dynamic_query`,
-changed `Client::query`, and targets `/v2/query`, while the checked Helix v3.0.1
-server still exposes `/v1/query`. The repository's
+when `remote` is disabled. The unpublished Helix adapter now targets exact
+`helix-db` 3.0.0: its SDK path uses typed nested-AST `QueryRequest` builders and
+`Client::query(request)` rather than `DynamicQueryRequest` and `dynamic_query`.
+The direct HTTP/v1 store remains separate and unchanged. Nineteen unit tests
+pass, including SDK serialization and existing HTTP behavior; live SDK/v2
+service qualification remains pending. Historical HTTP service evidence is not
+reused as proof of SDK/v2 compatibility. The repository's
 `benchmarks/lsqb/BACKENDS.md` records the full qualification matrix and live
 gate evidence.
 
