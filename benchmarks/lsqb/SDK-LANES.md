@@ -86,6 +86,14 @@ tests reject altered counts, transport labels, ownership and sample records.
 This diagnostic audit does not issue a publication receipt; site admission and
 larger-scale SDK evidence remain pending.
 
+Freeze a checked cohort with `bundle-sdk.py RAW_DIRECTORY NEW_BUNDLE_DIRECTORY
+--client-build BUILD_DIRECTORY`. It audits captured bytes, exports only the
+structured observation journal from runtime logs, and includes the verified
+client recipe, build receipt and build log. Each payload has a byte count and
+SHA-256 hash in `bundle.json`. The bundle retains `publication_qualified=false`:
+transport integrity and diagnostic checks do not replace independent site
+admission. Existing output directories are never overwritten.
+
 ## Qualification still required
 
 For long-running compilation and tests, retain output and 30-second progress

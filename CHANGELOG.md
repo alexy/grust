@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Freeze audited SDK observations and client build provenance in hashed evidence
+  bundles, without treating diagnostic verification as publication admission.
+
 - Accept content-addressed, source-pinned local SDK server images for Docker
   qualification, with image-level revision and platform checks. Registry
   services retain their digest pinning; publication admission remains separate.
