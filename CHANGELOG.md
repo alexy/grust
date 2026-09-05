@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Add a read-only native-run progress summary with load percentages, observed
+  outcomes, warm-up/measurement counts and current query. Partial journal lines
+  remain explicit; a snapshot never implies process liveness or publication.
+
 - Require the native Neo4j runner's network to be internal and the server to
   attach exclusively to that exact network; retain the inspected network identity.
   Include that record in frozen exports and require it for SF0.3 publication;

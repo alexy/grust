@@ -31,6 +31,19 @@ single-run diagnostic below is not substituted for that comparison.
 
 ## Startup readiness
 
+For subsequent runs, the qualification network must be internal, and the server
+must attach only to that exact network. The runner retains `network-before.json`;
+SF0.3 frozen exports require it. Older evidence is preserved without retroactive
+claims about network isolation.
+
+Monitor a retained run with `python3 benchmarks/lsqb/native-progress.py RUN_DIR`.
+This read-only snapshot reports loaded nodes/edges against the canonical dataset,
+warm-up and measurement counts, outcomes and the currently started query. It
+ignores an unfinished final journal line explicitly, but rejects malformed
+completed lines. It does not infer process liveness from a log or declare
+publication success. Check the actual process/container separately; the runner
+continues emitting its durable journal and 30-second watchdog heartbeats.
+
 The Docker wrapper now waits for `cypher-shell` to return the exact scalar42
 before creating the benchmark client. Readiness has a120second total deadline,
 individual attempts are bounded to10seconds, and every attempt emits a status
