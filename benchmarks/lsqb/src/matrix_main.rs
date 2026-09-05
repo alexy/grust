@@ -367,6 +367,7 @@ async fn run_phase(
                     .recovery_ns
                     .saturating_add(elapsed_ns(recovery_started));
             }
+            let plan = isolated.require_declared_plan()?;
             let observation = match isolated.outcome {
                 WorkerOutcome::Pass => {
                     let count = isolated.actual_count.ok_or_else(|| {
@@ -375,6 +376,7 @@ async fn run_phase(
                     QueryObservationV3 {
                         iteration,
                         query_position: position as u32 + 1,
+                        plan: Some(plan),
                         setup_ns: isolated.setup_ns,
                         elapsed_ns: isolated.elapsed_ns,
                         recovery_ns: isolated.recovery_ns,
@@ -391,6 +393,7 @@ async fn run_phase(
                 WorkerOutcome::Error => QueryObservationV3 {
                     iteration,
                     query_position: position as u32 + 1,
+                    plan: Some(plan),
                     setup_ns: isolated.setup_ns,
                     elapsed_ns: isolated.elapsed_ns,
                     recovery_ns: isolated.recovery_ns,
@@ -402,6 +405,7 @@ async fn run_phase(
                 WorkerOutcome::Timeout => QueryObservationV3 {
                     iteration,
                     query_position: position as u32 + 1,
+                    plan: Some(plan),
                     setup_ns: isolated.setup_ns,
                     elapsed_ns: isolated.elapsed_ns,
                     recovery_ns: isolated.recovery_ns,
@@ -1035,6 +1039,7 @@ mod tests {
         outcome.warmups.push(QueryObservationV3 {
             iteration: 1,
             query_position: 1,
+            plan: Some(report::ExecutionPlan::ClausePipeline),
             setup_ns: 1,
             elapsed_ns: 1,
             recovery_ns: 1,
@@ -1046,6 +1051,7 @@ mod tests {
         outcome.measurements.push(QueryObservationV3 {
             iteration: 1,
             query_position: 1,
+            plan: Some(report::ExecutionPlan::ClausePipeline),
             setup_ns: 1,
             elapsed_ns: 1,
             recovery_ns: 1,

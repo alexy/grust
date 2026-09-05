@@ -123,7 +123,12 @@ OBSERVATION_V3_REQUIRED_FIELDS = frozenset(
         "termination",
     }
 )
-OBSERVATION_V3_FIELDS = OBSERVATION_V3_REQUIRED_FIELDS | {"actual_count", "detail"}
+OBSERVATION_V3_FIELDS = OBSERVATION_V3_REQUIRED_FIELDS | {"actual_count", "detail", "plan"}
+OBSERVATION_PLAN_CLASSES = {
+    "clause-pipeline": {"in-process-reference", "backend-materialize-rust-reference"},
+    "sql-row-source": {"backend-row-source-rust-projection"},
+    "backend-native": {"backend-native-aggregate"},
+}
 LOAD_STRATEGY = {
     "memory": "per-observation-worker-reload",
     "turso": "per-observation-worker-reload",
@@ -799,6 +804,21 @@ def validate_v3_timeout_contract(report: dict[str, Any], path: str) -> None:
                         and set(observation) <= OBSERVATION_V3_FIELDS,
                         f"wrong schema-v3 observation fields: {path}",
                     )
+                    # Absence is immutable legacy evidence, not an inferred
+                    # plan. An explicit value must name a compatible executor.
+                    if "plan" in observation:
+                        plan = observation["plan"]
+                        require(
+                            isinstance(plan, str) and plan in OBSERVATION_PLAN_CLASSES,
+                            f"invalid observation plan: {path}",
+                        )
+                        execution = query.get("execution")
+                        execution_class = execution.get("class") if isinstance(execution, dict) else None
+                        require(
+                            isinstance(execution_class, str)
+                            and execution_class in OBSERVATION_PLAN_CLASSES[plan],
+                            f"observation plan does not match execution class: {path}",
+                        )
                     for field in ("setup_ns", "elapsed_ns", "recovery_ns"):
                         require(
                             nonnegative_integer(observation.get(field)),

@@ -8,6 +8,8 @@
 ))]
 mod materialize;
 
+mod execution_plan;
+
 #[cfg(feature = "falkor")]
 mod falkor;
 

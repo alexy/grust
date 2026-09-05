@@ -1,6 +1,13 @@
 import importlib.util
+import copy
+import hashlib
+import json
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
+from unittest import mock
 
 spec = importlib.util.spec_from_file_location('summary', Path(__file__).with_name('summarize-performance.py'))
 summary = importlib.util.module_from_spec(spec)
@@ -19,6 +26,9 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual(result['statistics']['elapsed_ns']['median_ns'], 20)
         self.assertEqual(result['measured_raw_ns']['sample_boundary_total_ns'], [45, 45])
         self.assertEqual(result['measurement_count'], 2)
+        self.assertIsNone(result['plan'])
+        self.assertEqual(result['plans'], [None])
+        self.assertFalse(result['mixed_plans'])
 
     def test_warmup_failure_suppresses_statistics(self):
         query = self.query()
@@ -42,6 +52,139 @@ class PerformanceTests(unittest.TestCase):
         result = summary.summarize_query(query)
         self.assertIsNone(result['statistics'])
         self.assertEqual(result['measurement_count'], 0)
+        self.assertIsNone(result['plan'])
+        self.assertEqual(result['plans'], [])
+
+    def tagged_query(self, plan='clause-pipeline'):
+        query = self.query()
+        for observation in query['warmups'] + query['measurements']:
+            observation['plan'] = plan
+        return query
+
+    def test_uniform_plan_is_exposed_without_changing_timings_or_input(self):
+        query = self.tagged_query()
+        original = copy.deepcopy(query)
+        result = summary.summarize_query(query)
+        self.assertEqual(result['plan'], 'clause-pipeline')
+        self.assertEqual(result['plans'], ['clause-pipeline'])
+        self.assertTrue(result['performance_eligible'])
+        self.assertEqual(result['statistics']['elapsed_ns']['median_ns'], 20)
+        self.assertEqual(result['plan_subsets'][0]['statistics'], result['statistics'])
+        self.assertEqual(query, original)
+
+    def test_mixed_warmup_plan_suppresses_pooled_and_subset_statistics(self):
+        query = self.tagged_query()
+        del query['warmups'][0]['plan']
+        result = summary.summarize_query(query)
+        self.assertEqual(result['plans'], [None, 'clause-pipeline'])
+        self.assertTrue(result['mixed_plans'])
+        self.assertIsNone(result['statistics'])
+        self.assertIn('mixed-plans', result['ineligibility_reasons'])
+        subsets = {part['plan']: part for part in result['plan_subsets']}
+        self.assertEqual(subsets['clause-pipeline']['missing_warmup_count'], 1)
+        self.assertEqual(subsets[None]['missing_measurement_count'], 2)
+        self.assertTrue(all(part['statistics'] is None for part in subsets.values()))
+
+    def test_mixed_measurement_plans_are_never_pooled_into_statistics(self):
+        query = self.tagged_query()
+        del query['measurements'][1]['plan']
+        result = summary.summarize_query(query)
+        self.assertIsNone(result['statistics'])
+        self.assertEqual(result['measured_raw_ns']['elapsed_ns'], [10, 30])
+        self.assertEqual([part['measurement_count'] for part in result['plan_subsets']], [1, 1])
+        self.assertTrue(all(part['statistics'] is None for part in result['plan_subsets']))
+
+    def test_filter_does_not_invent_corresponding_warmups(self):
+        query = self.tagged_query()
+        del query['warmups'][0]['plan']
+        result = summary.summarize_query(query, 'clause-pipeline')
+        self.assertEqual(result['plan_filter'], 'clause-pipeline')
+        self.assertEqual(result['source_plans'], [None, 'clause-pipeline'])
+        self.assertEqual(result['excluded_warmup_count'], 1)
+        self.assertEqual(result['declared_warmup_count'], 1)
+        self.assertEqual(result['warmup_count'], 0)
+        self.assertEqual(result['missing_warmup_count'], 1)
+        self.assertIn('incomplete-warmup-cohort', result['ineligibility_reasons'])
+        self.assertIsNone(result['statistics'])
+
+    def test_explicit_legacy_filter_never_reclassifies_absent_plans(self):
+        legacy = summary.summarize_query(self.query(), 'legacy')
+        self.assertIsNone(legacy['plan'])
+        self.assertEqual(legacy['plan_filter'], 'legacy')
+        self.assertTrue(legacy['performance_eligible'])
+        absent = summary.summarize_query(self.tagged_query(), 'legacy')
+        self.assertIsNone(absent['statistics'])
+        self.assertEqual(absent['measurement_count'], 0)
+        self.assertEqual(absent['excluded_measurement_count'], 2)
+        tagged = summary.summarize_query(self.query(), 'clause-pipeline')
+        self.assertEqual(tagged['measurement_count'], 0)
+
+    def test_filtered_warmup_failure_and_original_query_failure_remain_ineligible(self):
+        query = self.tagged_query()
+        query['warmups'][0]['outcome'] = 'error'
+        self.assertIsNone(summary.summarize_query(query, 'clause-pipeline')['statistics'])
+        query = self.tagged_query()
+        query['outcome'] = 'mismatch'
+        self.assertIsNone(summary.summarize_query(query, 'clause-pipeline')['statistics'])
+
+    def test_declared_missing_samples_are_reported(self):
+        result = summary.summarize_query(self.query(), warmup_iterations=2, measurement_iterations=10)
+        self.assertEqual(result['declared_warmup_count'], 2)
+        self.assertEqual(result['missing_warmup_count'], 1)
+        self.assertEqual(result['declared_measurement_count'], 10)
+        self.assertEqual(result['missing_measurement_count'], 8)
+        self.assertIsNone(result['statistics'])
+
+    def test_invalid_plan_values_cannot_be_hidden_by_filtering(self):
+        for value in (None, '', 'legacy', 'count-tree', 1, [], {}):
+            query = self.query()
+            query['measurements'][0]['plan'] = value
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, 'invalid observation plan'):
+                summary.summarize_query(query, 'clause-pipeline')
+        with self.assertRaisesRegex(ValueError, 'invalid plan filter'):
+            summary.summarize_query(self.query(), 'count-tree')
+
+    def test_native_plan_remains_an_opaque_execution_label(self):
+        query = self.tagged_query('backend-native')
+        query['execution']['class'] = 'backend-native-aggregate'
+        result = summary.summarize_query(query, 'backend-native')
+        self.assertEqual(result['plan'], 'backend-native')
+        self.assertTrue(result['performance_eligible'])
+
+    def test_directory_summary_passes_declared_cohort_counts_and_plan_filter(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            matrix = dict(schema_version=3, environment={},
+                          timing=dict(warmup_iterations=2, measurement_iterations=2),
+                          backends=[dict(backend={'name': 'memory'}, lifecycle={},
+                                         setup_outcome='pass', queries=[self.tagged_query()])])
+            name = 'matrix-baseline-sfexample.json'
+            raw = json.dumps(matrix).encode()
+            (directory / name).write_bytes(raw)
+            receipt = dict(suite_order=['baseline'], scale_factor='example', source_revision='a' * 40,
+                           output_inventory=[dict(path=name, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())])
+            receipt_raw = json.dumps(receipt).encode()
+            (directory / 'publication-receipt.json').write_bytes(receipt_raw)
+            with mock.patch.object(summary.subprocess, 'run') as verify:
+                result = summary.summarize(directory, 'clause-pipeline')
+            verify.assert_called_once()
+            self.assertEqual(result['plan_filter'], 'clause-pipeline')
+            query = result['suites'][0]['backends'][0]['queries'][0]
+            self.assertEqual(query['missing_warmup_count'], 1)
+            self.assertIsNone(query['statistics'])
+            self.assertEqual((directory / name).read_bytes(), raw)
+            self.assertEqual((directory / 'publication-receipt.json').read_bytes(), receipt_raw)
+
+    def test_cli_documents_plan_choices_and_rejects_unknown_selection(self):
+        script = str(Path(__file__).with_name('summarize-performance.py'))
+        help_result = subprocess.run([sys.executable, script, '--help'], capture_output=True, text=True)
+        self.assertEqual(help_result.returncode, 0)
+        for plan in summary.PLAN_FILTERS:
+            self.assertIn(plan, help_result.stdout)
+        invalid = subprocess.run([sys.executable, script, 'unused', '--plan', 'count-tree'],
+                                 capture_output=True, text=True)
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn('invalid choice', invalid.stderr)
 
 
 if __name__ == '__main__':

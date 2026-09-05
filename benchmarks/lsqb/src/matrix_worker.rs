@@ -50,14 +50,14 @@ pub async fn run_internal() -> Result<(), String> {
     } else {
         prepare_for_matrix(catalog, &arguments.scale, &data_dir).await?
     };
-    backend
-        .execution(case)
+    let plan = backend
+        .execution_plan(case)
         .map_err(|_| "worker could not classify its query".to_string())?;
     let setup_ns = duration_ns(setup_started.elapsed());
 
     let stdout = std::io::stdout();
     let mut output = BufWriter::new(stdout.lock());
-    observation_process::write_ready(&mut output, &arguments.token, setup_ns)?;
+    observation_process::write_ready_with_plan(&mut output, &arguments.token, setup_ns, plan)?;
     let stdin = std::io::stdin();
     let go_nonce =
         observation_process::read_go(&mut BufReader::new(stdin.lock()), &arguments.token)?;

@@ -407,7 +407,10 @@ Schema-v3 JSON records initial graph load nanoseconds separately, then keeps
 every warm-up and measured observation with its rotating query position,
 expected/actual count, outcome, source/adapter digest, execution class,
 unmeasured worker `setup_ns`, process `termination`, and post-result/deadline
-`recovery_ns`. Each backend cell also declares whether workers attach to state
+`recovery_ns`. New observations also include the worker-selected `plan`; old
+records without it remain unknown rather than being backfilled. See
+[observation plan identity](EXECUTION-PLANS.md) for the labels and comparison
+rules. Each backend cell also declares whether workers attach to state
 loaded once or reload before every observation, plus the recovery proof that a
 forced timeout requires. The default protocol is two warm-ups and five
 measured iterations. The measured boundary is the coordinator's monotonic GO
@@ -501,7 +504,8 @@ receipt-bound watchdog completion schema.
 Each completed observation additionally emits an `observation-recorded` JSON
 line to stdout, captured incrementally in the host-side cell log. Unlike the
 bounded progress telemetry, this includes the full scalar count, setup/query/
-recovery timings, outcome, and termination mechanism. The record is flushed
+recovery timings, outcome, termination mechanism, and the selected `plan`.
+The record is flushed
 outside query timing before starting another observation; a write failure fails
 the cell. These partial records are diagnostic, not a completion receipt, and
 must not be pooled or published as a completed comparison. A machine power loss

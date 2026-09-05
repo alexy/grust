@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Record worker-selected LSQB execution plans in new observations and incremental
+  journals, including timeouts. Keep missing-plan evidence explicitly legacy,
+  validate plan/class compatibility, and prevent mixed-plan timing aggregation;
+  preserve the frozen Neo4j and upstream bundles without backfilling metadata.
 - Gate native qualification startup on a retained, fail-closed host CPU screen.
   Preserve the completed 264-pass SF0.3 diagnostic as performance-excluded;
   publish the timing correction without changing frozen correctness evidence.

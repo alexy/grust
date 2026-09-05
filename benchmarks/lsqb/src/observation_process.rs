@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::report::ObservationTerminationV3;
+use crate::report::{ExecutionPlan, ObservationTerminationV3, deserialize_present_execution_plan};
 
 pub const WORKER_PROTOCOL: &str = "grust-lsqb-observation-worker-v1";
 const MAX_CONTROL_LINE_BYTES: usize = 16 * 1024;
@@ -39,6 +39,12 @@ pub struct WorkerReady {
     pub event: String,
     pub token: String,
     pub setup_ns: u64,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_execution_plan",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub plan: Option<ExecutionPlan>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -70,6 +76,17 @@ pub struct IsolatedObservation {
     pub elapsed_ns: u64,
     pub termination: ObservationTerminationV3,
     pub recovery_ns: u64,
+    /// Selected before GO, so it survives a deadline without a result record.
+    pub plan: Option<ExecutionPlan>,
+}
+
+impl IsolatedObservation {
+    /// Matrix observations require a declaration; legacy/native workers may
+    /// continue through the generic process protocol without one.
+    pub fn require_declared_plan(&self) -> Result<ExecutionPlan, String> {
+        self.plan
+            .ok_or_else(|| "observation worker omitted its selected execution plan".to_string())
+    }
 }
 
 /// Run one already-configured command in a fresh process group.
@@ -330,6 +347,7 @@ where
                 elapsed_ns: deadline_elapsed_ns,
                 termination,
                 recovery_ns: duration_ns(recovery_started.elapsed()),
+                plan: ready.plan,
             });
         }
     };
@@ -393,10 +411,29 @@ where
             ObservationTerminationV3::NormalExit
         },
         recovery_ns: duration_ns(recovery_started.elapsed()),
+        plan: ready.plan,
     })
 }
 
 pub fn write_ready(writer: &mut impl Write, token: &str, setup_ns: u64) -> Result<(), String> {
+    write_ready_record(writer, token, setup_ns, None)
+}
+
+pub fn write_ready_with_plan(
+    writer: &mut impl Write,
+    token: &str,
+    setup_ns: u64,
+    plan: ExecutionPlan,
+) -> Result<(), String> {
+    write_ready_record(writer, token, setup_ns, Some(plan))
+}
+
+fn write_ready_record(
+    writer: &mut impl Write,
+    token: &str,
+    setup_ns: u64,
+    plan: Option<ExecutionPlan>,
+) -> Result<(), String> {
     write_control(
         writer,
         &WorkerReady {
@@ -404,6 +441,7 @@ pub fn write_ready(writer: &mut impl Write, token: &str, setup_ns: u64) -> Resul
             event: "ready".to_string(),
             token: token.to_string(),
             setup_ns,
+            plan,
         },
     )
 }
@@ -926,23 +964,23 @@ fn duration_ns(duration: Duration) -> u64 {
 mod cleanup_tests;
 
 #[cfg(test)]
+#[path = "observation_process/plan_tests.rs"]
+mod plan_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[cfg(unix)]
     fn shell(script: &str, token: &str) -> Command {
         let mut command = Command::new("/bin/sh");
-        command
-            .arg("-c")
-            .arg(script)
-            .env("TEST_TOKEN", token)
-            .env(
-                "TEST_SPINNER",
-                concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/src/observation_process/bounded_spinner.py"
-                ),
-            );
+        command.arg("-c").arg(script).env("TEST_TOKEN", token).env(
+            "TEST_SPINNER",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/src/observation_process/bounded_spinner.py"
+            ),
+        );
         command
     }
 
@@ -985,7 +1023,8 @@ mod tests {
     #[cfg(unix)]
     fn timeout_kills_descendants_in_the_worker_group() {
         let token = "tree-1";
-        let script = format!("{READY}; trap '' TERM; python3 \"$TEST_SPINNER\" & python3 \"$TEST_SPINNER\"");
+        let script =
+            format!("{READY}; trap '' TERM; python3 \"$TEST_SPINNER\" & python3 \"$TEST_SPINNER\"");
         let mut worker = shell(&script, token);
         let observation = run(&mut worker, token, 25, 10, 1_000, 500).unwrap();
         assert_eq!(

@@ -6,6 +6,10 @@ use grust_cypher::ReadQueryPolicy;
 
 use crate::queries::RustRowEstimate;
 
+mod execution_plan;
+pub use execution_plan::ExecutionPlan;
+pub(crate) use execution_plan::deserialize_present_execution_plan;
+
 /// Legacy schema-v2 constant retained with its original meaning.
 pub const COMPARISON_REPORT_SCHEMA_VERSION: u32 = 2;
 pub const COMPARISON_REPORT_SCHEMA_VERSION_V2: u32 = COMPARISON_REPORT_SCHEMA_VERSION;
@@ -474,6 +478,14 @@ pub struct BackendLifecycleV3 {
 pub struct QueryObservationV3 {
     pub iteration: u32,
     pub query_position: u32,
+    /// Worker-declared route, absent only in legacy observations. Backend-native
+    /// describes opaque server execution, not a claimed server physical plan.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present_execution_plan",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub plan: Option<ExecutionPlan>,
     /// Worker preparation/attach interval completed before READY and GO.
     pub setup_ns: u64,
     /// GO through result consumption or the coordinator's observed deadline.
@@ -772,6 +784,7 @@ mod v3_tests {
         let observation = QueryObservationV3 {
             iteration: 1,
             query_position: 2,
+            plan: Some(ExecutionPlan::ClausePipeline),
             setup_ns: 3,
             elapsed_ns: 10_000_000,
             recovery_ns: 4,

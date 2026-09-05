@@ -10,7 +10,9 @@ Docker matrix always contains all twelve canonical backend cells. A cell may be
 executed, explicitly unavailable, unsupported at a requested scale, or not
 applicable. Those states are evidence, not passes silently substituted for a
 missing backend. Timings are compared only within the execution class recorded
-on every query. `unavailable` is reserved for the three service adapters whose
+on every query and the [plan identity](EXECUTION-PLANS.md) recorded on new
+observations; old missing-plan observations remain explicitly unknown.
+`unavailable` is reserved for the three service adapters whose
 default service is explicitly unconfigured below. A failed feature build,
 configured service, runner, or data load is an error or stops orchestration; it
 is never rewritten as an unavailable core-runner fallback.
