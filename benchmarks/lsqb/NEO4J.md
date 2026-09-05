@@ -25,6 +25,24 @@ server2026.07.1 Community, scalar42, explicit rollback acknowledged. Both
 scalar-shape unit tests passed. Server inspection confirms
 `db.transaction.timeout = 1m`; forced cancellation recovery is not yet qualified.
 
+The `qualify LSQB_ROOT ATTACKS_DIR SCALE NEW_OUTPUT_DIR` subcommand now imports
+bounded chunks using the shared Rust dataset and oracle validators. Import
+requires `NEO4J_BENCHMARK_DISPOSABLE=1` and an empty database; it never clears a
+database. It preserves Post/Comment labels alongside Message, stable node IDs,
+and edge multiplicity. An ID uniqueness constraint supports indexed endpoints.
+Every batch verifies its inserted count, and final database totals are checked.
+
+The first example diagnostic passed all nine original native baseline queries
+and thirteen attacks with a host Rust client and Docker server. All22 flushed
+journal observations exactly match the final diagnostic report. Reimport into
+the nonempty database was refused. These are W0/R1 diagnostics, not published
+or resource-isolated performance measurements. A transaction failure stops the
+run; it is not silently reclassified as a successfully recovered timeout.
+
+The shared Dockerfile accepts `BENCHMARK_FEATURE=neo4j-native` and includes the
+native executable. Use `--entrypoint grust-lsqb-neo4j` for this lane; it is not
+part of the twelve-backend matrix's default entry point.
+
 ## Required completion gates
 
 1. Reuse the Rust dataset fingerprint/oracle loaders and bounded graph chunks.

@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use neo4rs::{ConfigBuilder, Graph, query};
+#[path = "native_neo4j_load.rs"]
+mod loading;
+#[path = "native_neo4j_run.rs"]
+mod qualification;
 
 fn scalar_value(values: &BTreeMap<String, i64>) -> Result<i64, &'static str> {
     if values.len() != 1 {
@@ -11,7 +15,7 @@ fn scalar_value(values: &BTreeMap<String, i64>) -> Result<i64, &'static str> {
     Ok(*values.values().next().expect("one value"))
 }
 
-async fn probe() -> Result<(), &'static str> {
+fn connect() -> Result<Graph, &'static str> {
     let config = ConfigBuilder::default()
         .uri(std::env::var("NEO4J_URI").map_err(|_| "NEO4J_URI is required")?)
         .user(std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".into()))
@@ -22,7 +26,11 @@ async fn probe() -> Result<(), &'static str> {
         .connection_timeout(Duration::from_secs(10))
         .build()
         .map_err(|_| "invalid Neo4j configuration")?;
-    let graph = Graph::connect(config).map_err(|_| "Neo4j connection setup failed")?;
+    Graph::connect(config).map_err(|_| "Neo4j connection setup failed")
+}
+
+async fn probe() -> Result<(), &'static str> {
+    let graph = connect()?;
     // Explicit transactions do not retry. Graph::execute transparently retries
     // transient errors and must not be used for measured benchmark observations.
     let mut transaction = graph
@@ -84,26 +92,16 @@ async fn probe() -> Result<(), &'static str> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn scalar_alias_does_not_change_the_result() {
-        for alias in ["count", "count(*)", "résultat_🦀"] {
-            assert_eq!(scalar_value(&BTreeMap::from([(alias.into(), 42)])), Ok(42));
-        }
-    }
-
-    #[test]
-    fn empty_and_multi_column_results_are_not_counts() {
-        assert!(scalar_value(&BTreeMap::new()).is_err());
-        assert!(scalar_value(&BTreeMap::from([("a".into(), 1), ("b".into(), 2)])).is_err());
-    }
-}
-
 #[tokio::main]
 async fn main() {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("qualify") {
+        if let Err(error) = qualification::run(&args[1..]).await {
+            eprintln!("neo4j qualification: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if std::env::args().nth(1).as_deref() != Some("probe") {
         eprintln!("usage: grust-lsqb-neo4j probe (connection via NEO4J_* environment)");
         std::process::exit(2);
@@ -119,5 +117,23 @@ async fn main() {
             eprintln!("neo4j qualification: probe deadline exceeded");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scalar_alias_does_not_change_the_result() {
+        for alias in ["count", "count(*)", "résultat_🦀"] {
+            assert_eq!(scalar_value(&BTreeMap::from([(alias.into(), 42)])), Ok(42));
+        }
+    }
+
+    #[test]
+    fn empty_and_multi_column_results_are_not_counts() {
+        assert!(scalar_value(&BTreeMap::new()).is_err());
+        assert!(scalar_value(&BTreeMap::from([("a".into(), 1), ("b".into(), 2)])).is_err());
     }
 }
