@@ -1,5 +1,9 @@
 # Backend qualification for the graph benchmark
 
+Sail's public [Docker build guide](SAIL-DOCKER.md) provides the pinned-source
+reproduction path. A private prebuilt package does not mean Sail is unexecutable;
+source-built runtime evidence and registry-attested evidence are distinct routes.
+
 This qualification review is scoped to Grust 0.13 and the pinned LSQB
 comparison. The schema-v3
 Docker matrix always contains all twelve canonical backend cells. A cell may be

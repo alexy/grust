@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Publish the Sail Docker reproduction guide with pinned public base/wheel inputs,
+  explicit Grust-built provenance, and source-built comparison admission requirements.
+
 - Derive receipt-bound performance summaries with measured query/setup/recovery
   distributions, per-sample boundary totals, and separate coordinator loading.
   Retain raw samples and failures; suppress timing summaries after failed

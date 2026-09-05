@@ -190,6 +190,8 @@ so a run cannot silently discover or reuse a local service. PostgreSQL 19 Beta
 contracts; Sail can use the Grust-built image from `Dockerfile.sail` and the
 manual `sail-benchmark-image.yml` publication workflow. A vendor-hosted image
 is not required; the resulting registry manifest still needs qualification.
+The public [Sail Docker build guide](SAIL-DOCKER.md) reproduces the runtime from
+pinned upstream inputs without GHCR access and explains the source-built lane.
 The exact qualified candidates and their platform/config digests are recorded
 in [`BACKENDS.md`](BACKENDS.md). Ladybug and LanceDB are embedded. Set
 `SMOKE=1` for a one-run Memory-only infrastructure check:
