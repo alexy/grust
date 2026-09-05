@@ -4,15 +4,16 @@ The matrix executable has distinct `helix-sdk` and `surreal-sdk` backend IDs.
 The existing `helix` and `surreal` IDs retain their HTTP implementation and
 historical evidence. Surreal SDK now has a separately admitted example Docker
 comparison on [adversari.al/graph](https://adversari.al/graph/). Helix SDK also
-passes its example Docker cohort, with a diagnostic audit; independent site
-admission and the full-matrix launcher's SDK integration remain pending.
+has an independently admitted example Docker cohort on the same public page.
+The full-matrix launcher's SDK integration remains pending.
 
 `bundle-helix-sdk.py RUN NEW_OUTPUT --client-build CLIENT_BUILD --server-build
 SERVER_BUILD` freezes the audited Helix cohort with both build receipts, recipes
 and logs. The server recipe defaults to `Dockerfile.helix-sdk-server`; overridden
 paths must contain identical pinned bytes. Each bundle inventories 17 payloads
 by size and SHA-256. This transport manifest deliberately keeps
-`publication_qualified: false`: independent site verification is still required.
+`publication_qualified: false`: it does not itself issue publication admission.
+The public site's separate verifier admits the two pinned example bundles.
 
 | Lane | Grust store | Transport | Endpoint variable |
 | --- | --- | --- | --- |

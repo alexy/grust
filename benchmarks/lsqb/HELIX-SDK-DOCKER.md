@@ -77,7 +77,8 @@ The Helix SDK3 example baseline and adversarial suites now pass all 108 and
 156 observations respectively. `validate-helix-sdk.py RAW_DIRECTORY` checks
 the pinned client source `ed3febd88d35c5a6bd6c090787536dc0f33c85cd`, server
 source and image identities, dataset/query counts, rotating journal, timings
-and runtime lifecycle. The audit is diagnostic: frozen bundle export and
-independent site admission remain pending. The measured plan remains backend materialization plus Rust reference
+and runtime lifecycle. The audit remains diagnostic. Frozen bundles now include
+both client and server build provenance and are independently admitted on
+[adversari.al/graph](https://adversari.al/graph/). The measured plan remains backend materialization plus Rust reference
 execution, not native Helix query-engine timing. Larger-scale admission and
 fail-closed remote recovery rules remain in force.

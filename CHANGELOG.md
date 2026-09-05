@@ -6,6 +6,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Publish independently verified Helix Rust SDK example evidence at
+  adversari.al/graph: 108 baseline and 156 adversarial observations, with
+  load/query/setup/recovery timings and both client/server build provenance.
+  Retain the separate direct HTTP lane and materialize-reference classification.
+
 - Freeze Helix SDK example evidence with pinned client and source-built server
   recipes, logs and provenance; reject altered server identities or build bytes
   before export. Independent site admission remains pending.
