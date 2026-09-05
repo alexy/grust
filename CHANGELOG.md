@@ -10,7 +10,10 @@ reconstructed from Git history, release commits, and the shipped docs.
   explicit Grust-built provenance, and source-built comparison admission requirements.
   Add retained source-build evidence and a fresh-process shared-session qualification
   probe. The probe verifies borrower reads, owner-only release, and server health;
-  shared-session benchmark execution is not enabled by the probe itself.
+  enable coordinator-owned, once-loaded Sail sessions in the benchmark runner,
+  with fresh borrowing workers and bounded owner-only cleanup. All 22 example
+  queries pass a host-client/Docker-service diagnostic; fully Dockerized repeated
+  performance evidence and publication admission remain separate requirements.
 
 - Derive receipt-bound performance summaries with measured query/setup/recovery
   distributions, per-sample boundary totals, and separate coordinator loading.

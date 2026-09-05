@@ -162,7 +162,6 @@ make_component() {
                         if $setup_outcome != "pass" then "not-executed"
                         elif $backend == "memory" or $backend == "turso"
                             or $backend == "ladybug" or $backend == "lancedb"
-                            or $backend == "sail"
                         then "per-observation-worker-reload"
                         else "once-worker-attach"
                         end

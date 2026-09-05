@@ -211,7 +211,7 @@ async fn execute_protocol(
     arguments: &MatrixArguments,
     backend_id: &str,
 ) -> Result<Vec<QueryOutcomeV3>, String> {
-    let mut outcomes = cases
+    let outcomes = cases
         .iter()
         .map(|case| match backend.execution(case) {
             Ok(execution) => query_outcome_for_scale(case, execution, &arguments.scale),
@@ -234,39 +234,62 @@ async fn execute_protocol(
                 measurements: Vec::new(),
             }),
         })
-        .collect::<Result<Vec<_>, String>>()?;
+        .collect::<Result<Vec<_>, String>>();
+    let mut outcomes = match outcomes {
+        Ok(outcomes) => outcomes,
+        Err(error) => {
+            backend.finish().await?;
+            return Err(error);
+        }
+    };
     // No worker inherits Rust state from this Tokio process. Persistent
     // service backends retain their loaded state and workers reconnect;
     // process-owned backends reload explicitly before each READY record.
-    backend.finish().await?;
+    let coordinator = if backend_id == "sail" {
+        Some(backend)
+    } else {
+        backend.finish().await?;
+        None
+    };
     drop(graph);
 
-    run_phase(
-        cases,
-        &mut outcomes,
-        arguments,
-        PhaseProgress::new(
-            backend_id,
-            &arguments.suite,
-            &arguments.scale,
-            QueryPhase::Warmup,
-            arguments.warmups,
-        ),
-    )
-    .await?;
-    run_phase(
-        cases,
-        &mut outcomes,
-        arguments,
-        PhaseProgress::new(
-            backend_id,
-            &arguments.suite,
-            &arguments.scale,
-            QueryPhase::Measurement,
-            arguments.runs,
-        ),
-    )
-    .await?;
+    let execution = async {
+        run_phase(
+            cases,
+            &mut outcomes,
+            arguments,
+            coordinator.as_ref(),
+            PhaseProgress::new(
+                backend_id,
+                &arguments.suite,
+                &arguments.scale,
+                QueryPhase::Warmup,
+                arguments.warmups,
+            ),
+        )
+        .await?;
+        run_phase(
+            cases,
+            &mut outcomes,
+            arguments,
+            coordinator.as_ref(),
+            PhaseProgress::new(
+                backend_id,
+                &arguments.suite,
+                &arguments.scale,
+                QueryPhase::Measurement,
+                arguments.runs,
+            ),
+        )
+        .await
+    }
+    .await;
+    let cleanup = match coordinator {
+        Some(owner) => owner.finish().await,
+        None => Ok(()),
+    };
+    execution?;
+    cleanup?;
     for outcome in &mut outcomes {
         if outcome.execution.class.is_some() && outcome.outcome != OutcomeStatus::Unsupported {
             finalize_query_outcome(outcome);
@@ -279,6 +302,7 @@ async fn run_phase(
     cases: &[QueryCase],
     outcomes: &mut [QueryOutcomeV3],
     arguments: &MatrixArguments,
+    coordinator: Option<&backend::PreparedBackend>,
     progress: PhaseProgress<'_>,
 ) -> Result<(), String> {
     if cases.is_empty() {
@@ -313,6 +337,9 @@ async fn run_phase(
                 &token,
                 matrix_worker::uses_attach_worker(&arguments.backend),
             )?;
+            if let Some(owner) = coordinator {
+                owner.configure_worker(&mut command);
+            }
             let mut isolated = observation_process::run_with_ready(
                 &mut command,
                 &token,

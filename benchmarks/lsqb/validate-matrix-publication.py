@@ -129,7 +129,7 @@ LOAD_STRATEGY = {
     "turso": "per-observation-worker-reload",
     "ladybug": "per-observation-worker-reload",
     "lancedb": "per-observation-worker-reload",
-    "sail": "per-observation-worker-reload",
+    "sail": "once-worker-attach",
     "postgres": "once-worker-attach",
     "falkor": "once-worker-attach",
     "surreal": "once-worker-attach",

@@ -11,6 +11,9 @@ mod materialize;
 #[cfg(feature = "falkor")]
 mod falkor;
 
+#[cfg(feature = "sail")]
+mod sail_session;
+
 #[cfg(any(feature = "helix", feature = "surreal"))]
 use std::collections::BTreeSet;
 use std::env;
@@ -80,7 +83,7 @@ enum Backend {
         _directory: tempfile::TempDir,
     },
     #[cfg(feature = "sail")]
-    Sail(SailGraphStore),
+    Sail(sail_session::Session),
     #[cfg(feature = "pggraph")]
     PgGraph(PgGraphStore),
     #[cfg(feature = "postgres-pgq")]
@@ -90,15 +93,20 @@ enum Backend {
 }
 
 impl PreparedBackend {
-    /// Release per-observation remote state after the result has been emitted.
+    pub fn configure_worker(&self, command: &mut std::process::Command) {
+        let _ = command;
+        #[cfg(feature = "sail")]
+        if let Backend::Sail(session) = &self.inner {
+            session.configure_worker(command);
+        }
+    }
+
+    /// Release coordinator-owned remote state; borrowed workers only detach.
     /// Persistent service backends keep their dataset for the next attachment.
     pub async fn finish(self) -> Result<(), String> {
         #[cfg(feature = "sail")]
         if let Backend::Sail(store) = self.inner {
-            return store
-                .close()
-                .await
-                .map_err(|_| "release Sail observation session failed".to_string());
+            return store.close().await;
         }
         Ok(())
     }
@@ -152,6 +160,11 @@ impl PreparedBackend {
     pub async fn attach_existing(id: &str, source: &Graph) -> Result<Self, String> {
         let _ = source;
         match id {
+            #[cfg(feature = "sail")]
+            "sail" => Ok(Self {
+                inner: Backend::Sail(sail_session::Session::borrow().await?),
+                load_ns: 0,
+            }),
             "postgres" => Ok(Self {
                 inner: Backend::Postgres(
                     PostgresGraphStore::connect(postgres_config())
@@ -373,7 +386,7 @@ pub fn load_strategy(id: &str, executed: bool) -> LoadStrategyV3 {
     }
     if matches!(
         id,
-        "postgres" | "falkor" | "surreal" | "pggraph" | "postgres-pgq" | "helix"
+        "postgres" | "falkor" | "surreal" | "pggraph" | "postgres-pgq" | "helix" | "sail"
     ) {
         LoadStrategyV3::OnceWorkerAttach
     } else {
@@ -736,28 +749,31 @@ async fn prepare_lancedb(graph: &Graph) -> Result<PreparedBackend, String> {
 
 #[cfg(feature = "sail")]
 async fn prepare_sail(graph: &Graph) -> Result<PreparedBackend, String> {
-    let store = SailGraphStore::connect(SailConfig {
+    let config = SailConfig {
         endpoint: env::var("SAIL_ENDPOINT").unwrap_or_else(|_| "http://sail:50051".to_string()),
         // Match the projected loader chunk size; avoid ten Delta commits per chunk.
         batch_size: 10_000,
         ..SailConfig::default()
-    })
-    .await
-    // External endpoints may contain credentials. The adapter itself redacts
-    // transport failures, and the benchmark boundary deliberately provides a
-    // second defense so report details can never serialize the endpoint.
-    .map_err(|_| "connect to Sail failed".to_string())?;
-    let started = Instant::now();
-    store.bootstrap().await.map_err(|err| err.to_string())?;
-    store.clear().await.map_err(|err| err.to_string())?;
-    store
-        .put_graph(graph)
+    };
+    let store = SailGraphStore::connect(config.clone())
         .await
-        .map_err(|err| err.to_string())?;
-    Ok(PreparedBackend {
-        inner: Backend::Sail(store),
-        load_ns: elapsed_ns(started)?,
-    })
+        // External endpoints may contain credentials. The adapter itself redacts
+        // transport failures, and the benchmark boundary deliberately provides a
+        // second defense so report details can never serialize the endpoint.
+        .map_err(|_| "connect to Sail failed".to_string())?;
+    let started = Instant::now();
+    let session = sail_session::Session::owned(store, config);
+    let result = async {
+        session.bootstrap().await.map_err(|err| err.to_string())?;
+        session.clear().await.map_err(|err| err.to_string())?;
+        session
+            .put_graph(graph)
+            .await
+            .map_err(|err| err.to_string())?;
+        elapsed_ns(started)
+    }
+    .await;
+    finish_sail_preparation(session, result).await
 }
 
 #[cfg(feature = "sail")]
@@ -765,21 +781,41 @@ async fn prepare_sail_chunks<I>(chunks: I) -> Result<PreparedBackend, String>
 where
     I: IntoIterator<Item = Result<Graph, String>>,
 {
-    let store = SailGraphStore::connect(SailConfig {
+    let config = SailConfig {
         endpoint: env::var("SAIL_ENDPOINT").unwrap_or_else(|_| "http://sail:50051".to_string()),
         batch_size: 10_000,
         ..SailConfig::default()
-    })
-    .await
-    .map_err(|_| "connect to Sail failed".to_string())?;
+    };
+    let store = SailGraphStore::connect(config.clone())
+        .await
+        .map_err(|_| "connect to Sail failed".to_string())?;
     let started = Instant::now();
-    store.bootstrap().await.map_err(|err| err.to_string())?;
-    store.clear().await.map_err(|err| err.to_string())?;
-    put_projected_chunks(&store, chunks).await?;
-    Ok(PreparedBackend {
-        inner: Backend::Sail(store),
-        load_ns: elapsed_ns(started)?,
-    })
+    let session = sail_session::Session::owned(store, config);
+    let result = async {
+        session.bootstrap().await.map_err(|err| err.to_string())?;
+        session.clear().await.map_err(|err| err.to_string())?;
+        put_projected_chunks(&*session, chunks).await?;
+        elapsed_ns(started)
+    }
+    .await;
+    finish_sail_preparation(session, result).await
+}
+
+#[cfg(feature = "sail")]
+async fn finish_sail_preparation(
+    session: sail_session::Session,
+    result: Result<u64, String>,
+) -> Result<PreparedBackend, String> {
+    match result {
+        Ok(load_ns) => Ok(PreparedBackend {
+            inner: Backend::Sail(session),
+            load_ns,
+        }),
+        Err(error) => match session.close().await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(format!("{error}; {cleanup}")),
+        },
+    }
 }
 
 async fn put_projected_chunks<S, I>(store: &S, chunks: I) -> Result<(), String>

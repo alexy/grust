@@ -626,7 +626,7 @@ for report in "${reports[@]}"; do
                                     $cell.lifecycle.load_strategy == "per-observation-worker-reload"
                                     and $cell.lifecycle.recovery_contract == "process-group-absent"
                                 elif $cell.backend.name == "sail" then
-                                    $cell.lifecycle.load_strategy == "per-observation-worker-reload"
+                                    $cell.lifecycle.load_strategy == "once-worker-attach"
                                     and $cell.lifecycle.recovery_contract == "fail-closed"
                                 elif $cell.backend.name == "postgres"
                                     or $cell.backend.name == "pggraph"

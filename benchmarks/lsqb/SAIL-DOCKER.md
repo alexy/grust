@@ -92,9 +92,15 @@ performance run and publication admission are still being completed. Earlier
 matrices marked it unavailable because no external service was configured for
 their registry-attestation route—not because Sail cannot execute graph queries.
 
-Large-dataset setup is a separate issue: current workers reload session-scoped
-graph state. Sharing a coordinator-owned session requires fresh-process
-visibility and release-isolation qualification before it is enabled.
+The current harness loads Sail once per suite and attaches fresh observation
+processes to the coordinator-owned session. Borrowers never release that session;
+the coordinator releases it after the suite, including on preparation errors.
+Fresh-process visibility and release isolation have passed live qualification.
+The actual shared-session runner also passed all nine baseline and thirteen
+adversarial example queries (zero warm-ups, one measurement) against this
+Docker-built service. That host-client diagnostic is not the repeated,
+fully Dockerized performance cohort. Forced worker termination still fails the
+cell closed: releasing a session is not proof of remote query quiescence.
 
 Stop the owned service when finished:
 

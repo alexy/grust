@@ -35,8 +35,9 @@ private READY/GO handshake. The coordinator proves that group absent and its
 control pipes closed; trusted benchmark workers do not re-session descendants,
 and only the outer container watchdog is a full-tree boundary. Memory, Turso,
 Ladybug, and LanceDB reload their
-process-owned state before READY; Sail also reloads because its temporary views
-are session scoped. PostgreSQL, FalkorDB, SurrealDB, pgGraph, PostgreSQL PGQ,
+process-owned state before READY. Sail workers borrow the coordinator-owned
+session so its session-scoped views are loaded once; only the coordinator
+releases that session after the suite. PostgreSQL, FalkorDB, SurrealDB, pgGraph, PostgreSQL PGQ,
 and Helix attach to state loaded once by the coordinator. PostgreSQL-family
 workers carry a unique server session name and `statement_timeout`, allowing a
 forced timeout to be followed by an exact `pg_stat_activity` disappearance

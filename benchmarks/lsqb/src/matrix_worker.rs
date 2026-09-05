@@ -102,6 +102,7 @@ pub fn command(
     let executable = env::current_exe()
         .map_err(|_| "failed to resolve the matrix worker executable".to_string())?;
     let mut command = Command::new(executable);
+    command.env_remove("GRUST_LSQB_SAIL_OWNED_SESSION");
     command
         .arg(WORKER_MARKER)
         .env(ENV_BACKEND, &arguments.backend)
@@ -291,8 +292,8 @@ mod tests {
     }
 
     #[test]
-    fn only_process_owned_or_session_scoped_backends_reload() {
-        for backend in ["memory", "turso", "ladybug", "lancedb", "sail"] {
+    fn only_process_owned_backends_reload() {
+        for backend in ["memory", "turso", "ladybug", "lancedb"] {
             assert!(!uses_attach_worker(backend), "{backend}");
         }
         for backend in [
@@ -302,6 +303,7 @@ mod tests {
             "pggraph",
             "postgres-pgq",
             "helix",
+            "sail",
         ] {
             assert!(uses_attach_worker(backend), "{backend}");
         }
