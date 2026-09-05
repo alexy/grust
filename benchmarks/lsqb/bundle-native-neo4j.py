@@ -26,6 +26,9 @@ def canonical(value):
 
 
 def payloads(directory):
+    exclusion = directory / 'performance-exclusion.json'
+    if exclusion.exists() or exclusion.is_symlink():
+        raise ValueError('run is excluded from performance export; retain raw diagnostic evidence')
     result = {}
     names = list(FILES)
     network = directory / 'network-before.json'

@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Record orphaned CPU-spinning benchmark test workers and quarantine the
+  overlapping native SF0.3 run from performance export pending cleanup and rerun.
+
 - Add a read-only native-run progress summary with load percentages, observed
   outcomes, warm-up/measurement counts and current query. Partial journal lines
   remain explicit; a snapshot never implies process liveness or publication.

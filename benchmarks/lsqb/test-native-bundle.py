@@ -12,6 +12,13 @@ spec.loader.exec_module(bundle)
 
 
 class BundleTests(unittest.TestCase):
+    def test_performance_exclusion_blocks_export(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'performance-exclusion.json').write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'excluded from performance export'):
+                bundle.payloads(root)
+
     def test_internal_network_provenance_rejects_mutations(self):
         record = dict(Name='grust-lsqb-neo4j-qualification', Id='a' * 64, Internal=True)
         bundle.audit.validate_network_record(record)
