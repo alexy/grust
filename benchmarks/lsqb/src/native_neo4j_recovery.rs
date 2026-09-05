@@ -4,7 +4,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const WORK: &str = "UNWIND range(1, 100000000) AS i RETURN sum(sin(toFloat(i))) AS total";
 
-async fn owned(graph: &Graph, tag: &str, running_only: bool) -> Result<Vec<String>, &'static str> {
+pub(super) async fn owned(
+    graph: &Graph,
+    tag: &str,
+    running_only: bool,
+) -> Result<Vec<String>, &'static str> {
     let mut tx = graph
         .start_txn()
         .await
@@ -32,7 +36,7 @@ async fn owned(graph: &Graph, tag: &str, running_only: bool) -> Result<Vec<Strin
     Ok(ids)
 }
 
-async fn terminate(graph: &Graph, id: &str) -> Result<(), &'static str> {
+pub(super) async fn terminate(graph: &Graph, id: &str) -> Result<(), &'static str> {
     let mut tx = graph
         .start_txn()
         .await

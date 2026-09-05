@@ -5,6 +5,8 @@ use std::time::Duration;
 use neo4rs::{ConfigBuilder, Graph, query};
 #[path = "native_neo4j_load.rs"]
 mod loading;
+#[path = "native_neo4j_process.rs"]
+mod process;
 #[path = "native_neo4j_run.rs"]
 mod qualification;
 #[path = "native_neo4j_recovery.rs"]
@@ -18,6 +20,10 @@ fn scalar_value(values: &BTreeMap<String, i64>) -> Result<i64, &'static str> {
 }
 
 fn connect() -> Result<Graph, &'static str> {
+    connect_with_timeout(Duration::from_secs(10))
+}
+
+fn connect_with_timeout(timeout: Duration) -> Result<Graph, &'static str> {
     let config = ConfigBuilder::default()
         .uri(std::env::var("NEO4J_URI").map_err(|_| "NEO4J_URI is required")?)
         .user(std::env::var("NEO4J_USER").unwrap_or_else(|_| "neo4j".into()))
@@ -25,7 +31,7 @@ fn connect() -> Result<Graph, &'static str> {
         .db("neo4j")
         .max_connections(2)
         .fetch_size(10)
-        .connection_timeout(Duration::from_secs(10))
+        .connection_timeout(timeout)
         .build()
         .map_err(|_| "invalid Neo4j configuration")?;
     Graph::connect(config).map_err(|_| "Neo4j connection setup failed")
@@ -97,6 +103,19 @@ async fn probe() -> Result<(), &'static str> {
 #[tokio::main]
 async fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("deadline-probe") {
+        if let Err(error) = process::probe().await {
+            eprintln!("neo4j deadline qualification: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if args.first().map(String::as_str) == Some("observation-worker") {
+        if process::worker().await.is_err() {
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.first().map(String::as_str) == Some("recovery-probe") {
         if let Err(error) = recovery::probe().await {
             eprintln!("neo4j recovery qualification: {error}");

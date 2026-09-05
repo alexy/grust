@@ -23,7 +23,8 @@ echo endpoint credentials. A probe pass is not a benchmark result.
 The initial live probe passed on 2026-09-05 UTC against the pinned ARM64 image:
 server2026.07.1 Community, scalar42, explicit rollback acknowledged. Both
 scalar-shape unit tests passed. Server inspection confirms
-`db.transaction.timeout = 1m`; forced cancellation recovery is not yet qualified.
+`db.transaction.timeout = 1m`; the later targeted cancellation probe is
+described below.
 
 The `qualify LSQB_ROOT ATTACKS_DIR SCALE NEW_OUTPUT_DIR` subcommand now imports
 bounded chunks using the shared Rust dataset and oracle validators. Import
@@ -43,6 +44,15 @@ The shared Dockerfile accepts `BENCHMARK_FEATURE=neo4j-native` and includes the
 native executable. Use `--entrypoint grust-lsqb-neo4j` for this lane; it is not
 part of the twelve-backend matrix's default entry point.
 
+The Docker-client/Docker-server example diagnostic also passed all nine
+baseline queries and thirteen attacks on 2026-09-05 UTC. Its22 incrementally
+flushed observations exactly match the final diagnostic. The outer watchdog
+completed successfully in16.279seconds. Client source was
+`3628d2d3bffc9f4324e418818d1c76e6f9f30e9f`; both containers had8CPU/6GiB limits
+on a shared host. Evidence is retained under
+`out/neo4j-native-docker-example-3628d2d`. This remains W0/R1 qualification,
+not a published performance ranking or a complete hard-deadline receipt.
+
 `recovery-probe` now tests a uniquely tagged running transaction, targeted
 termination acknowledgement, worker error, discarded worker connection pool,
 absence observed through a separate connection, and a successful subsequent
@@ -51,6 +61,30 @@ The first attempt failed the absence check while retaining the worker pool;
 the failed pool must never be reused. Neo4j2026.07.1 exposes `tx.setMetaData`,
 not the older `dbms.setTXMetaData` spelling. This server-cancellation probe does
 not yet establish the full isolated-process benchmark deadline contract.
+
+The native qualifier now uses the shared READY/GO isolated-process protocol:
+transaction creation and unique metadata tagging precede READY; query execution,
+scalar consumption and rollback follow GO. The coordinator enforces a60second
+query deadline, reaps the worker, and independently verifies server absence and
+a scalar probe within15seconds before continuing. Any remaining tagged
+transaction receives targeted termination; protocol or recovery failures reject
+the run. Setup, query, process-reaping and server-recovery times are separate.
+
+The `deadline-probe` command forces a2second process deadline and then executes
+a fresh isolated scalar query. A host-client/Docker-server live probe passed:
+deadline observed at2.009seconds, SIGTERM/reap5.6ms, server absence and scalar
+verification260ms, next isolated result42. No transaction remained after
+process death in this probe, so no termination acknowledgement was needed.
+The separate `recovery-probe` above exercises the targeted-termination branch.
+These probes are diagnostics; Docker qualification of this new process boundary
+and independent publication receipts are still required.
+
+The host-client/Docker-server example rerun with isolated workers passed all
+22 cases. Each observation records a normal worker exit, zero remaining owned
+server transactions and a successful independent scalar probe; the flushed
+journal exactly matches the final diagnostic. Output:
+`out/neo4j-native-process-example`. This rerun is not the earlier Docker-client
+run and the two timing boundaries must not be pooled.
 
 ## Required completion gates
 

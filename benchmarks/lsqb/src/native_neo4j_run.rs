@@ -90,30 +90,33 @@ pub(super) async fn run(args: &[String]) -> Result<(), &'static str> {
         }
     }
     let load_ns = started.elapsed().as_nanos();
+    drop(graph);
     let mut observations = Vec::new();
     for (suite, case) in cases {
         record(
             &mut journal,
             &json!({"event":"query-start", "suite":suite,"id":case.id,"complete":false}),
         )?;
-        let started = Instant::now();
-        let result = super::loading::scalar(&graph, query(&case.executable), false).await;
-        let elapsed_ns = started.elapsed().as_nanos();
-        let outcome = match result {
-            Ok(count) if count == case.expected_count => "pass",
-            Ok(_) => "mismatch",
-            Err(_) => "error",
+        let (result, recovery) = super::process::run(&case.executable, 60_000).await?;
+        let outcome = match result.outcome {
+            grust_lsqb_runner::observation_process::WorkerOutcome::Pass
+                if result.actual_count == Some(case.expected_count) =>
+            {
+                "pass"
+            }
+            grust_lsqb_runner::observation_process::WorkerOutcome::Pass => "mismatch",
+            grust_lsqb_runner::observation_process::WorkerOutcome::Timeout => "timeout",
+            grust_lsqb_runner::observation_process::WorkerOutcome::Error => "error",
         };
         let observation = json!({"event":"observation-recorded", "complete":false,"suite":suite,
-            "id":case.id,"expected_count":case.expected_count,"actual_count":result.as_ref().ok(),
-            "outcome":outcome,"elapsed_ns":elapsed_ns,"source_sha256":case.source_sha256,
+            "id":case.id,"expected_count":case.expected_count,"actual_count":result.actual_count,
+            "outcome":outcome,"elapsed_ns":result.elapsed_ns,"source_sha256":case.source_sha256,
             "query_sha256":queries::sha256(case.executable.as_bytes()),
-            "timing_boundary":"explicit-transaction-begin-through-scalar-consumption-and-rollback"});
+            "timing_boundary":"coordinator-go-through-scalar-consumption-and-rollback-result",
+            "setup_ns":result.setup_ns,"process_recovery_ns":result.recovery_ns,
+            "termination":result.termination,"server_recovery":recovery,"query_timeout_ms":60_000});
         record(&mut journal, &observation)?;
         observations.push(observation);
-        // Fail closed: no next query after transport/transaction failure until
-        // server recovery is independently qualified. Do not relabel as timeout.
-        result?;
     }
     let report = json!({"schema":"grust-neo4j-native-diagnostic-v1", "complete":false,
         "warning":"These are not LDBC Benchmark Results.","scale":scale,"dataset":identity,
