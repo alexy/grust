@@ -44,6 +44,11 @@ use crate::parser::parse_query;
 use crate::{CypherParameters, CypherResultTable, Result};
 use grust_core::{Node, Value};
 
+mod scalar_count;
+pub use scalar_count::{ScalarCountReadPushdown, plan_scalar_count_read};
+mod relationship_types;
+use relationship_types::pairwise_disjoint_types;
+
 // ---------------------------------------------------------------------------
 // Logical descriptor
 // ---------------------------------------------------------------------------
@@ -357,6 +362,20 @@ pub trait SqlDialect {
     fn quote_ident(&self, ident: &str) -> String;
     /// Extract JSON property `key` from the props column, yielding a SQL scalar.
     fn json_property(&self, props_column: &str, key: &str) -> String;
+    /// Render exact property equality against a string for scalar aggregation.
+    /// The property key is a validated ASCII identifier. Implementations must
+    /// distinguish JSON strings from numeric/boolean/container payloads and
+    /// compare strings in byte order, matching the reference's `Value::to_json`
+    /// equality. Return `None` when this exact predicate is unsupported.
+    /// This opt-in hook never changes the existing row-source SQL rendering.
+    fn exact_string_property_eq(
+        &self,
+        _props_column: &str,
+        _key: &str,
+        _value: &str,
+    ) -> Option<String> {
+        None
+    }
     /// Wrap `expr` in an integer cast.
     fn cast_int(&self, expr: &str) -> String;
     /// Wrap `expr` in a floating-point cast.
@@ -525,6 +544,22 @@ impl SqlDialect for SqliteDialect {
     }
     fn json_property(&self, props_column: &str, key: &str) -> String {
         format!("json_extract({props_column}, '$.{key}')")
+    }
+    fn exact_string_property_eq(
+        &self,
+        props_column: &str,
+        key: &str,
+        value: &str,
+    ) -> Option<String> {
+        if value.contains('\0') {
+            return None;
+        }
+        let path = self.string_literal(&format!("$.{key}"));
+        let value = self.string_literal(value);
+        Some(format!(
+            "(json_type({props_column}, {path}) = 'text' AND \
+             json_extract({props_column}, {path}) COLLATE BINARY = {value})"
+        ))
     }
     fn cast_int(&self, expr: &str) -> String {
         format!("CAST({expr} AS INTEGER)")
@@ -1105,14 +1140,31 @@ impl NodeReadPushdown {
     /// projection itself is *not* pushed in milestone 1 (it runs in Rust against
     /// the shared reference, guaranteeing identical output).
     pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
+        self.to_sql_select(dialect, "id, label, props")
+    }
+
+    fn to_sql_select(&self, dialect: &dyn SqlDialect, select: &str) -> String {
+        let filter = self
+            .filter
+            .as_ref()
+            .map(|filter| render_predicate(filter, dialect));
+        self.to_sql_select_with_filter(dialect, select, filter.as_deref())
+    }
+
+    fn to_sql_select_with_filter(
+        &self,
+        dialect: &dyn SqlDialect,
+        select: &str,
+        filter: Option<&str>,
+    ) -> String {
         let table = dialect.quote_ident(dialect.nodes_table());
-        let mut sql = format!("SELECT id, label, props FROM {table}");
+        let mut sql = format!("SELECT {select} FROM {table}");
         let mut conditions: Vec<String> = Vec::new();
         if let Some(label) = &self.label {
             conditions.push(format!("label = {}", dialect.string_literal(label)));
         }
-        if let Some(filter) = &self.filter {
-            conditions.push(render_predicate(filter, dialect));
+        if let Some(filter) = filter {
+            conditions.push(filter.to_string());
         }
         if !conditions.is_empty() {
             sql.push_str(" WHERE ");
@@ -1512,6 +1564,8 @@ struct SegOrderKey {
 ///
 /// Same contract as [`plan_node_read`]: `Ok(Some(_))` for the pushable subset,
 /// `Ok(None)` for a valid query outside it, `Err` only for invalid input.
+/// Multiple edge positions require explicit pairwise-disjoint type sets:
+/// nullable public edge IDs cannot prove physical-row uniqueness in SQL.
 pub fn plan_segment_read(
     cypher: &str,
     params: &CypherParameters,
@@ -1550,6 +1604,14 @@ fn lower_segment_single(
         return None;
     }
     let k = pattern.segments.len();
+    if !pairwise_disjoint_types(
+        pattern
+            .segments
+            .iter()
+            .map(|s| s.relationship.types.as_slice()),
+    ) {
+        return None;
+    }
 
     // Node patterns by position: [start, seg0.node, seg1.node, …]; ≤1 label each.
     let mut node_patterns: Vec<&NodePattern> = Vec::with_capacity(k + 1);
@@ -2000,9 +2062,6 @@ impl SegmentReadPushdown {
     /// id,src_id,dst_id,edge_type,props) — all text columns, reconstructed by
     /// [`Self::project_text_rows`].
     pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
-        let nodes = dialect.quote_ident(dialect.nodes_table());
-        let edges = dialect.quote_ident(dialect.edges_table());
-
         let mut cols: Vec<String> = Vec::new();
         for binding in &self.selected {
             match binding {
@@ -2027,6 +2086,26 @@ impl SegmentReadPushdown {
         } else {
             cols.join(", ")
         };
+
+        self.to_sql_select(dialect, &select_list)
+    }
+
+    fn to_sql_select(&self, dialect: &dyn SqlDialect, select_list: &str) -> String {
+        let filter = self
+            .filter
+            .as_ref()
+            .map(|filter| render_seg_predicate(filter, dialect));
+        self.to_sql_select_with_filter(dialect, select_list, filter.as_deref())
+    }
+
+    fn to_sql_select_with_filter(
+        &self,
+        dialect: &dyn SqlDialect,
+        select_list: &str,
+        filter: Option<&str>,
+    ) -> String {
+        let nodes = dialect.quote_ident(dialect.nodes_table());
+        let edges = dialect.quote_ident(dialect.edges_table());
 
         // FROM n0, then chain: JOIN e{j} JOIN n{j+1} per segment.
         let mut sql = format!("SELECT {select_list} FROM {nodes} n0");
@@ -2064,8 +2143,8 @@ impl SegmentReadPushdown {
                 conditions.push(format!("n{i}.label = {}", dialect.string_literal(label)));
             }
         }
-        if let Some(filter) = &self.filter {
-            conditions.push(render_seg_predicate(filter, dialect));
+        if let Some(filter) = filter {
+            conditions.push(filter.to_string());
         }
         if !conditions.is_empty() {
             sql.push_str(" WHERE ");
@@ -2989,7 +3068,8 @@ impl OptionalReadPushdown {
 // reuses its alias, so the join unifies it; patterns with no shared variable
 // cross-join. Directed segments only (undirected falls back). Tried after the
 // single-path segment planner, so it handles ≥2 patterns and single patterns
-// that reuse a variable.
+// that reuse a variable. Overlapping edge types remain reference-only because
+// portable edge tables do not guarantee a non-null unique physical edge ID.
 
 /// One global edge: the node indices its stored `src_id`/`dst_id` join to.
 #[derive(Clone, Debug, PartialEq)]
@@ -3020,6 +3100,15 @@ fn lower_multi_pattern_single(
         _ => return None,
     };
     if match_clause.patterns.is_empty() {
+        return None;
+    }
+    if !pairwise_disjoint_types(
+        match_clause
+            .patterns
+            .iter()
+            .flat_map(|path| &path.segments)
+            .map(|s| s.relationship.types.as_slice()),
+    ) {
         return None;
     }
     // Path variables and shortestPath(...) wrappers are reference-only.
@@ -3192,9 +3281,6 @@ impl MultiPatternReadPushdown {
     }
 
     pub fn to_sql(&self, dialect: &dyn SqlDialect) -> String {
-        let nodes = dialect.quote_ident(dialect.nodes_table());
-        let edges_tbl = dialect.quote_ident(dialect.edges_table());
-
         let mut cols: Vec<String> = Vec::new();
         for binding in &self.selected {
             match binding {
@@ -3217,6 +3303,26 @@ impl MultiPatternReadPushdown {
         } else {
             cols.join(", ")
         };
+
+        self.to_sql_select(dialect, &select_list)
+    }
+
+    fn to_sql_select(&self, dialect: &dyn SqlDialect, select_list: &str) -> String {
+        let filter = self
+            .filter
+            .as_ref()
+            .map(|filter| render_seg_predicate(filter, dialect));
+        self.to_sql_select_with_filter(dialect, select_list, filter.as_deref())
+    }
+
+    fn to_sql_select_with_filter(
+        &self,
+        dialect: &dyn SqlDialect,
+        select_list: &str,
+        filter: Option<&str>,
+    ) -> String {
+        let nodes = dialect.quote_ident(dialect.nodes_table());
+        let edges_tbl = dialect.quote_ident(dialect.edges_table());
 
         // Comma-join every node and edge alias; connectivity + filters in WHERE.
         let mut from: Vec<String> = (0..self.node_count)
@@ -3253,8 +3359,8 @@ impl MultiPatternReadPushdown {
                 conds.push(format!("n{i}.label = {}", dialect.string_literal(label)));
             }
         }
-        if let Some(filter) = &self.filter {
-            conds.push(render_seg_predicate(filter, dialect));
+        if let Some(filter) = filter {
+            conds.push(filter.to_string());
         }
 
         let mut sql = format!("SELECT {select_list} FROM {}", from.join(", "));
@@ -5045,16 +5151,19 @@ mod tests {
 
     #[test]
     fn two_segment_path_join() {
-        // Friend-of-friend: a chained join over two segments.
+        assert!(
+            seg_plan("MATCH (a:Person)-[:KNOWS]->()-[:KNOWS]->(c) RETURN a.name, c.name").is_none()
+        );
+        // Disjoint types retain the same chained join SQL.
         assert_eq!(
-            seg_spark("MATCH (a:Person)-[:KNOWS]->()-[:KNOWS]->(c) RETURN a.name, c.name"),
+            seg_spark("MATCH (a:Person)-[:KNOWS]->()-[:RATED]->(c) RETURN a.name, c.name"),
             "SELECT n0.id, n0.label, n0.props, n2.id, n2.label, n2.props \
              FROM `grust_nodes` n0 \
              JOIN `grust_edges` e0 ON e0.src_id = n0.id \
              JOIN `grust_nodes` n1 ON n1.id = e0.dst_id \
              JOIN `grust_edges` e1 ON e1.src_id = n1.id \
              JOIN `grust_nodes` n2 ON n2.id = e1.dst_id \
-             WHERE e0.edge_type = 'KNOWS' AND e1.edge_type = 'KNOWS' AND n0.label = 'Person'"
+             WHERE e0.edge_type = 'KNOWS' AND e1.edge_type = 'RATED' AND n0.label = 'Person'"
         );
     }
 

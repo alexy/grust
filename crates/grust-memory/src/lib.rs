@@ -1,16 +1,19 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use async_trait::async_trait;
-use grust_core::{UniqueValueIndex, prelude::*};
+use grust_core::{TypedGraphIndex, UniqueValueIndex, prelude::*};
+
+mod indexed_snapshot;
 
 type UniqueValueIndexes<Owner> = BTreeMap<Label, BTreeMap<String, UniqueValueIndex<Owner, Value>>>;
 
 #[derive(Clone, Debug, Default)]
 pub struct MemoryGraphStore {
     inner: Arc<RwLock<MemoryGraph>>,
+    index_cache: Arc<Mutex<Option<Arc<TypedGraphIndex>>>>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -716,7 +719,7 @@ impl MemoryGraphStore {
 #[async_trait]
 impl GraphStore for MemoryGraphStore {
     async fn apply_schema(&self, schema: &GraphSchema) -> Result<()> {
-        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        let mut inner = self.write_inner();
         schema.validate_graph(&Self::graph_snapshot(&inner))?;
         inner.schema = Some(schema.clone());
         inner.rebuild_unique_value_indexes();
@@ -752,7 +755,7 @@ impl GraphStore for MemoryGraphStore {
         &self,
         request: GraphNativeConstraintRequest,
     ) -> Result<GraphNativeConstraintReport> {
-        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        let mut inner = self.write_inner();
         if inner.native_constraints.contains(&request.constraint) {
             if request.if_not_exists {
                 return Ok(GraphNativeConstraintReport {
@@ -781,7 +784,7 @@ impl GraphStore for MemoryGraphStore {
     }
 
     async fn put_node(&self, node: &Node) -> Result<PutOutcome> {
-        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        let mut inner = self.write_inner();
         let previous = if Self::requires_write_validation(&inner) {
             Self::validate_node_write(&inner, node)?;
             inner.upsert_node(node.clone())
@@ -795,7 +798,7 @@ impl GraphStore for MemoryGraphStore {
     }
 
     async fn put_edge(&self, edge: &Edge) -> Result<PutOutcome> {
-        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        let mut inner = self.write_inner();
         let previous = if Self::requires_write_validation(&inner) {
             Self::validate_edge_write(&inner, edge)?;
             inner.upsert_edge(edge.clone())
@@ -809,7 +812,7 @@ impl GraphStore for MemoryGraphStore {
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
-        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        let mut inner = self.write_inner();
         if Self::requires_write_validation(&inner) {
             Self::validate_write_snapshot(&inner, &Self::graph_snapshot_with_graph(&inner, graph))?;
         }
@@ -933,14 +936,14 @@ impl GraphStore for MemoryGraphStore {
 #[async_trait]
 impl GraphMutationStore for MemoryGraphStore {
     async fn delete_node(&self, id: &NodeId) -> Result<()> {
-        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        let mut inner = self.write_inner();
         inner.remove_node(id);
         inner.remove_incident_edges(id);
         Ok(())
     }
 
     async fn delete_edge(&self, from: &NodeId, label: &Label, to: &NodeId) -> Result<()> {
-        let mut inner = self.inner.write().expect("memory graph lock poisoned");
+        let mut inner = self.write_inner();
         inner.remove_edges_between(from, label, to);
         Ok(())
     }
@@ -962,7 +965,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     patch,
                     ..
                 } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let ids = Self::matching_node_ids(&inner, label.as_ref(), props, predicates);
                     report.matched_rows += ids.len();
                     report.node_patches += ids.len();
@@ -995,7 +998,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     operand,
                     ..
                 } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let ids = Self::matching_node_ids(&inner, label.as_ref(), props, predicates);
                     report.matched_rows += ids.len();
                     report.node_patches += ids.len();
@@ -1029,7 +1032,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     keys,
                     ..
                 } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let ids = Self::matching_node_ids(&inner, label.as_ref(), props, predicates);
                     report.matched_rows += ids.len();
                     report.node_property_removes += ids.len();
@@ -1058,7 +1061,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     predicates,
                     ..
                 } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let ids = Self::matching_node_ids(&inner, label.as_ref(), props, predicates);
                     let incident_edges = ids
                         .iter()
@@ -1080,7 +1083,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     patch,
                     ..
                 } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let edges = Self::matching_edges(&inner, relationship);
                     report.matched_rows += edges.len();
                     report.edge_patches += edges.len();
@@ -1110,7 +1113,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     operand,
                     ..
                 } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let edges = Self::matching_edges(&inner, relationship);
                     report.matched_rows += edges.len();
                     report.edge_patches += edges.len();
@@ -1139,7 +1142,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                 GraphMutationPlanOp::RemoveMatchingEdgeProps {
                     relationship, keys, ..
                 } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let edges = Self::matching_edges(&inner, relationship);
                     report.matched_rows += edges.len();
                     report.edge_property_removes += edges.len();
@@ -1162,7 +1165,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     }
                 }
                 GraphMutationPlanOp::DeleteMatchingEdges { relationship, .. } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let edges = Self::matching_edges(&inner, relationship);
                     report.matched_rows += edges.len();
                     report.edge_deletes += edges.len();
@@ -1177,7 +1180,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     endpoint_nodes,
                     ..
                 } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let edges = Self::matching_edges(&inner, relationship);
                     let mut ids = edges
                         .iter()
@@ -1225,7 +1228,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     edge_id_policy,
                     ..
                 } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let from_ids = Self::matching_node_ids(
                         &inner,
                         from.label.as_ref(),
@@ -1301,7 +1304,7 @@ impl CypherMutationExecutor for MemoryGraphStore {
                     correlation,
                     ..
                 } => {
-                    let mut inner = self.inner.write().expect("memory graph lock poisoned");
+                    let mut inner = self.write_inner();
                     let mut target_ids = Self::matching_node_ids(
                         &inner,
                         target_label.as_ref(),

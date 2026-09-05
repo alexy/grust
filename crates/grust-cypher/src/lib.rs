@@ -39,7 +39,9 @@ mod read_budget;
 pub mod read_policy;
 pub use read::run_read_query_on_named_graph;
 pub use read_budget::MAX_RANGE_ITEMS;
-pub use read_policy::{ReadQueryPolicy, run_bounded_read_query, validate_read_query};
+pub use read_policy::{
+    ReadQueryPolicy, run_bounded_read_query, run_bounded_read_query_indexed, validate_read_query,
+};
 pub mod semantics;
 pub mod session;
 pub mod transaction;

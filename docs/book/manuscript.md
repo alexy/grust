@@ -886,6 +886,14 @@ When a `GraphSchema` is applied, the memory backend validates writes against it,
 which makes it a useful conformance harness for typed storage behavior before a
 database enters the picture.
 
+For repeated language reads, `indexed_snapshot()` returns a shared immutable
+`TypedGraphIndex`. The first call after a write clones the graph and builds
+typed incoming/outgoing adjacency; later calls reuse it, including through
+cloned store handles. Every write attempt invalidates the cache, while snapshots
+already returned remain unchanged. Construction holds the store's read lock
+and therefore delays writers. Ordinary `GraphStore` reads and traversals keep
+their map-based behavior; indexed Cypher entrypoints are a separate choice.
+
 ```rust
 use grust::prelude::*;
 
@@ -1438,6 +1446,11 @@ silently scanning no relation tables. Explicit edge-label reads and deletes can
 still target a known relation table directly. Traversal batches target-node
 reads per step through `get_nodes`, avoiding a serial node lookup for every
 edge in a fan-out. Mutation batches are wrapped in SurrealDB transactions.
+Both transports push edge endpoint filters to SurrealQL using `meta::id(in)`
+and `meta::id(out)` with complete escaped logical IDs, then retain the Rust
+postfilter. This avoids transferring unrelated relation rows without guessing
+an endpoint table from its ID prefix. It is not a claim that the server uses an
+index seek; live query-plan and performance validation remain separate work.
 SurrealDB 3.2 identifiers are quoted without lossy property-name rewriting.
 Every newly written node stores its original, case-sensitive Grust label in
 the reserved `__grust_label` field instead of reconstructing that label from a
@@ -1567,6 +1580,13 @@ rejection category. A capability or service gap remains visible rather than
 becoming a fallback pass. Those execution classes are not performance
 equivalent and their timings must not be collapsed.
 
+New matrix observations also record a worker-declared execution `plan`:
+`clause-pipeline`, `count-factorized`, `sql-row-source`, `sql-count`, or
+`backend-native`. This is the selected Grust route, not the database's physical
+plan. It is retained in incremental records, including timeouts. Historical
+observations without it remain explicitly unknown; frozen Neo4j and upstream
+bundles are not rewritten. Mixed plans do not form one timing distribution.
+
 The 28-node, 72-edge `sfexample` graph is a conformance and orchestration gate,
 not a backend ranking. Authenticated LSQB SF0.1 and SF0.3 downloads add larger
 tiers with sealed archive and extracted-manifest identities. At those scales,
@@ -1575,9 +1595,18 @@ projection, and backend-native aggregate execution, while whole-store
 materialization plus the Rust reference is explicitly `unsupported`. The
 manifest additionally binds a per-query, per-execution-class logical-row bound:
 only exact cardinalities or certified upper bounds at or below 1,000,000 are
-timed on downloaded tiers. Larger or insufficient Rust-row bounds are explicit
-unsupported outcomes without samples, while native scalar aggregates remain a
-separate class. The
+timed on downloaded tiers for row-producing Rust plans. Larger or insufficient
+Rust-row bounds are explicit unsupported outcomes without samples. A separate,
+hash-bound registry admits proven indexed counts as `count-factorized` with
+`not-materialized` Rust rows; this describes the algorithm, not an empty query
+result or zero memory usage. Native scalar aggregates remain a separate class.
+For the pinned workload, Memory selects indexed counts for all 22 cases
+(q1–q9 and a1–a13); Turso and PostgreSQL select scalar SQL counts for q1, q4,
+a1 and a7. Unproven shapes retain their existing routes and gates. All 22
+example cases pass offline
+on Memory and embedded Turso, but these checks do not qualify a performance run
+or a live PostgreSQL service. Index construction is load work; parsing,
+semantic analysis, planning and execution remain query-timed. The
 fourteen-case policy suite remains fixed to `sfexample`. Sail, PostgreSQL PGQ,
 and Helix have no default pinned service startup contract; their cells are
 `unavailable` unless an operator explicitly qualifies a digest-pinned,
@@ -1627,11 +1656,127 @@ relationship segment. Procedures generalize to table-valued functions:
 `CALL name(args) [YIELD …]` evaluates its arguments against each incoming row
 (`tvf.range`, `tvf.keys` join the `db.*` catalog procedures).
 
-Backends that can materialize SQL push the bounded read subset down: a query's
-`MATCH`/`WHERE` filter lowers into backend SQL (Spark and SQLite dialects), while
-the `RETURN` projection still runs through the shared reference. Pushed results
-are therefore identical to the reference *by construction*, and an embedded-SQLite
-differential oracle checks reference-vs-pushdown row equality on every change.
+Backends that can materialize SQL push a supported read subset down: a query's
+`MATCH`/`WHERE` filter lowers into backend SQL, while the `RETURN` projection
+normally runs through the shared reference. Turso and PostgreSQL additionally
+opt into a conservative scalar `COUNT(*)` lowering over existing match sources,
+returning one integer to Rust for decoding and final pagination. Sail has not
+opted into scalar aggregation. Segment and multi-pattern SQL joins decline
+overlapping relationship types when physical edge independence is unproven;
+nullable or duplicate edge IDs are not a valid uniqueness guard. Scalar filters admit only conjunctions of genuine
+property/string equality with exact JSON payload-type checks and byte-wise
+comparison, in addition to structural node labels. Numeric and ambiguous
+inline-label filters keep their older routes. Existing row-source SQL
+filter/coercion restrictions still apply;
+an embedded-SQLite differential oracle checks supported reference-vs-pushdown
+results. Sharing the final projection alone does not prove every backend SQL
+predicate equivalent.
+
+`grust_cypher::read::run_read_query_indexed` uses a reusable `TypedGraphIndex`
+and selects exact count algebra for proven query shapes. Forests require
+globally distinct relationship types and allow
+labels and inline scalar literal properties. The wedge supports labels but no
+inline property maps: two undirected hops with unequal outer endpoints are
+weighted by a differently typed outgoing leaf. Parallel edges, reciprocal edges, self-loops, empty-match
+zero and final scalar pagination are preserved. General predicates, grouping,
+unproven repeated types and other unsupported shapes use the existing reference
+executor. A forest may also carry independent single-edge optional leaves;
+each contributes its number of matching edges, or one padded row if none
+match. Optional anchor predicates stay optional. A narrowly supported plain
+`WITH` before those leaves preserves multiplicity even when it drops bindings;
+filters, nullable anchors and dependent optional branches retain fallback.
+Mandatory forest branch combination reuses borrowed necessary candidates from
+predicate evaluation. Outside-seed weights remain zero; neither optional
+padding nor child products revive them. Full weight-array initialization,
+optional scans and root sums retain their existing accounting.
+Mandatory child-branch scans prepay borrowed chunks of at most 256 physical
+adjacency slots, including incoming self-loop copies that are skipped when
+counting. Successful work totals remain exact and no storage is added; a tight
+budget can reject a whole chunk before its affordable prefix. Per-predicate
+charges and checkpoints remain, while property-free scans checkpoint at most
+256 slots apart. Optional execution is unchanged.
+Property-bearing roles with at least two mandatory incident atoms first require
+a nonempty typed adjacency row for each atom in its role-relative direction.
+This necessary-condition prefilter resolves each type once into a borrowed
+`TypedAdjacencyView`, retaining a charged per-role vector of views and directions.
+Each actual row probe is still charged; it does not scan neighbors or allocate
+candidates. Enabled roles may choose a strictly shorter borrowed sparse source
+list for a mandatory directed atom instead of their label/full-domain seed,
+charging one metadata inspection per atom. Ties retain the current seed;
+undirected atoms and dense storage do not supply source lists. The view's
+`sparse_outgoing_sources()` and `sparse_incoming_sources()` distinguish dense
+storage (`None`) from an absent relationship (`Some(&[])`). Source slots are
+sorted and unique, without copying or intersecting lists; every original
+predicate and required-row check still applies to survivors.
+Disabled or empty-candidate roles prepare nothing. Views borrow the
+immutable index and retain its dense/sparse and absent-row behavior without
+cloning the snapshot. Original predicates remain for survivors;
+optional edges never qualify a mandatory role. Degree-one and property-free
+roles stay unchanged. This structural heuristic can add overhead on dense
+roles; it is not a general selectivity estimate or a measured speedup guarantee.
+
+Weighted tag intersections and optional-null tag/wedge anti-joins preserve
+the distinction between witness existence and witness multiplicity. Wedge
+anti-joins subtract weighted support triangles; they share a degree-oriented
+topology helper with location triangles and account for their additional
+scratch space. Support edges store checked compact multiplicities and widen
+before count arithmetic. The helper orders forward targets by explicit
+`(simple support degree, stable graph vertex slot)` rank, not multiplicity or
+original ordinal. For x–y, y's forward neighbors all rank above y, so the
+intersection safely starts strictly after y in x's sorted row. Callbacks map
+the three ranks back to original active-domain ordinals; location-triangle and
+wedge anti-join role weights and semantics are unchanged.
+
+Constructing that rank order costs O(V log V) and charges two V-entry `u32`
+maps, ordinal-to-rank and rank-to-ordinal, retaining only the latter after
+forward adjacency is filled. Here V is the active domain size and M the number
+of distinct non-loop support pairs.
+The helper's scratch remains O(V + M); forward-row sorting costs O(M log M) in
+the worst case and triangle intersections remain O(M^(3/2)). These structural
+bounds are not a measured speedup claim. Fixed-cost anti-wedge mask scans
+precharge small chunks, retaining cumulative work totals and end-of-pass
+deadline checkpoints.
+Wedge role masks seed unconditional roles during initialization and use the
+label index for the others, preserving every label condition and overlapping roles.
+Leaf and non-anti center traversal reuse those borrowed candidates with full
+mask checks and per-candidate charging. Unlabeled roles still scan all vertices,
+and full-size mask/leaf arrays and their initialization remain accounted.
+Non-anti wedges merge each center's neighbors once, accumulating its A degree,
+weighted C leaves and A/C overlap. The exact checked `u128` product minus overlap
+preserves the unequal-outer-node constraint and physical edge multiplicities
+without additional scratch. Scalar narrowing happens only after subtraction;
+the wedge anti-join's support algorithm is unchanged.
+The index's global edge bound allows checked `u32` multiplicities/degrees and
+checked `u64` weighted leaf totals; overlap, final products and accumulated
+counts stay `u128`. Multiplicities come from drained adjacency spans, while raw
+scan indices remain `usize` because loops occur in both adjacency rows.
+Non-anti physical-slot scans prepay at most 256 slots per chunk, preserving exact
+successful work totals and separate grouped-endpoint charges. Deadline checks
+remain bounded even within large parallel groups and cover the end of traversal.
+An insufficient budget may conservatively refuse a partly affordable chunk.
+Directed four-cycles narrow role candidates through required
+labels, retain every predicate, and choose adjacency merging or binary probes.
+Symmetric location triangles use sparse country/path weights and
+oriented intersections; neither creators nor locations are assumed functional.
+Scalar scans count proven nonnull node/edge bindings, zero-hop identities,
+bounded literal ranges, simple null/constant-string probes and compatible scalar
+unions without match-row buffers. Range limits, null semantics and duplicates
+remain part of each proof. Scalar literal predicates borrow property values;
+comparing an incompatible complex JSON value does not clone its payload.
+
+The classifier and executor share their eligibility proof; a query ID
+never selects an optimization. The repository's
+[`docs/INDEXED_READS.md`](https://github.com/querygraph/grust/blob/main/docs/INDEXED_READS.md)
+documents the exact API and shape boundaries.
+
+The reference executor also enforces relationship uniqueness within a single
+`MATCH`, including comma paths. It uses physical edge slots, not application
+IDs, and starts a new uniqueness scope at the next `MATCH`. Named fixed edges
+keep their identity through `WITH` aliases, bare-variable grouping and
+`WITH DISTINCT`; internal slot keys never appear in public results. Repeated
+relationship-list
+bindings are explicitly unsupported; shortest selection and node-simple
+variable-length traversal retain their documented restrictions.
 
 Applications that intentionally expose a small read-only surface can use
 `ReadQueryPolicy`, `validate_read_query`, and `run_bounded_read_query`. This is
@@ -1648,6 +1793,14 @@ each graph scan, so an outer row cannot reset that work or its deadline.
 Authorization, tenant-safe graph projection, remote-backend deadlines, and
 process isolation remain the host's responsibility; the cooperative timeout is
 not an operating-system hard kill.
+
+`run_bounded_read_query_indexed` applies that same policy to an immutable
+indexed snapshot, including fallback execution. Planner work, masks, count
+arrays and typed adjacency scans consume the active budgets. Exact serialized
+graph size is cached at index construction, so each query checks the same byte
+limit without serializing the graph again. Snapshot construction occurs before
+the query call and is outside its deadline and intermediate budget; the host
+must separately bound loading and resident memory.
 
 ## Values, procedures, transactions, writes
 

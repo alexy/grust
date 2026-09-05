@@ -15,7 +15,7 @@
 //! and rendering logic (only function names / quoting differ), so a green oracle
 //! gives high confidence in that path too.
 
-use grust_core::{Edge, Graph, Label, Node, NodeId, Props, Value};
+use grust_core::{Edge, Graph, GraphAdminStore, GraphStore, Label, Node, NodeId, Props, Value};
 use grust_cypher::pushdown::{
     ReadPushdown, ScalarKind, SqlDialect, SqliteDialect, StrOp, TypeHints, combine_union,
     plan_node_read, plan_node_read_with_hints, plan_read, plan_segment_read,
@@ -23,6 +23,7 @@ use grust_cypher::pushdown::{
 };
 use grust_cypher::read::run_read_query;
 use grust_cypher::{CypherParameters, CypherResultTable};
+use grust_turso::TursoGraphStore;
 
 /// A small social/geo graph with varied types: ints, a float, missing props
 /// (NULLs), and a name with an apostrophe (to exercise string escaping).
@@ -130,9 +131,6 @@ const PUSHABLE_SEGMENTS: &[&str] = &[
     "MATCH (a:Person {name:'Ada'})-[:KNOWS]-(b) RETURN b.name",
     "MATCH (a:Person)-[:RATED]-(b) RETURN a.name, b.name",
     // Multi-segment (chained) paths.
-    "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.name, b.name, c.name",
-    "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE c.age >= 80 RETURN a.name, c.name",
-    "MATCH (a:Person)-[:KNOWS]->(b)<-[:KNOWS]-(c) RETURN a.name, c.name",
     "MATCH (a:Person)-[:KNOWS]->(b)-[:RATED]->(c) RETURN a.name, c.name",
     "MATCH (:Person)-[:KNOWS]->(b) WHERE b.name STARTS WITH 'A' RETURN b.name",
     "MATCH (a:Person)-[:KNOWS]->(b) WHERE b.name CONTAINS 'r' RETURN b.name",
@@ -380,6 +378,57 @@ async fn segment_pushdown_matches_reference() {
         let actual = segment_pushdown(&conn, cypher, &params).await;
         assert_same(cypher, &actual, &expected);
     }
+}
+
+#[tokio::test]
+async fn overlapping_join_queries_keep_real_store_fallback_and_exact_rows() {
+    let graph = fixture();
+    let store = TursoGraphStore::in_memory().await.unwrap();
+    store.bootstrap().await.unwrap();
+    store.put_graph(&graph).await.unwrap();
+    let params = CypherParameters::new();
+    // Preserve the former pushdown queries via actual backend fallback.
+    // Backtracking has no distinct-edge match, even with distinct variable names.
+    for (source, rows) in [
+        (
+            "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) RETURN a.name, b.name, c.name",
+            1,
+        ),
+        (
+            "MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE c.age >= 80 RETURN a.name, c.name",
+            1,
+        ),
+        (
+            "MATCH (a:Person)-[:KNOWS]->(b)<-[:KNOWS]-(c) RETURN a.name, c.name",
+            0,
+        ),
+        (
+            "MATCH (a:Person)-[:KNOWS]->(b:Person), (b)-[:KNOWS]->(c:Person) RETURN a.name, c.name",
+            1,
+        ),
+        (
+            "MATCH (a:Person)-[:KNOWS]->(b), (a)-[:KNOWS]->(b) RETURN a.name",
+            0,
+        ),
+    ] {
+        assert!(plan_segment_read(source, &params).unwrap().is_none());
+        assert!(plan_read(source, &params, &OracleHints).unwrap().is_none());
+        let expected = run_read_query(&graph, source, &params).unwrap();
+        assert_eq!(expected.rows.len(), rows, "{source}");
+        assert_same(
+            source,
+            &store.run_read_query(source, &params).await.unwrap(),
+            &expected,
+        );
+    }
+    let source = "MATCH ()-[:KNOWS]->(), ()-[:KNOWS]->() RETURN count(*) AS n";
+    assert!(plan_read(source, &params, &OracleHints).unwrap().is_none());
+    let expected = run_read_query(&graph, source, &params).unwrap();
+    assert_eq!(expected.rows, vec![vec![Value::Int(6)]]); // 3 * (3 - 1)
+    assert_eq!(
+        store.run_read_query(source, &params).await.unwrap(),
+        expected
+    );
 }
 
 #[tokio::test]
@@ -642,7 +691,6 @@ async fn multi_pattern_pushdown_matches_reference() {
     for cypher in [
         "MATCH (a:Person)-[:KNOWS]->(b), (a)-[:RATED]->(c) RETURN a.name, b.name, c.name",
         "MATCH (a:Person), (c:City) RETURN a.name, c.name",
-        "MATCH (a:Person)-[:KNOWS]->(b:Person), (b)-[:KNOWS]->(c:Person) RETURN a.name, c.name",
     ] {
         let plan = plan_read(cypher, &params, &OracleHints)
             .unwrap()

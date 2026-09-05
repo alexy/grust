@@ -29,9 +29,10 @@ pub use grust_cypher::{
     cypher_mutation_plan_with_options, cypher_mutation_plan_with_return_options,
     ensure_catalog_graph_selection, ensure_query_uses_graph,
     execute_cypher_mutation_returning_with_options_on_store, query_graph_selection,
-    run_bounded_read_query, run_read_query_on_named_graph, sail_cypher_constraints,
-    sail_cypher_ddl, sail_cypher_mutation_plan, sail_cypher_mutation_plan_with_options,
-    sail_cypher_mutation_plan_with_return_options, validate_read_query,
+    run_bounded_read_query, run_bounded_read_query_indexed, run_read_query_on_named_graph,
+    sail_cypher_constraints, sail_cypher_ddl, sail_cypher_mutation_plan,
+    sail_cypher_mutation_plan_with_options, sail_cypher_mutation_plan_with_return_options,
+    validate_read_query,
 };
 
 #[cfg(feature = "falkor")]
@@ -97,9 +98,10 @@ pub mod prelude {
         cypher_mutation_plan_with_options, cypher_mutation_plan_with_return_options,
         ensure_catalog_graph_selection, ensure_query_uses_graph,
         execute_cypher_mutation_returning_with_options_on_store, query_graph_selection,
-        run_bounded_read_query, run_read_query_on_named_graph, sail_cypher_constraints,
-        sail_cypher_ddl, sail_cypher_mutation_plan, sail_cypher_mutation_plan_with_options,
-        sail_cypher_mutation_plan_with_return_options, validate_read_query,
+        run_bounded_read_query, run_bounded_read_query_indexed, run_read_query_on_named_graph,
+        sail_cypher_constraints, sail_cypher_ddl, sail_cypher_mutation_plan,
+        sail_cypher_mutation_plan_with_options, sail_cypher_mutation_plan_with_return_options,
+        validate_read_query,
     };
 
     #[cfg(feature = "falkor")]

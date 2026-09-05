@@ -252,6 +252,22 @@ impl SqlDialect for PostgresReadDialect {
     fn json_property(&self, props_column: &str, key: &str) -> String {
         format!("{props_column} #>> ARRAY[{}, 'value']", sql_str(key))
     }
+    fn exact_string_property_eq(
+        &self,
+        props_column: &str,
+        key: &str,
+        value: &str,
+    ) -> Option<String> {
+        if value.contains('\0') {
+            return None;
+        }
+        let path = format!("ARRAY[{}, 'value']", self.string_literal(key));
+        let text = self.byte_order_expr(&format!("({props_column} #>> {path})"));
+        let value = self.string_literal(value);
+        Some(format!(
+            "(jsonb_typeof({props_column} #> {path}) = 'string' AND {text} = {value})"
+        ))
+    }
     fn cast_int(&self, expr: &str) -> String {
         format!("({expr})::bigint")
     }
@@ -368,7 +384,9 @@ impl PostgresGraphStore {
     /// paths via `WITH RECURSIVE`, catalog procedures, and `tvf.range` via
     /// `generate_series`); shortest paths, correlated `tvf.keys`, and
     /// everything unplannable fall back to the Memory reference over
-    /// [`Self::read_graph`]. Results are identical to
+    /// [`Self::read_graph`]. Eligible single `COUNT(*)` projections aggregate
+    /// in SQL and transport only one scalar; final pagination remains in the
+    /// shared Rust projection. Results are identical to
     /// [`grust_cypher::read::run_read_query`] by construction.
     pub async fn run_read_query(
         &self,
@@ -379,6 +397,13 @@ impl PostgresGraphStore {
         if let Some(plan) = plan_read(cypher, params, &NoTypeHints)?
             && plan.supported_by(&dialect)
         {
+            if let Some(count) = plan.scalar_count_read()
+                && count.supported_by(&dialect)
+            {
+                let sql = count.to_sql(&dialect)?;
+                let rows = self.run_text_rows(&sql, count.column_count()).await?;
+                return count.project_text_rows(rows, params);
+            }
             if let Some((arms, distinct)) = plan.union_arms() {
                 let mut tables = Vec::with_capacity(arms.len());
                 for arm in arms {

@@ -271,3 +271,16 @@ pub(crate) fn check_range_items(items: usize) -> Result<()> {
     })?;
     charge_candidate_work(items, "materializing range()")
 }
+
+/// Exercise execution-phase checkpoints without sleeps or scheduler races.
+#[cfg(test)]
+pub(crate) fn expire_deadline_for_test() {
+    BUDGETS.with(|budgets| {
+        budgets
+            .borrow_mut()
+            .last_mut()
+            .expect("deadline expiry requires an active test budget")
+            .limits
+            .deadline = Instant::now();
+    });
+}

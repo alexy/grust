@@ -10,10 +10,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 mod guarded_commit;
+mod typed_graph_index;
 mod unique_values;
 pub use guarded_commit::{
     GraphCommitReceipt, GraphCommitStore, GraphExpectation, GuardedGraphCommit,
 };
+pub use typed_graph_index::{TypedAdjacencyView, TypedGraphIndex, TypedNeighbor};
 pub use unique_values::UniqueValueIndex;
 
 pub type Result<T> = std::result::Result<T, GrustError>;
@@ -4248,9 +4250,9 @@ pub mod prelude {
         GraphRelationshipMatch, GraphRowEdgeIdPolicy, GraphSchema, GraphSchemaBuilder, GraphStore,
         GraphValue, GraphWriteCorrelation, GrustError, GuardedGraphCommit, Label, LoadReport, Node,
         NodeId, NodeType, PathValue, Props, PutOutcome, Result, RfcDate, Start, Step, Traversal,
-        Value, checked_edge_key, classify_edge_upsert, classify_node_upsert, edge_key,
-        edge_key_matches, edge_keys_equal, evaluate_numeric_update, generated_row_edge_id,
-        relationship_type, schema_identifier, validate_edge_key_components,
+        TypedAdjacencyView, TypedGraphIndex, Value, checked_edge_key, classify_edge_upsert,
+        classify_node_upsert, edge_key, edge_key_matches, edge_keys_equal, evaluate_numeric_update,
+        generated_row_edge_id, relationship_type, schema_identifier, validate_edge_key_components,
         validate_physical_identifier_claims,
     };
 

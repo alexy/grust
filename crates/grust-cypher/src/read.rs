@@ -31,12 +31,31 @@ use crate::read_budget;
 use crate::session::ensure_query_uses_graph;
 use crate::*;
 
+mod binding_key;
+mod count_cycle;
+mod count_predicate;
+mod count_scan;
+mod count_support;
+mod count_tags;
+mod count_tree;
+mod count_triangle;
+mod count_wedge;
+mod indexed;
+mod match_scope;
+mod property_equality;
+pub use indexed::{
+    IndexedReadPlan, classify_indexed_read_query, execute_read_query_indexed,
+    run_read_query_indexed,
+};
+use match_scope::{EdgeTrail, MatchRow};
+
 /// A value bound to a variable in a candidate row. Pattern matching binds
 /// `Node`/`Edge`; `WITH`/`UNWIND` projections bind computed `Value`s.
 #[derive(Debug)]
 enum Bound {
     Node(Node),
-    Edge(Edge),
+    // Graph-free pushed bindings have no slot; graph MATCH bindings do.
+    Edge(Edge, Option<usize>),
     Value(Value),
 }
 
@@ -53,7 +72,7 @@ fn charge_intermediate_copy(context: &str, measure: impl FnOnce() -> usize) -> R
 fn bound_copy_bytes(bound: &Bound) -> usize {
     let nested = match bound {
         Bound::Node(node) => read_budget::node_copy_bytes(node),
-        Bound::Edge(edge) => read_budget::edge_copy_bytes(edge),
+        Bound::Edge(edge, _) => read_budget::edge_copy_bytes(edge),
         Bound::Value(value) => read_budget::value_copy_bytes(value),
     };
     std::mem::size_of::<Bound>().saturating_add(nested)
@@ -72,7 +91,7 @@ fn row_copy_bytes(row: &Row) -> usize {
 fn clone_bound_unaccounted(bound: &Bound) -> Bound {
     match bound {
         Bound::Node(node) => Bound::Node(node.clone()),
-        Bound::Edge(edge) => Bound::Edge(edge.clone()),
+        Bound::Edge(edge, slot) => Bound::Edge(edge.clone(), *slot),
         Bound::Value(value) => Bound::Value(value.clone()),
     }
 }
@@ -286,10 +305,11 @@ fn advance_rows(
     match clause {
         Clause::Use(_) => Ok((rows, None)),
         Clause::Match(m) if !m.optional => {
-            let mut rows = rows;
+            let mut rows = match_scope::begin(rows)?;
             for pattern in &m.patterns {
                 rows = expand_pattern(graph, index, pattern, rows, params)?;
             }
+            let mut rows = match_scope::finish(rows)?;
             if let Some(where_expr) = &m.where_clause {
                 rows = filter_rows(rows, where_expr, params)?;
             }
@@ -301,10 +321,14 @@ fn advance_rows(
             let new_vars = pattern_variables(&m.patterns);
             let mut out = Vec::new();
             for row in rows {
-                let mut matched = vec![clone_row(&row, "starting OPTIONAL MATCH expansion")?];
+                let mut matched = match_scope::begin(vec![clone_row(
+                    &row,
+                    "starting OPTIONAL MATCH expansion",
+                )?])?;
                 for pattern in &m.patterns {
                     matched = expand_pattern(graph, index, pattern, matched, params)?;
                 }
+                let mut matched = match_scope::finish(matched)?;
                 if let Some(where_expr) = &m.where_clause {
                     matched = filter_rows(matched, where_expr, params)?;
                 }
@@ -668,7 +692,7 @@ fn procedure_rows(
                     Some(Bound::Node(n)) => {
                         return Ok(string_rows(n.props.keys().cloned().collect()));
                     }
-                    Some(Bound::Edge(e)) => {
+                    Some(Bound::Edge(e, _)) => {
                         return Ok(string_rows(e.props.keys().cloned().collect()));
                     }
                     _ => {}
@@ -844,24 +868,16 @@ fn grouped_bindings(
         .filter(|i| !expr_has_aggregate(&i.expr))
         .collect();
 
-    let mut order: Vec<String> = Vec::new();
-    let mut groups: HashMap<String, (Row, Vec<usize>)> = HashMap::new();
+    let mut order: Vec<binding_key::Key> = Vec::new();
+    let mut groups: HashMap<binding_key::Key, (Row, Vec<usize>)> = HashMap::new();
     for (idx, row) in rows.iter().enumerate() {
-        let key_values: Vec<Value> = key_items
-            .iter()
-            .map(|i| eval(&i.expr, row, params))
-            .collect::<Result<_>>()?;
-        let key = return_row_key(&key_values, "WITH GROUP BY")?;
+        let key = binding_key::grouping(&key_items, row, params)?;
         match groups.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut entry) => {
                 entry.get_mut().1.push(idx);
             }
             std::collections::hash_map::Entry::Vacant(entry) => {
-                read_budget::charge_intermediate_bytes(
-                    entry.key().len(),
-                    "recording WITH grouping order",
-                )?;
-                order.push(entry.key().clone());
+                order.push(entry.key().copy("recording WITH grouping order")?);
                 entry.insert((
                     clone_row(row, "retaining WITH group representatives")?,
                     vec![idx],
@@ -870,8 +886,8 @@ fn grouped_bindings(
         }
     }
     if key_items.is_empty() && rows.is_empty() {
-        order.push(String::new());
-        groups.insert(String::new(), (Row::new(), Vec::new()));
+        order.push(binding_key::Key::default());
+        groups.insert(binding_key::Key::default(), (Row::new(), Vec::new()));
     }
 
     let mut out = Vec::with_capacity(order.len());
@@ -900,19 +916,16 @@ fn grouped_bindings(
 }
 
 /// Deduplicate a `WITH DISTINCT` (or subquery `RETURN DISTINCT`) row stream by
-/// the **produced** rows' bound values. The projection has already run, so the
+/// the **produced** rows' bindings. Bare relationships retain physical identity.
+/// The projection has already run, so the
 /// items' source expressions may reference variables the new rows no longer
 /// bind (e.g. `WITH DISTINCT p.name AS n` drops `p`); the produced bindings
-/// are exactly the projected values, so they are the dedup key.
+/// are exactly the projected bindings, so they are the dedup key.
 fn dedup_bindings(rows: Vec<Row>) -> Result<Vec<Row>> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(rows.len());
     for row in rows {
-        let mut values: Vec<Value> = Vec::with_capacity(row.len());
-        for bound in row.values() {
-            values.push(bound_value(bound)?);
-        }
-        if seen.insert(return_row_key(&values, "WITH DISTINCT")?) {
+        if seen.insert(binding_key::bindings(&row)?) {
             read_budget::charge_candidate_work(1, "deduplicating WITH rows")?;
             out.push(row);
         }
@@ -981,7 +994,7 @@ fn skip_limit_bindings(
 fn bound_value(bound: &Bound) -> Result<Value> {
     match bound {
         Bound::Node(node) => materialize_node_value(node, "materializing bound nodes"),
-        Bound::Edge(edge) => materialize_edge_value(edge, "materializing bound relationships"),
+        Bound::Edge(edge, _) => materialize_edge_value(edge, "materializing bound relationships"),
         Bound::Value(value) => clone_value(value, "materializing bound values"),
     }
 }
@@ -1070,7 +1083,7 @@ fn binding_rows_to_rows(binding_rows: Vec<Vec<(String, PushedBinding)>>) -> Vec<
 fn bound_from_pushed(binding: PushedBinding) -> Bound {
     match binding {
         PushedBinding::Node(node) => Bound::Node(node),
-        PushedBinding::Edge(edge) => Bound::Edge(edge),
+        PushedBinding::Edge(edge) => Bound::Edge(edge, None),
         PushedBinding::Null => Bound::Value(Value::Null),
     }
 }
@@ -1440,17 +1453,18 @@ struct IndexedEdges<'a> {
 }
 
 impl<'a> Iterator for IndexedEdges<'a> {
-    type Item = &'a Edge;
+    type Item = (usize, &'a Edge);
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Some(index) = self.first.next() {
-            return Some(&self.graph.edges[*index]);
+            return Some((*index, &self.graph.edges[*index]));
         }
         let second = self.second.as_mut()?;
         loop {
-            let edge = &self.graph.edges[*second.next()?];
+            let slot = *second.next()?;
+            let edge = &self.graph.edges[slot];
             if !self.skip_second_self_loops || edge.from != edge.to {
-                return Some(edge);
+                return Some((slot, edge));
             }
         }
     }
@@ -1521,9 +1535,9 @@ fn expand_pattern(
     graph: &Graph,
     index: &NodeIndex,
     pattern: &PathPattern,
-    base_rows: Vec<Row>,
+    base_rows: Vec<MatchRow>,
     params: &CypherParameters,
-) -> Result<Vec<Row>> {
+) -> Result<Vec<MatchRow>> {
     if let Some(kind) = pattern.shortest {
         return expand_shortest(graph, index, pattern, kind, base_rows, params);
     }
@@ -1543,7 +1557,7 @@ fn expand_pattern(
     let mut out = Vec::new();
     for row in base_rows {
         for start in node_candidates(graph, &pattern.start, &row, params)? {
-            let mut next_row = clone_row(&row, "expanding MATCH patterns")?;
+            let mut next_row = row.copy("expanding MATCH patterns")?;
             if let Some(var) = &pattern.start.variable {
                 next_row.insert(
                     var.clone(),
@@ -1585,9 +1599,9 @@ fn expand_shortest(
     index: &NodeIndex,
     pattern: &PathPattern,
     kind: ShortestKind,
-    base_rows: Vec<Row>,
+    base_rows: Vec<MatchRow>,
     params: &CypherParameters,
-) -> Result<Vec<Row>> {
+) -> Result<Vec<MatchRow>> {
     let [segment] = pattern.segments.as_slice() else {
         return Err(unsupported_gql_feature(
             GqlFeature::ShortestPath,
@@ -1611,14 +1625,15 @@ fn expand_shortest(
 
     let mut out = Vec::new();
     for row in base_rows {
+        match_scope::require_unbound_trail(&row, rel.variable.as_deref())?;
         for start in node_candidates(graph, &pattern.start, &row, params)? {
             // end-node id -> minimal-length edge lists, in first-found order.
-            let mut resolved: BTreeMap<String, Vec<Vec<Edge>>> = BTreeMap::new();
+            let mut resolved: BTreeMap<String, Vec<EdgeTrail>> = BTreeMap::new();
             for length in min..=cap.max(min) {
                 if length > cap {
                     break;
                 }
-                let mut paths: Vec<(Node, Vec<Edge>)> = Vec::new();
+                let mut paths: Vec<(Node, EdgeTrail)> = Vec::new();
                 let mut visited = std::collections::HashSet::new();
                 visited.insert(start.id.as_str().to_string());
                 collect_var_length_paths(
@@ -1628,14 +1643,15 @@ fn expand_shortest(
                     &start,
                     length,
                     Some(length),
-                    &mut Vec::new(),
+                    &mut EdgeTrail::default(),
                     &mut visited,
+                    &[],
                     params,
                     &mut paths,
                 )?;
                 // Same-length ties accumulate here, then merge; endpoints
                 // resolved at an earlier (shorter) length are skipped.
-                let mut found: BTreeMap<String, Vec<Vec<Edge>>> = BTreeMap::new();
+                let mut found: BTreeMap<String, Vec<EdgeTrail>> = BTreeMap::new();
                 for (end, edges) in paths {
                     let end_id = end.id.as_str().to_string();
                     if resolved.contains_key(&end_id) {
@@ -1659,12 +1675,20 @@ fn expand_shortest(
                 let Some(end_node) = index.get(graph, &end_id) else {
                     continue;
                 };
-                let picked: Vec<&Vec<Edge>> = match kind {
+                let picked: Vec<&EdgeTrail> = match kind {
                     ShortestKind::Single => edge_lists.iter().take(1).collect(),
                     ShortestKind::All => edge_lists.iter().collect(),
                 };
-                for edges in picked {
-                    let mut next_row = clone_row(&row, "producing shortest-path rows")?;
+                for trail in picked {
+                    // Preserve shortest selection (including first-found ties),
+                    // then apply MATCH uniqueness. Never substitute a longer
+                    // path merely because a chosen shortest path reused an edge.
+                    if !row.disjoint(&trail.slots)? {
+                        continue;
+                    }
+                    let edges = &trail.edges;
+                    let mut next_row = row.copy("producing shortest-path rows")?;
+                    next_row.record(&trail.slots)?;
                     if let Some(var) = &pattern.start.variable {
                         next_row.insert(
                             var.clone(),
@@ -1748,12 +1772,12 @@ fn expand_segments(
     segments: &[PathSegment],
     idx: usize,
     current: &Node,
-    row: Row,
+    row: MatchRow,
     params: &CypherParameters,
     path_var: Option<&str>,
     acc_nodes: Vec<Node>,
     acc_edges: Vec<Edge>,
-    out: &mut Vec<Row>,
+    out: &mut Vec<MatchRow>,
 ) -> Result<()> {
     if idx == segments.len() {
         let mut row = row;
@@ -1774,9 +1798,10 @@ fn expand_segments(
     // the search is finite even with an open upper bound). The relationship
     // variable binds to the list of traversed edges.
     if let Some(range) = rel.length {
+        match_scope::require_unbound_trail(&row, rel.variable.as_deref())?;
         let min = range.min.unwrap_or(1) as usize;
         let max = range.max.map(|m| m as usize);
-        let mut paths: Vec<(Node, Vec<Edge>)> = Vec::new();
+        let mut paths: Vec<(Node, EdgeTrail)> = Vec::new();
         let mut visited = std::collections::HashSet::new();
         visited.insert(current.id.as_str().to_string());
         collect_var_length_paths(
@@ -1786,12 +1811,13 @@ fn expand_segments(
             current,
             min,
             max,
-            &mut Vec::new(),
+            &mut EdgeTrail::default(),
             &mut visited,
+            row.slots(),
             params,
             &mut paths,
         )?;
-        for (end_node, edges) in paths {
+        for (end_node, trail) in paths {
             if !node_matches(&end_node, &segment.node, params)? {
                 continue;
             }
@@ -1801,7 +1827,9 @@ fn expand_segments(
             {
                 continue;
             }
-            let mut next_row = clone_row(&row, "expanding variable-length paths")?;
+            let mut next_row = row.copy("expanding variable-length paths")?;
+            next_row.record(&trail.slots)?;
+            let edges = trail.edges;
             if let Some(var) = &rel.variable {
                 let mut arr = Vec::with_capacity(edges.len());
                 for edge in &edges {
@@ -1849,7 +1877,7 @@ fn expand_segments(
         );
     }
     expand_fixed_edges(
-        graph.edges.iter(),
+        graph.edges.iter().enumerate(),
         graph,
         index,
         segments,
@@ -1866,23 +1894,29 @@ fn expand_segments(
 
 #[allow(clippy::too_many_arguments)]
 fn expand_fixed_edges<'a>(
-    edges: impl Iterator<Item = &'a Edge>,
+    edges: impl Iterator<Item = (usize, &'a Edge)>,
     graph: &Graph,
     index: &NodeIndex,
     segments: &[PathSegment],
     idx: usize,
     current: &Node,
-    row: &Row,
+    row: &MatchRow,
     params: &CypherParameters,
     path_var: Option<&str>,
     acc_nodes: &[Node],
     acc_edges: &[Edge],
-    out: &mut Vec<Row>,
+    out: &mut Vec<MatchRow>,
 ) -> Result<()> {
     let segment = &segments[idx];
     let rel = &segment.relationship;
-    for edge in edges {
+    for (slot, edge) in edges {
         read_budget::charge_candidate_work(1, "scanning relationship candidates")?;
+        if row.contains(slot)? {
+            continue;
+        }
+        if !match_scope::fixed_binding_matches(row, rel.variable.as_deref(), slot)? {
+            continue;
+        }
         let Some(next_id) = edge_other_endpoint(edge, current, rel.direction) else {
             continue;
         };
@@ -1905,11 +1939,15 @@ fn expand_fixed_edges<'a>(
         {
             continue;
         }
-        let mut next_row = clone_row(row, "expanding fixed relationship segments")?;
+        let mut next_row = row.copy("expanding fixed relationship segments")?;
+        next_row.record(&[slot])?;
         if let Some(var) = &rel.variable {
             next_row.insert(
                 var.clone(),
-                Bound::Edge(clone_edge(edge, "binding matched relationships")?),
+                Bound::Edge(
+                    clone_edge(edge, "binding matched relationships")?,
+                    Some(slot),
+                ),
             );
         }
         if let Some(var) = &segment.node.variable {
@@ -1955,17 +1993,18 @@ fn collect_var_length_paths(
     node: &Node,
     min: usize,
     max: Option<usize>,
-    edges_so_far: &mut Vec<Edge>,
+    edges_so_far: &mut EdgeTrail,
     visited: &mut std::collections::HashSet<String>,
+    used_slots: &[usize],
     params: &CypherParameters,
-    results: &mut Vec<(Node, Vec<Edge>)>,
+    results: &mut Vec<(Node, EdgeTrail)>,
 ) -> Result<()> {
-    let depth = edges_so_far.len();
+    let depth = edges_so_far.edges.len();
     if depth >= min {
         read_budget::charge_candidate_work(1, "collecting variable-length paths")?;
         results.push((
             clone_node(node, "collecting variable-length path endpoints")?,
-            clone_edges(edges_so_far, "collecting variable-length path edges")?,
+            edges_so_far.copy()?,
         ));
     }
     if max.is_some_and(|m| depth >= m) {
@@ -1982,12 +2021,13 @@ fn collect_var_length_paths(
             max,
             edges_so_far,
             visited,
+            used_slots,
             params,
             results,
         );
     }
     collect_var_length_edges(
-        graph.edges.iter(),
+        graph.edges.iter().enumerate(),
         graph,
         index,
         rel,
@@ -1996,6 +2036,7 @@ fn collect_var_length_paths(
         max,
         edges_so_far,
         visited,
+        used_slots,
         params,
         results,
     )
@@ -2003,20 +2044,24 @@ fn collect_var_length_paths(
 
 #[allow(clippy::too_many_arguments)]
 fn collect_var_length_edges<'a>(
-    edges: impl Iterator<Item = &'a Edge>,
+    edges: impl Iterator<Item = (usize, &'a Edge)>,
     graph: &Graph,
     index: &NodeIndex,
     rel: &RelationshipPattern,
     node: &Node,
     min: usize,
     max: Option<usize>,
-    edges_so_far: &mut Vec<Edge>,
+    edges_so_far: &mut EdgeTrail,
     visited: &mut std::collections::HashSet<String>,
+    used_slots: &[usize],
     params: &CypherParameters,
-    results: &mut Vec<(Node, Vec<Edge>)>,
+    results: &mut Vec<(Node, EdgeTrail)>,
 ) -> Result<()> {
-    for edge in edges {
+    for (slot, edge) in edges {
         read_budget::charge_candidate_work(1, "searching variable-length paths")?;
+        if match_scope::contains(used_slots, slot)? {
+            continue;
+        }
         let Some(next_id) = edge_other_endpoint(edge, node, rel.direction) else {
             continue;
         };
@@ -2032,7 +2077,7 @@ fn collect_var_length_edges<'a>(
         let Some(next_node) = index.get(graph, next_id) else {
             continue;
         };
-        edges_so_far.push(clone_edge(edge, "searching variable-length paths")?);
+        edges_so_far.push(slot, edge)?;
         visited.insert(next_id.to_string());
         collect_var_length_paths(
             graph,
@@ -2043,6 +2088,7 @@ fn collect_var_length_edges<'a>(
             max,
             edges_so_far,
             visited,
+            used_slots,
             params,
             results,
         )?;
@@ -2122,9 +2168,24 @@ fn props_match(props: &Props, map: Option<&MapLiteral>, params: &CypherParameter
         return Ok(true);
     };
     for (key, expr) in &map.entries {
+        // Scalar-literal shortcuts still perform work and must retain the
+        // cooperative checkpoint previously supplied by eval_constant.
+        read_budget::charge_candidate_work(1, "checking inline property predicates")?;
+        // Pure scalar literals can be compared by borrowing the graph value;
+        // do not clone a large JSON property merely to reject its scalar type.
+        if matches!(
+            expr,
+            Expr::Null | Expr::Boolean(_) | Expr::Integer(_) | Expr::Float(_) | Expr::String(_)
+        ) {
+            match props.get(key) {
+                Some(actual) if count_predicate::literal_equal(actual, expr)? => continue,
+                _ => return Ok(false),
+            }
+        }
+        // Preserve expression/parameter errors even when the property is absent.
         let expected = eval_constant(expr, params)?;
         match props.get(key) {
-            Some(actual) if values_equal(actual, &expected) == Some(true) => {}
+            Some(actual) if property_equality::checked(actual, &expected)? == Some(true) => {}
             _ => return Ok(false),
         }
     }
@@ -2814,7 +2875,7 @@ fn eval_element_function(
                     _ => return Err(gql_type(format!("{name}() is not defined for a node"))),
                 });
             }
-            Some(Bound::Edge(e)) => {
+            Some(Bound::Edge(e, _)) => {
                 return Ok(match name {
                     "type" => Value::String(e.label.as_str().to_string()),
                     "id" => {
@@ -3099,7 +3160,7 @@ fn eval_property(base: &Expr, key: &str, row: &Row, params: &CypherParameters) -
                 Some(value) => clone_value(value, "projecting node properties"),
                 None => Ok(Value::Null),
             },
-            Some(Bound::Edge(edge)) => match edge.props.get(key) {
+            Some(Bound::Edge(edge, _)) => match edge.props.get(key) {
                 Some(value) => clone_value(value, "projecting relationship properties"),
                 None => Ok(Value::Null),
             },
@@ -3387,22 +3448,9 @@ fn as_decimal_operand(value: &Value) -> Option<grust_core::Decimal> {
 
 /// Equality with NULL propagation (None == one side NULL / incomparable types).
 fn values_equal(a: &Value, b: &Value) -> Option<bool> {
-    if matches!(a, Value::Null) || matches!(b, Value::Null) {
-        return None;
-    }
-    // Exact decimal/duration equality before any lossy f64 coercion.
-    match (a, b) {
-        (Value::Decimal(x), Value::Decimal(y)) => return Some(x == y),
-        (Value::Duration(x), Value::Duration(y)) => return Some(x == y),
-        _ => {}
-    }
-    if let (Some(x), Some(y)) = (numeric(a), numeric(b)) {
-        return Some(x == y);
-    }
-    match (a, b) {
-        (Value::String(x), Value::String(y)) => Some(x == y),
-        (Value::Bool(x), Value::Bool(y)) => Some(x == y),
-        _ => Some(value_to_json(a) == value_to_json(b)),
+    match property_equality::decision(a, b) {
+        property_equality::Decision::Known(result) => result,
+        property_equality::Decision::JsonFallback => Some(value_to_json(a) == value_to_json(b)),
     }
 }
 

@@ -6,10 +6,126 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Harden benchmark cancellation: latch SIGINT/SIGTERM through child creation,
+  reap owned process groups, revalidate exact container identity during cleanup,
+  and report cleanup failures as errors. Allow an explicit longer logger grace
+  so nested container cleanup can finish before escalation.
 - Record worker-selected LSQB execution plans in new observations and incremental
   journals, including timeouts. Keep missing-plan evidence explicitly legacy,
   validate plan/class compatibility, and prevent mixed-plan timing aggregation;
   preserve the frozen Neo4j and upstream bundles without backfilling metadata.
+- Require and hash-bind passing startup host screens for newly opted-in canonical
+  matrix bundles, validating them on receipt creation and verification. Preserve
+  historical layouts and distinguish startup-only evidence from ongoing host
+  isolation in performance summaries.
+- Audit historical Surreal and Helix SDK cohorts against their original,
+  content-addressed manifest instead of the changing current manifest. Keep
+  source/digest pins and frozen audit outputs unchanged; missing or altered
+  historical contract bytes fail closed without fallback.
+- Add an immutable typed snapshot index and a separate indexed read entrypoint
+  with exact factorized `count(*)` for proven fixed-length pattern forests and
+  unequal-endpoint two-hop wedges with a differently typed outgoing leaf.
+  Independent optional leaves retain null padding and bag multiplicity through
+  a restricted plain `WITH`, without moving optional predicates into mandatory filters.
+  Preserve edge multiplicity, self-loop handling, scalar limits and active read
+  budgets; unsupported plans retain the existing executor. Memory caches indexed
+  snapshots across reads and invalidates them on writes; the bounded indexed API
+  checks cached exact graph size without serializing it on every query.
+- Extend indexed count algebra to weighted tag intersections and optional-null
+  tag/wedge anti-joins, preserving parallel edges and witness-existence semantics.
+  Add nonnull node/edge counts, zero-hop identity paths, bounded range counts,
+  null/constant-string probes and scalar unions without matching-row buffers.
+  Borrow scalar predicates without copying incompatible complex JSON properties;
+  retain numeric/temporal equality, range ceilings and cumulative work limits.
+- Count proven directed four-cycles with grouped multiplicities and adaptive
+  adjacency probes, and symmetric location triangles with sparse path weights
+  and oriented intersections. Do not assume functional creator/location edges.
+- Narrow cycle role candidates using required labels from any node mention;
+  keep every predicate, unlabeled full scans and cumulative resource accounting.
+- Replace repeated wedge anti-neighbor probes with exact weighted support
+  triangles, sharing degree-oriented topology with location triangles. Preserve
+  asymmetric role filters and witness existence, with accounted O(V + M) scratch.
+  Compact stored support multiplicities to checked `u32` values while retaining
+  wide count arithmetic. Precharge small fixed-cost anti-wedge mask chunks,
+  preserving cumulative work totals and deadline checkpoints.
+- Sort shared support targets by explicit simple-degree/stable-vertex-slot rank
+  and intersect only the safe strict suffix. Translate triangle callbacks back
+  to original active-domain ordinals, preserving weighted location-triangle and
+  wedge anti-join semantics. Rank construction adds charged O(V log V) work and
+  two V-entry `u32` maps, one retained; support scratch remains O(V + M), with V
+  active vertices and M distinct non-loop support pairs.
+- Prepare wedge role masks from required-label candidates; initialize
+  unconditional unlabeled roles directly without per-vertex predicate checks.
+  Preserve overlapping roles, every label conjunct and full-size scratch charges.
+- Reuse borrowed label candidates for wedge leaf/center scans and mandatory
+  forest branch combination. Avoid revisiting unrelated zero-weight vertices
+  without allocating candidate lists or repeating label lookups. Unlabeled
+  roles retain full scans; predicates, optional padding and full-size scratch
+  accounting remain unchanged.
+- Prefilter property-bearing forest roles with at least two mandatory incident
+  atoms using necessary typed-adjacency existence checks. Charge each actual
+  lookup, keep original predicates for survivors, and exclude optional edges;
+  no candidate allocation or neighbor scan is added. Dense roles can pay extra
+  lookup overhead, so this is not a general selectivity or performance guarantee.
+- Add copyable borrowed typed-adjacency views that resolve a relationship type
+  once while preserving dense/sparse lookup, physical multiplicities and snapshot
+  lifetime. Cache views for enabled mandatory-adjacency prefilters, charging
+  preparation storage, one-time type resolution and individual row probes;
+  disabled/empty roles retain their allocation-free path.
+- Borrow sparse typed source lists to narrow enabled mandatory forest roles
+  when strictly shorter than the current label/full-domain candidates. Preserve
+  all predicates, row probes, bag multiplicities and full-domain accounting;
+  dense/undirected atoms do not supply seeds, and no candidate lists are copied.
+- Prepay mandatory forest branch scans in borrowed chunks of 256 physical
+  adjacency slots. Successful work totals, loop/parallel-edge semantics and
+  per-predicate charges remain exact; tight budgets can refuse a whole chunk
+  before its partially affordable prefix. Optional execution is unchanged.
+- Count non-anti wedges in one grouped-neighbor traversal per center using
+  checked degree/leaf/overlap totals. Preserve outer-node inequality, self-loops,
+  physical parallel/reciprocal multiplicities and final scalar overflow checks;
+  no additional scratch allocation or change to wedge anti-joins.
+- Prepay non-anti wedge physical-slot scan work in bounded 256-slot chunks to
+  amortize budget access. Successful work totals stay exact, group callbacks
+  retain separate charges, and final deadline checks include empty rows. Tight
+  budgets can conservatively reject a partly affordable chunk before scanning.
+- Narrow non-anti wedge multiplicity/degree to checked `u32` and weighted leaf
+  totals to checked `u64`, using the typed index's global physical-edge bound.
+  Derive multiplicities from drained adjacency spans while keeping scan indices
+  wide. Overlap, final products/subtraction and total count remain `u128`;
+  shared leaf storage, anti-joins and work/allocation budgets are unchanged.
+- Account for label comparison/lookup bytes in scalar and forest counts, and
+  property-map searches in null probes. Constant-time label cardinality shortcuts
+  remain; tight budgets may now reject previously undercharged queries.
+- Correct reference relationship uniqueness within one `MATCH`, including comma
+  paths, physical parallel edges, optional padding and mixed fixed/variable paths.
+  Named fixed relationships keep physical identity through `WITH` aliases,
+  bare-variable grouping and `WITH DISTINCT`;
+  repeated relationship-list bindings now fail explicitly instead of overwriting.
+- Connect indexed Memory counts and opt-in Turso/PostgreSQL scalar SQL counts
+  to LSQB observations. Bind optimized-plan admission to query hashes and exact
+  SQL digests; exempt only proven non-materializing counts from the Rust
+  match-row ceiling. All 22 example cases pass offline against the pinned
+  oracle on Memory and embedded Turso; all 22 pinned Memory queries now select
+  non-materializing plans. Native, non-publication SF0.1/SF0.3 diagnostics also
+  match all 22 pinned counts; qualified container comparisons and live PostgreSQL
+  validation remain pending. Sail has
+  not opted into scalar SQL counts.
+- Restrict scalar SQL filter admission to conjunctions of genuine property/string
+  equality with exact JSON payload-type and byte-comparison checks. Numeric,
+  inline-label and other unproven predicates retain older routes; dialects opt
+  into exact rendering through a default-unsupported hook.
+- Decline SQL segment/multi-pattern joins with overlapping relationship types:
+  nullable or duplicate edge IDs cannot establish physical relationship
+  uniqueness. Preserve the oracle queries through the corrected reference
+  fallback rather than accepting duplicate relationship use in SQL joins.
+- Push Surreal HTTP and SDK edge endpoint predicates to the server using full
+  logical record keys, preserving table independence and client-side filtering.
+  Live query-plan and performance validation remain pending.
+- Add a bounded, load-once Memory profiling diagnostic with pinned dataset/plan
+  checks, per-iteration count oracles and flushed progress. Its distinct schema
+  explicitly excludes publication; it does not modify benchmark observations
+  or the comparison lifecycle.
+
 - Gate native qualification startup on a retained, fail-closed host CPU screen.
   Preserve the completed 264-pass SF0.3 diagnostic as performance-excluded;
   publish the timing correction without changing frozen correctness evidence.

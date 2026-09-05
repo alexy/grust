@@ -855,6 +855,22 @@ impl SqlDialect for TursoReadDialect {
         // Tagged storage: extract the scalar payload under the type tag.
         format!("json_extract({props_column}, '$.{key}.value')")
     }
+    fn exact_string_property_eq(
+        &self,
+        props_column: &str,
+        key: &str,
+        value: &str,
+    ) -> Option<String> {
+        if value.contains('\0') {
+            return None;
+        }
+        let path = self.string_literal(&format!("$.{key}.value"));
+        let value = self.string_literal(value);
+        Some(format!(
+            "(json_type({props_column}, {path}) = 'text' AND \
+             json_extract({props_column}, {path}) COLLATE BINARY = {value})"
+        ))
+    }
     fn cast_int(&self, expr: &str) -> String {
         format!("CAST({expr} AS INTEGER)")
     }
@@ -955,7 +971,9 @@ impl TursoGraphStore {
     /// this dialect (node scans, fixed segments, `OPTIONAL MATCH`,
     /// multi-pattern, `UNION`, `WITH` pipelines, subqueries, and the
     /// non-recursive catalog procedures); everything else falls back to the
-    /// Memory reference over [`Self::read_graph`]. Results are identical to
+    /// Memory reference over [`Self::read_graph`]. Eligible single `COUNT(*)`
+    /// projections aggregate in SQL and transport only one scalar; final
+    /// pagination remains in the shared Rust projection. Results are identical to
     /// [`grust_cypher::read::run_read_query`] by construction.
     pub async fn run_read_query(
         &self,
@@ -966,6 +984,13 @@ impl TursoGraphStore {
         if let Some(plan) = plan_read(cypher, params, &NoTypeHints)?
             && plan.supported_by(&dialect)
         {
+            if let Some(count) = plan.scalar_count_read()
+                && count.supported_by(&dialect)
+            {
+                let sql = count.to_sql(&dialect)?;
+                let rows = self.run_text_rows(&sql, count.column_count()).await?;
+                return count.project_text_rows(rows, params);
+            }
             if let Some((arms, distinct)) = plan.union_arms() {
                 let mut tables = Vec::with_capacity(arms.len());
                 for arm in arms {

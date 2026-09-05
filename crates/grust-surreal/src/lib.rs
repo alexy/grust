@@ -717,8 +717,23 @@ fn surreal_get_edges_query(query: &EdgeQuery, config: &SurrealConfig) -> Result<
             "SurrealConfig.relationships is empty; generic edge reads need configured relationship labels or an EdgeQuery label".to_string(),
         ));
     }
+    // Grust IDs are the complete record keys, independent of physical tables.
+    // Endpoint labels can be absent from the config or differ from ID prefixes,
+    // so restricting reads to inferred type::record(table, id) candidates would
+    // drop valid edges. Filter keys on the server and retain the Rust postfilter.
+    let predicates = [("in", query.from.as_ref()), ("out", query.to.as_ref())]
+        .into_iter()
+        .filter_map(|(endpoint, id)| {
+            id.map(|id| format!("meta::id({endpoint}) = {}", surreal_string(id.as_str())))
+        })
+        .collect::<Vec<_>>();
+    let where_clause = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
+    };
     Ok(format!(
-        "SELECT *, meta::tb(id) AS __grust_label FROM {};",
+        "SELECT *, meta::tb(id) AS __grust_label FROM {}{where_clause};",
         tables
             .iter()
             .map(|table| surreal_identifier(table))
@@ -1369,6 +1384,8 @@ fn surreal_ws_address(surreal_url: &str) -> Result<String> {
     })
 }
 
+#[cfg(test)]
+mod edge_read_tests;
 #[cfg(test)]
 mod hardening_tests;
 #[cfg(test)]

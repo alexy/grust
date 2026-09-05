@@ -90,6 +90,15 @@ object and exact duplicate declarations before any schema operation is sent.
 for local analytics, backend planning, and adapter crates that need validated
 edge endpoints without rebuilding their own node-id maps.
 
+The separate `TypedGraphIndex` owns a reusable immutable snapshot with typed
+incoming/outgoing adjacency. `MemoryGraphStore::indexed_snapshot()` caches it
+until the next write. Indexed Cypher reads use exact count algebra for proven
+forests, optional leaves, wedges, tag anti-joins, cycles, triangles and scalar
+scans, falling back
+to the reference executor for other shapes. Turso and PostgreSQL also opt into scalar SQL counts for a
+conservative read subset. See [indexed reads](docs/INDEXED_READS.md) for APIs,
+bounded-use rules and current limitations; performance qualification is pending.
+
 `grust-cocoindex` is intentionally different: it exports Grust graphs as
 CocoIndex-style node and relationship target state so an incremental indexing
 flow can propagate changes into a downstream graph or table backend.

@@ -10,9 +10,10 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::read::execute_read_query;
+use crate::read::{execute_read_query, execute_read_query_indexed};
 use crate::read_budget::{MAX_RANGE_ITEMS, ReadExecutionBudgetLimits, with_budget};
 use crate::{CypherParameters, CypherResultTable, gql_execution, gql_syntax};
+use grust_core::TypedGraphIndex;
 use grust_core::prelude::{Graph, Result};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -93,6 +94,43 @@ pub fn run_bounded_read_query(
     params: &CypherParameters,
     policy: &ReadQueryPolicy,
 ) -> Result<CypherResultTable> {
+    run_bounded_read_query_with_executor(graph, None, query_text, params, policy, |query| {
+        execute_read_query(graph, query, params)
+    })
+}
+
+/// Execute a bounded read against the index's immutable projected graph.
+///
+/// Applies the same validation, input-size checks, execution budgets and output
+/// checks as [`run_bounded_read_query`], including when execution falls back to
+/// the reference executor. The exact graph-byte limit uses the size measured
+/// when the index acquired its immutable snapshot.
+/// `USE` retains the reference entrypoint's behavior: the policy controls whether
+/// it is permitted; this wrapper does not resolve a different graph snapshot.
+pub fn run_bounded_read_query_indexed(
+    index: &TypedGraphIndex,
+    query_text: &str,
+    params: &CypherParameters,
+    policy: &ReadQueryPolicy,
+) -> Result<CypherResultTable> {
+    run_bounded_read_query_with_executor(
+        index.graph(),
+        Some(index.serialized_graph_bytes()),
+        query_text,
+        params,
+        policy,
+        |query| execute_read_query_indexed(index, query, params),
+    )
+}
+
+fn run_bounded_read_query_with_executor(
+    graph: &Graph,
+    indexed_graph_bytes: Option<usize>,
+    query_text: &str,
+    params: &CypherParameters,
+    policy: &ReadQueryPolicy,
+    execute: impl FnOnce(&Query) -> Result<CypherResultTable>,
+) -> Result<CypherResultTable> {
     let started = Instant::now();
     let deadline = started
         .checked_add(policy.max_execution_time)
@@ -102,7 +140,17 @@ pub fn run_bounded_read_query(
     crate::semantics::analyze(&query)?;
     ensure_graph_bounds(graph, policy)?;
     ensure_serialized_size("parameters", params, policy.max_parameter_bytes, deadline)?;
-    ensure_serialized_size("graph", graph, policy.max_graph_bytes, deadline)?;
+    if let Some(bytes) = indexed_graph_bytes {
+        ensure_before_deadline(deadline)?;
+        if bytes > policy.max_graph_bytes {
+            return Err(gql_execution(format!(
+                "bounded read graph exceeds {} serialized bytes",
+                policy.max_graph_bytes
+            )));
+        }
+    } else {
+        ensure_serialized_size("graph", graph, policy.max_graph_bytes, deadline)?;
+    }
 
     let limits = ReadExecutionBudgetLimits {
         max_candidate_work: policy.max_candidate_work,
@@ -111,7 +159,7 @@ pub fn run_bounded_read_query(
         deadline,
     };
     with_budget(limits, || {
-        let table = execute_read_query(graph, &query, params)?;
+        let table = execute(&query)?;
         if table.rows.len() > policy.max_result_rows {
             return Err(gql_execution(format!(
                 "query produced more than {} rows",
@@ -126,6 +174,10 @@ pub fn run_bounded_read_query(
         Ok(table)
     })
 }
+
+#[cfg(test)]
+#[path = "read_policy/indexed_tests.rs"]
+mod indexed_tests;
 
 fn validate_policy(policy: &ReadQueryPolicy) -> Result<()> {
     let positive = [
@@ -446,7 +498,9 @@ mod tests {
         let policy = ReadQueryPolicy {
             max_query_bytes: 2_000,
             max_candidate_work: 10_000,
-            max_intermediate_bytes: 64 * 1024,
+            // Leave room for MATCH bindings and relationship-scope framing;
+            // the repeated 512-byte projection must still exhaust the budget.
+            max_intermediate_bytes: 96 * 1024,
             ..ReadQueryPolicy::default()
         };
 
