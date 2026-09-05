@@ -98,6 +98,20 @@ The Docker client platform manifest is
 Artifacts are the three `out/neo4j-native-docker-example-*-aaf0999` directories.
 No published ranking or larger-scale result is implied by example qualification.
 
+SF0.1 Docker qualification of the same source/image passed all nine baseline
+queries and thirteen attacks:432,235 nodes and2,080,404 edges. Import took
+89.923seconds and the whole diagnostic completed in145.877seconds; no query
+timed out. The independent Python diagnostic audit checked pinned upstream
+counts, attack counts, ordered journal equality, distinct transaction tags,
+normal process exits and server recovery. This remains a W0/R1 diagnostic on a
+shared host, not a published performance ranking.
+
+Run `python3 benchmarks/lsqb/validate-neo4j-diagnostic.py OUTPUT_DIRECTORY`
+to audit these new Docker diagnostics. Its mutation tests are in
+`test-neo4j-diagnostic.py`. The audit deliberately returns
+`publication_qualified: false`: it does not authenticate the complete
+container/source/resource provenance or issue a publication receipt.
+
 ## Required completion gates
 
 1. Reuse the Rust dataset fingerprint/oracle loaders and bounded graph chunks.
