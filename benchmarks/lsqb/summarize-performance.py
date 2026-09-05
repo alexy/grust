@@ -8,8 +8,17 @@ import statistics
 import subprocess
 import sys
 
+from host_evidence import validate_record
 
-PLAN_NAMES = ('clause-pipeline', 'sql-row-source', 'backend-native')
+
+PLAN_CLASSES = {
+    'clause-pipeline': {'in-process-reference', 'backend-materialize-rust-reference'},
+    'count-factorized': {'in-process-reference'},
+    'sql-row-source': {'backend-row-source-rust-projection'},
+    'sql-count': {'backend-native-aggregate'},
+    'backend-native': {'backend-native-aggregate'},
+}
+PLAN_NAMES = tuple(PLAN_CLASSES)
 PLAN_FILTERS = (*PLAN_NAMES, 'legacy')
 
 
@@ -17,12 +26,15 @@ def distribution(values):
     return dict(min_ns=min(values), median_ns=statistics.median(values), max_ns=max(values))
 
 
-def observation_plan(observation):
+def observation_plan(observation, execution_class=None):
     if 'plan' not in observation:
         return None
     plan = observation['plan']
     if not isinstance(plan, str) or plan not in PLAN_NAMES:
         raise ValueError(f'invalid observation plan: {plan!r}')
+    if execution_class not in PLAN_CLASSES[plan]:
+        raise ValueError(
+            f'observation plan {plan!r} does not match execution class {execution_class!r}')
     return plan
 
 
@@ -33,7 +45,11 @@ def validate_plan_filter(plan):
 
 def summarize_samples(query, warmups, measured, declared_warmups, declared_measurements):
     samples = warmups + measured
-    plans = sorted({observation_plan(x) for x in samples}, key=lambda plan: plan or '')
+    execution = query.get('execution')
+    execution_class = execution.get('class') if isinstance(execution, dict) else None
+    plans = sorted(
+        {observation_plan(x, execution_class) for x in samples},
+        key=lambda plan: plan or '')
     reasons = []
     if not measured:
         reasons.append('no-measurements')
@@ -67,21 +83,54 @@ def summarize_samples(query, warmups, measured, declared_warmups, declared_measu
 def summarize_query(query, plan=None, *, warmup_iterations=None, measurement_iterations=None):
     validate_plan_filter(plan)
     warmups, measured = query['warmups'], query['measurements']
-    source_plans = sorted({observation_plan(x) for x in warmups + measured}, key=lambda value: value or '')
+    execution = query.get('execution')
+    execution_class = execution.get('class') if isinstance(execution, dict) else None
+    source_plans = sorted(
+        {observation_plan(x, execution_class) for x in warmups + measured},
+        key=lambda value: value or '')
     declared_warmups = len(warmups) if warmup_iterations is None else warmup_iterations
     declared_measurements = len(measured) if measurement_iterations is None else measurement_iterations
     selected = None if plan == 'legacy' else plan
-    selected_warmups = [x for x in warmups if plan is None or observation_plan(x) == selected]
-    selected_measured = [x for x in measured if plan is None or observation_plan(x) == selected]
+    selected_warmups = [
+        x for x in warmups
+        if plan is None or observation_plan(x, execution_class) == selected]
+    selected_measured = [
+        x for x in measured
+        if plan is None or observation_plan(x, execution_class) == selected]
     result = summarize_samples(query, selected_warmups, selected_measured,
                                declared_warmups, declared_measurements)
     result.update(plan_filter=plan, source_plans=source_plans,
                   excluded_warmup_count=len(warmups) - len(selected_warmups),
                   excluded_measurement_count=len(measured) - len(selected_measured),
                   plan_subsets=[summarize_samples(
-                      query, [x for x in selected_warmups if observation_plan(x) == value],
-                      [x for x in selected_measured if observation_plan(x) == value],
+                      query,
+                      [x for x in selected_warmups
+                       if observation_plan(x, execution_class) == value],
+                      [x for x in selected_measured
+                       if observation_plan(x, execution_class) == value],
                       declared_warmups, declared_measurements) for value in result['plans']])
+    return result
+
+
+def read_bound_artifact(directory, inventory, name, label):
+    raw = (directory / name).read_bytes()
+    expected = inventory[name]
+    if len(raw) != expected['bytes'] or hashlib.sha256(raw).hexdigest() != expected['sha256']:
+        raise ValueError(f'{label} changed after receipt verification')
+    return raw
+
+
+def summarize_host_screen(directory, inventory):
+    name = 'host-preflight.json'
+    result = dict(status='unrecorded-legacy', startup_screen_passed=None,
+                  evidence_path=None, evidence_sha256=None,
+                  clean_host_performance_eligible=False,
+                  limitation='Startup screening does not establish ongoing host isolation.')
+    if name in inventory:
+        raw = read_bound_artifact(directory, inventory, name, 'host preflight')
+        validate_record(raw)
+        result.update(status='recorded-startup-only', startup_screen_passed=True,
+                      evidence_path=name, evidence_sha256=hashlib.sha256(raw).hexdigest())
     return result
 
 
@@ -95,13 +144,11 @@ def summarize(directory, plan=None):
         raise ValueError('receipt changed during verification')
     receipt = json.loads(receipt_bytes)
     inventory = {entry['path']: entry for entry in receipt['output_inventory']}
+    host_screen = summarize_host_screen(directory, inventory)
     suites = []
     for suite in receipt['suite_order']:
         name = f"matrix-{suite}-sf{receipt['scale_factor']}.json"
-        raw = (directory / name).read_bytes()
-        expected = inventory[name]
-        if len(raw) != expected['bytes'] or hashlib.sha256(raw).hexdigest() != expected['sha256']:
-            raise ValueError('matrix changed after receipt verification')
+        raw = read_bound_artifact(directory, inventory, name, 'matrix')
         matrix = json.loads(raw)
         if matrix['schema_version'] != 3:
             raise ValueError('performance summary requires separated schema-v3 timing fields')
@@ -119,13 +166,15 @@ def summarize(directory, plan=None):
     return dict(schema='grust-lsqb-performance-summary-v1',
                 warning='These are not LDBC Benchmark Results.',
                 source_revision=receipt['source_revision'], scale=receipt['scale_factor'],
-                plan_filter=plan,
+                plan_filter=plan, host_screen=host_screen,
                 receipt_sha256=hashlib.sha256(receipt_bytes).hexdigest(),
                 notes=['Warm-ups are excluded from timing statistics, but any failed warm-up suppresses statistics.',
                        'Coordinator loading is a single separately recorded duration, not a sampled distribution.',
                        'Sample boundary total sums setup, query and recovery per observation; it is not service throughput.',
                        'Execution class, plan, lifecycle and resource limits must accompany cross-backend comparisons.',
                        'A missing observation plan remains null (legacy unknown); backend-native does not describe a server physical plan.',
+                       'count-factorized and sql-count are admitted only for query shapes authenticated by the bundled execution-plan registry.',
+                       'Per-query performance_eligible means a successful fixed-plan cohort (or uniformly legacy-unknown plans), not clean-host performance qualification; a startup screen does not verify ongoing isolation.',
                        'Mixed plans, including warm-ups, suppress pooled statistics. Plan subsets and filters require the full declared warm-up and measurement cohort.'],
                 suites=suites)
 

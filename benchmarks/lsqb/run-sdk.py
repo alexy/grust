@@ -99,6 +99,7 @@ def main():
     cpu = subprocess.check_output(['sysctl', '-n', 'machdep.cpu.brand_string'], text=True, timeout=20).strip()
     output = args.output.resolve()
     output.mkdir(exist_ok=False)
+    runtime.require_host_preflight(output)
 
     def save(name, value):
         with (output / name).open('x') as stream:

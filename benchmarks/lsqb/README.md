@@ -124,6 +124,9 @@ benchmarks/lsqb/test-launcher-portability.sh
 benchmarks/lsqb/test-dataset-integrity.sh
 benchmarks/lsqb/test-external-service.sh
 python3 benchmarks/lsqb/test-cell-watchdog.py
+python3 benchmarks/lsqb/test-cell-watchdog-interruptions.py
+python3 benchmarks/lsqb/test-cell-watchdog-nested-cancellation.py
+python3 benchmarks/lsqb/test-command-progress.py
 python3 benchmarks/lsqb/test-fetch-upstream-source.py
 ```
 
@@ -474,7 +477,7 @@ verifies the container's Compose project/service labels before killing by its
 immutable ID. Successful run containers are retained long enough for that
 identity to be observed, then removed by the same exact-ID check instead of an
 auto-remove race. The watchdog writes the observed identity to an exclusively
-created completion record on every terminal path. That receipt-bound record
+created completion record on controlled success, timeout and error paths. That receipt-bound record
 also fixes the configured timeout, elapsed wall time, child exit status, and
 terminal state. If the watchdog fires—or cannot prove the container
 identity—the run stops without a publication receipt. The bound covers the
@@ -484,6 +487,19 @@ examples above intentionally use a one-hour fail-fast qualification budget;
 they do not silently turn that budget into a per-query wait or claim it can
 contain every configured worst-case timeout. Full-run caps remain explicit
 and configurable, and the cost arithmetic must be reviewed before launch.
+
+SIGINT/SIGTERM are latched through child creation and cleanup. Cancellation
+first stops/reaps the owned CLI group, then kills/removes only the observed
+immutable container ID after revalidating its name and Compose labels. Cleanup
+failures are errors, never successful timeouts. If no identity was observed,
+one late lookup follows CLI termination; this cannot exclude daemon creation
+after that lookup. New diagnostic flows should create/attest a stopped container
+before starting work. Unexpected exceptions attempt cleanup but may lack a
+completion record; missing records fail publication validation. When nesting
+this watchdog under `command-progress.py`, use `--termination-grace-seconds 60`
+to allow bounded Docker cleanup before escalation. This is cancellation grace,
+not a guessed runtime limit. SIGKILL, an unavailable daemon or blocked record
+I/O cannot guarantee cleanup or durable completion.
 
 The supervisor emits a secret-safe stderr heartbeat every 30 seconds with only
 the constrained expected container name and elapsed/remaining wall-clock
@@ -544,6 +560,15 @@ observations. FalkorDB's backend-native scalar aggregate remains admitted.
 This prevents an explosive count such as the 4.913-billion-row SF0.1 Cartesian
 attack from exhausting the runner before its cooperative timeout can quiesce.
 It is a capability and safety boundary, not a zero-time performance result.
+
+Proven non-materializing counts use a separate, hash-bound
+[execution-plan registry](EXECUTION-PLANS.md). All 22 pinned Memory cases now
+select `count-factorized`, with `rust_rows.kind = "not-materialized"`; an empty
+materialized result does not qualify. Index and query work still consume
+resources. Turso and PostgreSQL admit four scalar SQL cases each. These are
+implementation classifications, not qualified larger-scale performance results.
+The separate [Memory profiler](examples/profile_memory/README.md) is a load-once,
+oracle-checked developer diagnostic, never a publication comparison.
 
 `backend-native-aggregate` means the backend computed the scalar itself.
 `backend-row-source-rust-projection` means SQL or Spark supplied rows and Grust

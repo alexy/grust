@@ -351,6 +351,10 @@ verify_output_directories() {
 }
 
 verify_output_directories || die "benchmark output directories changed during setup"
+python3 "${root}/host_preflight.py" \
+    --output "${BENCHMARK_OUTPUT_ROOT}/host-preflight.json" || die \
+    "host CPU preflight failed before benchmark builds or client creation"
+verify_output_directories || die "benchmark output directories changed during host preflight"
 image_manifest="${BENCHMARK_OUTPUT_ROOT}/images.tsv"
 lsqb_open_exclusive_output_fd 3 "$image_manifest" "image manifest" || die \
     "cannot create image manifest"

@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 import statistics
 
+from historical_contracts import load_manifest
+
 ROOT = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('matrix', ROOT / 'validate-matrix-publication.py')
 matrix = importlib.util.module_from_spec(spec)
@@ -26,9 +28,7 @@ MANIFEST = '1dcae942840f216a83282f45f27e7fe228616e8f51af764689dc4f4fea0de849'
 def validate(directory):
     def read(name):
         return matrix.load_json(directory / name, name)[0]
-    raw = (ROOT / 'evidence-manifest-v2.json').read_bytes()
-    require(hashlib.sha256(raw).hexdigest() == MANIFEST, 'canonical contract changed')
-    manifest = json.loads(raw)
+    manifest = load_manifest(MANIFEST)
     report, invocation = read('component.json'), read('invocation.json')
     require(report['schema_version'] == 3 and report['valid'] is True and report['complete'] is False,
             'not a successful standalone component')

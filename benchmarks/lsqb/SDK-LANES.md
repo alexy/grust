@@ -92,13 +92,18 @@ until a real run and independent admission complete.
 
 The frozen `945dfa7` Surreal SDK example runs now have108 baseline and156
 adversarial passing observations. `validate-sdk.py OUTPUT_DIRECTORY` checks
-that pinned cohort against the canonical dataset/query/count contract, timing,
+that pinned cohort against its original dataset/query/count contract, timing,
 rotation, incremental journal and retained runtime lifecycle. Its mutation
 tests reject altered counts, transport labels, ownership and sample records.
 This diagnostic audit does not issue a publication receipt. The site now
 independently admits both frozen example bundles, recomputing summaries and
 checking counts, rotation, query identities, runtime lifecycle and transport.
 Larger-scale SDK evidence remains pending.
+
+The auditor selects the byte-exact, hash-verified
+[historical contract](contracts/README.md), not today's expanded canonical
+manifest. The existing source and manifest digest pins remain mandatory; there
+is no fallback or retroactive host/plan qualification.
 
 Freeze a checked cohort with `bundle-sdk.py RAW_DIRECTORY NEW_BUNDLE_DIRECTORY
 --client-build BUILD_DIRECTORY`. It audits captured bytes, exports only the

@@ -80,6 +80,7 @@ def main():
         parser.error('client platform differs')
     output = args.output.resolve()
     output.mkdir(exist_ok=False)
+    runtime.require_host_preflight(output)
 
     def save(name, value):
         with (output / name).open('x') as stream:

@@ -40,6 +40,9 @@ pub enum RustRowCardinality {
     Exact,
     UpperBound,
     LowerBound,
+    /// The selected executor counts without allocating a row per match.
+    #[serde(rename = "not-materialized")]
+    NotMaterialized,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -30,6 +30,21 @@ def write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def passing_host_preflight() -> dict:
+    return {
+        "schema": "grust-host-preflight-v1",
+        "startup_screen_passed": True,
+        "clean_host_performance_eligible": False,
+        "limitation": "startup screen only; ongoing contention monitoring required",
+        "samples": [
+            {"total_cpu_percent": 20.5, "busy_processes": [],
+             "startup_screen_passed": True,
+             "observed_at": f"2026-09-05T12:00:0{index}+00:00"}
+            for index in range(3)
+        ],
+    }
+
+
 def image_id(label: str) -> str:
     return "sha256:" + hashlib.sha256(label.encode()).hexdigest()
 
@@ -396,8 +411,11 @@ def make_bundle(root: Path, revision: str, scale: str = "example") -> Path:
     expected_files, artifacts, _ = PUBLICATION.expected_layout(
         manifest, scale, include_receipt=False
     )
-    assert len(artifacts) == (54 if scale == "example" else 52)
-    assert len(expected_files) == (102 if scale == "example" else 99)
+    host_required = PUBLICATION.requires_host_preflight(manifest)
+    assert len(artifacts) == (54 if scale == "example" else 52) + host_required
+    assert len(expected_files) == (102 if scale == "example" else 99) + host_required
+    if host_required:
+        write_json(output / "host-preflight.json", passing_host_preflight())
     for relative in expected_files:
         path = output / relative
         if relative.startswith("logs/"):
@@ -555,8 +573,8 @@ class MatrixPublicationTests(unittest.TestCase):
         self.assertEqual(receipt["mode"], "publication")
         self.assertEqual(receipt["status"], "complete")
         self.assertEqual(receipt["source_revision"], self.revision)
-        self.assertEqual(receipt["output_file_count"], 102)
-        self.assertEqual(len(receipt["artifact_sha256"]), 54)
+        self.assertEqual(receipt["output_file_count"], 103)
+        self.assertEqual(len(receipt["artifact_sha256"]), 55)
         self.assertEqual(receipt["suite_valid"], {"baseline": True, "adversarial": True})
         self.assertTrue(receipt["policy_valid"])
         self.assertTrue(receipt["all_required_outcomes_valid"])

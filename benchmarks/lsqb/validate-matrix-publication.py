@@ -18,6 +18,8 @@ import sys
 import tempfile
 from typing import Any
 
+import host_evidence
+
 
 RECEIPT_NAME = "publication-receipt.json"
 MANIFEST_NAME = "evidence-manifest-v2.json"
@@ -126,9 +128,26 @@ OBSERVATION_V3_REQUIRED_FIELDS = frozenset(
 OBSERVATION_V3_FIELDS = OBSERVATION_V3_REQUIRED_FIELDS | {"actual_count", "detail", "plan"}
 OBSERVATION_PLAN_CLASSES = {
     "clause-pipeline": {"in-process-reference", "backend-materialize-rust-reference"},
+    "count-factorized": {"in-process-reference"},
     "sql-row-source": {"backend-row-source-rust-projection"},
+    "sql-count": {"backend-native-aggregate"},
     "backend-native": {"backend-native-aggregate"},
 }
+OBSERVATION_PLAN_BACKENDS = {
+    "count-factorized": {"memory"},
+    "sql-count": {"turso", "postgres"},
+}
+EXECUTION_PLAN_REGISTRY_SCHEMA = "grust-lsqb-execution-plan-registry-v1"
+EXECUTION_PLAN_ENTRY_FIELDS = frozenset(
+    {
+        "adapter_sha256",
+        "backend_query_sha256",
+        "execution_class",
+        "plan",
+        "rust_rows",
+        "source_sha256",
+    }
+)
 LOAD_STRATEGY = {
     "memory": "per-observation-worker-reload",
     "turso": "per-observation-worker-reload",
@@ -253,7 +272,16 @@ def load_manifest(directory: Path) -> tuple[dict[str, Any], str]:
     )
     backends = manifest.get("backends")
     require(isinstance(backends, list) and len(backends) > 0, "manifest has no backends")
+    manifest_execution_plans(manifest)
+    requires_host_preflight(manifest)
     return manifest, sha256(raw)
+
+
+def requires_host_preflight(manifest: dict[str, Any]) -> bool:
+    try:
+        return host_evidence.required(manifest)
+    except ValueError as error:
+        raise PublicationError(str(error)) from error
 
 
 def manifest_backends(manifest: dict[str, Any]) -> list[dict[str, Any]]:
@@ -293,6 +321,95 @@ def manifest_backends(manifest: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def manifest_queries(manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    tracks = manifest.get("tracks")
+    require(isinstance(tracks, dict), "manifest has no query tracks")
+    queries: dict[str, dict[str, Any]] = {}
+    for track in SUITES:
+        track_entry = tracks.get(track)
+        require(isinstance(track_entry, dict), f"manifest has no {track} track")
+        track_queries = track_entry.get("queries")
+        require(isinstance(track_queries, dict), f"manifest has no {track} queries")
+        for query_id, query in track_queries.items():
+            require(
+                isinstance(query_id, str) and query_id and query_id not in queries,
+                f"manifest has a duplicate or invalid query id: {query_id!r}",
+            )
+            require(isinstance(query, dict), f"manifest query is not an object: {query_id}")
+            queries[query_id] = query
+    return queries
+
+
+def manifest_execution_plans(
+    manifest: dict[str, Any],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Validate and return the optional, immutable optimized-plan registry."""
+    if "execution_plans" not in manifest:
+        return {}
+    registry = manifest["execution_plans"]
+    require(isinstance(registry, dict), "manifest execution plan registry is not an object")
+    require(
+        set(registry) == {"schema", "entries"}
+        and registry.get("schema") == EXECUTION_PLAN_REGISTRY_SCHEMA,
+        "manifest execution plan registry has an unexpected schema or fields",
+    )
+    entries = registry.get("entries")
+    require(isinstance(entries, dict) and entries, "manifest execution plan registry is empty")
+    backend_ids = {entry["id"] for entry in manifest_backends(manifest)}
+    canonical_queries = manifest_queries(manifest)
+    require(
+        set(entries) <= {"memory", "turso", "postgres"}
+        and set(entries) <= backend_ids,
+        "manifest execution plan registry has an unsupported backend",
+    )
+    for backend, backend_entries in entries.items():
+        require(
+            isinstance(backend_entries, dict) and backend_entries,
+            f"manifest execution plan registry has no entries for {backend}",
+        )
+        for query_id, entry in backend_entries.items():
+            require(
+                isinstance(query_id, str) and query_id in canonical_queries,
+                f"manifest execution plan registry has an unknown query: {backend}/{query_id}",
+            )
+            require(
+                isinstance(entry, dict) and set(entry) == EXECUTION_PLAN_ENTRY_FIELDS,
+                f"manifest execution plan registry has wrong fields: {backend}/{query_id}",
+            )
+            canonical = canonical_queries[query_id]
+            require(
+                entry.get("source_sha256") == canonical.get("source_sha256")
+                and entry.get("adapter_sha256") == canonical.get("adapter_sha256")
+                and isinstance(entry.get("source_sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", entry["source_sha256"])
+                is not None
+                and isinstance(entry.get("adapter_sha256"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", entry["adapter_sha256"])
+                is not None,
+                f"manifest execution plan registry query hashes differ: {backend}/{query_id}",
+            )
+            if backend == "memory":
+                require(
+                    entry.get("plan") == "count-factorized"
+                    and entry.get("execution_class") == "in-process-reference"
+                    and entry.get("rust_rows")
+                    == {"kind": "not-materialized", "rows": 0}
+                    and entry.get("backend_query_sha256") is None,
+                    f"invalid count-factorized registry entry: {backend}/{query_id}",
+                )
+            else:
+                require(
+                    entry.get("plan") == "sql-count"
+                    and entry.get("execution_class") == "backend-native-aggregate"
+                    and entry.get("rust_rows") is None
+                    and isinstance(entry.get("backend_query_sha256"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", entry["backend_query_sha256"])
+                    is not None,
+                    f"invalid sql-count registry entry: {backend}/{query_id}",
+                )
+    return entries
+
+
 def expected_layout(
     manifest: dict[str, Any], scale: str, include_receipt: bool
 ) -> tuple[set[str], list[str], set[str]]:
@@ -302,6 +419,8 @@ def expected_layout(
     backend_ids = [entry["id"] for entry in backends]
 
     artifacts = {"images.tsv", MANIFEST_NAME}
+    if requires_host_preflight(manifest):
+        artifacts.add(host_evidence.FILENAME)
     artifacts.update(f"matrix-{suite}-sf{scale}.json" for suite in SUITES)
     artifacts.update(
         f"components/{suite}-{backend}-sf{scale}.json"
@@ -819,6 +938,11 @@ def validate_v3_timeout_contract(report: dict[str, Any], path: str) -> None:
                             and execution_class in OBSERVATION_PLAN_CLASSES[plan],
                             f"observation plan does not match execution class: {path}",
                         )
+                        allowed_backends = OBSERVATION_PLAN_BACKENDS.get(plan)
+                        require(
+                            allowed_backends is None or backend in allowed_backends,
+                            f"observation plan does not match backend: {path}",
+                        )
                     for field in ("setup_ns", "elapsed_ns", "recovery_ns"):
                         require(
                             nonnegative_integer(observation.get(field)),
@@ -923,6 +1047,83 @@ def report_identity(
     return schema
 
 
+def optimized_plan_entry_matches_query(
+    query: dict[str, Any], entry: dict[str, Any] | None
+) -> bool:
+    if entry is None:
+        return False
+    execution = query.get("execution")
+    return (
+        isinstance(execution, dict)
+        and query.get("source_sha256") == entry["source_sha256"]
+        and query.get("adapter_sha256") == entry["adapter_sha256"]
+        and execution.get("class") == entry["execution_class"]
+        and execution.get("backend_query_sha256") == entry["backend_query_sha256"]
+        and query.get("rust_rows") == entry["rust_rows"]
+    )
+
+
+def validate_report_execution_plans(
+    report: dict[str, Any], manifest: dict[str, Any], path: str
+) -> None:
+    """Bind optimized query shapes and every executed sample to the registry."""
+    if report.get("schema_version") != 3:
+        return
+    registry = manifest_execution_plans(manifest)
+    cells = report.get("backends")
+    require(isinstance(cells, list), f"matrix has no backend cells: {path}")
+    for cell in cells:
+        require(isinstance(cell, dict), f"malformed backend cell: {path}")
+        identity = cell.get("backend")
+        backend = identity.get("name") if isinstance(identity, dict) else None
+        require(isinstance(backend, str), f"backend cell has no identity: {path}")
+        backend_registry = registry.get(backend, {})
+        queries = cell.get("queries")
+        require(isinstance(queries, list), f"backend cell has no queries: {path}")
+        for query in queries:
+            require(isinstance(query, dict), f"malformed query outcome: {path}")
+            query_id = query.get("id")
+            entry = backend_registry.get(query_id) if isinstance(query_id, str) else None
+            matches = optimized_plan_entry_matches_query(query, entry)
+            execution = query.get("execution")
+            execution_class = execution.get("class") if isinstance(execution, dict) else None
+            rust_rows = query.get("rust_rows")
+            phases = (query.get("warmups"), query.get("measurements"))
+            observations = [
+                observation
+                for phase in phases
+                if isinstance(phase, list)
+                for observation in phase
+                if isinstance(observation, dict)
+            ]
+            optimized_plans = {
+                observation.get("plan")
+                for observation in observations
+                if observation.get("plan") in OBSERVATION_PLAN_BACKENDS
+            }
+            optimized_shape_claimed = (
+                isinstance(rust_rows, dict)
+                and rust_rows.get("kind") == "not-materialized"
+            ) or (
+                backend in {"turso", "postgres"}
+                and execution_class == "backend-native-aggregate"
+            )
+            require(
+                not optimized_plans or matches,
+                f"optimized observation plan is not authorized by the manifest: {path}",
+            )
+            require(
+                not optimized_shape_claimed or matches,
+                f"optimized query shape is not authorized by the manifest: {path}",
+            )
+            if matches and observations:
+                required_plan = entry["plan"]
+                require(
+                    all(observation.get("plan") == required_plan for observation in observations),
+                    f"optimized query does not use one plan for every observation: {path}",
+                )
+
+
 def validate_reports(
     output_directory: Path,
     manifest: dict[str, Any],
@@ -949,6 +1150,7 @@ def validate_reports(
         )
         if report_schema is None:
             report_schema = schema
+        validate_report_execution_plans(matrix, manifest, matrix_path.name)
         require(matrix.get("complete") is True, f"matrix is not complete: {matrix_path.name}")
         require(isinstance(matrix.get("valid"), bool), f"matrix has no validity result: {matrix_path.name}")
         cells = matrix.get("backends")
@@ -963,6 +1165,7 @@ def validate_reports(
             relative = f"components/{suite}-{backend}-sf{scale}.json"
             component, _ = load_json(output_directory / relative, f"component {suite}/{backend}")
             report_identity(component, relative, revision, scale, suite, report_schema)
+            validate_report_execution_plans(component, manifest, relative)
             require(component.get("complete") is False, f"component claims completeness: {relative}")
             require(isinstance(component.get("valid"), bool), f"component has no validity result: {relative}")
             component_cells = component.get("backends")
@@ -1540,6 +1743,11 @@ def inspect_bundle(
         manifest, scale, include_receipt
     )
     files = scan_output(output_directory, expected_files, expected_directories)
+    if requires_host_preflight(manifest):
+        try:
+            host_evidence.validate_record(files[host_evidence.FILENAME])
+        except ValueError as error:
+            raise PublicationError(str(error)) from error
     require(
         all(
             not any(marker in raw for marker in WATCHDOG_TIMEOUT_MARKERS)

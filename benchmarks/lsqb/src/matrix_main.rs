@@ -368,6 +368,7 @@ async fn run_phase(
                     .saturating_add(elapsed_ns(recovery_started));
             }
             let plan = isolated.require_declared_plan()?;
+            plan.validate_execution(&outcomes[index].execution, outcomes[index].rust_rows)?;
             let observation = match isolated.outcome {
                 WorkerOutcome::Pass => {
                     let count = isolated.actual_count.ok_or_else(|| {
@@ -578,6 +579,14 @@ fn rust_rows_for_execution(
     execution: &ExecutionDescriptorV2,
     scale: &str,
 ) -> Result<Option<queries::RustRowEstimate>, String> {
+    if execution.class == Some(ExecutionClass::InProcessReference)
+        && backend::memory_execution_plan(case)? == report::ExecutionPlan::CountFactorized
+    {
+        return Ok(Some(queries::RustRowEstimate {
+            kind: queries::RustRowCardinality::NotMaterialized,
+            rows: 0,
+        }));
+    }
     let plan = match execution.class {
         Some(
             ExecutionClass::InProcessReference | ExecutionClass::BackendMaterializeRustReference,
@@ -639,6 +648,8 @@ fn catalog_execution_for_case(
         && matrix_catalog::compiled(catalog.feature)
     {
         execution.class = Some(backend::portable_execution_class(catalog.id, case)?);
+        execution.backend_query_sha256 =
+            backend::scalar_sql_query(catalog.id, case)?.map(|sql| queries::sha256(sql.as_bytes()));
     } else if catalog.query_capability == QueryCapability::PortableQuery {
         execution.class = None;
     }
@@ -810,7 +821,7 @@ mod tests {
             let catalog = matrix_catalog::backend(backend_id).unwrap();
             assert_eq!(
                 catalog_execution_for_case(catalog, &pushed).unwrap().class,
-                Some(ExecutionClass::BackendRowSourceRustProjection),
+                Some(ExecutionClass::BackendNativeAggregate),
                 "{backend_id} should push the simple count"
             );
             assert_eq!(
@@ -889,11 +900,30 @@ mod tests {
             },
         };
 
-        for class in [
-            ExecutionClass::InProcessReference,
-            ExecutionClass::BackendRowSourceRustProjection,
+        let factorized = query_outcome_for_scale(
+            &cartesian,
+            execution(ExecutionClass::InProcessReference),
+            "0.1",
+        )
+        .unwrap();
+        // Error is the not-yet-executed placeholder, not a successful sample.
+        assert_eq!(factorized.outcome, OutcomeStatus::Error);
+        assert_eq!(factorized.reason_code, None);
+        assert_eq!(
+            factorized.rust_rows,
+            Some(queries::RustRowEstimate {
+                kind: queries::RustRowCardinality::NotMaterialized,
+                rows: 0,
+            })
+        );
+        let mut fallback = cartesian.clone();
+        fallback.executable =
+            "MATCH (a:Person), (b:Person), (c:Person) WITH a, b, c RETURN count(*)".into();
+        for (case, class) in [
+            (&fallback, ExecutionClass::InProcessReference),
+            (&cartesian, ExecutionClass::BackendRowSourceRustProjection),
         ] {
-            let refused = query_outcome_for_scale(&cartesian, execution(class), "0.1").unwrap();
+            let refused = query_outcome_for_scale(case, execution(class), "0.1").unwrap();
             assert_eq!(refused.outcome, OutcomeStatus::Unsupported);
             assert_eq!(refused.reason_code.as_deref(), Some(RUST_ROW_LIMIT));
             assert_eq!(refused.detail.as_deref(), Some(RUST_ROW_LIMIT_DETAIL));
@@ -927,7 +957,7 @@ mod tests {
 
         let q3 = QueryCase {
             id: "q3".to_string(),
-            executable: "RETURN count(*)".to_string(),
+            executable: "MATCH (n) WHERE n.missing = 1 RETURN count(*)".to_string(),
             source_sha256: "0".repeat(64),
             expected_count: 30_456,
             claim: "test".to_string(),

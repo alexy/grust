@@ -9,7 +9,9 @@ appears in both the incremental journal and the final report.
 | `plan` | Meaning | Compatible execution class |
 |---|---|---|
 | `clause-pipeline` | Existing Rust clause-by-clause reference evaluation | `in-process-reference` or `backend-materialize-rust-reference` |
+| `count-factorized` | Indexed Rust count algebra without materializing matching rows | `in-process-reference` |
 | `sql-row-source` | Backend SQL produces rows; Rust completes the projection | `backend-row-source-rust-projection` |
+| `sql-count` | Opt-in SQL `COUNT(*)`; Rust decodes one scalar and applies final pagination | `backend-native-aggregate` |
 | `backend-native` | Backend evaluates the aggregate; its internal physical plan is opaque | `backend-native-aggregate` |
 
 Plan and execution class answer different questions. For example, the same
@@ -37,18 +39,73 @@ must not become one timing distribution. A warm-up from a different plan does
 not establish a warm-up for the measured plan. Retain raw samples and failures
 when suppressing aggregate statistics.
 
-## Before enabling a faster executor
+## Indexed counts and SQL aggregation
 
-The indexed executor is not yet connected to the LSQB matrix. Current matrix
-runs therefore cannot claim `count-factorized`, `count-pipeline`, or
-`count-intersection`. Add a label when its route actually becomes executable,
-and update worker selection, report validation, and comparison tests together.
-An optimized route must report its actual fallback when it uses the reference
-executor; query shape alone is not proof that the optimized plan ran.
+Memory now owns an immutable `TypedGraphIndex`. Loading and index construction
+are included in `load_ns`, before the worker declares readiness. Parsing,
+semantic analysis, structural proof and query execution are repeated after
+`GO`, inside the query timing boundary. Classification before `GO` does not
+cache a query plan or remove that work from measurement. Fresh observation
+workers still reload their own snapshots; this is not a once-loaded session.
 
-Plan metadata does not change the row-admission gate, read budgets, timing
-boundary, or performance qualification. Any future non-materializing-plan
-exemption needs its own implementation and tests. Across runs, continue to
+`count-factorized` uses the same eligibility proof for classification and
+execution. It handles proven pattern forests and optional leaves, weighted
+wedges and tag intersections, optional-null anti-joins, directed four-cycles,
+and symmetric location triangles. Scalar scans, zero-hop paths, bounded ranges
+and scalar unions have separate proofs. These algorithms preserve parallel
+edges and do not assume functional creator or location relationships. None
+enumerates matching rows. Other shapes retain `clause-pipeline` and its row bounds; an
+empty materialized result is not evidence of a non-materializing algorithm.
+See [indexed reads](../../docs/INDEXED_READS.md) for exact scope and APIs.
+
+Turso and PostgreSQL opt into scalar SQL aggregation for a conservative subset
+of their existing match-source lowering. `sql-count` binds the exact rendered
+SQL digest and returns one scalar, not all matching rows. Other queries keep
+their SQL row-source or reference fallback. Sail has not opted into
+this scalar lowering. Row-source joins now also decline overlapping relationship
+type sets unless physical relationship independence is proved; unsupported joins
+use the corrected reference route. Scalar
+predicate support is checked against the actual dialect in both execution and
+metadata: genuine property/string equalities use exact JSON-type checks;
+numeric, ambiguous inline-label and other unproven filters do not select it.
+
+The pinned example's compiler-derived plan inventory is:
+
+| Backend | Optimized query IDs | Plan |
+|---|---|---|
+| Memory | All 22: q1–q9 and a1–a13 | `count-factorized` |
+| Turso, PostgreSQL | q1, q4, a1, a7 | `sql-count` |
+
+These are structural classifications, not performance results. The offline
+integration tests compare all 22 example cases with the pinned oracle and
+reference executor, execute Memory and embedded Turso, and check PostgreSQL's
+SQL without requiring a server. They do not qualify a live PostgreSQL service
+or a larger-scale timing cohort.
+
+## Plan-bound row admission
+
+The optional `execution_plans` registry in `evidence-manifest-v2.json` binds each
+optimized backend/query pair to its upstream and adapted query hashes, plan,
+execution class, Rust-row declaration and exact SQL digest when applicable.
+The pure `plan_inventory` example generates this inventory from the actual
+classifiers; it does not execute queries or generate benchmark observations:
+
+```sh
+cargo run --quiet --manifest-path benchmarks/lsqb/Cargo.toml --example plan_inventory
+```
+
+Only registered `count-factorized` observations may use
+`{"kind":"not-materialized","rows":0}` to bypass the logical match-row ceiling.
+This zero means *no matching rows are materialized*, not that execution uses no
+memory or does no work. The index, masks and count arrays still consume memory,
+and bounded indexed reads retain candidate-work and intermediate-byte budgets.
+`sql-count` instead uses the existing native-aggregate class with no Rust-row
+bound. The validators reject missing, mixed or fallback plans carrying an
+optimized exemption. Old manifests without this registry remain valid but
+authorize no new optimized plans. Non-executed setup-error/unavailable entries
+may retain exact planned metadata; they provide no timing evidence.
+
+Across runs, continue to
 match source revision, dataset and query hashes, execution class, transport,
 backend version, resource limits, lifecycle, and timing protocol. The plan
 field makes those comparisons more precise; it does not replace them.

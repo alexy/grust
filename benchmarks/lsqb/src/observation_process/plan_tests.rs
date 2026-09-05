@@ -22,7 +22,9 @@ fn execution_plan_ready_is_additive_and_native_ready_bytes_stay_unchanged() {
     );
     for plan in [
         ExecutionPlan::ClausePipeline,
+        ExecutionPlan::CountFactorized,
         ExecutionPlan::SqlRowSource,
+        ExecutionPlan::SqlCount,
         ExecutionPlan::BackendNative,
     ] {
         let bytes = ready_record(Some(plan));
@@ -36,7 +38,7 @@ fn execution_plan_ready_is_additive_and_native_ready_bytes_stay_unchanged() {
 #[test]
 fn unknown_and_null_execution_plans_are_invalid_ready_records() {
     for invalid in [
-        serde_json::json!("count-factorized"),
+        serde_json::json!("count-intersection"),
         serde_json::Value::Null,
     ] {
         let mut value: serde_json::Value = serde_json::from_slice(&ready_record(None)).unwrap();
@@ -82,6 +84,8 @@ print(json.dumps({
 #[cfg(unix)]
 fn ready_execution_plan_survives_success_error_and_backend_timeout() {
     for (outcome, expected, plan) in [
+        ("pass", WorkerOutcome::Pass, ExecutionPlan::CountFactorized),
+        ("pass", WorkerOutcome::Pass, ExecutionPlan::SqlCount),
         ("pass", WorkerOutcome::Pass, ExecutionPlan::SqlRowSource),
         ("error", WorkerOutcome::Error, ExecutionPlan::ClausePipeline),
         (
@@ -108,7 +112,7 @@ fn ready_execution_plan_survives_success_error_and_backend_timeout() {
 #[cfg(unix)]
 fn ready_execution_plan_survives_hard_timeout_without_a_result_record() {
     let observation = run(
-        &mut worker(Some(ExecutionPlan::ClausePipeline), "hang"),
+        &mut worker(Some(ExecutionPlan::CountFactorized), "hang"),
         "plan-test",
         25,
         10,
@@ -124,7 +128,7 @@ fn ready_execution_plan_survives_hard_timeout_without_a_result_record() {
     assert_eq!(observation.actual_count, None);
     assert_eq!(
         observation.require_declared_plan().unwrap(),
-        ExecutionPlan::ClausePipeline
+        ExecutionPlan::CountFactorized
     );
 }
 

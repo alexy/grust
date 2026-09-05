@@ -151,6 +151,24 @@ class PerformanceTests(unittest.TestCase):
         self.assertEqual(result['plan'], 'backend-native')
         self.assertTrue(result['performance_eligible'])
 
+    def test_optimized_count_plans_are_distinct_filters(self):
+        cases = (
+            ('count-factorized', 'in-process-reference'),
+            ('sql-count', 'backend-native-aggregate'),
+        )
+        for plan, execution_class in cases:
+            query = self.tagged_query(plan)
+            query['execution']['class'] = execution_class
+            with self.subTest(plan=plan):
+                result = summary.summarize_query(query, plan)
+                self.assertEqual(result['plan'], plan)
+                self.assertTrue(result['performance_eligible'])
+
+    def test_plan_class_mismatch_cannot_be_summarized(self):
+        query = self.tagged_query('sql-count')
+        with self.assertRaisesRegex(ValueError, 'does not match execution class'):
+            summary.summarize_query(query)
+
     def test_directory_summary_passes_declared_cohort_counts_and_plan_filter(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -174,6 +192,93 @@ class PerformanceTests(unittest.TestCase):
             self.assertIsNone(query['statistics'])
             self.assertEqual((directory / name).read_bytes(), raw)
             self.assertEqual((directory / 'publication-receipt.json').read_bytes(), receipt_raw)
+
+    def host_record(self):
+        return dict(schema='grust-host-preflight-v1', startup_screen_passed=True,
+                    clean_host_performance_eligible=False,
+                    limitation='startup screen only; ongoing contention monitoring required',
+                    samples=[dict(total_cpu_percent=12.5, busy_processes=[],
+                                  startup_screen_passed=True,
+                                  observed_at=f'2026-09-05T12:00:0{index}.000000+00:00')
+                             for index in range(3)])
+
+    def write_summary_bundle(self, directory, host_raw=None):
+        matrix = dict(schema_version=3, environment={},
+                      timing=dict(warmup_iterations=1, measurement_iterations=2),
+                      backends=[dict(backend={'name': 'memory'}, lifecycle={},
+                                     setup_outcome='pass', queries=[self.tagged_query()])])
+        files = {'matrix-baseline-sfexample.json': json.dumps(matrix).encode()}
+        if host_raw is not None:
+            files['host-preflight.json'] = host_raw
+        receipt = dict(suite_order=['baseline'], scale_factor='example', source_revision='a' * 40,
+                       output_inventory=[dict(path=name, bytes=len(raw),
+                                              sha256=hashlib.sha256(raw).hexdigest())
+                                         for name, raw in files.items()])
+        files['publication-receipt.json'] = json.dumps(receipt).encode()
+        for name, raw in files.items():
+            (directory / name).write_bytes(raw)
+        return files
+
+    def test_legacy_host_screen_is_unknown_not_a_failed_or_qualified_screen(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            files = self.write_summary_bundle(directory)
+            with mock.patch.object(summary.subprocess, 'run'):
+                result = summary.summarize(directory)
+            self.assertEqual(result['host_screen'], dict(
+                status='unrecorded-legacy', startup_screen_passed=None,
+                evidence_path=None, evidence_sha256=None, clean_host_performance_eligible=False,
+                limitation='Startup screening does not establish ongoing host isolation.'))
+            query = result['suites'][0]['backends'][0]['queries'][0]
+            self.assertTrue(query['performance_eligible'])
+            self.assertEqual(query['statistics']['elapsed_ns']['median_ns'], 20)
+            self.assertTrue(any('not clean-host performance qualification' in note
+                                for note in result['notes']))
+            self.assertEqual({name: (directory / name).read_bytes() for name in files}, files)
+
+    def test_recorded_host_screen_is_bound_but_never_ongoing_qualification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            host_raw = json.dumps(self.host_record()).encode()
+            files = self.write_summary_bundle(directory, host_raw)
+            with mock.patch.object(summary.subprocess, 'run'):
+                result = summary.summarize(directory)
+            self.assertEqual(result['host_screen'], dict(
+                status='recorded-startup-only', startup_screen_passed=True,
+                evidence_path='host-preflight.json',
+                evidence_sha256=hashlib.sha256(host_raw).hexdigest(),
+                clean_host_performance_eligible=False,
+                limitation='Startup screening does not establish ongoing host isolation.'))
+            query = result['suites'][0]['backends'][0]['queries'][0]
+            self.assertTrue(query['performance_eligible'])
+            self.assertEqual(query['statistics']['elapsed_ns']['median_ns'], 20)
+            self.assertEqual({name: (directory / name).read_bytes() for name in files}, files)
+
+    def test_host_screen_tampering_after_receipt_verification_is_rejected(self):
+        original = json.dumps(self.host_record()).encode()
+        replacements = (original.replace(b'12.5', b'13.5'), original + b'\n')
+        for replacement in replacements:
+            with self.subTest(length=len(replacement)), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                self.write_summary_bundle(directory, original)
+
+                def mutate(*args, **kwargs):
+                    (directory / 'host-preflight.json').write_bytes(replacement)
+
+                with mock.patch.object(summary.subprocess, 'run', side_effect=mutate):
+                    with self.assertRaisesRegex(ValueError, 'host preflight changed after receipt verification'):
+                        summary.summarize(directory)
+
+    def test_bound_host_screen_is_revalidated_even_after_receipt_verification(self):
+        failed = self.host_record()
+        failed['startup_screen_passed'] = False
+        for raw in (b'{', json.dumps(failed).encode()):
+            with self.subTest(raw=raw), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                self.write_summary_bundle(directory, raw)
+                with mock.patch.object(summary.subprocess, 'run'):
+                    with self.assertRaises(ValueError):
+                        summary.summarize(directory)
 
     def test_cli_documents_plan_choices_and_rejects_unknown_selection(self):
         script = str(Path(__file__).with_name('summarize-performance.py'))

@@ -9,6 +9,8 @@
 mod materialize;
 
 mod execution_plan;
+use execution_plan::scalar_sql_execution_class;
+pub use execution_plan::{memory_execution_plan, scalar_sql_query};
 
 #[cfg(feature = "falkor")]
 mod falkor;
@@ -25,7 +27,7 @@ use std::env;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use grust_core::{Graph, GraphAdminStore, GraphStore, Value};
+use grust_core::{Graph, GraphAdminStore, GraphStore, TypedGraphIndex, Value};
 use grust_cypher::pushdown::{NoTypeHints, SqlDialect, plan_read};
 use grust_cypher::{CypherParameters, CypherResultTable};
 use grust_postgres_core::{PostgresGraphConfig, PostgresGraphStore, PostgresReadDialect};
@@ -71,7 +73,7 @@ impl From<String> for QueryExecutionError {
 }
 
 enum Backend {
-    Memory(Arc<Graph>),
+    Memory(Arc<TypedGraphIndex>),
     Turso(TursoGraphStore),
     Postgres(PostgresGraphStore),
     #[cfg(feature = "ladybug")]
@@ -252,14 +254,14 @@ impl PreparedBackend {
                 "in-process",
             ),
             Backend::Turso(_) => (
-                sql_execution_class(case, &TursoReadDialect::new("grust"))?,
+                scalar_sql_execution_class(case, &TursoReadDialect::new("grust"))?,
                 "Grust portable Cypher",
                 "embedded",
             ),
             Backend::Postgres(_) => {
                 let config = postgres_config();
                 (
-                    sql_execution_class(case, &PostgresReadDialect::new(&config))?,
+                    scalar_sql_execution_class(case, &PostgresReadDialect::new(&config))?,
                     "Grust portable Cypher",
                     "PostgreSQL wire",
                 )
@@ -315,13 +317,10 @@ impl PreparedBackend {
         let _ = source;
         let _ = timeout_ms;
         match &self.inner {
-            Backend::Memory(graph) => {
-                let graph = Arc::clone(graph);
+            Backend::Memory(index) => {
+                let index = Arc::clone(index);
                 let case = case.clone();
-                blocking_count_with_timeout(timeout_ms, move || {
-                    portable_count(graph.as_ref(), &case)
-                })
-                .await
+                blocking_count_with_timeout(timeout_ms, move || indexed_count(&index, &case)).await
             }
             Backend::Turso(store) => {
                 let table = query_result(
@@ -402,6 +401,10 @@ impl PreparedBackend {
     fn backend_query(&self, case: &QueryCase) -> Result<String, String> {
         let _ = case;
         match &self.inner {
+            Backend::Turso(_) => scalar_sql_query("turso", case)?
+                .ok_or_else(|| "query has no native Turso count plan".to_string()),
+            Backend::Postgres(_) => scalar_sql_query("postgres", case)?
+                .ok_or_else(|| "query has no native PostgreSQL count plan".to_string()),
             #[cfg(feature = "falkor")]
             Backend::Falkor { .. } => Ok(falkor::adapt_query(case)),
             _ => Err("backend does not use a native query adapter".to_string()),
@@ -512,9 +515,10 @@ fn materialized_execution() -> (ExecutionClass, &'static str, &'static str) {
 
 async fn prepare_memory(graph: &Graph) -> Result<PreparedBackend, String> {
     let started = Instant::now();
-    let graph = Arc::new(graph.clone());
+    let index = TypedGraphIndex::new(Arc::new(graph.clone()))
+        .map_err(|error| format!("dataset.load: {error}"))?;
     Ok(PreparedBackend {
-        inner: Backend::Memory(graph),
+        inner: Backend::Memory(Arc::new(index)),
         load_ns: elapsed_ns(started)?,
     })
 }
@@ -540,8 +544,10 @@ where
         graph.nodes.extend(chunk.nodes);
         graph.edges.extend(chunk.edges);
     }
+    let index =
+        TypedGraphIndex::new(Arc::new(graph)).map_err(|error| format!("dataset.load: {error}"))?;
     Ok(PreparedBackend {
-        inner: Backend::Memory(Arc::new(graph)),
+        inner: Backend::Memory(Arc::new(index)),
         load_ns: elapsed_ns(started)?,
     })
 }
@@ -1126,10 +1132,10 @@ fn sql_execution_class(
 pub fn portable_execution_class(id: &str, case: &QueryCase) -> Result<ExecutionClass, String> {
     match id {
         "memory" => Ok(ExecutionClass::InProcessReference),
-        "turso" => sql_execution_class(case, &TursoReadDialect::new("grust")),
+        "turso" => scalar_sql_execution_class(case, &TursoReadDialect::new("grust")),
         "postgres" => {
             let config = postgres_config();
-            sql_execution_class(case, &PostgresReadDialect::new(&config))
+            scalar_sql_execution_class(case, &PostgresReadDialect::new(&config))
         }
         #[cfg(feature = "sail")]
         "sail" => sql_execution_class(case, &grust_cypher::pushdown::SparkDialect),
@@ -1139,10 +1145,14 @@ pub fn portable_execution_class(id: &str, case: &QueryCase) -> Result<ExecutionC
     }
 }
 
-fn portable_count(graph: &Graph, case: &QueryCase) -> Result<i64, String> {
+fn indexed_count(index: &TypedGraphIndex, case: &QueryCase) -> Result<i64, String> {
     count_from(
-        grust_cypher::read::run_read_query(graph, &case.executable, &CypherParameters::new())
-            .map_err(|err| err.to_string())?,
+        grust_cypher::read::run_read_query_indexed(
+            index,
+            &case.executable,
+            &CypherParameters::new(),
+        )
+        .map_err(|err| err.to_string())?,
     )
 }
 
@@ -1228,8 +1238,8 @@ mod tests {
             panic!("memory preparation must retain the reference graph");
         };
         assert_eq!(Arc::strong_count(graph), 1);
-        assert_eq!(graph.nodes.len(), 2);
-        assert_eq!(graph.edges.len(), 1);
+        assert_eq!(graph.graph().nodes.len(), 2);
+        assert_eq!(graph.graph().edges.len(), 1);
     }
 
     #[tokio::test]

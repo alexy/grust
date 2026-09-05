@@ -17,6 +17,10 @@ done
 
 temporary_directory=$(mktemp -d "${TMPDIR:-/tmp}/grust-lsqb-evidence-test.XXXXXX")
 cleanup() {
+    if [[ ${GRUST_KEEP_TEST_OUTPUT:-0} == 1 ]]; then
+        printf 'test-evidence-tools.sh: retained fixtures: %s\n' "$temporary_directory" >&2
+        return
+    fi
     case "$temporary_directory" in
         "${TMPDIR:-/tmp}"/grust-lsqb-evidence-test.*)
             rm -rf -- "$temporary_directory"
@@ -40,6 +44,7 @@ execution_class() {
 
 make_component() {
     local track=$1 backend=$2 setup_outcome=$3 output=$4 scale=${5:-example}
+    local fixture_manifest=${6:-$manifest}
     local class reason detail
     class=$(execution_class "$backend")
     case "$setup_outcome" in
@@ -66,7 +71,7 @@ make_component() {
     esac
 
     jq -n \
-        --slurpfile manifest "$manifest" \
+        --slurpfile manifest "$fixture_manifest" \
         --arg track "$track" \
         --arg backend "$backend" \
         --arg class "$class" \
@@ -286,6 +291,11 @@ expect_failure() {
     fi
 }
 
+progress() {
+    printf 'test-evidence-tools.sh: %s\n' "$1" >&2
+}
+
+progress "validating example-scale matrix and summary fixtures"
 for track in baseline adversarial; do
     track_directory="$temporary_directory/$track"
     mkdir -p -- "$track_directory"
@@ -376,6 +386,56 @@ PY
     done
 done
 
+progress "validating explicit legacy-route plan labels and optimized fallbacks"
+tagged_directory="$temporary_directory/tagged-plans"
+mkdir -- "$tagged_directory"
+tagged_components=()
+while IFS= read -r backend; do
+    tagged="$tagged_directory/$backend.json"
+    jq '
+        def plan_for($class):
+            if $class == "in-process-reference"
+                or $class == "backend-materialize-rust-reference"
+            then "clause-pipeline"
+            elif $class == "backend-row-source-rust-projection" then "sql-row-source"
+            elif $class == "backend-native-aggregate" then "backend-native"
+            else null
+            end;
+        .backends[0].queries |= map(
+            .execution.class as $class
+            | .warmups |= map(.plan = plan_for($class))
+            | .measurements |= map(.plan = plan_for($class))
+        )
+    ' "$temporary_directory/baseline/$backend.json" >"$tagged"
+    tagged_components+=("$tagged")
+done < <(jq -r '.backends[].id' "$manifest")
+"$merge" "$tagged_directory/matrix.json" "${tagged_components[@]}" >/dev/null
+jq -e '
+    all(.backends[];
+        all(.queries[];
+            all((.warmups[]?, .measurements[]?);
+                if .plan == "clause-pipeline" then true
+                elif .plan == "sql-row-source" then true
+                elif .plan == "backend-native" then true
+                else false
+                end
+            )
+        )
+    )
+' "$tagged_directory/matrix.json" >/dev/null
+for invalid_plan in null future-plan; do
+    invalid="$tagged_directory/invalid-$invalid_plan.json"
+    if [[ "$invalid_plan" == null ]]; then
+        jq '.backends[0].queries[0].measurements[0].plan = null' \
+            "$tagged_directory/memory.json" >"$invalid"
+    else
+        jq '.backends[0].queries[0].measurements[0].plan = "future-plan"' \
+            "$tagged_directory/memory.json" >"$invalid"
+    fi
+    expect_failure "explicit invalid observation plan $invalid_plan" \
+        "$merge" "$tagged_directory/rejected-$invalid_plan.json" "$invalid"
+done
+
 nonempty_summary="$temporary_directory/nonempty-summary"
 mkdir -- "$nonempty_summary"
 printf 'sentinel\n' >"$nonempty_summary/user-file"
@@ -398,6 +458,7 @@ with os.scandir(sys.argv[1]) as entries:
         raise SystemExit("symlink summary target was modified")
 PY
 
+progress "validating downloaded-scale row admission and refusals"
 downloaded_directory="$temporary_directory/downloaded"
 mkdir -p -- "$downloaded_directory"
 for track in baseline adversarial; do
@@ -503,6 +564,222 @@ expect_failure "downloaded Rust row execution above the canonical admission limi
     "$merge" "$downloaded_directory/rejected-high-row-query.json" \
     "$executed_high_row_query"
 
+progress "validating registry-authenticated count plans and negative cases"
+# Optimized COUNT admission is an exact, manifest-authenticated contract rather
+# than a new way to reinterpret the legacy row bounds.
+registry_directory="$temporary_directory/registry"
+registry_tool_directory="$registry_directory/tool"
+mkdir -p -- "$registry_tool_directory"
+cp -- "$merge" "$script_dir/output-safety.sh" "$registry_tool_directory/"
+registry_manifest="$registry_tool_directory/evidence-manifest-v2.json"
+jq '
+    .execution_plans = {
+        schema: "grust-lsqb-execution-plan-registry-v1",
+        entries: {
+            memory: {q1: {
+                plan: "count-factorized",
+                execution_class: "in-process-reference",
+                source_sha256: .tracks.baseline.queries.q1.source_sha256,
+                adapter_sha256: .tracks.baseline.queries.q1.adapter_sha256,
+                rust_rows: {kind: "not-materialized", rows: 0},
+                backend_query_sha256: null
+            }},
+            turso: {q1: {
+                plan: "sql-count",
+                execution_class: "backend-native-aggregate",
+                source_sha256: .tracks.baseline.queries.q1.source_sha256,
+                adapter_sha256: .tracks.baseline.queries.q1.adapter_sha256,
+                rust_rows: null,
+                backend_query_sha256: ("b" * 64)
+            }},
+            postgres: {q1: {
+                plan: "sql-count",
+                execution_class: "backend-native-aggregate",
+                source_sha256: .tracks.baseline.queries.q1.source_sha256,
+                adapter_sha256: .tracks.baseline.queries.q1.adapter_sha256,
+                rust_rows: null,
+                backend_query_sha256: ("c" * 64)
+            }}
+        }
+    }
+' "$manifest" >"$registry_manifest"
+registry_merge="$registry_tool_directory/merge-reports.sh"
+
+optimize_component() {
+    local input=$1 output=$2 backend=$3 query_id=$4 mode=${5:-executed}
+    local entry
+    entry=$(jq -c --arg backend "$backend" --arg query_id "$query_id" \
+        '.execution_plans.entries[$backend][$query_id]' "$registry_manifest")
+    jq --arg query_id "$query_id" --arg mode "$mode" --argjson entry "$entry" '
+        (.backends[0].queries | map(.id) | index($query_id) + 1) as $position
+        | .backends[0].queries |= map(
+            if .id == $query_id then
+                .source_sha256 = $entry.source_sha256
+                | .adapter_sha256 = $entry.adapter_sha256
+                | .execution.class = $entry.execution_class
+                | .execution.backend_query_sha256 = $entry.backend_query_sha256
+                | .rust_rows = $entry.rust_rows
+                | if $mode == "executed" then
+                    .execution.transport = "fixture optimized transport"
+                    | .outcome = "pass"
+                    | .reason_code = null
+                    | .detail = null
+                    | .warmups = []
+                    | .measurements = [{
+                        iteration: 1,
+                        query_position: $position,
+                        setup_ns: 1,
+                        elapsed_ns: 1,
+                        recovery_ns: 1,
+                        termination: "normal-exit",
+                        actual_count: .expected_count,
+                        outcome: "pass",
+                        detail: null,
+                        plan: $entry.plan
+                    }]
+                  else .
+                  end
+            else . end
+        )
+    ' "$input" >"$output"
+}
+
+registry_memory="$registry_directory/memory.json"
+registry_turso="$registry_directory/turso.json"
+make_component baseline memory pass "$registry_directory/memory-legacy.json" 0.1 \
+    "$registry_manifest"
+make_component baseline turso pass "$registry_directory/turso-legacy.json" 0.1 \
+    "$registry_manifest"
+optimize_component "$registry_directory/memory-legacy.json" "$registry_memory" memory q1
+optimize_component "$registry_directory/turso-legacy.json" "$registry_turso" turso q1
+"$registry_merge" "$registry_directory/accepted-memory.json" "$registry_memory" >/dev/null
+"$registry_merge" "$registry_directory/accepted-turso.json" "$registry_turso" >/dev/null
+jq -e '
+    .backends[0].queries[] | select(.id == "q1")
+    | .outcome == "pass"
+    and .rust_rows == {kind: "not-materialized", rows: 0}
+    and all(.measurements[]; .plan == "count-factorized")
+' "$registry_directory/accepted-memory.json" >/dev/null
+jq -e '
+    .backends[0].queries[] | select(.id == "q1")
+    | .execution.class == "backend-native-aggregate"
+    and .rust_rows == null
+    and all(.measurements[]; .plan == "sql-count")
+' "$registry_directory/accepted-turso.json" >/dev/null
+
+for mutation in missing-plan fallback-plan wrong-rows wrong-adapter; do
+    candidate="$registry_directory/memory-$mutation.json"
+    case "$mutation" in
+        missing-plan)
+            jq 'del(.backends[0].queries[] | select(.id == "q1") | .measurements[0].plan)' \
+                "$registry_memory" >"$candidate"
+            ;;
+        fallback-plan)
+            jq '(.backends[0].queries[] | select(.id == "q1") | .measurements[0].plan) = "clause-pipeline"' \
+                "$registry_memory" >"$candidate"
+            ;;
+        wrong-rows)
+            jq '(.backends[0].queries[] | select(.id == "q1") | .rust_rows.rows) = 1' \
+                "$registry_memory" >"$candidate"
+            ;;
+        wrong-adapter)
+            jq '(.backends[0].queries[] | select(.id == "q1") | .adapter_sha256) = ("d" * 64)' \
+                "$registry_memory" >"$candidate"
+            ;;
+    esac
+    expect_failure "optimized memory $mutation" \
+        "$registry_merge" "$registry_directory/rejected-memory-$mutation.json" "$candidate"
+done
+
+wrong_sql_digest="$registry_directory/turso-wrong-digest.json"
+jq '(.backends[0].queries[] | select(.id == "q1")
+    | .execution.backend_query_sha256) = ("d" * 64)' \
+    "$registry_turso" >"$wrong_sql_digest"
+expect_failure "sql-count with noncanonical rendered SQL digest" \
+    "$registry_merge" "$registry_directory/rejected-turso-digest.json" "$wrong_sql_digest"
+
+unknown_optimized_query="$registry_directory/memory-unregistered-q2.json"
+jq '
+    (.backends[0].queries[] | select(.id == "q2")) |= (
+        .rust_rows = {kind: "not-materialized", rows: 0}
+        | .measurements[0].plan = "count-factorized"
+    )
+' "$registry_directory/memory-legacy.json" >"$unknown_optimized_query"
+expect_failure "unregistered query claiming count-factorized rows" \
+    "$registry_merge" "$registry_directory/rejected-unregistered-query.json" \
+    "$unknown_optimized_query"
+
+for backend in memory turso; do
+    planned="$registry_directory/$backend-planned-error.json"
+    make_component baseline "$backend" pass \
+        "$registry_directory/$backend-before-error.json" 0.1 "$registry_manifest"
+    jq '
+        .valid = false
+        | .backends[0] |= (
+            .setup_outcome = "error"
+            | .setup_detail = "fixture dataset load failed"
+            | .load_ns = null
+            | .lifecycle = {
+                load_strategy: "not-executed",
+                recovery_contract: "not-applicable"
+            }
+            | .queries |= map(
+                .execution.transport = "not executed"
+                | .execution.backend_query_sha256 = null
+                | .outcome = "error"
+                | .reason_code = "dataset.load"
+                | .detail = "fixture dataset load failed"
+                | .warmups = []
+                | .measurements = []
+            )
+        )
+    ' "$registry_directory/$backend-before-error.json" \
+        >"$registry_directory/$backend-error.json"
+    optimize_component "$registry_directory/$backend-error.json" "$planned" \
+        "$backend" q1 planned
+    "$registry_merge" "$registry_directory/accepted-$backend-planned-error.json" \
+        "$planned" >/dev/null
+    jq -e '
+        .backends[0].queries[] | select(.id == "q1")
+        | .outcome == "error"
+        and (.warmups | length == 0)
+        and (.measurements | length == 0)
+    ' "$planned" >/dev/null
+done
+
+legacy_tool_directory="$registry_directory/legacy-tool"
+mkdir -- "$legacy_tool_directory"
+cp -- "$merge" "$script_dir/output-safety.sh" "$legacy_tool_directory/"
+jq 'del(.execution_plans)' "$registry_manifest" \
+    >"$legacy_tool_directory/evidence-manifest-v2.json"
+legacy_component="$registry_directory/legacy-component.json"
+make_component baseline memory pass "$legacy_component" example \
+    "$legacy_tool_directory/evidence-manifest-v2.json"
+"$legacy_tool_directory/merge-reports.sh" "$registry_directory/accepted-legacy.json" \
+    "$legacy_component" >/dev/null
+expect_failure "optimized plan under a legacy manifest without a registry" \
+    "$legacy_tool_directory/merge-reports.sh" \
+    "$registry_directory/rejected-without-registry.json" "$registry_memory"
+
+for mutation in unknown-schema empty-registry; do
+    bad_tool_directory="$registry_directory/bad-tool-$mutation"
+    mkdir -- "$bad_tool_directory"
+    cp -- "$merge" "$script_dir/output-safety.sh" "$bad_tool_directory/"
+    case "$mutation" in
+        unknown-schema)
+            jq '.execution_plans.schema = "future-registry"' "$registry_manifest" \
+                >"$bad_tool_directory/evidence-manifest-v2.json"
+            ;;
+        empty-registry)
+            jq '.execution_plans.entries = {}' "$registry_manifest" \
+                >"$bad_tool_directory/evidence-manifest-v2.json"
+            ;;
+    esac
+    expect_failure "$mutation" "$bad_tool_directory/merge-reports.sh" \
+        "$registry_directory/rejected-$mutation.json" "$legacy_component"
+done
+
+progress "validating timeout, recovery, identity, and lifecycle tampering"
 late_success="$temporary_directory/late-success.json"
 jq '
     .backends[0].queries[0].measurements[0].elapsed_ns =
@@ -889,6 +1166,7 @@ jq '.environment.memory_limit_bytes = 0' \
 expect_failure "complete matrix without a positive memory limit" \
     "$validate" "$zero_memory"
 
+progress "validating bounded-policy reports and output safety"
 policy_report="$temporary_directory/policy.json"
 jq -n --slurpfile manifest "$manifest" '
     $manifest[0] as $m

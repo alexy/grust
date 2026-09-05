@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import queue
@@ -13,7 +14,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 
 CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
@@ -132,6 +133,93 @@ class WatchdogError(RuntimeError):
     """The watchdog could not prove that a Docker action was narrowly scoped."""
 
 
+class WatchdogInterrupted(RuntimeError):
+    """SIGINT or SIGTERM requested controlled cell cleanup."""
+
+    def __init__(self, signal_number: int) -> None:
+        self.signal_number = signal_number
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = str(signal_number)
+        super().__init__(f"interrupted by {signal_name}")
+
+
+class InterruptionController:
+    """Latch termination signals without interrupting an in-flight spawn."""
+
+    def __init__(self) -> None:
+        self.signal_number: int | None = None
+
+    def handle(self, signal_number: int, _frame: Any) -> None:
+        if self.signal_number is None:
+            self.signal_number = signal_number
+
+    def checkpoint(self) -> None:
+        if self.signal_number is not None:
+            raise WatchdogInterrupted(self.signal_number)
+
+
+@contextmanager
+def controlled_interruption_signals() -> Iterator[InterruptionController]:
+    """Temporarily turn SIGINT/SIGTERM into a latched cleanup request."""
+    controller = InterruptionController()
+    installed: list[tuple[int, Any]] = []
+    try:
+        for signal_number in (signal.SIGINT, signal.SIGTERM):
+            try:
+                previous = signal.getsignal(signal_number)
+                signal.signal(signal_number, controller.handle)
+            except (OSError, RuntimeError, ValueError) as error:
+                raise WatchdogError(
+                    "could not install watchdog handler for "
+                    f"{signal.Signals(signal_number).name}: {error}"
+                ) from error
+            installed.append((signal_number, previous))
+        yield controller
+    finally:
+        failures = []
+        for signal_number, previous in reversed(installed):
+            try:
+                signal.signal(signal_number, previous)
+            except (OSError, RuntimeError, ValueError) as error:
+                failures.append(f"{signal.Signals(signal_number).name}: {error}")
+        if failures:
+            raise WatchdogError(
+                "could not restore watchdog signal handlers: " + "; ".join(failures)
+            )
+
+
+class OwnedContainerIdentity:
+    """Track whether exact-name discovery remains safe and pin one immutable ID."""
+
+    UNOBSERVED = "unobserved"
+    ABSENT = "absent"
+    PINNED = "pinned"
+    TAINTED = "tainted"
+
+    def __init__(self) -> None:
+        self.state = self.UNOBSERVED
+        self.container_id: str | None = None
+
+    def discover(self, name: str, project: str, service: str) -> str | None:
+        if self.state == self.PINNED:
+            return self.container_id
+        if self.state == self.TAINTED:
+            raise WatchdogError("container name discovery was tainted by an earlier mismatch")
+        try:
+            container_id = inspect_container(name, name, project, service)
+        except WatchdogError:
+            self.state = self.TAINTED
+            raise
+        if container_id is None:
+            self.state = self.ABSENT
+            return None
+        self.state = self.PINNED
+        self.container_id = container_id
+        return container_id
+
+
 def docker_command(arguments: list[str], timeout: float = 5.0) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
@@ -145,7 +233,10 @@ def docker_command(arguments: list[str], timeout: float = 5.0) -> subprocess.Com
         raise WatchdogError(f"Docker command failed: {error}") from error
 
 
-def inspect_container(name_or_id: str, name: str, project: str, service: str) -> str | None:
+def inspect_container_record(
+    name_or_id: str, name: str, project: str, service: str
+) -> dict[str, Any] | None:
+    """Return one strictly identified container record, or ``None`` if absent."""
     result = docker_command(["container", "inspect", name_or_id])
     if result.returncode != 0:
         detail = f"{result.stdout}\n{result.stderr}".lower()
@@ -172,26 +263,41 @@ def inspect_container(name_or_id: str, name: str, project: str, service: str) ->
         raise WatchdogError(
             "refusing to act on a container without the exact expected name and Compose labels"
         )
-    return container_id
+    return record
+
+
+def inspect_container(name_or_id: str, name: str, project: str, service: str) -> str | None:
+    """Return the immutable ID while preserving the original watchdog API."""
+    record = inspect_container_record(name_or_id, name, project, service)
+    return None if record is None else record["Id"]
 
 
 def stop_process_group(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
+    failures = []
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        pass
+    except OSError as error:
+        failures.append(f"could not terminate cell process group: {error}")
     try:
         process.wait(timeout=2.0)
-        return
     except subprocess.TimeoutExpired:
         pass
+    except OSError as error:
+        failures.append(f"could not reap cell command after SIGTERM: {error}")
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
-        return
-    process.wait(timeout=2.0)
+        pass
+    except OSError as error:
+        failures.append(f"could not kill cell process group: {error}")
+    try:
+        process.wait(timeout=2.0)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        failures.append(f"could not reap cell command after SIGKILL: {error}")
+    if failures:
+        raise WatchdogError("; ".join(failures))
 
 
 def kill_exact_container(container_id: str, name: str, project: str, service: str) -> None:
@@ -206,11 +312,67 @@ def kill_exact_container(container_id: str, name: str, project: str, service: st
 
 
 def remove_exact_container(container_id: str, name: str, project: str, service: str) -> None:
-    if inspect_container(container_id, name, project, service) is None:
+    current = inspect_container(container_id, name, project, service)
+    if current is None:
         return
+    if current != container_id:
+        raise WatchdogError("container identity changed before watchdog removal")
     removed = docker_command(["container", "rm", "--force", container_id], timeout=10.0)
     if removed.returncode != 0 and inspect_container(container_id, name, project, service) is not None:
         raise WatchdogError(f"failed to remove timed-out container: {removed.stderr.strip()}")
+
+
+def cleanup_owned_cell(
+    arguments: argparse.Namespace,
+    process: subprocess.Popen[bytes] | None,
+    identity: OwnedContainerIdentity,
+    *,
+    kill_container: bool,
+) -> tuple[str | None, str | None]:
+    """Best-effort bounded cleanup, retaining every failure for the caller."""
+    if process is None:
+        return identity.container_id, None
+    failures = []
+    process_stopped = True
+    try:
+        stop_process_group(process)
+    except WatchdogError as error:
+        process_stopped = False
+        failures.append(str(error))
+
+    if process_stopped and identity.state in (identity.UNOBSERVED, identity.ABSENT):
+        try:
+            identity.discover(
+                arguments.container,
+                arguments.project,
+                arguments.service,
+            )
+        except WatchdogError as error:
+            failures.append(f"late container discovery failed: {error}")
+
+    container_id = identity.container_id
+    if container_id is not None:
+        if kill_container:
+            try:
+                kill_exact_container(
+                    container_id,
+                    arguments.container,
+                    arguments.project,
+                    arguments.service,
+                )
+            except WatchdogError as error:
+                failures.append(str(error))
+        try:
+            remove_exact_container(
+                container_id,
+                arguments.container,
+                arguments.project,
+                arguments.service,
+            )
+        except WatchdogError as error:
+            failures.append(str(error))
+
+    return container_id, "; ".join(failures) or None
 
 
 def elapsed_milliseconds(started_ns: int, observed_ns: int | None = None) -> int:
@@ -310,7 +472,9 @@ def write_completion_record(descriptor: int, record: dict[str, Any]) -> None:
 
 
 def run(
-    arguments: argparse.Namespace, heartbeat_emitter: HeartbeatEmitter | None = None
+    arguments: argparse.Namespace,
+    heartbeat_emitter: HeartbeatEmitter | None = None,
+    interruption: InterruptionController | None = None,
 ) -> tuple[int, dict[str, Any], str | None]:
     started_ns = time.monotonic_ns()
     command = list(arguments.command)
@@ -327,7 +491,19 @@ def run(
         return WATCHDOG_ERROR_EXIT, record, "no cell command was supplied"
 
     process: subprocess.Popen[bytes] | None = None
-    container_id: str | None = None
+    identity = OwnedContainerIdentity()
+    if interruption is not None:
+        try:
+            interruption.checkpoint()
+        except WatchdogInterrupted as error:
+            record = completion_record(
+                arguments,
+                child_exit_status=None,
+                container_id=None,
+                elapsed_wall_ms=elapsed_milliseconds(started_ns),
+                status="error",
+            )
+            return WATCHDOG_ERROR_EXIT, record, str(error)
     try:
         process = subprocess.Popen(command, start_new_session=True)
     except OSError as error:
@@ -339,18 +515,23 @@ def run(
             status="error",
         )
         return WATCHDOG_ERROR_EXIT, record, f"cannot start cell command: {error}"
-    deadline_ns = started_ns + arguments.timeout_ms * 1_000_000
-    heartbeat_interval_ns = arguments.heartbeat_ms * 1_000_000
-    next_heartbeat_ns = started_ns + heartbeat_interval_ns
     try:
+        deadline_ns = started_ns + arguments.timeout_ms * 1_000_000
+        heartbeat_interval_ns = arguments.heartbeat_ms * 1_000_000
+        next_heartbeat_ns = started_ns + heartbeat_interval_ns
+        if interruption is not None:
+            interruption.checkpoint()
         while True:
-            if container_id is None:
-                container_id = inspect_container(
-                    arguments.container,
+            if interruption is not None:
+                interruption.checkpoint()
+            if identity.container_id is None:
+                identity.discover(
                     arguments.container,
                     arguments.project,
                     arguments.service,
                 )
+            if interruption is not None:
+                interruption.checkpoint()
             remaining_ns = deadline_ns - time.monotonic_ns()
             if remaining_ns <= 0:
                 break
@@ -361,16 +542,29 @@ def run(
             if completion_is_timely(
                 child_exit_status, completion_observed_ns, deadline_ns
             ):
-                if container_id is None:
+                if identity.container_id is None:
                     raise WatchdogError(
                         "cell command exited before its immutable container identity was observed"
                     )
-                remove_exact_container(
-                    container_id,
-                    arguments.container,
-                    arguments.project,
-                    arguments.service,
+                container_id, cleanup_error = cleanup_owned_cell(
+                    arguments,
+                    process,
+                    identity,
+                    kill_container=False,
                 )
+                if cleanup_error is not None:
+                    record = completion_record(
+                        arguments,
+                        child_exit_status=process.returncode,
+                        container_id=container_id,
+                        elapsed_wall_ms=elapsed_milliseconds(started_ns),
+                        status="error",
+                    )
+                    return (
+                        WATCHDOG_ERROR_EXIT,
+                        record,
+                        f"cell cleanup failed after completion: {cleanup_error}",
+                    )
                 record = completion_record(
                     arguments,
                     child_exit_status=child_exit_status,
@@ -397,8 +591,39 @@ def run(
                     heartbeat_interval_ns,
                 )
             time.sleep(min(0.1, remaining_ns / 1_000_000_000))
-    except WatchdogError as error:
-        stop_process_group(process)
+        container_id, cleanup_error = cleanup_owned_cell(
+            arguments,
+            process,
+            identity,
+            kill_container=True,
+        )
+        if cleanup_error is not None:
+            record = completion_record(
+                arguments,
+                child_exit_status=process.returncode,
+                container_id=container_id,
+                elapsed_wall_ms=elapsed_milliseconds(started_ns),
+                status="error",
+            )
+            return WATCHDOG_ERROR_EXIT, record, f"cell cleanup failed: {cleanup_error}"
+        record = completion_record(
+            arguments,
+            child_exit_status=process.returncode,
+            container_id=container_id,
+            elapsed_wall_ms=elapsed_milliseconds(started_ns),
+            status="timeout",
+        )
+        return WATCHDOG_TIMEOUT_EXIT, record, None
+    except WatchdogInterrupted as error:
+        container_id, cleanup_error = cleanup_owned_cell(
+            arguments,
+            process,
+            identity,
+            kill_container=True,
+        )
+        message = str(error)
+        if cleanup_error is not None:
+            message = f"{message}; cleanup failed: {cleanup_error}"
         record = completion_record(
             arguments,
             child_exit_status=process.returncode,
@@ -406,55 +631,35 @@ def run(
             elapsed_wall_ms=elapsed_milliseconds(started_ns),
             status="error",
         )
-        return WATCHDOG_ERROR_EXIT, record, str(error)
-    except BaseException:
-        stop_process_group(process)
+        return WATCHDOG_ERROR_EXIT, record, message
+    except WatchdogError as error:
+        container_id, cleanup_error = cleanup_owned_cell(
+            arguments,
+            process,
+            identity,
+            kill_container=True,
+        )
+        message = str(error)
+        if cleanup_error is not None:
+            message = f"{message}; cleanup failed: {cleanup_error}"
+        record = completion_record(
+            arguments,
+            child_exit_status=process.returncode,
+            container_id=container_id,
+            elapsed_wall_ms=elapsed_milliseconds(started_ns),
+            status="error",
+        )
+        return WATCHDOG_ERROR_EXIT, record, message
+    except BaseException as error:
+        _, cleanup_error = cleanup_owned_cell(
+            arguments,
+            process,
+            identity,
+            kill_container=True,
+        )
+        if cleanup_error is not None:
+            error.add_note(f"cell cleanup also failed: {cleanup_error}")
         raise
-
-    try:
-        try:
-            if container_id is not None and process.poll() is None:
-                kill_exact_container(
-                    container_id, arguments.container, arguments.project, arguments.service
-                )
-            stop_process_group(process)
-            if container_id is None:
-                container_id = inspect_container(
-                    arguments.container,
-                    arguments.container,
-                    arguments.project,
-                    arguments.service,
-                )
-                if container_id is not None:
-                    kill_exact_container(
-                        container_id,
-                        arguments.container,
-                        arguments.project,
-                        arguments.service,
-                    )
-            if container_id is not None:
-                remove_exact_container(
-                    container_id, arguments.container, arguments.project, arguments.service
-                )
-        finally:
-            stop_process_group(process)
-    except WatchdogError as error:
-        record = completion_record(
-            arguments,
-            child_exit_status=process.returncode,
-            container_id=container_id,
-            elapsed_wall_ms=elapsed_milliseconds(started_ns),
-            status="error",
-        )
-        return WATCHDOG_ERROR_EXIT, record, str(error)
-    record = completion_record(
-        arguments,
-        child_exit_status=process.returncode,
-        container_id=container_id,
-        elapsed_wall_ms=elapsed_milliseconds(started_ns),
-        status="timeout",
-    )
-    return WATCHDOG_TIMEOUT_EXIT, record, None
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -485,18 +690,28 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> int:
     try:
         arguments = parse_arguments()
-        heartbeat_emitter = HeartbeatEmitter.for_stderr()
-        try:
-            status, record, error = run(arguments, heartbeat_emitter)
-        finally:
-            if heartbeat_emitter is not None:
-                heartbeat_emitter.close()
-        write_completion_record(arguments.record_fd, record)
-        if record["status"] == "timeout":
-            print(normalized_record(record).decode("utf-8"), end="", file=sys.stderr, flush=True)
-        if error is not None:
-            print(f"cell-watchdog.py: {error}", file=sys.stderr)
-        return status
+        with controlled_interruption_signals() as interruption:
+            heartbeat_emitter = HeartbeatEmitter.for_stderr()
+            try:
+                status, record, error = run(
+                    arguments,
+                    heartbeat_emitter,
+                    interruption,
+                )
+            finally:
+                if heartbeat_emitter is not None:
+                    heartbeat_emitter.close()
+            write_completion_record(arguments.record_fd, record)
+            if record["status"] == "timeout":
+                print(
+                    normalized_record(record).decode("utf-8"),
+                    end="",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            if error is not None:
+                print(f"cell-watchdog.py: {error}", file=sys.stderr)
+            return status
     except WatchdogError as error:
         print(f"cell-watchdog.py: {error}", file=sys.stderr)
         return WATCHDOG_ERROR_EXIT

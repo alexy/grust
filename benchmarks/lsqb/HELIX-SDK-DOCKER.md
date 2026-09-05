@@ -82,3 +82,7 @@ both client and server build provenance and are independently admitted on
 [adversari.al/graph](https://adversari.al/graph/). The measured plan remains backend materialization plus Rust reference
 execution, not native Helix query-engine timing. Larger-scale admission and
 fail-closed remote recovery rules remain in force.
+
+The audit uses the pinned [historical manifest](contracts/README.md) independently
+of current canonical changes. Missing or changed contract bytes fail closed;
+source/image pins and frozen audit outputs are unchanged.

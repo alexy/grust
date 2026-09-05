@@ -13,6 +13,28 @@ spec.loader.exec_module(runtime)
 
 
 class SnapshotTests(unittest.TestCase):
+    def test_host_preflight_failure_prevents_continuation(self):
+        for status in (1, 2, -9):
+            with self.subTest(status=status), patch.object(runtime.subprocess, 'run') as run:
+                run.return_value.returncode = status
+                with self.assertRaisesRegex(ValueError, 'no benchmark client created'):
+                    runtime.require_host_preflight(Path('/unused'))
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.kwargs['timeout'], 45)
+
+    def test_host_preflight_command_and_success(self):
+        with patch.object(runtime.subprocess, 'run') as run:
+            run.return_value.returncode = 0
+            runtime.require_host_preflight(Path('/unused'))
+            command = run.call_args.args[0]
+            self.assertEqual(Path(command[1]).name, 'host_preflight.py')
+            self.assertEqual(command[-2:], ['--output', '/unused/host-preflight.json'])
+
+    def test_host_preflight_timeout_is_not_success(self):
+        with patch.object(runtime.subprocess, 'run', side_effect=subprocess.TimeoutExpired('screen', 45)):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                runtime.require_host_preflight(Path('/unused'))
+
     def test_private_network_is_internal_exclusive_and_identity_bound(self):
         name = 'grust-lsqb-neo4j-qualification'
         network = dict(Name=name, Id='a' * 64, Internal=True)

@@ -37,7 +37,64 @@ if [[ ! -f "$manifest_path" ]] || ! jq -e \
     echo "merge-reports.sh: missing or invalid canonical evidence manifest: $manifest_path" >&2
     exit 2
 fi
+if ! jq -e '
+    def sha256: type == "string" and test("^[0-9a-f]{64}$");
+    if has("execution_plans") | not then
+        true
+    else
+        . as $manifest
+        | .execution_plans as $registry
+        | ([.tracks.baseline.queries, .tracks.adversarial.queries] | add) as $queries
+        | ([.tracks.baseline.queries, .tracks.adversarial.queries]
+            | map(keys) | add) as $query_ids
+        | ($registry | type == "object")
+        and (($registry | keys) == ["entries", "schema"])
+        and ($registry.schema == "grust-lsqb-execution-plan-registry-v1")
+        and ($registry.entries | type == "object" and length > 0)
+        and (($query_ids | length) == ($query_ids | unique | length))
+        and all($registry.entries | to_entries[];
+            .key as $backend
+            | ($backend == "memory" or $backend == "turso" or $backend == "postgres")
+            and (($manifest.backends | map(.id) | index($backend)) != null)
+            and (.value | type == "object" and length > 0)
+            and all(.value | to_entries[];
+                .key as $query_id
+                | .value as $entry
+                | ($queries[$query_id] | type == "object")
+                and (($entry | keys) == [
+                    "adapter_sha256",
+                    "backend_query_sha256",
+                    "execution_class",
+                    "plan",
+                    "rust_rows",
+                    "source_sha256"
+                ])
+                and ($entry.source_sha256 | sha256)
+                and ($entry.adapter_sha256 | sha256)
+                and ($entry.source_sha256 == $queries[$query_id].source_sha256)
+                and ($entry.adapter_sha256 == $queries[$query_id].adapter_sha256)
+                and (
+                    if $backend == "memory" then
+                        $entry.plan == "count-factorized"
+                        and $entry.execution_class == "in-process-reference"
+                        and $entry.rust_rows == {kind: "not-materialized", rows: 0}
+                        and $entry.backend_query_sha256 == null
+                    else
+                        $entry.plan == "sql-count"
+                        and $entry.execution_class == "backend-native-aggregate"
+                        and $entry.rust_rows == null
+                        and ($entry.backend_query_sha256 | sha256)
+                    end
+                )
+            )
+        )
+    end
+' "$manifest_path" >/dev/null; then
+    echo "merge-reports.sh: invalid canonical execution plan registry: $manifest_path" >&2
+    exit 2
+fi
 evidence_manifest=$(jq -S -c . "$manifest_path")
+canonical_execution_registry=$(jq -c '.execution_plans.entries // {}' "$manifest_path")
 canonical_backends=$(jq -c '[.backends[].id]' "$manifest_path")
 canonical_adapters=$(jq -c '[.backends[] | {key: .id, value: .adapter}] | from_entries' "$manifest_path")
 canonical_resource_components=$(jq -c \
@@ -108,6 +165,7 @@ for report in "${reports[@]}"; do
         --argjson service_contracts "$canonical_service_contracts" \
         --argjson runtime_versions "$canonical_runtime_versions" \
         --argjson manifest "$evidence_manifest" \
+        --argjson execution_registry "$canonical_execution_registry" \
         --argjson outcomes "$allowed_outcomes" \
         --argjson classes "$allowed_execution_classes" \
         --argjson terminations "$allowed_terminations" \
@@ -135,18 +193,54 @@ for report in "${reports[@]}"; do
             def pinned_image: concrete_string and test("@sha256:[0-9a-f]{64}$");
             def neutral:
                 . == "unsupported" or . == "unavailable" or . == "not_applicable";
-            def execution_class_for($backend; $class):
-                if $backend == "memory" then
+            def registry_entry($backend; $query_id):
+                $execution_registry[$backend][$query_id] // null;
+            def optimized_query_shape($query; $backend):
+                registry_entry($backend; $query.id) as $entry
+                | $entry != null
+                and $query.source_sha256 == $entry.source_sha256
+                and $query.adapter_sha256 == $entry.adapter_sha256
+                and $query.execution.class == $entry.execution_class
+                and $query.execution.backend_query_sha256 == $entry.backend_query_sha256
+                and $query.rust_rows == $entry.rust_rows;
+            def execution_class_for($backend; $query):
+                $query.execution.class as $class
+                | if $backend == "memory" then
                     $class == "in-process-reference"
                 elif $backend == "falkor" then
                     $class == "backend-native-aggregate"
                 elif $backend == "cocoindex" then
                     $class == null
-                elif $backend == "turso" or $backend == "postgres" or $backend == "sail" then
+                elif $backend == "turso" or $backend == "postgres" then
+                    $class == "backend-row-source-rust-projection"
+                    or $class == "backend-materialize-rust-reference"
+                    or (
+                        $class == "backend-native-aggregate"
+                        and optimized_query_shape($query; $backend)
+                    )
+                elif $backend == "sail" then
                     $class == "backend-row-source-rust-projection"
                     or $class == "backend-materialize-rust-reference"
                 else
                     $class == "backend-materialize-rust-reference"
+                end;
+            def legacy_observation_plan_valid($plan; $class):
+                if $plan == "clause-pipeline" then
+                    $class == "in-process-reference"
+                    or $class == "backend-materialize-rust-reference"
+                elif $plan == "sql-row-source" then
+                    $class == "backend-row-source-rust-projection"
+                elif $plan == "backend-native" then
+                    $class == "backend-native-aggregate"
+                else false
+                end;
+            def observation_plan_valid($observation; $class; $required_plan):
+                if $required_plan == null then
+                    (($observation | has("plan") | not)
+                        or legacy_observation_plan_valid($observation.plan; $class))
+                else
+                    ($observation | has("plan"))
+                    and $observation.plan == $required_plan
                 end;
             def expected_position($query_index; $iteration; $query_count; $order):
                 if $order == "fixed" then
@@ -154,15 +248,16 @@ for report in "${reports[@]}"; do
                 else
                     (($query_index - (($iteration - 1) % $query_count) + $query_count) % $query_count) + 1
                 end;
-            def observation_valid($observation; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract):
+            def observation_valid($observation; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract; $class; $required_plan):
                 ($observation | type == "object")
                 and ($observation | has("iteration") and has("query_position")
                     and has("setup_ns") and has("elapsed_ns") and has("recovery_ns")
                     and has("termination") and has("outcome"))
                 and (($observation | keys) - [
                     "actual_count", "detail", "elapsed_ns", "iteration", "outcome",
-                    "query_position", "recovery_ns", "setup_ns", "termination"
+                    "plan", "query_position", "recovery_ns", "setup_ns", "termination"
                 ] | length == 0)
+                and observation_plan_valid($observation; $class; $required_plan)
                 and ($observation.iteration | positive_integer)
                 and ($observation.query_position | positive_integer and . <= $query_count)
                 and ($observation.query_position == expected_position(
@@ -222,11 +317,11 @@ for report in "${reports[@]}"; do
                         )
                     end
                 );
-            def phase_valid($observations; $iterations; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract):
+            def phase_valid($observations; $iterations; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract; $class; $required_plan):
                 ($observations | type == "array" and length == $iterations)
                 and (($observations | map(.iteration) | sort) == [range(1; $iterations + 1)])
                 and all($observations[];
-                    observation_valid(.; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract)
+                    observation_valid(.; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract; $class; $required_plan)
                 );
             def reduced_outcome($observations):
                 if any($observations[]; .outcome == "error") then
@@ -257,10 +352,17 @@ for report in "${reports[@]}"; do
                 . == null
                 or (
                     type == "object"
-                    and (.kind == "exact" or .kind == "upper_bound" or .kind == "lower_bound")
+                    and ((keys) == ["kind", "rows"])
+                    and (
+                        .kind == "exact"
+                        or .kind == "upper_bound"
+                        or .kind == "lower_bound"
+                        or .kind == "not-materialized"
+                    )
                     and (.rows | nonnegative_integer)
+                    and (.kind != "not-materialized" or .rows == 0)
                 );
-            def common_query_valid($query; $canonical; $scale):
+            def common_query_valid($query; $canonical; $backend; $scale):
                 ($query | type == "object")
                 and ($query.id | nonempty_string)
                 and ($query.source_sha256 | sha256)
@@ -271,11 +373,6 @@ for report in "${reports[@]}"; do
                 and ($query.adapter_sha256 == $canonical.adapter_sha256)
                 and ($query.expected_count == $canonical.expected_count)
                 and ($query.rust_rows | rust_rows_valid)
-                and ($query.rust_rows == canonical_rust_rows(
-                    $canonical;
-                    $query.execution.class;
-                    $scale
-                ))
                 and ($query.reason_code | optional_string)
                 and ($query.detail | optional_string)
                 and ($query.outcome as $status | ($outcomes | index($status)) != null)
@@ -288,9 +385,17 @@ for report in "${reports[@]}"; do
                 and ($query.execution.transport | nonempty_string)
                 and ($query.execution.backend_query_sha256 | optional_sha256)
                 and ($query.warmups | type == "array")
-                and ($query.measurements | type == "array");
+                and ($query.measurements | type == "array")
+                and (
+                    $query.rust_rows == canonical_rust_rows(
+                        $canonical;
+                        $query.execution.class;
+                        $scale
+                    )
+                    or optimized_query_shape($query; $backend)
+                );
             def executed_query_valid($query; $canonical; $backend; $scale; $warmups; $measurements; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract):
-                common_query_valid($query; $canonical; $scale)
+                common_query_valid($query; $canonical; $backend; $scale)
                 and (
                     if $query.execution.class == null then
                         $query.outcome == "error"
@@ -299,14 +404,18 @@ for report in "${reports[@]}"; do
                         and ($query.warmups | length == 0)
                         and ($query.measurements | length == 0)
                     else
-                        execution_class_for($backend; $query.execution.class)
+                        execution_class_for($backend; $query)
                         and (
                             $scale == "example"
                             or $query.execution.class != "backend-materialize-rust-reference"
                         )
                         and (
                             $scale == "example"
-                            or $query.execution.class == "backend-native-aggregate"
+                            or optimized_query_shape($query; $backend)
+                            or (
+                                $backend == "falkor"
+                                and $query.execution.class == "backend-native-aggregate"
+                            )
                             or (
                                 ($query.rust_rows.kind == "exact"
                                     or $query.rust_rows.kind == "upper_bound")
@@ -321,7 +430,13 @@ for report in "${reports[@]}"; do
                                 $query.execution.backend_query_sha256 == null
                             end
                         )
-                        and ($queries | index($query.id)) as $query_index
+                        and (
+                            if optimized_query_shape($query; $backend) then
+                                registry_entry($backend; $query.id).plan
+                            else null
+                            end
+                        ) as $required_plan
+                        | ($queries | index($query.id)) as $query_index
                         | phase_valid(
                             $query.warmups;
                             $warmups;
@@ -332,7 +447,9 @@ for report in "${reports[@]}"; do
                             $timeout_ns;
                             $ready_ns;
                             $term_grace_ns;
-                            $recovery_contract
+                            $recovery_contract;
+                            $query.execution.class;
+                            $required_plan
                         )
                         and phase_valid(
                             $query.measurements;
@@ -344,7 +461,9 @@ for report in "${reports[@]}"; do
                             $timeout_ns;
                             $ready_ns;
                             $term_grace_ns;
-                            $recovery_contract
+                            $recovery_contract;
+                            $query.execution.class;
+                            $required_plan
                         )
                         and ($query.outcome == reduced_outcome($query.warmups + $query.measurements))
                         and (
@@ -366,10 +485,10 @@ for report in "${reports[@]}"; do
                 );
             def disallowed_materialization_query_valid($query; $canonical; $backend; $scale):
                 ($manifest.backends[] | select(.id == $backend)) as $catalog
-                | common_query_valid($query; $canonical; $scale)
+                | common_query_valid($query; $canonical; $backend; $scale)
                 and $scale != "example"
                 and $catalog.query_capability == "portable"
-                and execution_class_for($backend; $query.execution.class)
+                and execution_class_for($backend; $query)
                 and $query.execution.class == "backend-materialize-rust-reference"
                 and $query.execution.backend_query_sha256 == null
                 and $query.execution.transport == "not executed"
@@ -379,9 +498,9 @@ for report in "${reports[@]}"; do
                 and ($query.warmups | length == 0)
                 and ($query.measurements | length == 0);
             def rust_row_refusal_query_valid($query; $canonical; $backend; $scale):
-                common_query_valid($query; $canonical; $scale)
+                common_query_valid($query; $canonical; $backend; $scale)
                 and $scale != "example"
-                and execution_class_for($backend; $query.execution.class)
+                and execution_class_for($backend; $query)
                 and (
                     $query.execution.class == "in-process-reference"
                     or $query.execution.class == "backend-row-source-rust-projection"
@@ -423,10 +542,13 @@ for report in "${reports[@]}"; do
                     false
                 end;
             def nonexecuted_query_valid($query; $canonical; $backend; $scale; $status; $reason; $detail):
-                common_query_valid($query; $canonical; $scale)
+                common_query_valid($query; $canonical; $backend; $scale)
                 and $query.outcome == $status
-                and execution_class_for($backend; $query.execution.class)
-                and $query.execution.backend_query_sha256 == null
+                and execution_class_for($backend; $query)
+                and (
+                    $query.execution.backend_query_sha256 == null
+                    or optimized_query_shape($query; $backend)
+                )
                 and $query.execution.transport == "not executed"
                 and $query.reason_code == $reason
                 and $query.detail == $detail
