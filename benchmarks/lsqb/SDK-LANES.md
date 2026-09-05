@@ -69,6 +69,14 @@ These prerequisites are tested with ownership, image, resource, network and
 transport mutations. No actual Docker SDK performance evidence is claimed
 until a real run and independent admission complete.
 
+The frozen `945dfa7` Surreal SDK example runs now have108 baseline and156
+adversarial passing observations. `validate-sdk.py OUTPUT_DIRECTORY` checks
+that pinned cohort against the canonical dataset/query/count contract, timing,
+rotation, incremental journal and retained runtime lifecycle. Its mutation
+tests reject altered counts, transport labels, ownership and sample records.
+This diagnostic audit does not issue a publication receipt; site admission and
+larger-scale SDK evidence remain pending.
+
 ## Qualification still required
 
 For long-running compilation and tests, retain output and 30-second progress

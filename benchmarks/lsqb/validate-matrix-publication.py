@@ -136,6 +136,8 @@ LOAD_STRATEGY = {
     "pggraph": "once-worker-attach",
     "postgres-pgq": "once-worker-attach",
     "helix": "once-worker-attach",
+    "helix-sdk": "once-worker-attach",
+    "surreal-sdk": "once-worker-attach",
 }
 RECOVERY_CONTRACT = {
     "memory": "process-group-absent",
@@ -149,6 +151,8 @@ RECOVERY_CONTRACT = {
     "sail": "fail-closed",
     "surreal": "fail-closed",
     "helix": "fail-closed",
+    "helix-sdk": "fail-closed",
+    "surreal-sdk": "fail-closed",
 }
 
 
