@@ -21,6 +21,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   reports warm-up failures separately from measured outcomes.
   Align subsequent native runs with Grust's phase-major rotating query schedule;
   preserve earlier query-major runs as a separate diagnostic cohort.
+  Require runtime evidence plus rotating W2/R10/60-second sampling through an
+  explicit comparison-cohort audit gate; the example cohort passes all 264 samples.
 
 - Benchmark-only: use 10,000-row Sail bulk-write batches and expose aggregate
   completed-chunk/node/edge counters during projected coordinator loading.

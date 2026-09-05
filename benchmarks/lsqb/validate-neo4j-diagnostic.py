@@ -34,9 +34,12 @@ CLIENT_PROFILES = {
         'sha256:91e1cec7607127a56f26859bcc7d3750b41d687a40b542f310e8047863117e4c',
     '242b6b842836e64fb76e667f8ad5609e7cb2c115':
         'sha256:7e20f8504f9ad0a04aa72226d4493c501cdaa2ebc62cd8041824fbcd2333f27e',
+    '4995115ad95e7e12215e86bcc13e60a78ddcea00':
+        'sha256:4934c9343e3a5edb03e4f13f0b8ccea48ec7a16142e3497bdb4ab649aded69b4',
 }
-SAMPLED_SOURCES = {'4c385e26135547f1771577f20a90234f830488b6', '242b6b842836e64fb76e667f8ad5609e7cb2c115'}
-ROTATING_SOURCES = set()  # Registered after a matching Docker build is pinned.
+SAMPLED_SOURCES = {'4c385e26135547f1771577f20a90234f830488b6', '242b6b842836e64fb76e667f8ad5609e7cb2c115',
+                   '4995115ad95e7e12215e86bcc13e60a78ddcea00'}
+ROTATING_SOURCES = {'4995115ad95e7e12215e86bcc13e60a78ddcea00'}
 SERVER_IMAGE = 'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d'
 
 
@@ -47,6 +50,17 @@ def require(condition, message):
 
 def integer(value):
     return type(value) is int and value >= 0
+
+
+def require_matched_sampling(report):
+    """Configuration gate, called only after full diagnostic/runtime validation."""
+    require(report.get('schema') == 'grust-neo4j-native-diagnostic-v2', 'matched sampling requires schema v2')
+    sampling = report.get('sampling', {})
+    require(sampling.get('order') == 'suite-major-phase-major-rotating' and
+            sampling.get('warmups_per_query') == 2 and sampling.get('measurements_per_query') == 10,
+            'not the rotating W2/R10 comparison sampling cohort')
+    require(all(item.get('query_timeout_ms') == 60000 for item in report['observations']),
+            'comparison query deadline differs')
 
 
 def summarize_measurements(report):
@@ -284,10 +298,16 @@ if __name__ == '__main__':
     parser.add_argument('--attacks', type=Path, default=Path(__file__).parent / 'attacks')
     parser.add_argument('--runtime', action='store_true', help='also require retained runtime evidence')
     parser.add_argument('--summaries', action='store_true', help='include measured-only timing series and summaries')
+    parser.add_argument('--matched-sampling', action='store_true', help='require rotating W2/R10/60s sampling (also requires --runtime)')
     args = parser.parse_args()
+    if args.matched_sampling and not args.runtime:
+        parser.error('--matched-sampling requires --runtime')
     result = validate(args.directory, args.upstream, args.attacks)
     if args.runtime:
         result['runtime_verified'] = validate_runtime(args.directory)
+    if args.matched_sampling:
+        require_matched_sampling(json.loads((args.directory / 'result/diagnostic.json').read_text()))
+        result['matched_sampling_verified'] = True
     if args.summaries:
         result['query_summaries'] = summarize_measurements(json.loads((args.directory / 'result/diagnostic.json').read_text()))
     print(json.dumps(result))

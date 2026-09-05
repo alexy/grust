@@ -178,6 +178,13 @@ audits passed; it must not be pooled into the rotating comparison cohort.
 Output: `out/neo4j-sampled-example-4c385e2`. The client platform manifest is
 `sha256:2f68b1f5e47a3627124ec02390de3088660059c860c2ab2461cf133ba9af3aca`.
 Matched repeated larger-scale runs and publication receipts remain pending.
+The rotating example run of source `4995115ad95e7e12215e86bcc13e60a78ddcea00`
+passed all 44 warm-ups and 220 measured executions. Its independent diagnostic,
+runtime, and matched-sampling audits passed. Evidence is retained in
+`out/neo4j-rotating-example-4995115`; this is not yet a published comparison.
+Use `--runtime --matched-sampling` with the diagnostic validator to require the
+rotating W2/R10 cohort and 60-second query deadline. The gate rejects historical
+query-major cohorts even when their repetition counts agree.
 The validator supports both historical and rotating schedules and binds each
 declared order to source-image capability. Identical repetition counts alone
 do not establish a matched comparison protocol.

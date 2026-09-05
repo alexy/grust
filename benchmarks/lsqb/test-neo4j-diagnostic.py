@@ -14,6 +14,22 @@ spec.loader.exec_module(check)
 
 
 class ObservationTests(unittest.TestCase):
+    def test_matched_sampling_does_not_admit_grouped_or_single_run_cohorts(self):
+        report = dict(schema='grust-neo4j-native-diagnostic-v2', observations=[dict(query_timeout_ms=60000)],
+                      sampling=dict(order='suite-major-phase-major-rotating', warmups_per_query=2,
+                                    measurements_per_query=10))
+        check.require_matched_sampling(report)
+        for key, value in [('order', 'query-major-warmups-then-measurements'),
+                           ('warmups_per_query', 0), ('measurements_per_query', 1)]:
+            broken = copy.deepcopy(report)
+            broken['sampling'][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                check.require_matched_sampling(broken)
+        broken = copy.deepcopy(report)
+        broken['observations'][0]['query_timeout_ms'] = 30000
+        with self.assertRaises(ValueError):
+            check.require_matched_sampling(broken)
+
     def setUp(self):
         self.reference = ('baseline', 'q1', 8, 'a' * 64)
         self.item = dict(event='observation-recorded', complete=False, suite='baseline', id='q1',
