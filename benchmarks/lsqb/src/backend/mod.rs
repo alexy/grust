@@ -15,6 +15,9 @@ mod falkor;
 mod sail_session;
 
 #[cfg(any(feature = "helix", feature = "surreal"))]
+mod sdk;
+
+#[cfg(any(feature = "helix", feature = "surreal"))]
 use std::collections::BTreeSet;
 use std::env;
 use std::sync::Arc;
@@ -77,6 +80,8 @@ enum Backend {
     },
     #[cfg(feature = "surreal")]
     Surreal(SurrealHttpGraphStore),
+    #[cfg(feature = "surreal")]
+    SurrealSdk(grust_surreal::SurrealSdkGraphStore),
     #[cfg(feature = "lancedb")]
     LanceDb {
         store: LanceDbGraphStore,
@@ -90,6 +95,8 @@ enum Backend {
     PostgresPgq(PostgresPgqStore),
     #[cfg(feature = "helix")]
     Helix(HelixHttpGraphStore),
+    #[cfg(feature = "helix")]
+    HelixSdk(grust_helix::HelixSdkGraphStore),
 }
 
 impl PreparedBackend {
@@ -122,6 +129,8 @@ impl PreparedBackend {
             "falkor" => prepare_falkor(graph).await,
             #[cfg(feature = "surreal")]
             "surreal" => prepare_surreal(graph).await,
+            #[cfg(feature = "surreal")]
+            "surreal-sdk" => sdk::prepare_surreal(graph).await,
             #[cfg(feature = "lancedb")]
             "lancedb" => prepare_lancedb(graph).await,
             #[cfg(feature = "sail")]
@@ -132,6 +141,8 @@ impl PreparedBackend {
             "postgres-pgq" => prepare_postgres_pgq(graph).await,
             #[cfg(feature = "helix")]
             "helix" => prepare_helix(graph).await,
+            #[cfg(feature = "helix")]
+            "helix-sdk" => sdk::prepare_helix(graph).await,
             _ => Err(format!("backend {id:?} is not compiled into this runner")),
         }
     }
@@ -160,6 +171,10 @@ impl PreparedBackend {
     pub async fn attach_existing(id: &str, source: &Graph) -> Result<Self, String> {
         let _ = source;
         match id {
+            #[cfg(feature = "helix")]
+            "helix-sdk" => sdk::attach_helix(source),
+            #[cfg(feature = "surreal")]
+            "surreal-sdk" => sdk::attach_surreal(source).await,
             #[cfg(feature = "sail")]
             "sail" => Ok(Self {
                 inner: Backend::Sail(sail_session::Session::borrow().await?),
@@ -263,6 +278,8 @@ impl PreparedBackend {
             Backend::Ladybug(_) => materialized_execution(),
             #[cfg(feature = "surreal")]
             Backend::Surreal(_) => materialized_execution(),
+            #[cfg(feature = "surreal")]
+            Backend::SurrealSdk(_) => sdk::execution("SurrealDB Rust SDK / WebSocket"),
             #[cfg(feature = "lancedb")]
             Backend::LanceDb { .. } => materialized_execution(),
             #[cfg(feature = "pggraph")]
@@ -271,6 +288,8 @@ impl PreparedBackend {
             Backend::PostgresPgq(_) => materialized_execution(),
             #[cfg(feature = "helix")]
             Backend::Helix(_) => materialized_execution(),
+            #[cfg(feature = "helix")]
+            Backend::HelixSdk(_) => sdk::execution("Helix Rust SDK / HTTP"),
         };
         Ok(ExecutionDescriptorV2 {
             class: Some(class),
@@ -328,6 +347,10 @@ impl PreparedBackend {
             Backend::Surreal(store) => {
                 query_result(materialize::materialized_count(store, source, case).await)
             }
+            #[cfg(feature = "surreal")]
+            Backend::SurrealSdk(store) => {
+                query_result(materialize::materialized_count(store, source, case).await)
+            }
             #[cfg(feature = "lancedb")]
             Backend::LanceDb { store, .. } => {
                 query_result(materialize::materialized_count(store, source, case).await)
@@ -351,6 +374,10 @@ impl PreparedBackend {
             }
             #[cfg(feature = "helix")]
             Backend::Helix(store) => {
+                query_result(materialize::materialized_count(store, source, case).await)
+            }
+            #[cfg(feature = "helix")]
+            Backend::HelixSdk(store) => {
                 query_result(materialize::materialized_count(store, source, case).await)
             }
         }
@@ -386,7 +413,15 @@ pub fn load_strategy(id: &str, executed: bool) -> LoadStrategyV3 {
     }
     if matches!(
         id,
-        "postgres" | "falkor" | "surreal" | "pggraph" | "postgres-pgq" | "helix" | "sail"
+        "postgres"
+            | "falkor"
+            | "surreal"
+            | "surreal-sdk"
+            | "pggraph"
+            | "postgres-pgq"
+            | "helix"
+            | "helix-sdk"
+            | "sail"
     ) {
         LoadStrategyV3::OnceWorkerAttach
     } else {
@@ -1039,7 +1074,7 @@ fn adapter_version(id: &str) -> &'static str {
     // version is the correct default for the remaining adapter identities.
     match id {
         "sail" => "0.13.2",
-        "surreal" => "0.13.1",
+        "surreal" | "surreal-sdk" => "0.13.1",
         _ => env!("CARGO_PKG_VERSION"),
     }
 }
@@ -1051,7 +1086,15 @@ fn nonempty_env(name: String) -> Option<String> {
 fn resource_components(id: &str) -> u32 {
     if matches!(
         id,
-        "postgres" | "falkor" | "surreal" | "sail" | "pggraph" | "postgres-pgq" | "helix"
+        "postgres"
+            | "falkor"
+            | "surreal"
+            | "surreal-sdk"
+            | "sail"
+            | "pggraph"
+            | "postgres-pgq"
+            | "helix"
+            | "helix-sdk"
     ) {
         2
     } else {
@@ -1268,7 +1311,18 @@ mod tests {
     fn scoped_patch_reports_the_actual_adapter_versions() {
         assert_eq!(adapter_version("sail"), "0.13.2");
         assert_eq!(adapter_version("surreal"), "0.13.1");
+        assert_eq!(adapter_version("surreal-sdk"), "0.13.1");
         assert_eq!(adapter_version("memory"), "0.13.0");
+    }
+
+    #[test]
+    fn sdk_lanes_attach_and_fail_closed_without_remote_recovery_proof() {
+        for id in ["helix-sdk", "surreal-sdk"] {
+            assert_eq!(load_strategy(id, true), LoadStrategyV3::OnceWorkerAttach);
+            assert_eq!(resource_components(id), 2);
+            assert_eq!(recovery_contract(id, true), RecoveryContractV3::FailClosed);
+            assert_eq!(load_strategy(id, false), LoadStrategyV3::NotExecuted);
+        }
     }
 
     #[test]

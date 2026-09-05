@@ -15,7 +15,7 @@ pub enum QueryCapability {
     ExportOnly,
 }
 
-pub const BACKENDS: [BackendCatalogEntry; 12] = [
+pub const BACKENDS: [BackendCatalogEntry; 14] = [
     BackendCatalogEntry {
         id: "memory",
         adapter: "grust-memory",
@@ -100,6 +100,20 @@ pub const BACKENDS: [BackendCatalogEntry; 12] = [
         query_capability: QueryCapability::ExportOnly,
         default_execution: None,
     },
+    BackendCatalogEntry {
+        id: "helix-sdk",
+        adapter: "grust-helix",
+        feature: Some("helix"),
+        query_capability: QueryCapability::MaterializeThenReference,
+        default_execution: Some("backend-materialize+rust-reference"),
+    },
+    BackendCatalogEntry {
+        id: "surreal-sdk",
+        adapter: "grust-surreal",
+        feature: Some("surreal"),
+        query_capability: QueryCapability::MaterializeThenReference,
+        default_execution: Some("backend-materialize+rust-reference"),
+    },
 ];
 
 pub fn backend(id: &str) -> Result<&'static BackendCatalogEntry, String> {
@@ -151,5 +165,21 @@ mod tests {
             backend("cocoindex").unwrap().query_capability,
             QueryCapability::ExportOnly
         );
+    }
+
+    #[test]
+    fn sdk_lanes_preserve_http_identities_and_capabilities() {
+        for (http, sdk) in [("helix", "helix-sdk"), ("surreal", "surreal-sdk")] {
+            let http = backend(http).unwrap();
+            let sdk = backend(sdk).unwrap();
+            assert_ne!(http.id, sdk.id);
+            assert_eq!(http.adapter, sdk.adapter);
+            assert_eq!(http.feature, sdk.feature);
+            assert_eq!(
+                sdk.query_capability,
+                QueryCapability::MaterializeThenReference
+            );
+            assert_eq!(http.default_execution, sdk.default_execution);
+        }
     }
 }

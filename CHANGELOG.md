@@ -6,6 +6,14 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Retain long-running build/test output with durable periodic progress and
+  terminal exit records, without imposing a guessed job completion timeout.
+
+- Add distinct `helix-sdk` and `surreal-sdk` matrix executable lanes without
+  replacing the HTTP lanes. Record SDK transports, separate Surreal datasets,
+  and retain materialization and fail-closed recovery semantics. Docker
+  qualification and independent publication admission remain pending.
+
 - Gate native Neo4j benchmark startup on a successful Bolt scalar query, not
   merely a running Docker container. Bound readiness to 120 seconds, report
   each attempt, and stop the selected disposable server on startup failure;
