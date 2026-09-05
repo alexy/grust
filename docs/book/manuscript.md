@@ -1543,6 +1543,17 @@ adversarial cell declares 13 separately labeled count attacks. A distinct
 backend-neutral suite has 14 required policy rejections, so the adversari.al
 extension contains 27 attacks across two non-overlapping expectation models.
 
+The executable additionally exposes distinct `helix-sdk` and `surreal-sdk`
+network-client lanes, while the historical twelve-backend launcher and receipts
+remain unchanged. Both Helix and Surreal retain their direct HTTP lanes.
+Surreal's separately published Rust SDK/WebSocket example cohort passes 108
+baseline and 156 adversarial observations, with two warm-ups and ten measured
+repetitions per query in rotating order. It measures backend materialization
+plus Rust reference execution, not native Surreal query-engine performance.
+Load, worker setup, query, and recovery timings remain separate. Helix's SDK3
+source-built `/v2/query` service is still undergoing live qualification; its
+public build guide and candidate recipe do not establish a passing result.
+
 Reports name the measured execution class as `in-process-reference`,
 `backend-native-aggregate`, `backend-row-source-rust-projection`,
 `backend-materialize-rust-reference`, or `backend-neutral-policy`. Each query
@@ -1569,9 +1580,11 @@ and Helix have no default pinned service startup contract; their cells are
 resource-limited external service.
 
 This is a conformance and reproducibility microbenchmark, and LSQB is not an
-official LDBC benchmark. Only a clean orchestrated run with a valid publication
-receipt is admitted as release evidence; diagnostic and discovery runs are not
-publication evidence. That receipt inventories one normalized watchdog record
+official LDBC benchmark. A complete Grust matrix requires a valid publication
+receipt; separate native Neo4j, source-built Sail and Surreal SDK cohorts use
+immutable evidence bundles admitted by an independent site verifier. A bundle
+manifest's hashes alone do not establish qualification. Unadmitted diagnostic
+and discovery runs are not publication evidence. The matrix receipt inventories one normalized watchdog record
 per cell, binding the configured hard limit and elapsed wall time to the child
 exit status and exact container ID, name, project, and service observed by the
 supervisor. Missing, timed-out, or cross-cell records are rejected.
