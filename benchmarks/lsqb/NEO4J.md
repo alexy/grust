@@ -43,6 +43,15 @@ The shared Dockerfile accepts `BENCHMARK_FEATURE=neo4j-native` and includes the
 native executable. Use `--entrypoint grust-lsqb-neo4j` for this lane; it is not
 part of the twelve-backend matrix's default entry point.
 
+`recovery-probe` now tests a uniquely tagged running transaction, targeted
+termination acknowledgement, worker error, discarded worker connection pool,
+absence observed through a separate connection, and a successful subsequent
+scalar query. Live qualification passed this sequence in about1.42seconds.
+The first attempt failed the absence check while retaining the worker pool;
+the failed pool must never be reused. Neo4j2026.07.1 exposes `tx.setMetaData`,
+not the older `dbms.setTXMetaData` spelling. This server-cancellation probe does
+not yet establish the full isolated-process benchmark deadline contract.
+
 ## Required completion gates
 
 1. Reuse the Rust dataset fingerprint/oracle loaders and bounded graph chunks.

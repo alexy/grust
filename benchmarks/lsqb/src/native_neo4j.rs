@@ -7,6 +7,8 @@ use neo4rs::{ConfigBuilder, Graph, query};
 mod loading;
 #[path = "native_neo4j_run.rs"]
 mod qualification;
+#[path = "native_neo4j_recovery.rs"]
+mod recovery;
 
 fn scalar_value(values: &BTreeMap<String, i64>) -> Result<i64, &'static str> {
     if values.len() != 1 {
@@ -95,6 +97,13 @@ async fn probe() -> Result<(), &'static str> {
 #[tokio::main]
 async fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.first().map(String::as_str) == Some("recovery-probe") {
+        if let Err(error) = recovery::probe().await {
+            eprintln!("neo4j recovery qualification: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if args.first().map(String::as_str) == Some("qualify") {
         if let Err(error) = qualification::run(&args[1..]).await {
             eprintln!("neo4j qualification: {error}");
