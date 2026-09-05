@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Correct duplicate book chapter numbers by letting the renderer number the
+  thirteen chapters, with unnumbered preface and conclusion.
+
 - Bound cleanup of the book diagram renderer's owned browser after a successful
   render. Validate a fresh PNG before atomically replacing a diagram, and retain
   explicit render/cleanup progress rather than waiting indefinitely on shutdown.

@@ -5,7 +5,7 @@ author: "Alexy Khrabrov"
 lang: en-US
 ---
 
-# Preface
+# Preface {.unnumbered}
 
 Grust is a small Rust property graph API with a large architectural promise:
 application code should be able to build, validate, traverse, and persist graph
@@ -29,7 +29,7 @@ the Rust concepts the code leans on, the core graph types, traversal IR, backend
 contracts, implemented backend profiles, query safety, semantic-model
 projection, and practical examples.
 
-# 1. The Shape of Grust
+# The Shape of Grust
 
 Grust is not trying to be every graph library for Rust. It is not an algorithm
 crate like `petgraph`, and it is not a thin wrapper around a single database. It
@@ -76,7 +76,7 @@ dependency-free. Backends are allowed to depend on Redis, SurrealDB, LanceDB,
 PostgreSQL, Spark Connect, HTTP clients, gRPC clients, or SDKs without dragging
 those dependencies into every Grust user.
 
-# 2. The Core Property Graph
+# The Core Property Graph
 
 At the center of Grust are three public data structures:
 
@@ -146,7 +146,7 @@ means a Grust node has a first-class typed identity and an ordinary property
 view of that identity, which helps backends that identify records through
 property maps.
 
-# 3. Building Graphs
+# Building Graphs
 
 Most application code should not construct every `Node` and `Edge` by hand. It
 should use `GraphBuilder`:
@@ -291,7 +291,7 @@ Serialization removes the generated `id` property from node property maps when
 it only mirrors the node's `NodeId`. That keeps exported documents readable
 without changing what `Node::new` guarantees after loading.
 
-# 4. Typed Graph Ingestion with garde and zod-rs
+# Typed Graph Ingestion with garde and zod-rs
 
 The core `Graph`, `Node`, and `Edge` types are intentionally dynamic. A node has
 a label and a property map; an edge has a label, endpoints, and a property map.
@@ -713,7 +713,7 @@ That call validates labels, required fields, field value types, and edge
 endpoint labels before delegating to the backend. Schema-capable stores then use
 `apply_schema` to lower the portable model into their native storage surfaces.
 
-# 5. Traversal as an Intermediate Representation
+# Traversal as an Intermediate Representation
 
 Grust traversal is not Cypher, SQL, GQL, SurrealQL, Spark SQL, or a graph
 database dialect. It is a small Rust intermediate representation:
@@ -758,7 +758,7 @@ dependency-free `benchmarks` example that exercises graph cloning,
 edge-key generation over ring, grid, layered, clustered, Graph500-style R-MAT,
 and GAP-style R-MAT graph families.
 
-# 6. The Store Contract
+# The Store Contract
 
 The central backend trait is `GraphStore` (capability and native-constraint
 methods are omitted here for brevity):
@@ -814,7 +814,7 @@ This separation keeps ordinary application persistence apart from setup and
 destructive workflows. A production service may receive a `GraphStore`, while a
 test harness or migration tool can require `GraphAdminStore`.
 
-# 7. Rust Concepts Used
+# Rust Concepts Used
 
 Grust is a good example of idiomatic Rust applied to a storage abstraction.
 
@@ -846,7 +846,7 @@ unsupported-feature, and serialization failures. That lets a caller tell the
 difference between "the database rejected this" and "this backend does not yet
 support traversal."
 
-# 8. Backend Architecture
+# Backend Architecture
 
 Backends share the same input model but not the same execution model:
 
@@ -1594,7 +1594,7 @@ These are not LDBC Benchmark Results.
 The evidence home and canonical public presentation are at
 [adversari.al/graph](https://adversari.al/graph).
 
-# 9. Cypher and GQL
+# Cypher and GQL
 
 The property graph model so far is a Rust API: builders, traversals, and the
 store contract. `grust-cypher` adds a query and mutation *language* on top of it
@@ -1687,7 +1687,7 @@ pins that scoped-out set to the feature manifest, while backend descriptors and
 integration tests record which execution paths are reference, pushed, native,
 or unsupported.
 
-# 10. Example: A Conference Graph
+# Example: A Conference Graph
 
 Here is a complete graph-building example:
 
@@ -1815,7 +1815,7 @@ flowchart LR
   presentedBy --> ada["Person\nperson:ada"]
 ```
 
-# 11. Schema and Validation Direction
+# Schema and Validation Direction
 
 Grust has schema types: `GraphSchema`, `NodeType`, `EdgeType`, `Field`,
 `FieldType`, `EdgeUniqueness`, and `GraphConstraint`. `GraphSchema` validates
@@ -1915,7 +1915,7 @@ a replacement for the graph. Application code can begin with plain graph
 construction, add schemas when operational needs demand it, and still speak the
 same store trait.
 
-# 12. Design Tradeoffs
+# Design Tradeoffs
 
 The universal node/edge layout appears in multiple backend plans because it is
 the easiest way to preserve arbitrary property graphs:
@@ -1939,7 +1939,7 @@ Grust's current architecture keeps both paths open. Core stays universal.
 Backends choose their storage layout. Schema support can become richer without
 forcing every backend to look the same.
 
-# 13. Where Grust Can Grow
+# Where Grust Can Grow
 
 The next natural step is to deepen graph-native read and traversal support
 across the backends. HelixDB, LadybugDB, and SurrealDB now satisfy the portable
@@ -1987,7 +1987,7 @@ write-with-`RETURN` helper remains sequential because later operations may use
 intermediate bindings; it is not a whole-statement atomicity boundary. Explicit
 transaction scripts batch supported mutations when atomicity is required.
 
-# Conclusion
+# Conclusion {.unnumbered}
 
 Grust is small by design. Its core model is easy to hold in your head, and its
 backend contract is narrow enough that very different systems can implement it.

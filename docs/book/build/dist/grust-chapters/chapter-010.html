@@ -780,17 +780,20 @@ service v4.20.4, SurrealDB Rust SDK and service 3.2.4 with reqwest
 0.13.4, pgGraph service 1.2.0, tokio-postgres 0.7.18, and stable Turso
 0.7.2. These are tested compatibility updates, not claims that every
 adapter implements the portable Cypher executor.</p>
-<p>Two attempted upgrades remain intentionally held. LanceDB stays at
-0.30.0: the attempted 0.38.0 default-feature local build fails within
-upstream <code>lancedb</code> because <code>job.rs</code> references the
-remote-only <code>Error::Http</code> variant when <code>remote</code> is
-disabled. The unpublished Helix adapter stays at exact
-<code>helix-db</code> 2.0.0: 3.0.0 removed
-<code>DynamicQueryRequest</code> and <code>dynamic_query</code>, changed
-<code>Client::query</code>, and targets <code>/v2/query</code>, while
-the checked Helix v3.0.1 server still exposes <code>/v1/query</code>.
-The repository’s <code>benchmarks/lsqb/BACKENDS.md</code> records the
-full qualification matrix and live gate evidence.</p>
+<p>LanceDB stays at 0.30.0: the attempted 0.38.0 default-feature local
+build fails within upstream <code>lancedb</code> because
+<code>job.rs</code> references the remote-only <code>Error::Http</code>
+variant when <code>remote</code> is disabled. The unpublished Helix
+adapter now targets exact <code>helix-db</code> 3.0.0: its SDK path uses
+typed nested-AST <code>QueryRequest</code> builders and
+<code>Client::query(request)</code> rather than
+<code>DynamicQueryRequest</code> and <code>dynamic_query</code>. The
+direct HTTP/v1 store remains separate and unchanged. Nineteen unit tests
+pass, including SDK serialization and existing HTTP behavior; live
+SDK/v2 service qualification remains pending. Historical HTTP service
+evidence is not reused as proof of SDK/v2 compatibility. The
+repository’s <code>benchmarks/lsqb/BACKENDS.md</code> records the full
+qualification matrix and live gate evidence.</p>
 <h2 data-number="9.11" id="lsqb-compatibility-microbenchmark"><span
 class="header-section-number">9.11</span> LSQB Compatibility
 Microbenchmark</h2>
@@ -812,6 +815,18 @@ cell declares 13 separately labeled count attacks. A distinct
 backend-neutral suite has 14 required policy rejections, so the
 adversari.al extension contains 27 attacks across two non-overlapping
 expectation models.</p>
+<p>The executable additionally exposes distinct <code>helix-sdk</code>
+and <code>surreal-sdk</code> network-client lanes, while the historical
+twelve-backend launcher and receipts remain unchanged. Both Helix and
+Surreal retain their direct HTTP lanes. Surreal’s separately published
+Rust SDK/WebSocket example cohort passes 108 baseline and 156
+adversarial observations, with two warm-ups and ten measured repetitions
+per query in rotating order. It measures backend materialization plus
+Rust reference execution, not native Surreal query-engine performance.
+Load, worker setup, query, and recovery timings remain separate. Helix’s
+SDK3 source-built <code>/v2/query</code> service is still undergoing
+live qualification; its public build guide and candidate recipe do not
+establish a passing result.</p>
 <p>Reports name the measured execution class as
 <code>in-process-reference</code>,
 <code>backend-native-aggregate</code>,
@@ -843,13 +858,16 @@ pinned service startup contract; their cells are
 <code>unavailable</code> unless an operator explicitly qualifies a
 digest-pinned, resource-limited external service.</p>
 <p>This is a conformance and reproducibility microbenchmark, and LSQB is
-not an official LDBC benchmark. Only a clean orchestrated run with a
-valid publication receipt is admitted as release evidence; diagnostic
-and discovery runs are not publication evidence. That receipt
-inventories one normalized watchdog record per cell, binding the
-configured hard limit and elapsed wall time to the child exit status and
-exact container ID, name, project, and service observed by the
-supervisor. Missing, timed-out, or cross-cell records are rejected.</p>
+not an official LDBC benchmark. A complete Grust matrix requires a valid
+publication receipt; separate native Neo4j, source-built Sail and
+Surreal SDK cohorts use immutable evidence bundles admitted by an
+independent site verifier. A bundle manifest’s hashes alone do not
+establish qualification. Unadmitted diagnostic and discovery runs are
+not publication evidence. The matrix receipt inventories one normalized
+watchdog record per cell, binding the configured hard limit and elapsed
+wall time to the child exit status and exact container ID, name,
+project, and service observed by the supervisor. Missing, timed-out, or
+cross-cell records are rejected.</p>
 <p>These are not LDBC Benchmark Results.</p>
 <p>The evidence home and canonical public presentation are at <a
 href="https://adversari.al/graph">adversari.al/graph</a>.</p>
