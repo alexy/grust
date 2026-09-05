@@ -25,6 +25,11 @@ ATTACKS = ('reversed-chain', 'reordered-join', 'split-match', 'optional-fanout',
            'parser-comment-trivia', 'resource-edge-scan')
 SOURCE_REVISION = 'aaf0999706fa8cfdb7eeb10e8349b9a471229857'
 CLIENT_IMAGE_ID = 'sha256:ff4f6c185f1d10a6ee63a815f823c0dfa48d917bcb25a0e2998d20c6291717b6'
+CLIENT_PROFILES = {
+    SOURCE_REVISION: CLIENT_IMAGE_ID,
+    'bb4f7c161fdae90cc9fc2b35aaf0870e9da91164':
+        'sha256:b68b801a134fc85af5e9a44486a1309b45315b2ff7e67eab8489e24dab51c9ed',
+}
 SERVER_IMAGE = 'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d'
 
 
@@ -42,12 +47,14 @@ def validate_runtime(directory):
     records = {name: json.loads((directory / f'{name}.json').read_text()) for name in
                ('invocation', 'watchdog', 'client-before', 'client-after', 'server-before', 'server-after')}
     invocation, watchdog = records['invocation'], records['watchdog']
+    revision = invocation.get('source_revision')
+    require(isinstance(revision, str) and revision in CLIENT_PROFILES, 'unqualified source revision')
+    client_image = CLIENT_PROFILES[revision]
     require(invocation.get('diagnostic_only') is True, 'runtime lane is not diagnostic')
-    require(invocation.get('source_revision') == SOURCE_REVISION and
-            invocation.get('client_image_id') == CLIENT_IMAGE_ID and
+    require(invocation.get('client_image_id') == client_image and
             invocation.get('server_image') == SERVER_IMAGE, 'runtime source/image identity differs')
     labels = invocation.get('client_labels', {})
-    require(labels.get('org.opencontainers.image.revision') == SOURCE_REVISION and
+    require(labels.get('org.opencontainers.image.revision') == revision and
             labels.get('io.adversarial.grust.benchmark-feature') == 'neo4j-native', 'client source labels differ')
     for role in ('client', 'server'):
         before, after = records[f'{role}-before'], records[f'{role}-after']
@@ -64,7 +71,7 @@ def validate_runtime(directory):
                     type(record['state'].get('ExitCode')) is int and record['state']['ExitCode'] == 0,
                     'runtime OOM or nonzero exit')
         if role == 'client':
-            require(before['image_id'] == CLIENT_IMAGE_ID and resource.get('ReadonlyRootfs') is True,
+            require(before['image_id'] == client_image and resource.get('ReadonlyRootfs') is True,
                     'client runtime image/filesystem differs')
             require(before['state'].get('Status') == 'created' and before['state'].get('Running') is False and
                     after['state'].get('Status') == 'exited' and after['state'].get('Running') is False,

@@ -12,7 +12,7 @@ reconstructed from Git history, release commits, and the shipped docs.
   independently checked server recovery, and an oracle/journal diagnostic audit.
   Retain Docker runtime metadata before watchdog cleanup and distinguish a
   transaction disappearing after worker exit from acknowledged termination.
-  Race-fix Docker qualification and publication receipts remain pending;
+  Race-fix Docker deadline/recovery probes pass; publication receipts remain pending;
   diagnostics are not published rankings.
 
 - Benchmark-only: use 10,000-row Sail bulk-write batches and expose aggregate

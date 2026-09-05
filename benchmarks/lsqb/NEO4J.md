@@ -131,7 +131,23 @@ and stopped the owned server. Neo4j confirms `Transaction not found.` for an
 absent transaction; the fix distinguishes disappearance from acknowledged
 termination and still requires independent absence and next-query proof.
 Regression tests cover both responses and reject wrong transaction identities.
-Docker qualification of that race-handling change remains pending.
+The race-handling build `bb4f7c161fdae90cc9fc2b35aaf0870e9da91164` passed three
+consecutive Docker process-deadline probes and a targeted-termination probe.
+All four retained-runtime audits passed. The disappearance branch was not
+observed in those three deadline runs; its exact response classification is
+covered by the regression test and the live absent-transaction response check.
+The new client platform manifest is
+`sha256:cb694a3f3b15f0008cec656bdda295cd1d7ff82b56d2929b304b8b06b53630db`.
+Use the diagnostic validator's `--runtime` option to also check supported
+source/image pairs, stable container identities and resource limits, process
+states, OOM flags and watchdog ownership. This still does not issue a
+publication receipt or establish an isolated performance ranking.
+
+The fresh example run `out/neo4j-runtime-example-bb4f7c1` passed all22 cases
+and the combined diagnostic/runtime audit. Its watchdog completed in21.053seconds,
+and all client/server before/after records were retained before client cleanup.
+This is the first full native example diagnostic with the new runtime evidence;
+larger-scale runs above still belong to their original source/provenance cohort.
 
 ## Required completion gates
 

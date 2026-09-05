@@ -167,6 +167,19 @@ class RuntimeTests(unittest.TestCase):
     def test_consistent_records_pass(self):
         self.assertTrue(self.audit())
 
+    def test_race_fix_profile_is_bound_to_its_own_image(self):
+        revision = 'bb4f7c161fdae90cc9fc2b35aaf0870e9da91164'
+        invocation = self.records['invocation']
+        invocation['source_revision'] = revision
+        invocation['client_labels']['org.opencontainers.image.revision'] = revision
+        with self.assertRaises(ValueError):
+            self.audit()
+        image = check.CLIENT_PROFILES[revision]
+        invocation['client_image_id'] = image
+        for phase in ('before', 'after'):
+            self.records[f'client-{phase}']['image_id'] = image
+        self.assertTrue(self.audit())
+
     def test_restart_oom_changed_resources_and_wrong_watchdog_fail(self):
         original = copy.deepcopy(self.records)
         mutations = [('server-after', 'state', 'StartedAt', 'new-start'),
