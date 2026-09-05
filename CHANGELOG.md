@@ -6,6 +6,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Gate native Neo4j benchmark startup on a successful Bolt scalar query, not
+  merely a running Docker container. Bound readiness to 120 seconds, report
+  each attempt, and stop the selected disposable server on startup failure;
+  readiness is outside the query measurement boundary.
+
 - Publish the Sail Docker reproduction guide with pinned public base/wheel inputs,
   explicit Grust-built provenance, and source-built comparison admission requirements.
   Add retained source-build evidence and a fresh-process shared-session qualification

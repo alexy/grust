@@ -4,6 +4,13 @@ This lane is under implementation, not published benchmark evidence. It adds
 Neo4j as a native engine comparator; it does not invent a Grust Neo4j adapter.
 The existing twelve-backend Grust receipts remain unchanged.
 
+The Docker wrapper now waits for `cypher-shell` to return the exact scalar42
+before creating the benchmark client. Readiness has a120second total deadline,
+individual attempts are bounded to10seconds, and every attempt emits a status
+record. This prevents Docker's running state from admitting a server whose Bolt
+listener is still starting. Startup failures stop the selected disposable
+server before import; readiness time is not a query performance sample.
+
 ## Pinned qualification target
 
 - Neo4j Community 2026.07.1, the current server release identified in

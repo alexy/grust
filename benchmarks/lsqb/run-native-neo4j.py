@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
 
 SERVER_IMAGE = 'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d'
 MEMORY = 6 * 1024**3
@@ -39,6 +40,37 @@ def stop_owned(client_id, server_id):
         subprocess.run(['docker', 'stop', client_id], check=True, timeout=30)
     finally:
         subprocess.run(['docker', 'stop', server_id], check=True, timeout=30)
+
+
+def wait_ready(server_id, timeout=120):
+    """Probe Bolt before measurement; a running container is not a ready DB.
+
+    Retain only probe status, never unfiltered command output. Each attempt is
+    bounded and emits progress, including when cypher-shell itself times out.
+    """
+    started = time.monotonic()
+    attempts = 0
+    while True:
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            raise RuntimeError('Neo4j readiness deadline exceeded before benchmark start')
+        attempts += 1
+        try:
+            result = subprocess.run(
+                ['docker', 'exec', server_id, 'cypher-shell', '--format', 'plain',
+                 'RETURN 42 AS readiness'], capture_output=True, text=True,
+                timeout=min(10, remaining), check=False)
+            ready = result.returncode == 0 and result.stdout.strip().splitlines() == ['readiness', '42']
+        except subprocess.TimeoutExpired:
+            ready = False
+        record = dict(event='neo4j-readiness', attempt=attempts, ready=ready,
+                      elapsed_ms=round((time.monotonic() - started) * 1000))
+        print(json.dumps(record), flush=True)
+        if ready:
+            return record
+        remaining = timeout - (time.monotonic() - started)
+        if remaining > 0:
+            time.sleep(min(2, remaining))
 
 
 def start_recorded(client_id, output):
@@ -115,6 +147,13 @@ def main():
     save('invocation.json', dict(diagnostic_only=True, command=command, source_revision=args.source_revision,
                                  client_image_id=image['Id'], client_labels=labels, server_image=SERVER_IMAGE))
     save('server-before.json', snapshot(server))
+    # No client exists yet and no dataset has been touched. A startup failure
+    # therefore cannot be mistaken for a query failure or a measured sample.
+    try:
+        wait_ready(server['Id'])
+    except Exception:
+        subprocess.run(['docker', 'stop', server['Id']], check=True, timeout=30)
+        raise
     client_id = subprocess.check_output(command, text=True, timeout=30).strip()
     if not re.fullmatch(r'[0-9a-f]{64}', client_id):
         raise RuntimeError('invalid created client identity')
