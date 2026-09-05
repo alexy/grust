@@ -21,6 +21,26 @@ below are authoritative.
 - Publish workspace crates in dependency order. Publish `grust-core` first, then backend and adapter crates such as `grust-memory`, `grust-cocoindex`, `grust-falkor`, `grust-helix`, `grust-lancedb`, `grust-pggraph`, `grust-sail`, and `grust-surreal`, and publish the facade package `grust-graph` last.
 - After publishing, verify the released versions from outside the workspace with `cargo info <crate>@<version>` so local path dependencies cannot mask registry state.
 
+## Benchmark Neutrality
+
+- The benchmarks in this repository (`benchmarks/lsqb`) and the companion
+  strain benchmark (`querygraph/adversarial-graph`) are neutral at every
+  level: workload design, harness code, evidence, documentation, commit
+  messages, and site prose. They measure and report; they do not pursue an
+  outcome for any system, including Grust.
+- Do not write, commit, or publish strategy about making one system look
+  better or worse than another, in any file or commit message, at any time.
+  State targets as engineering properties (exact answers, admitted queries,
+  disclosed execution classes, resource envelopes, protocol parity), never as
+  a contest against a named engine.
+- Comparisons are evidence: same dataset, protocol, envelope, and execution
+  class, with every outcome (pass, mismatch, unsupported, unavailable,
+  timeout, error, not applicable) kept distinct and every failure retained.
+  A faster or slower number is reported with its boundary, not framed as a
+  win or a loss.
+- If a document is found to violate this, fix the document and remove the
+  violation from history; do not leave it in place with a disclaimer.
+
 ## File Discipline
 
 - Prefer keeping source and documentation files under 500 lines, and try to keep
