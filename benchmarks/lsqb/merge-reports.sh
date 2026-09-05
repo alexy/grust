@@ -5,7 +5,7 @@ usage() {
     cat >&2 <<'USAGE'
 Usage: merge-reports.sh OUTPUT.json REPORT.json [REPORT.json ...]
 
-Merge schema-v2 one-backend LSQB reports. Reports must describe the same
+Merge schema-v3 one-backend LSQB reports. Reports must describe the same
 suite, environment, dataset, timing protocol, and per-query oracle identity.
 Partial matrices are valid artifacts but carry complete=false until all twelve
 canonical backends exist.
@@ -48,6 +48,7 @@ canonical_runtime_versions=$(jq -c \
     '[.backends[] | {key: .id, value: (.runtime_version // .service_identity.version // null)}] | from_entries' "$manifest_path")
 allowed_outcomes='["pass","mismatch","unsupported","unavailable","timeout","error","not_applicable"]'
 allowed_execution_classes='["in-process-reference","backend-native-aggregate","backend-row-source-rust-projection","backend-materialize-rust-reference","backend-neutral-policy"]'
+allowed_terminations='["normal-exit","backend-timeout","deadline-observed-exit","deadline-sigterm","deadline-sigkill"]'
 
 first=${reports[0]}
 for report in "${reports[@]}"; do
@@ -76,7 +77,7 @@ case "$track" in
 esac
 
 # Everything except the cells and their computed flags is shared experiment
-# identity. Additive schema-v2 provenance therefore fails closed automatically.
+# identity. Additive schema-v3 provenance therefore fails closed automatically.
 shared=$(jq -S -c 'del(.backends, .complete, .valid)' "$first")
 query_identity=$(jq -S -c '
     [.backends[0].queries[] | {id, source_sha256, adapter_sha256, expected_count}]
@@ -109,6 +110,7 @@ for report in "${reports[@]}"; do
         --argjson manifest "$evidence_manifest" \
         --argjson outcomes "$allowed_outcomes" \
         --argjson classes "$allowed_execution_classes" \
+        --argjson terminations "$allowed_terminations" \
         --argjson queries "$expected_queries" '
             def string: type == "string";
             def nonempty_string: string and length > 0;
@@ -152,8 +154,15 @@ for report in "${reports[@]}"; do
                 else
                     (($query_index - (($iteration - 1) % $query_count) + $query_count) % $query_count) + 1
                 end;
-            def observation_valid($observation; $expected; $query_index; $query_count; $order):
+            def observation_valid($observation; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract):
                 ($observation | type == "object")
+                and ($observation | has("iteration") and has("query_position")
+                    and has("setup_ns") and has("elapsed_ns") and has("recovery_ns")
+                    and has("termination") and has("outcome"))
+                and (($observation | keys) - [
+                    "actual_count", "detail", "elapsed_ns", "iteration", "outcome",
+                    "query_position", "recovery_ns", "setup_ns", "termination"
+                ] | length == 0)
                 and ($observation.iteration | positive_integer)
                 and ($observation.query_position | positive_integer and . <= $query_count)
                 and ($observation.query_position == expected_position(
@@ -162,7 +171,11 @@ for report in "${reports[@]}"; do
                     $query_count;
                     $order
                 ))
+                and ($observation.setup_ns | nonnegative_integer and . <= $ready_ns)
                 and ($observation.elapsed_ns | nonnegative_integer)
+                and ($observation.recovery_ns | nonnegative_integer)
+                and ($observation.termination as $termination
+                    | ($terminations | index($termination)) != null)
                 and ($observation.detail | optional_string)
                 and ($observation.outcome as $status | ($outcomes | index($status)) != null)
                 and (
@@ -178,13 +191,42 @@ for report in "${reports[@]}"; do
                     else
                         false
                     end
+                )
+                and (
+                    if $observation.termination == "normal-exit" then
+                        $observation.outcome != "timeout"
+                        and $observation.elapsed_ns <= $timeout_ns
+                        and (
+                            $observation.outcome != "error"
+                            or $recovery_contract == "process-group-absent"
+                            or $recovery_contract == "postgres-session-absent"
+                        )
+                    elif $observation.termination == "backend-timeout" then
+                        $observation.outcome == "timeout"
+                        and $observation.elapsed_ns <= $timeout_ns
+                        and (
+                            $recovery_contract == "process-group-absent"
+                            or $recovery_contract == "postgres-session-absent"
+                            or $recovery_contract == "falkor-server-deadline"
+                        )
+                    else
+                        $observation.outcome == "timeout"
+                        and $observation.elapsed_ns >= $timeout_ns
+                        and (
+                            $observation.termination != "deadline-sigkill"
+                            or $observation.recovery_ns >= $term_grace_ns
+                        )
+                        and (
+                            $recovery_contract == "process-group-absent"
+                            or $recovery_contract == "postgres-session-absent"
+                        )
+                    end
                 );
-            def phase_valid($observations; $iterations; $expected; $query_index; $query_count; $order; $timeout_ns):
+            def phase_valid($observations; $iterations; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract):
                 ($observations | type == "array" and length == $iterations)
                 and (($observations | map(.iteration) | sort) == [range(1; $iterations + 1)])
                 and all($observations[];
-                    observation_valid(.; $expected; $query_index; $query_count; $order)
-                    and (.outcome == "timeout" or .elapsed_ns <= $timeout_ns)
+                    observation_valid(.; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract)
                 );
             def reduced_outcome($observations):
                 if any($observations[]; .outcome == "error") then
@@ -247,7 +289,7 @@ for report in "${reports[@]}"; do
                 and ($query.execution.backend_query_sha256 | optional_sha256)
                 and ($query.warmups | type == "array")
                 and ($query.measurements | type == "array");
-            def executed_query_valid($query; $canonical; $backend; $scale; $warmups; $measurements; $query_count; $order; $timeout_ns):
+            def executed_query_valid($query; $canonical; $backend; $scale; $warmups; $measurements; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract):
                 common_query_valid($query; $canonical; $scale)
                 and (
                     if $query.execution.class == null then
@@ -287,7 +329,10 @@ for report in "${reports[@]}"; do
                             $query_index;
                             $query_count;
                             $order;
-                            $timeout_ns
+                            $timeout_ns;
+                            $ready_ns;
+                            $term_grace_ns;
+                            $recovery_contract
                         )
                         and phase_valid(
                             $query.measurements;
@@ -296,7 +341,10 @@ for report in "${reports[@]}"; do
                             $query_index;
                             $query_count;
                             $order;
-                            $timeout_ns
+                            $timeout_ns;
+                            $ready_ns;
+                            $term_grace_ns;
+                            $recovery_contract
                         )
                         and ($query.outcome == reduced_outcome($query.warmups + $query.measurements))
                         and (
@@ -400,13 +448,15 @@ for report in "${reports[@]}"; do
             | ($queries | length) as $query_count
             | ($report.timing.query_order) as $order
             | ($report.timing.query_timeout_ms * 1000000) as $timeout_ns
+            | ($report.timing.worker_ready_timeout_ms * 1000000) as $ready_ns
+            | ($report.timing.query_reap_grace_ms * 1000000) as $term_grace_ns
             | ($report.dataset.scale_factor) as $scale
             | ($manifest.datasets[$scale]) as $known_dataset
             | ($manifest.tracks[$report.suite.track].queries | with_entries(
                 .value.expected_count = .value.expected_count[$scale]
               )) as $canonical_queries
             | (
-                $report.schema_version == 2
+                $report.schema_version == 3
                 and ($report.warning == $manifest.warning)
                 and $report.experiment_id == "lsqb-\($report.suite.track)-sf\($report.dataset.scale_factor)"
                 and ($report.suite | type == "object")
@@ -444,13 +494,30 @@ for report in "${reports[@]}"; do
                 and ($report.dataset.edges == $known_dataset.edges)
                 and ($report.dataset.person_nodes == $known_dataset.person_nodes)
                 and ($report.timing | type == "object")
+                and (($report.timing | keys) == [
+                    "boundary",
+                    "cell_timeout_ms",
+                    "measurement_iterations",
+                    "query_kill_reap_timeout_ms",
+                    "query_order",
+                    "query_reap_grace_ms",
+                    "query_recovery_timeout_ms",
+                    "query_timeout_ms",
+                    "timeout_enforcement",
+                    "warmup_iterations",
+                    "worker_ready_timeout_ms"
+                ])
                 and ($warmups | nonnegative_integer)
                 and ($measurements | positive_integer)
                 and ($report.timing.query_timeout_ms | positive_integer)
+                and ($report.timing.worker_ready_timeout_ms | positive_integer)
+                and ($report.timing.query_reap_grace_ms | nonnegative_integer)
+                and ($report.timing.query_kill_reap_timeout_ms | positive_integer)
+                and ($report.timing.query_recovery_timeout_ms | positive_integer)
                 and ($report.timing.cell_timeout_ms | positive_integer)
-                and ($order == "fixed" or $order == "rotating")
-                and ($report.timing.boundary == "submit-to-scalar-consumed")
-                and ($report.timing.reload_before_each_iteration | type == "boolean")
+                and ($report.timing.timeout_enforcement == "coordinator-process-group")
+                and ($order == "rotating")
+                and ($report.timing.boundary == "coordinator-go-to-result-consumed")
                 and ($report.complete == false)
                 and ($report.valid | type == "boolean")
                 and ($report.backends | type == "array" and length == 1)
@@ -493,6 +560,18 @@ for report in "${reports[@]}"; do
                     and ($cell.backend.image | optional_nonempty_string)
                     and ($cell.backend.image_id | . == null or (string and test("^sha256:[0-9a-f]{64}$")))
                     and ($cell.backend.worker_threads | . == null or positive_integer)
+                    and ($cell.lifecycle | type == "object")
+                    and (($cell.lifecycle | keys) == ["load_strategy", "recovery_contract"])
+                    and ($cell.lifecycle.load_strategy as $load_strategy
+                        | $load_strategy == "once-worker-attach"
+                        or $load_strategy == "per-observation-worker-reload"
+                        or $load_strategy == "not-executed")
+                    and ($cell.lifecycle.recovery_contract as $recovery_contract
+                        | $recovery_contract == "process-group-absent"
+                        or $recovery_contract == "postgres-session-absent"
+                        or $recovery_contract == "falkor-server-deadline"
+                        or $recovery_contract == "fail-closed"
+                        or $recovery_contract == "not-applicable")
                     and (
                         if $service_contracts[$cell.backend.name] == "none" then
                             $cell.backend.service_version == $runtime_versions[$cell.backend.name]
@@ -538,6 +617,34 @@ for report in "${reports[@]}"; do
                         if $cell.setup_outcome == "pass" then
                             ($cell.setup_detail == null)
                             and ($cell.load_ns | nonnegative_integer)
+                            and (
+                                if $cell.backend.name == "memory"
+                                    or $cell.backend.name == "turso"
+                                    or $cell.backend.name == "ladybug"
+                                    or $cell.backend.name == "lancedb"
+                                then
+                                    $cell.lifecycle.load_strategy == "per-observation-worker-reload"
+                                    and $cell.lifecycle.recovery_contract == "process-group-absent"
+                                elif $cell.backend.name == "sail" then
+                                    $cell.lifecycle.load_strategy == "per-observation-worker-reload"
+                                    and $cell.lifecycle.recovery_contract == "fail-closed"
+                                elif $cell.backend.name == "postgres"
+                                    or $cell.backend.name == "pggraph"
+                                    or $cell.backend.name == "postgres-pgq"
+                                then
+                                    $cell.lifecycle.load_strategy == "once-worker-attach"
+                                    and $cell.lifecycle.recovery_contract == "postgres-session-absent"
+                                elif $cell.backend.name == "falkor" then
+                                    $cell.lifecycle.load_strategy == "once-worker-attach"
+                                    and $cell.lifecycle.recovery_contract == "falkor-server-deadline"
+                                elif $cell.backend.name == "surreal"
+                                    or $cell.backend.name == "helix"
+                                then
+                                    $cell.lifecycle.load_strategy == "once-worker-attach"
+                                    and $cell.lifecycle.recovery_contract == "fail-closed"
+                                else false
+                                end
+                            )
                             and all($cell.queries[];
                                 disallowed_materialization_query_valid(
                                     .;
@@ -560,12 +667,17 @@ for report in "${reports[@]}"; do
                                     $measurements;
                                     $query_count;
                                     $order;
-                                    $timeout_ns
+                                    $timeout_ns;
+                                    $ready_ns;
+                                    $term_grace_ns;
+                                    $cell.lifecycle.recovery_contract
                                 )
                             )
                         elif $cell.setup_outcome == "error" then
                             ($cell.setup_detail | nonempty_string)
                             and $cell.load_ns == null
+                            and $cell.lifecycle.load_strategy == "not-executed"
+                            and $cell.lifecycle.recovery_contract == "not-applicable"
                             and (
                                 $cell.queries[0].reason_code as $reason
                                 | nonexecuted_reason_valid(
@@ -589,6 +701,8 @@ for report in "${reports[@]}"; do
                         elif ($cell.setup_outcome | neutral) then
                             ($cell.setup_detail | nonempty_string)
                             and $cell.load_ns == null
+                            and $cell.lifecycle.load_strategy == "not-executed"
+                            and $cell.lifecycle.recovery_contract == "not-applicable"
                             and (
                                 $cell.queries[0].reason_code as $reason
                                 | nonexecuted_reason_valid(
@@ -617,7 +731,7 @@ for report in "${reports[@]}"; do
                 and ($report.valid == ($report | computed_valid))
             )
         ' "$report" >/dev/null; then
-        echo "merge-reports.sh: invalid or semantically inconsistent one-backend schema-v2 report: $report" >&2
+        echo "merge-reports.sh: invalid or semantically inconsistent one-backend schema-v3 report: $report" >&2
         exit 1
     fi
 

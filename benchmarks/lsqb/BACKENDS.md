@@ -1,7 +1,7 @@
 # Backend qualification for the graph benchmark
 
 This qualification review is scoped to Grust 0.13 and the pinned LSQB
-comparison. The schema-v2
+comparison. The schema-v3
 Docker matrix always contains all twelve canonical backend cells. A cell may be
 executed, explicitly unavailable, unsupported at a requested scale, or not
 applicable. Those states are evidence, not passes silently substituted for a
@@ -25,6 +25,25 @@ is never rewritten as an unavailable core-runner fallback.
 | PostgreSQL PGQ | PostgreSQL 19 beta API; PostgreSQL 19 Beta 3 | unavailable by default; externally qualifiable at `sfexample` | PostgreSQL 19 Beta 3's official image includes SQL/PGQ. A fresh, explicitly qualified service can exercise the adapter; downloaded scales still reject its whole-store materialization path. |
 | Helix | `helix-db =2.0.0`; local runtime v0.9.0 | unavailable by default; externally qualifiable at `sfexample` | The official CLI uses the `enterprise-dev` runtime and dynamic `/v1/query` endpoint. Qualification requires a fresh isolated container. The runtime image reports a proprietary license identifier even though the public Helix repository is AGPL-3.0, so evidence discloses the exact artifact rather than generalizing its license. |
 | CocoIndex | export adapter | not applicable | Target-state export is not a queryable graph storage backend; all query cells say `not_applicable`. |
+
+Every executed observation uses a fresh, dedicated worker process group after a
+private READY/GO handshake. The coordinator proves that group absent and its
+control pipes closed; trusted benchmark workers do not re-session descendants,
+and only the outer container watchdog is a full-tree boundary. Memory, Turso,
+Ladybug, and LanceDB reload their
+process-owned state before READY; Sail also reloads because its temporary views
+are session scoped. PostgreSQL, FalkorDB, SurrealDB, pgGraph, PostgreSQL PGQ,
+and Helix attach to state loaded once by the coordinator. PostgreSQL-family
+workers carry a unique server session name and `statement_timeout`, allowing a
+forced timeout to be followed by an exact `pg_stat_activity` disappearance
+check. Falkor's acknowledged native TIMEOUT is accepted when it returns
+normally; its server cutoff reserves ten percent of the coordinator deadline,
+capped at one second, for the acknowledgement and reconnect. Falkor, Sail,
+SurrealDB, and Helix fail the cell if the coordinator
+must forcibly kill a worker because those services do not expose a sufficient
+post-kill quiescence proof through the current adapters. They never continue
+on process-exit evidence alone, including after an unacknowledged remote query
+error.
 
 “Externally qualifiable” requires an endpoint on an explicit
 `host.docker.internal` port published by the declared container on all host

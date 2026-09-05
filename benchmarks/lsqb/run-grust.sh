@@ -14,6 +14,10 @@ scale=${SF:-example}
 runs=${RUNS:-5}
 warmups=${WARMUPS:-2}
 query_timeout_ms=${QUERY_TIMEOUT_MS:-30000}
+worker_ready_timeout_ms=${WORKER_READY_TIMEOUT_MS:-1200000}
+query_reap_grace_ms=${QUERY_REAP_GRACE_MS:-1000}
+query_kill_reap_timeout_ms=${QUERY_KILL_REAP_TIMEOUT_MS:-5000}
+query_recovery_timeout_ms=${QUERY_RECOVERY_TIMEOUT_MS:-10000}
 cell_timeout_ms=${CELL_TIMEOUT_MS:-}
 smoke=${SMOKE:-0}
 discovery=${DISCOVERY:-0}
@@ -95,12 +99,19 @@ docker buildx version >/dev/null 2>&1 || die "Docker Buildx is required"
 docker info >/dev/null 2>&1 || die "Docker is not running"
 [[ -n "$cell_timeout_ms" ]] || die \
     "CELL_TIMEOUT_MS is required and sets the hard wall-clock limit for each named cell container"
-for value_name in runs warmups query_timeout_ms cell_timeout_ms; do
+for value_name in runs warmups query_timeout_ms worker_ready_timeout_ms \
+    query_reap_grace_ms query_kill_reap_timeout_ms query_recovery_timeout_ms \
+    cell_timeout_ms; do
     value=${!value_name}
     [[ "$value" =~ ^[0-9]+$ ]] || die "$value_name must be an integer"
 done
 (( runs > 0 )) || die "runs must be greater than zero"
 (( query_timeout_ms > 0 )) || die "query_timeout_ms must be greater than zero"
+(( worker_ready_timeout_ms > 0 )) || die "worker_ready_timeout_ms must be greater than zero"
+(( query_kill_reap_timeout_ms > 0 )) || die \
+    "query_kill_reap_timeout_ms must be greater than zero"
+(( query_recovery_timeout_ms > 0 )) || die \
+    "query_recovery_timeout_ms must be greater than zero"
 (( cell_timeout_ms > 0 )) || die "cell_timeout_ms must be greater than zero"
 [[ "$smoke" == 0 || "$smoke" == 1 ]] || die "SMOKE must be 0 or 1"
 [[ "$discovery" == 0 || "$discovery" == 1 ]] || die "DISCOVERY must be 0 or 1"
@@ -648,6 +659,10 @@ for backend in "${canonical_backends[@]}"; do
             --warmups "$warmups" \
             --runs "$runs" \
             --query-timeout-ms "$query_timeout_ms" \
+            --worker-ready-timeout-ms "$worker_ready_timeout_ms" \
+            --query-reap-grace-ms "$query_reap_grace_ms" \
+            --query-kill-reap-timeout-ms "$query_kill_reap_timeout_ms" \
+            --query-recovery-timeout-ms "$query_recovery_timeout_ms" \
             --cell-timeout-ms "$cell_timeout_ms" \
             --lsqb-root "$container_lsqb_root" \
             --output "$container_output" 2>&1 | tee /dev/stderr >&5 || cell_status=$?
@@ -674,7 +689,7 @@ for backend in "${canonical_backends[@]}"; do
         [[ -s "$component" && ! -L "$component" ]] || die \
             "backend produced no regular non-symlink component report: $backend/$suite"
         jq -e --arg backend "$backend" \
-            '.schema_version == 2 and .backends[0].backend.name == $backend' \
+            '.schema_version == 3 and .backends[0].backend.name == $backend' \
             "$component" >/dev/null || die "invalid component report: $component"
         jq -e --arg expected "$expected_manifest_sha256" \
             '.dataset.extracted_manifest_sha256 == $expected' \
@@ -740,10 +755,10 @@ for suite in "${matrix_suites[@]}"; do
     [[ -f "$matrix" && ! -L "$matrix" ]] || die \
         "merge did not create a regular non-symlink matrix report: $matrix"
     if [[ "$smoke" == 1 ]]; then
-        jq -e '.schema_version == 2 and .complete == false and .valid == true and (.backends | length == 1)' \
+        jq -e '.schema_version == 3 and .complete == false and .valid == true and (.backends | length == 1)' \
             "$matrix" >/dev/null || die "smoke matrix validation failed: $matrix"
     elif [[ "$discovery" == 1 ]]; then
-        jq -e '.schema_version == 2 and .complete == true and (.backends | length == 12)' \
+        jq -e '.schema_version == 3 and .complete == true and (.backends | length == 12)' \
             "$matrix" >/dev/null || die "discovery matrix validation failed: $matrix"
         if ! jq -e '.valid == true' "$matrix" >/dev/null; then
             matrix_failed=1

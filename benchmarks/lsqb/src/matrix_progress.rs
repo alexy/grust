@@ -148,6 +148,21 @@ struct QueryFinishEvent<'a> {
     elapsed_ns: u64,
 }
 
+#[derive(Serialize)]
+struct QueryReadyEvent<'a> {
+    event: &'static str,
+    backend: &'a str,
+    suite: &'a str,
+    scale: &'a str,
+    phase: QueryPhase,
+    iteration: u32,
+    iteration_total: u32,
+    query_position: u32,
+    query_total: u32,
+    query_id: &'a str,
+    setup_ns: u64,
+}
+
 pub fn query_start(progress: QueryProgress<'_>) {
     let stderr = io::stderr();
     let mut writer = stderr.lock();
@@ -158,6 +173,12 @@ pub fn query_finish(progress: QueryProgress<'_>, outcome: OutcomeStatus, elapsed
     let stderr = io::stderr();
     let mut writer = stderr.lock();
     let _ = write_query_finish(&mut writer, progress, outcome, elapsed_ns);
+}
+
+pub fn query_ready(progress: QueryProgress<'_>, setup_ns: u64) {
+    let stderr = io::stderr();
+    let mut writer = stderr.lock();
+    let _ = write_query_ready(&mut writer, progress, setup_ns);
 }
 
 fn write_query_start(writer: &mut impl Write, progress: QueryProgress<'_>) -> io::Result<()> {
@@ -199,6 +220,29 @@ fn write_query_finish(
             query_id: progress.query_id,
             outcome,
             elapsed_ns,
+        },
+    )
+}
+
+fn write_query_ready(
+    writer: &mut impl Write,
+    progress: QueryProgress<'_>,
+    setup_ns: u64,
+) -> io::Result<()> {
+    write_event(
+        writer,
+        &QueryReadyEvent {
+            event: "query_ready",
+            backend: progress.backend,
+            suite: progress.suite,
+            scale: progress.scale,
+            phase: progress.phase,
+            iteration: progress.iteration,
+            iteration_total: progress.iteration_total,
+            query_position: progress.query_position,
+            query_total: progress.query_total,
+            query_id: progress.query_id,
+            setup_ns,
         },
     )
 }
@@ -331,6 +375,26 @@ mod tests {
                 "scale",
                 "suite",
             ])
+        );
+    }
+
+    #[test]
+    fn ready_reports_setup_completion_with_one_atomic_flushed_record() {
+        let mut writer = FlushTrackingWriter::default();
+        write_query_ready(&mut writer, progress("q3"), 314).unwrap();
+
+        assert_eq!(writer.flushes, 1);
+        assert_eq!(writer.writes, 1);
+        assert_eq!(
+            String::from_utf8(writer.content).unwrap(),
+            concat!(
+                "grust-lsqb-progress {\"event\":\"query_ready\",",
+                "\"backend\":\"memory\",\"suite\":\"adversarial\",",
+                "\"scale\":\"0.1\",\"phase\":\"measurement\",",
+                "\"iteration\":2,\"iteration_total\":5,",
+                "\"query_position\":3,\"query_total\":13,",
+                "\"query_id\":\"q3\",\"setup_ns\":314}\n"
+            )
         );
     }
 

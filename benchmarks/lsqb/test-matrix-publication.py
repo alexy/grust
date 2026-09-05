@@ -128,7 +128,18 @@ def make_bundle(root: Path, revision: str, scale: str = "example") -> Path:
             else "grust-lsqb-matrix-core:0.13"
         )
         runner_id = image_id(runner)
-        if backend_entry["service_contract"] == "configured":
+        if backend == "cocoindex":
+            service_image = "none"
+            service_image_id = "none"
+            resource_components = 1
+            service_version = None
+            backend_image = None
+            backend_image_id = None
+            setup_outcome = "not_applicable"
+            setup_detail = "CocoIndex is not a query backend"
+            load_ns = None
+            reason_code = "adapter.export-only"
+        elif backend_entry["service_contract"] == "configured":
             platform = backend_entry["service_identity"]["platforms"]["arm64"]
             service_image = platform["image"]
             service_image_id = platform["config_id"]
@@ -192,11 +203,23 @@ def make_bundle(root: Path, revision: str, scale: str = "example") -> Path:
                     "image_id": backend_image_id,
                     "worker_threads": None,
                 },
+                "lifecycle": {
+                    "load_strategy": (
+                        PUBLICATION.LOAD_STRATEGY[backend]
+                        if setup_outcome == "pass"
+                        else "not-executed"
+                    ),
+                    "recovery_contract": (
+                        PUBLICATION.RECOVERY_CONTRACT[backend]
+                        if setup_outcome == "pass"
+                        else "not-applicable"
+                    ),
+                },
                 "setup_outcome": setup_outcome,
                 "setup_detail": setup_detail,
                 "load_ns": load_ns,
                 "queries": (
-                    [{"reason_code": reason_code}]
+                    [{"reason_code": reason_code, "warmups": [], "measurements": []}]
                     if backend_entry["service_contract"] == "external"
                     else []
                 ),
@@ -218,14 +241,22 @@ def make_bundle(root: Path, revision: str, scale: str = "example") -> Path:
     }
     dataset = {"scale_factor": scale, "fixture": True}
     timing = {
+        "warmup_iterations": 0,
         "measurement_iterations": 1,
+        "query_timeout_ms": 30_000,
+        "worker_ready_timeout_ms": 1_200_000,
+        "query_reap_grace_ms": 1_000,
+        "query_kill_reap_timeout_ms": 5_000,
+        "query_recovery_timeout_ms": 10_000,
         "cell_timeout_ms": 3_600_000,
-        "fixture": True,
+        "timeout_enforcement": "coordinator-process-group",
+        "query_order": "rotating",
+        "boundary": "coordinator-go-to-result-consumed",
     }
     backend_ids = [entry["id"] for entry in backends]
     for suite in PUBLICATION.SUITES:
         shared = {
-            "schema_version": 2,
+            "schema_version": 3,
             "warning": "These are not LDBC Benchmark Results.",
             "experiment_id": f"lsqb-{suite}-sf{scale}",
             "suite": {"track": suite},
@@ -434,6 +465,18 @@ def qualify_external_backend(
                 None if setup_outcome == "pass" else "qualified external service failed"
             )
             target["load_ns"] = 1 if setup_outcome == "pass" else None
+            target["lifecycle"] = {
+                "load_strategy": (
+                    PUBLICATION.LOAD_STRATEGY[backend]
+                    if setup_outcome == "pass"
+                    else "not-executed"
+                ),
+                "recovery_contract": (
+                    PUBLICATION.RECOVERY_CONTRACT[backend]
+                    if setup_outcome == "pass"
+                    else "not-applicable"
+                ),
+            }
         valid = setup_outcome != "error"
         matrix["valid"] = valid
         component["valid"] = valid
@@ -463,6 +506,10 @@ def make_pass_without_external_identity(output: Path, backend: str = "sail") -> 
             target["setup_outcome"] = "pass"
             target["setup_detail"] = None
             target["load_ns"] = 1
+            target["lifecycle"] = {
+                "load_strategy": PUBLICATION.LOAD_STRATEGY[backend],
+                "recovery_contract": PUBLICATION.RECOVERY_CONTRACT[backend],
+            }
         write_json(matrix_path, matrix)
         write_json(component_path, component)
 
@@ -611,6 +658,32 @@ class MatrixPublicationTests(unittest.TestCase):
         ):
             self.issue(output)
 
+    def test_mixed_v2_v3_matrices_are_not_publishable(self) -> None:
+        case_root = self.root / "mixed-v2-v3-matrix"
+        case_root.mkdir()
+        output = make_bundle(case_root, self.revision)
+        matrix_path = output / "matrix-baseline-sfexample.json"
+        matrix = json.loads(matrix_path.read_text())
+        matrix["schema_version"] = 2
+        write_json(matrix_path, matrix)
+
+        with self.assertRaisesRegex(PUBLICATION.PublicationError, "mixed matrix schema versions"):
+            self.issue(output)
+
+    def test_missing_query_enforcement_is_not_publishable(self) -> None:
+        case_root = self.root / "missing-query-enforcement"
+        case_root.mkdir()
+        output = make_bundle(case_root, self.revision)
+        matrix_path = output / "matrix-baseline-sfexample.json"
+        matrix = json.loads(matrix_path.read_text())
+        del matrix["timing"]["timeout_enforcement"]
+        write_json(matrix_path, matrix)
+
+        with self.assertRaisesRegex(
+            PUBLICATION.PublicationError, "schema-v3 timing fields"
+        ):
+            self.issue(output)
+
     def test_hard_cell_watchdog_timeout_log_is_not_publishable(self) -> None:
         case_root = self.root / "watchdog-timeout-log"
         case_root.mkdir()
@@ -638,6 +711,11 @@ class MatrixPublicationTests(unittest.TestCase):
             '"scale":"example","phase":"measurement","iteration":1,'
             '"iteration_total":1,"query_position":1,"query_total":9,'
             '"query_id":"q1"}\n'
+            "grust-lsqb-progress "
+            '{"event":"query_ready","backend":"memory","suite":"baseline",'
+            '"scale":"example","phase":"measurement","iteration":1,'
+            '"iteration_total":1,"query_position":1,"query_total":9,'
+            '"query_id":"q1","setup_ns":314}\n'
             "cell-watchdog.py: heartbeat "
             "container=grust-lsqb-matrix-123-456-baseline-memory-cell "
             "elapsed_ms=30000 remaining_ms=3570000\n"
@@ -761,9 +839,19 @@ class MatrixPublicationTests(unittest.TestCase):
                 cell
                 for cell in matrix["backends"]
                 if cell["backend"]["name"] == "ladybug"
-            )["queries"] = [{"reason_code": "runner.feature-not-compiled"}]
+            )["queries"] = [
+                {
+                    "reason_code": "runner.feature-not-compiled",
+                    "warmups": [],
+                    "measurements": [],
+                }
+            ]
             component["backends"][0]["queries"] = [
-                {"reason_code": "runner.feature-not-compiled"}
+                {
+                    "reason_code": "runner.feature-not-compiled",
+                    "warmups": [],
+                    "measurements": [],
+                }
             ]
             write_json(matrix_path, matrix)
             write_json(component_path, component)

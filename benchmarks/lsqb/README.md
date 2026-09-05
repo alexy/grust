@@ -151,7 +151,7 @@ CELL_TIMEOUT_MS=3600000 RUNS=5 SF=example benchmarks/lsqb/run-grust.sh
 That builds a core runner and one Cargo-feature image for each optional
 adapter, then runs baseline and adversarial cells in canonical order. Every
 backend-suite cell gets a fresh container and, where applicable, a fresh
-service and volume. It produces 24 one-backend reports, two merged schema-v2
+service and volume. It produces 24 one-backend reports, two merged schema-v3
 matrices, the one backend-neutral 14-attack policy report, logs, and an image
 manifest under `out/matrix-sfexample/`. A feature-build failure, configured
 service failure, runner crash, or load failure can never be replaced by a
@@ -262,13 +262,27 @@ tiers in fresh directories:
 
 ```sh
 benchmarks/lsqb/fetch-dataset.sh --scale 0.1
-CELL_TIMEOUT_MS=14400000 WARMUPS=2 RUNS=5 QUERY_TIMEOUT_MS=600000 SF=0.1 \
+CELL_TIMEOUT_MS=3600000 WARMUPS=0 RUNS=1 QUERY_TIMEOUT_MS=600000 \
+  WORKER_READY_TIMEOUT_MS=30000 QUERY_REAP_GRACE_MS=1000 \
+  QUERY_KILL_REAP_TIMEOUT_MS=5000 QUERY_RECOVERY_TIMEOUT_MS=10000 SF=0.1 \
   benchmarks/lsqb/run-grust.sh
 
 benchmarks/lsqb/fetch-dataset.sh --scale 0.3
-CELL_TIMEOUT_MS=14400000 WARMUPS=0 RUNS=1 QUERY_TIMEOUT_MS=1200000 SF=0.3 \
+CELL_TIMEOUT_MS=3600000 WARMUPS=0 RUNS=1 QUERY_TIMEOUT_MS=1200000 \
+  WORKER_READY_TIMEOUT_MS=1200000 QUERY_REAP_GRACE_MS=1000 \
+  QUERY_KILL_REAP_TIMEOUT_MS=5000 QUERY_RECOVERY_TIMEOUT_MS=10000 SF=0.3 \
   benchmarks/lsqb/run-grust.sh
 ```
+
+These are deliberately fail-fast, one-sample qualification runs with a
+one-hour budget per named backend/suite cell; they are not worst-case
+completion guarantees. If enough queries consume their ceilings, the cell
+watchdog stops the incomplete qualification and its output is not publishable.
+Choose any larger full-run cap explicitly only after reviewing the arithmetic:
+at SF0.1, the adversarial W0/R1 query-ceiling total is 13 × 10 minutes = 2
+hours 10 minutes, while W2/R5 is 13 × 7 × 10 minutes = 15 hours 10 minutes,
+before worker setup and recovery. Steady start/ready/finish events make actual
+progress visible throughout a successful run.
 
 These ten- and twenty-minute values are per-query ceilings, not expected
 latencies. They leave headroom for the admitted in-process reference work under
@@ -298,6 +312,8 @@ export BENCHMARK_EXECUTION_IMAGE="$BENCHMARK_IMAGE_ID"
 docker compose -f benchmarks/lsqb/compose.yaml run --rm --no-deps benchmark \
   --backend lancedb --suite baseline --scale example \
   --warmups 2 --runs 5 --query-timeout-ms 30000 \
+  --worker-ready-timeout-ms 1200000 --query-reap-grace-ms 1000 \
+  --query-kill-reap-timeout-ms 5000 --query-recovery-timeout-ms 10000 \
   --cell-timeout-ms 3600000 \
   --output /out/baseline-lancedb-sfexample.json
 ```
@@ -383,30 +399,70 @@ q1 q2 q3 q4 q5 q6 q7 q8 q9
  8  3  6  8  3  8 11  2  4
 ```
 
-Schema-v2 JSON records graph load nanoseconds separately, then keeps every
-warm-up and measured observation with its rotating query position,
-expected/actual count, outcome, source/adapter digest, and execution class. The
-default protocol is two warm-ups and five measured iterations. The measured
-boundary is query submission through scalar consumption; it excludes image
-build, service/container startup, CSV parsing, graph load, and report
-serialization.
+Schema-v3 JSON records initial graph load nanoseconds separately, then keeps
+every warm-up and measured observation with its rotating query position,
+expected/actual count, outcome, source/adapter digest, execution class,
+unmeasured worker `setup_ns`, process `termination`, and post-result/deadline
+`recovery_ns`. Each backend cell also declares whether workers attach to state
+loaded once or reload before every observation, plus the recovery proof that a
+forced timeout requires. The default protocol is two warm-ups and five
+measured iterations. The measured boundary is the coordinator's monotonic GO
+write through consumption of the scalar result; worker startup, READY setup,
+reaping/recovery, image and service startup, graph load, and report
+serialization are outside `elapsed_ns` and separately disclosed where
+applicable. For a forced deadline, `query_timeout_ms` is the configured cutoff
+and `elapsed_ns` is the coordinator's actual monotonic observation of that
+deadline, including any scheduler wake-up overshoot. TERM/KILL/reap and
+backend quiescence begin only afterwards and are recorded in `recovery_ns`;
+the report never substitutes the configured cutoff for an observed duration.
+Unlike schema v2's direct in-process API interval, schema v3 necessarily
+includes coordinator-to-worker GO delivery plus result serialization and pipe
+delivery. V2 and v3 latency samples therefore must never be pooled or treated
+as the same timing boundary. The wire contract makes that distinction explicit:
+v2 uses `submit-to-scalar-consumed`, while v3 uses
+`coordinator-go-to-result-consumed`.
 
-`query_timeout_ms` is the requested query cutoff, not a process-isolation
-claim. FalkorDB receives that deadline in `GRAPH.RO_QUERY`; the runner adds a
-bounded Redis socket grace, waits for the blocking request to finish, and
-replaces the connection after a timeout before measuring another sample.
-Memory runs each synchronous query in a blocking task. Other asynchronous
-backends retain an in-flight query future after its deadline. In both cases a
-deadline produces a timeout outcome, but the runner first waits for that work
-to quiesce so it cannot overlap or contaminate the next sample. Consequently a
-timed-out observation's wall time can exceed the requested cutoff. This is a
-measurement-isolation rule, not a hostile-code sandbox. A monotonic
-post-return check also converts non-yielding work that completes after the
-deadline into `timeout`; validators reject any non-timeout observation whose
-recorded elapsed time exceeds the cutoff. `run-grust.sh`
-therefore requires an explicit positive `CELL_TIMEOUT_MS`, records it as
+`query_timeout_ms` is a hard coordinator deadline. Each observation runs in a
+fresh OS process group. The worker completes setup, emits one bounded,
+token-bound READY record on a private pipe, and cannot submit the query until
+the coordinator sends GO. At the deadline the coordinator sends SIGTERM to the
+whole group, waits `query_reap_grace_ms`, escalates to SIGKILL, and requires the
+group to disappear within `query_kill_reap_timeout_ms`. It then performs the
+cell's backend-specific quiescence proof within
+`query_recovery_timeout_ms`; a backend without cancellation or introspection
+fails the cell after forced termination rather than starting a possibly
+overlapping sample. An unacknowledged transport/query error follows the same
+rule: process-owned work is gone, PostgreSQL sessions are probed, and other
+remote services fail closed. READY itself is bounded by
+`worker_ready_timeout_ms`, so a stalled load/connect is a prompt
+infrastructure failure rather than a query timeout. Malformed, duplicate,
+late, wrong-token, or oversized worker records are fatal protocol errors. Only
+the coordinator writes the final report.
+
+The coordinator's local containment proof covers the dedicated worker process
+group and closure of its inherited control pipes. Benchmark workers are trusted
+runner code and must not create a new session or process group; this is not a
+claim that the coordinator can discover an arbitrary hostile descendant that
+re-sessions and closes every inherited pipe. The exact container watchdog is
+the full-tree outer safety boundary. A descendant that escapes while retaining
+a pipe makes the cell fail because pipe closure cannot be proven.
+
+Process exit proves recovery for Memory, in-memory Turso, Ladybug, and local
+LanceDB, which therefore reload inside each observation worker. Persistent
+PostgreSQL-family services load once; workers attach with a unique
+`application_name` and server `statement_timeout`, and forced recovery polls
+`pg_stat_activity` until those sessions disappear. FalkorDB's native TIMEOUT
+reserves ten percent of the coordinator cutoff, capped at one second, for its
+timeout acknowledgement and fresh connection; successful queries still use
+the common coordinator deadline. An unacknowledged Falkor forced kill fails
+closed. Sail, SurrealDB, and Helix likewise fail closed after forced
+termination until their adapters expose an acknowledged server-side interrupt
+or quiescence probe.
+
+`run-grust.sh` still requires a positive `CELL_TIMEOUT_MS`, records it as
 `timing.cell_timeout_ms`, gives every Compose run container a unique name, and
-supervises that exact name under a hard wall-clock watchdog. The watchdog
+supervises that exact name under a last-resort wall-clock watchdog. A single
+query no longer waits for this cell deadline. The watchdog
 verifies the container's Compose project/service labels before killing by its
 immutable ID. Successful run containers are retained long enough for that
 identity to be observed, then removed by the same exact-ID check instead of an
@@ -416,15 +472,18 @@ also fixes the configured timeout, elapsed wall time, child exit status, and
 terminal state. If the watchdog fires—or cannot prove the container
 identity—the run stops without a publication receipt. The bound covers the
 entire Compose run, including container creation/start, dataset load, all
-warm-up and measurement work, and report serialization; the examples above
-use one hour for the tiny graph and four hours for downloaded tiers.
+warm-up and measurement work, and report serialization. The downloaded
+examples above intentionally use a one-hour fail-fast qualification budget;
+they do not silently turn that budget into a per-query wait or claim it can
+contain every configured worst-case timeout. Full-run caps remain explicit
+and configurable, and the cost arithmetic must be reviewed before launch.
 
 The supervisor emits a secret-safe stderr heartbeat every 30 seconds with only
 the constrained expected container name and elapsed/remaining wall-clock
-milliseconds. The matrix runner also emits `grust-lsqb-progress` JSONL
-start/finish events for each executed query, including its authenticated
-backend/suite/scale/query IDs,
-protocol position, terminal outcome, and measured nanoseconds. It never logs
+milliseconds. The matrix runner also emits `grust-lsqb-progress` JSONL start,
+ready, and finish events for each executed query, including its authenticated
+backend/suite/scale/query IDs, protocol position, setup completion, terminal
+outcome, and measured nanoseconds. It never logs
 query text, counts, errors, paths, endpoints, or environment values. Both
 line types are assembled to at most 512 bytes and issued with one write at
 their producer boundary. That is atomic on a normal blocking POSIX pipe;
@@ -563,7 +622,7 @@ cases never contribute to the LSQB count table.
 
 ## Backend scope
 
-The schema-v2 matrix is rectangular across Memory, Turso, PostgreSQL, Ladybug,
+The schema-v3 matrix is rectangular across Memory, Turso, PostgreSQL, Ladybug,
 FalkorDB, SurrealDB, LanceDB, Sail, pgGraph, PostgreSQL PGQ, Helix, and
 CocoIndex. It does not pretend all twelve have the same capability: native,
 row-source-plus-Rust, materialize-plus-reference, unavailable, unsupported,
@@ -574,6 +633,6 @@ backend measurements. See [`BACKENDS.md`](BACKENDS.md) for exact qualification
 and service gaps.
 
 See [`results/2026-09-03`](results/2026-09-03) for the historical schema-v1,
-three-backend bounded evidence. The receipt-backed schema-v2 evidence and its
+three-backend bounded evidence. The receipt-backed schema-v3 evidence and its
 canonical presentation belong at
 [adversari.al/graph](https://adversari.al/graph).

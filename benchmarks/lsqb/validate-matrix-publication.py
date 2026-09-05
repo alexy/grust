@@ -97,6 +97,59 @@ STARTED_AT_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T"
     r"[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?Z$"
 )
+TIMING_V3_FIELDS = frozenset(
+    {
+        "boundary",
+        "cell_timeout_ms",
+        "measurement_iterations",
+        "query_kill_reap_timeout_ms",
+        "query_order",
+        "query_reap_grace_ms",
+        "query_recovery_timeout_ms",
+        "query_timeout_ms",
+        "timeout_enforcement",
+        "warmup_iterations",
+        "worker_ready_timeout_ms",
+    }
+)
+OBSERVATION_V3_REQUIRED_FIELDS = frozenset(
+    {
+        "elapsed_ns",
+        "iteration",
+        "outcome",
+        "query_position",
+        "recovery_ns",
+        "setup_ns",
+        "termination",
+    }
+)
+OBSERVATION_V3_FIELDS = OBSERVATION_V3_REQUIRED_FIELDS | {"actual_count", "detail"}
+LOAD_STRATEGY = {
+    "memory": "per-observation-worker-reload",
+    "turso": "per-observation-worker-reload",
+    "ladybug": "per-observation-worker-reload",
+    "lancedb": "per-observation-worker-reload",
+    "sail": "per-observation-worker-reload",
+    "postgres": "once-worker-attach",
+    "falkor": "once-worker-attach",
+    "surreal": "once-worker-attach",
+    "pggraph": "once-worker-attach",
+    "postgres-pgq": "once-worker-attach",
+    "helix": "once-worker-attach",
+}
+RECOVERY_CONTRACT = {
+    "memory": "process-group-absent",
+    "turso": "process-group-absent",
+    "ladybug": "process-group-absent",
+    "lancedb": "process-group-absent",
+    "postgres": "postgres-session-absent",
+    "pggraph": "postgres-session-absent",
+    "postgres-pgq": "postgres-session-absent",
+    "falkor": "falkor-server-deadline",
+    "sail": "fail-closed",
+    "surreal": "fail-closed",
+    "helix": "fail-closed",
+}
 
 
 class PublicationError(Exception):
@@ -661,12 +714,170 @@ def validate_external_service_logs(
             )
 
 
-def report_identity(report: dict[str, Any], path: str, revision: str, scale: str, track: str) -> None:
+def positive_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def nonnegative_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def validate_v3_timeout_contract(report: dict[str, Any], path: str) -> None:
+    timing = report.get("timing")
+    require(isinstance(timing, dict), f"missing timing contract: {path}")
+    require(set(timing) == TIMING_V3_FIELDS, f"wrong schema-v3 timing fields: {path}")
+    for field in (
+        "measurement_iterations",
+        "query_kill_reap_timeout_ms",
+        "query_recovery_timeout_ms",
+        "query_timeout_ms",
+        "worker_ready_timeout_ms",
+        "cell_timeout_ms",
+    ):
+        require(positive_integer(timing.get(field)), f"invalid {field}: {path}")
+    require(
+        nonnegative_integer(timing.get("warmup_iterations")),
+        f"invalid warmup_iterations: {path}",
+    )
+    require(
+        nonnegative_integer(timing.get("query_reap_grace_ms")),
+        f"invalid query_reap_grace_ms: {path}",
+    )
+    require(
+        timing.get("timeout_enforcement") == "coordinator-process-group",
+        f"matrix lacks hard process-group query enforcement: {path}",
+    )
+    require(
+        timing.get("boundary") == "coordinator-go-to-result-consumed",
+        f"wrong query timing boundary: {path}",
+    )
+    require(timing.get("query_order") == "rotating", f"wrong query order: {path}")
+    timeout_ns = timing["query_timeout_ms"] * 1_000_000
+    ready_ns = timing["worker_ready_timeout_ms"] * 1_000_000
+    term_grace_ns = timing["query_reap_grace_ms"] * 1_000_000
+
+    cells = report.get("backends")
+    require(isinstance(cells, list), f"missing backend cells: {path}")
+    for cell in cells:
+        require(isinstance(cell, dict), f"malformed backend cell: {path}")
+        identity = cell.get("backend")
+        backend = identity.get("name") if isinstance(identity, dict) else None
+        require(isinstance(backend, str), f"backend cell has no identity: {path}")
+        lifecycle = cell.get("lifecycle")
+        require(
+            isinstance(lifecycle, dict)
+            and set(lifecycle) == {"load_strategy", "recovery_contract"},
+            f"backend cell has a malformed lifecycle: {path}",
+        )
+        executed = cell.get("setup_outcome") == "pass"
+        expected_load = LOAD_STRATEGY.get(backend) if executed else "not-executed"
+        expected_recovery = RECOVERY_CONTRACT.get(backend) if executed else "not-applicable"
+        require(expected_load is not None, f"unknown backend lifecycle: {path}")
+        require(
+            lifecycle.get("load_strategy") == expected_load,
+            f"backend load strategy is untruthful: {path}",
+        )
+        require(
+            lifecycle.get("recovery_contract") == expected_recovery,
+            f"backend recovery contract is untruthful: {path}",
+        )
+        queries = cell.get("queries")
+        require(isinstance(queries, list), f"backend cell has no queries: {path}")
+        for query in queries:
+            require(isinstance(query, dict), f"malformed query outcome: {path}")
+            for phase in ("warmups", "measurements"):
+                observations = query.get(phase)
+                require(isinstance(observations, list), f"malformed observation phase: {path}")
+                for observation in observations:
+                    require(isinstance(observation, dict), f"malformed observation: {path}")
+                    require(
+                        OBSERVATION_V3_REQUIRED_FIELDS <= set(observation)
+                        and set(observation) <= OBSERVATION_V3_FIELDS,
+                        f"wrong schema-v3 observation fields: {path}",
+                    )
+                    for field in ("setup_ns", "elapsed_ns", "recovery_ns"):
+                        require(
+                            nonnegative_integer(observation.get(field)),
+                            f"invalid observation {field}: {path}",
+                        )
+                    require(
+                        observation["setup_ns"] <= ready_ns,
+                        f"observation setup exceeds READY timeout: {path}",
+                    )
+                    termination = observation.get("termination")
+                    outcome = observation.get("outcome")
+                    require(
+                        termination
+                        in {
+                            "normal-exit",
+                            "backend-timeout",
+                            "deadline-observed-exit",
+                            "deadline-sigterm",
+                            "deadline-sigkill",
+                        },
+                        f"invalid observation termination: {path}",
+                    )
+                    if termination == "normal-exit":
+                        require(outcome != "timeout", f"normal exit claims timeout: {path}")
+                        require(
+                            observation["elapsed_ns"] <= timeout_ns,
+                            f"normal observation exceeds deadline: {path}",
+                        )
+                        if outcome == "error":
+                            require(
+                                lifecycle["recovery_contract"]
+                                in {"process-group-absent", "postgres-session-absent"},
+                                f"unacknowledged error lacks a recovery proof: {path}",
+                            )
+                    elif termination == "backend-timeout":
+                        require(outcome == "timeout", f"backend timeout outcome differs: {path}")
+                        require(
+                            observation["elapsed_ns"] <= timeout_ns,
+                            f"backend timeout exceeds coordinator deadline: {path}",
+                        )
+                        require(
+                            lifecycle["recovery_contract"]
+                            in {
+                                "process-group-absent",
+                                "postgres-session-absent",
+                                "falkor-server-deadline",
+                            },
+                            f"backend timeout lacks an acknowledged recovery contract: {path}",
+                        )
+                    else:
+                        require(outcome == "timeout", f"deadline termination is not timeout: {path}")
+                        require(
+                            observation["elapsed_ns"] >= timeout_ns,
+                            f"hard timeout predates its configured deadline: {path}",
+                        )
+                        if termination == "deadline-sigkill":
+                            require(
+                                observation["recovery_ns"] >= term_grace_ns,
+                                f"SIGKILL timeout omits the TERM grace: {path}",
+                            )
+                        require(
+                            lifecycle["recovery_contract"]
+                            in {"process-group-absent", "postgres-session-absent"},
+                            f"forced timeout lacks a provable backend recovery: {path}",
+                        )
+
+
+def report_identity(
+    report: dict[str, Any],
+    path: str,
+    revision: str,
+    scale: str,
+    track: str,
+    expected_schema: int | None = None,
+) -> int:
     suite = report.get("suite")
     environment = report.get("environment")
     dataset = report.get("dataset")
     timing = report.get("timing")
-    require(report.get("schema_version") == 2, f"wrong schema version: {path}")
+    schema = report.get("schema_version")
+    require(schema in {2, 3}, f"wrong schema version: {path}")
+    if expected_schema is not None:
+        require(schema == expected_schema, f"mixed matrix schema versions: {path}")
     require(isinstance(suite, dict) and suite.get("track") == track, f"wrong suite: {path}")
     require(
         isinstance(environment, dict) and environment.get("grust_revision") == revision,
@@ -683,6 +894,9 @@ def report_identity(report: dict[str, Any], path: str, revision: str, scale: str
         and cell_timeout_ms > 0,
         f"missing or invalid hard cell watchdog timeout: {path}",
     )
+    if schema == 3:
+        validate_v3_timeout_contract(report, path)
+    return schema
 
 
 def validate_reports(
@@ -701,11 +915,16 @@ def validate_reports(
     catalog = {entry["id"]: entry for entry in backends}
     matrices: dict[str, dict[str, Any]] = {}
     components: dict[str, dict[str, dict[str, Any]]] = {suite: {} for suite in SUITES}
+    report_schema: int | None = None
 
     for suite in SUITES:
         matrix_path = output_directory / f"matrix-{suite}-sf{scale}.json"
         matrix, _ = load_json(matrix_path, f"{suite} matrix")
-        report_identity(matrix, matrix_path.name, revision, scale, suite)
+        schema = report_identity(
+            matrix, matrix_path.name, revision, scale, suite, report_schema
+        )
+        if report_schema is None:
+            report_schema = schema
         require(matrix.get("complete") is True, f"matrix is not complete: {matrix_path.name}")
         require(isinstance(matrix.get("valid"), bool), f"matrix has no validity result: {matrix_path.name}")
         cells = matrix.get("backends")
@@ -719,7 +938,7 @@ def validate_reports(
         for index, backend in enumerate(backend_ids):
             relative = f"components/{suite}-{backend}-sf{scale}.json"
             component, _ = load_json(output_directory / relative, f"component {suite}/{backend}")
-            report_identity(component, relative, revision, scale, suite)
+            report_identity(component, relative, revision, scale, suite, report_schema)
             require(component.get("complete") is False, f"component claims completeness: {relative}")
             require(isinstance(component.get("valid"), bool), f"component has no validity result: {relative}")
             component_cells = component.get("backends")

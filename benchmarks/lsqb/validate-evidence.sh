@@ -5,7 +5,7 @@ usage() {
     cat >&2 <<'USAGE'
 Usage: validate-evidence.sh MATRIX.json [ONE-BACKEND-REPORT.json ...]
 
-Validate a complete schema-v2 matrix and print a SHA-256 line for every input.
+Validate a complete schema-v3 matrix and print a SHA-256 line for every input.
 When component reports are supplied, they must deterministically rebuild the
 matrix through merge-reports.sh.
 USAGE
@@ -207,7 +207,7 @@ done
 
 rebuilt="$temporary_dir/rebuilt.json"
 if ! "$merge" "$rebuilt" "${split_reports[@]}" >/dev/null; then
-    echo "validate-evidence.sh: matrix failed schema-v2 cell validation: $matrix" >&2
+    echo "validate-evidence.sh: matrix failed schema-v3 cell validation: $matrix" >&2
     exit 1
 fi
 if ! jq -e '.complete == true' "$rebuilt" >/dev/null; then

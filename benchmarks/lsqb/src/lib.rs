@@ -3,6 +3,8 @@ pub mod dataset;
 pub mod matrix_args;
 pub mod matrix_catalog;
 pub mod matrix_progress;
+pub mod matrix_worker;
+pub mod observation_process;
 pub mod policy;
 pub mod provenance;
 pub mod queries;

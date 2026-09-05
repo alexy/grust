@@ -9,6 +9,10 @@ pub struct MatrixArguments {
     pub warmups: u32,
     pub runs: u32,
     pub query_timeout_ms: u64,
+    pub worker_ready_timeout_ms: u64,
+    pub query_reap_grace_ms: u64,
+    pub query_kill_reap_timeout_ms: u64,
+    pub query_recovery_timeout_ms: u64,
     pub cell_timeout_ms: u64,
     pub lsqb_root: PathBuf,
     pub attacks_dir: PathBuf,
@@ -27,6 +31,10 @@ impl MatrixArguments {
         let mut warmups = 2_u32;
         let mut runs = 10_u32;
         let mut query_timeout_ms = 30_000_u64;
+        let mut worker_ready_timeout_ms = 1_200_000_u64;
+        let mut query_reap_grace_ms = 1_000_u64;
+        let mut query_kill_reap_timeout_ms = 5_000_u64;
+        let mut query_recovery_timeout_ms = 10_000_u64;
         let mut cell_timeout_ms = None;
         let mut lsqb_root = PathBuf::from("/opt/lsqb");
         let mut attacks_dir = PathBuf::from("/opt/grust-attacks");
@@ -45,6 +53,18 @@ impl MatrixArguments {
                 "--warmups" => warmups = parse_positive_or_zero(&flag, &value)?,
                 "--runs" => runs = parse_positive(&flag, &value)?,
                 "--query-timeout-ms" => query_timeout_ms = parse_positive(&flag, &value)?,
+                "--worker-ready-timeout-ms" => {
+                    worker_ready_timeout_ms = parse_positive(&flag, &value)?
+                }
+                "--query-reap-grace-ms" => {
+                    query_reap_grace_ms = parse_positive_or_zero(&flag, &value)?
+                }
+                "--query-kill-reap-timeout-ms" => {
+                    query_kill_reap_timeout_ms = parse_positive(&flag, &value)?
+                }
+                "--query-recovery-timeout-ms" => {
+                    query_recovery_timeout_ms = parse_positive(&flag, &value)?
+                }
                 "--cell-timeout-ms" => cell_timeout_ms = Some(parse_positive(&flag, &value)?),
                 "--lsqb-root" => lsqb_root = PathBuf::from(value),
                 "--attacks-dir" => attacks_dir = PathBuf::from(value),
@@ -70,6 +90,10 @@ impl MatrixArguments {
             warmups,
             runs,
             query_timeout_ms,
+            worker_ready_timeout_ms,
+            query_reap_grace_ms,
+            query_kill_reap_timeout_ms,
+            query_recovery_timeout_ms,
             cell_timeout_ms,
             lsqb_root,
             attacks_dir,
@@ -103,6 +127,8 @@ where
 pub fn usage() -> &'static str {
     "Usage: grust-lsqb-matrix --backend NAME [--suite baseline|adversarial] \
      [--scale SCALE] [--warmups N] [--runs N] [--query-timeout-ms MS] \
+     [--worker-ready-timeout-ms MS] [--query-reap-grace-ms MS] \
+     [--query-kill-reap-timeout-ms MS] [--query-recovery-timeout-ms MS] \
      --cell-timeout-ms MS \
      [--lsqb-root PATH] [--attacks-dir PATH] [--output PATH]"
 }
@@ -128,6 +154,14 @@ mod tests {
             "3",
             "--query-timeout-ms",
             "42",
+            "--worker-ready-timeout-ms",
+            "84",
+            "--query-reap-grace-ms",
+            "0",
+            "--query-kill-reap-timeout-ms",
+            "21",
+            "--query-recovery-timeout-ms",
+            "63",
             "--cell-timeout-ms",
             "420",
         ])
@@ -137,6 +171,10 @@ mod tests {
         assert_eq!(args.warmups, 0);
         assert_eq!(args.runs, 3);
         assert_eq!(args.query_timeout_ms, 42);
+        assert_eq!(args.worker_ready_timeout_ms, 84);
+        assert_eq!(args.query_reap_grace_ms, 0);
+        assert_eq!(args.query_kill_reap_timeout_ms, 21);
+        assert_eq!(args.query_recovery_timeout_ms, 63);
         assert_eq!(args.cell_timeout_ms, 420);
     }
 

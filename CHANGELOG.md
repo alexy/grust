@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Upgraded LSQB comparison evidence to schema v3 with a fresh process-group
+  worker per observation, nonce-bound READY/GO timing, hard query deadlines,
+  bounded TERM/KILL/reap handling, backend-specific recovery proofs, and
+  secret-safe start/ready/finish progress records.
 - Removed the downloaded-scale Memory benchmark's duplicate full-graph clone:
   lazy projected-FK chunks now build the sole owned in-process reference graph,
   and their decode time remains disclosed in `load_ns`.

@@ -1,4 +1,4 @@
-#![allow(dead_code)] // Schema-v2 types are consumed by the matrix runner landing alongside them.
+#![allow(dead_code)] // Report schemas are shared by the legacy, policy, and matrix runners.
 
 use serde::{Deserialize, Serialize};
 
@@ -6,7 +6,10 @@ use grust_cypher::ReadQueryPolicy;
 
 use crate::queries::RustRowEstimate;
 
+/// Legacy schema-v2 constant retained with its original meaning.
 pub const COMPARISON_REPORT_SCHEMA_VERSION: u32 = 2;
+pub const COMPARISON_REPORT_SCHEMA_VERSION_V2: u32 = COMPARISON_REPORT_SCHEMA_VERSION;
+pub const COMPARISON_REPORT_SCHEMA_VERSION_V3: u32 = 3;
 pub const POLICY_REPORT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize)]
@@ -249,6 +252,17 @@ pub enum TimingBoundary {
     SubmitToScalarConsumed,
 }
 
+/// Schema-v3's coordinator/worker timing interval.
+///
+/// This deliberately has a different wire value from `TimingBoundary`: v2
+/// measured the backend API call in-process, while v3 starts immediately
+/// before the coordinator writes GO and ends when it consumes the result.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TimingBoundaryV3 {
+    CoordinatorGoToResultConsumed,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct TimingProtocolV2 {
     pub warmup_iterations: u32,
@@ -390,6 +404,137 @@ pub struct ComparisonReportV2 {
     pub valid: bool,
 }
 
+/// Hard-deadline enforcement used by schema-v3 matrix observations.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TimeoutEnforcementV3 {
+    CoordinatorProcessGroup,
+}
+
+/// How an observation worker left its isolated process boundary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ObservationTerminationV3 {
+    NormalExit,
+    BackendTimeout,
+    /// The worker group had already disappeared when deadline enforcement
+    /// attempted to signal it, and the coordinator subsequently reaped it.
+    DeadlineObservedExit,
+    DeadlineSigterm,
+    DeadlineSigkill,
+}
+
+/// Whether graph setup can be shared safely with a fresh observation worker.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LoadStrategyV3 {
+    OnceWorkerAttach,
+    PerObservationWorkerReload,
+    NotExecuted,
+}
+
+/// Proof required after forcibly terminating a worker.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RecoveryContractV3 {
+    ProcessGroupAbsent,
+    PostgresSessionAbsent,
+    FalkorServerDeadline,
+    FailClosed,
+    NotApplicable,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TimingProtocolV3 {
+    pub warmup_iterations: u32,
+    pub measurement_iterations: u32,
+    pub query_timeout_ms: u64,
+    /// Maximum unmeasured setup time before GO. Expiry is a fatal cell error.
+    pub worker_ready_timeout_ms: u64,
+    /// Grace between a deadline SIGTERM and escalation to SIGKILL.
+    pub query_reap_grace_ms: u64,
+    /// Maximum wait after SIGKILL for the worker group to disappear.
+    pub query_kill_reap_timeout_ms: u64,
+    /// Maximum wait for backend-specific server-side quiescence proof.
+    pub query_recovery_timeout_ms: u64,
+    /// Last-resort wall-clock limit around the complete container cell.
+    pub cell_timeout_ms: u64,
+    pub timeout_enforcement: TimeoutEnforcementV3,
+    pub query_order: QueryOrder,
+    pub boundary: TimingBoundaryV3,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BackendLifecycleV3 {
+    pub load_strategy: LoadStrategyV3,
+    pub recovery_contract: RecoveryContractV3,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QueryObservationV3 {
+    pub iteration: u32,
+    pub query_position: u32,
+    /// Worker preparation/attach interval completed before READY and GO.
+    pub setup_ns: u64,
+    /// GO through result consumption or the coordinator's observed deadline.
+    /// Deadline observations may exceed the configured cutoff by scheduler
+    /// wake-up latency; termination and reap time is recorded in `recovery_ns`.
+    pub elapsed_ns: u64,
+    /// Result/deadline through proven worker and backend quiescence.
+    pub recovery_ns: u64,
+    pub termination: ObservationTerminationV3,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_count: Option<i64>,
+    pub outcome: OutcomeStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QueryOutcomeV3 {
+    pub id: String,
+    pub source_sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adapter_sha256: Option<String>,
+    pub execution: ExecutionDescriptorV2,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_count: Option<i64>,
+    pub rust_rows: Option<RustRowEstimate>,
+    pub outcome: OutcomeStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    pub warmups: Vec<QueryObservationV3>,
+    pub measurements: Vec<QueryObservationV3>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BackendCellV3 {
+    pub backend: BackendIdentityV2,
+    pub lifecycle: BackendLifecycleV3,
+    pub setup_outcome: OutcomeStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub setup_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_ns: Option<u64>,
+    pub queries: Vec<QueryOutcomeV3>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ComparisonReportV3 {
+    pub schema_version: u32,
+    pub warning: String,
+    pub experiment_id: String,
+    pub suite: SuiteIdentityV2,
+    pub environment: ComparisonEnvironmentV2,
+    pub dataset: DatasetIdentityV2,
+    pub timing: TimingProtocolV3,
+    pub backends: Vec<BackendCellV3>,
+    pub complete: bool,
+    pub valid: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SuiteIdentityV2 {
     pub name: String,
@@ -465,7 +610,7 @@ mod v2_tests {
             detail: None,
         };
         let report = ComparisonReportV2 {
-            schema_version: COMPARISON_REPORT_SCHEMA_VERSION,
+            schema_version: COMPARISON_REPORT_SCHEMA_VERSION_V2,
             warning: "These are not LDBC Benchmark Results.".to_string(),
             experiment_id: "test".to_string(),
             suite: SuiteIdentityV2 {
@@ -586,5 +731,65 @@ mod v2_tests {
         }))
         .unwrap();
         assert_eq!(environment.resource_limit_scope, "per-container");
+    }
+}
+
+#[cfg(test)]
+mod v3_tests {
+    use super::*;
+
+    #[test]
+    fn hard_timeout_contract_round_trips_without_changing_v2() {
+        let timing = TimingProtocolV3 {
+            warmup_iterations: 0,
+            measurement_iterations: 1,
+            query_timeout_ms: 10,
+            worker_ready_timeout_ms: 100,
+            query_reap_grace_ms: 5,
+            query_kill_reap_timeout_ms: 20,
+            query_recovery_timeout_ms: 30,
+            cell_timeout_ms: 1_000,
+            timeout_enforcement: TimeoutEnforcementV3::CoordinatorProcessGroup,
+            query_order: QueryOrder::Rotating,
+            boundary: TimingBoundaryV3::CoordinatorGoToResultConsumed,
+        };
+        let value = serde_json::to_value(&timing).unwrap();
+        assert_eq!(value["timeout_enforcement"], "coordinator-process-group");
+        assert_eq!(
+            value["boundary"],
+            "coordinator-go-to-result-consumed"
+        );
+        assert_eq!(value["query_reap_grace_ms"], 5);
+        assert!(value.get("reload_before_each_iteration").is_none());
+        assert_eq!(
+            serde_json::from_value::<TimingProtocolV3>(value).unwrap(),
+            timing
+        );
+        assert_eq!(COMPARISON_REPORT_SCHEMA_VERSION_V2, 2);
+        assert_eq!(COMPARISON_REPORT_SCHEMA_VERSION, 2);
+        assert_eq!(COMPARISON_REPORT_SCHEMA_VERSION_V3, 3);
+    }
+
+    #[test]
+    fn every_observation_discloses_setup_termination_and_recovery() {
+        let observation = QueryObservationV3 {
+            iteration: 1,
+            query_position: 2,
+            setup_ns: 3,
+            elapsed_ns: 10_000_000,
+            recovery_ns: 4,
+            termination: ObservationTerminationV3::DeadlineSigkill,
+            actual_count: None,
+            outcome: OutcomeStatus::Timeout,
+            detail: Some("fixed timeout detail".to_string()),
+        };
+        let value = serde_json::to_value(&observation).unwrap();
+        assert_eq!(value["setup_ns"], 3);
+        assert_eq!(value["termination"], "deadline-sigkill");
+        assert_eq!(value["recovery_ns"], 4);
+        assert_eq!(
+            serde_json::from_value::<QueryObservationV3>(value).unwrap(),
+            observation
+        );
     }
 }

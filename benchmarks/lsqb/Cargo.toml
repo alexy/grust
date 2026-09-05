@@ -41,12 +41,14 @@ grust-pggraph = { path = "../../crates/grust-pggraph", optional = true }
 grust-sail = { path = "../../crates/grust-sail", optional = true }
 grust-surreal = { path = "../../crates/grust-surreal", optional = true }
 grust-turso = { path = "../../crates/grust-turso" }
+libc = "0.2"
 redis = { version = "1.6", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tempfile = { version = "3", optional = true }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio-postgres = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

@@ -79,7 +79,7 @@ make_component() {
         | ($m.tracks[$track]) as $track_manifest
         | ($track_manifest.query_order | length) as $query_count
         | {
-            schema_version: 2,
+            schema_version: 3,
             warning: $m.warning,
             experiment_id: "lsqb-\($track)-sf\($scale)",
             suite: ($m.suite + {name: $track_manifest.suite_name, track: $track}),
@@ -101,10 +101,14 @@ make_component() {
                 warmup_iterations: 0,
                 measurement_iterations: 1,
                 query_timeout_ms: 30000,
+                worker_ready_timeout_ms: 1200000,
+                query_reap_grace_ms: 1000,
+                query_kill_reap_timeout_ms: 5000,
+                query_recovery_timeout_ms: 10000,
                 cell_timeout_ms: 3600000,
+                timeout_enforcement: "coordinator-process-group",
                 query_order: "rotating",
-                boundary: "submit-to-scalar-consumed",
-                reload_before_each_iteration: false
+                boundary: "coordinator-go-to-result-consumed"
             },
             backends: [{
                 backend: {
@@ -151,6 +155,29 @@ make_component() {
                         then
                             "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
                         else null end
+                    )
+                },
+                lifecycle: {
+                    load_strategy: (
+                        if $setup_outcome != "pass" then "not-executed"
+                        elif $backend == "memory" or $backend == "turso"
+                            or $backend == "ladybug" or $backend == "lancedb"
+                            or $backend == "sail"
+                        then "per-observation-worker-reload"
+                        else "once-worker-attach"
+                        end
+                    ),
+                    recovery_contract: (
+                        if $setup_outcome != "pass" then "not-applicable"
+                        elif $backend == "memory" or $backend == "turso"
+                            or $backend == "ladybug" or $backend == "lancedb"
+                        then "process-group-absent"
+                        elif $backend == "postgres" or $backend == "pggraph"
+                            or $backend == "postgres-pgq"
+                        then "postgres-session-absent"
+                        elif $backend == "falkor" then "falkor-server-deadline"
+                        else "fail-closed"
+                        end
                     )
                 },
                 setup_outcome: $setup_outcome,
@@ -233,7 +260,10 @@ make_component() {
                             if $setup_outcome == "pass" and ($rust_row_refused | not) then [{
                                 iteration: 1,
                                 query_position: ($index + 1),
+                                setup_ns: 1,
                                 elapsed_ns: (1000 + $index),
+                                recovery_ns: 1,
+                                termination: "normal-exit",
                                 actual_count: $query.expected_count[$scale],
                                 outcome: "pass",
                                 detail: null
@@ -460,7 +490,10 @@ jq '
         | .measurements = [{
             iteration: 1,
             query_position: 1,
+            setup_ns: 1,
             elapsed_ns: 1,
+            recovery_ns: 1,
+            termination: "normal-exit",
             actual_count: .expected_count,
             outcome: "pass",
             detail: null
@@ -528,6 +561,39 @@ expect_failure "external static unsupported state with the wrong reason" \
     "$wrong_static_reason"
 
 baseline_reference="$temporary_directory/baseline/memory.json"
+legacy_v2="$temporary_directory/legacy-v2.json"
+jq '.schema_version = 2' "$baseline_reference" >"$legacy_v2"
+expect_failure "legacy schema-v2 matrix component" \
+    "$merge" "$temporary_directory/rejected-v2.json" "$legacy_v2"
+missing_enforcement="$temporary_directory/missing-query-enforcement.json"
+jq 'del(.timing.timeout_enforcement)' \
+    "$baseline_reference" >"$missing_enforcement"
+expect_failure "matrix without hard query enforcement" \
+    "$merge" "$temporary_directory/rejected-enforcement.json" "$missing_enforcement"
+missing_termination="$temporary_directory/missing-observation-termination.json"
+jq 'del(.backends[0].queries[0].measurements[0].termination)' \
+    "$baseline_reference" >"$missing_termination"
+expect_failure "observation without termination proof" \
+    "$merge" "$temporary_directory/rejected-termination.json" "$missing_termination"
+missing_recovery="$temporary_directory/missing-observation-recovery.json"
+jq 'del(.backends[0].queries[0].measurements[0].recovery_ns)' \
+    "$baseline_reference" >"$missing_recovery"
+expect_failure "observation without recovery duration" \
+    "$merge" "$temporary_directory/rejected-recovery.json" "$missing_recovery"
+fixed_order="$temporary_directory/fixed-order-v3.json"
+jq '.timing.query_order = "fixed"' "$baseline_reference" >"$fixed_order"
+expect_failure "schema-v3 matrix without rotating order" \
+    "$merge" "$temporary_directory/rejected-fixed-order.json" "$fixed_order"
+extra_timeout_field="$temporary_directory/extra-timeout-field.json"
+jq '.timing.unattested_grace_ms = 1' "$baseline_reference" >"$extra_timeout_field"
+expect_failure "schema-v3 matrix with an undeclared timing field" \
+    "$merge" "$temporary_directory/rejected-extra-timing.json" "$extra_timeout_field"
+late_ready="$temporary_directory/late-ready.json"
+jq '.backends[0].queries[0].measurements[0].setup_ns =
+    ((.timing.worker_ready_timeout_ms * 1000000) + 1)' \
+    "$baseline_reference" >"$late_ready"
+expect_failure "observation setup beyond its READY timeout" \
+    "$merge" "$temporary_directory/rejected-late-ready.json" "$late_ready"
 existing_merge="$temporary_directory/existing-merge.json"
 printf 'sentinel\n' >"$existing_merge"
 expect_failure "merge overwrite" "$merge" "$existing_merge" "$baseline_reference"
@@ -568,10 +634,34 @@ jq '
     | .backends[0].queries[0].detail = "exceeded 30000 ms"
     | .backends[0].queries[0].measurements[0].outcome = "timeout"
     | .backends[0].queries[0].measurements[0].actual_count = null
+    | .backends[0].queries[0].measurements[0].elapsed_ns =
+        ((.timing.query_timeout_ms * 1000000) + 1234)
+    | .backends[0].queries[0].measurements[0].recovery_ns =
+        ((.timing.query_reap_grace_ms * 1000000) + 1234)
+    | .backends[0].queries[0].measurements[0].termination = "deadline-sigkill"
     | .backends[0].queries[0].measurements[0].detail = "exceeded 30000 ms"
 ' "$baseline_reference" >"$evidenced_failure"
 "$merge" "$temporary_directory/accepted-failure.json" "$evidenced_failure" >/dev/null
 jq -e '.valid == false' "$temporary_directory/accepted-failure.json" >/dev/null
+missing_term_grace="$temporary_directory/missing-term-grace.json"
+jq '.backends[0].queries[0].measurements[0].recovery_ns = 0' \
+    "$evidenced_failure" >"$missing_term_grace"
+expect_failure "SIGKILL observation without its configured TERM grace" \
+    "$merge" "$temporary_directory/rejected-term-grace.json" "$missing_term_grace"
+
+unproved_remote_error="$temporary_directory/unproved-remote-error.json"
+jq '
+    .valid = false
+    | .backends[0].queries[0].outcome = "error"
+    | .backends[0].queries[0].reason_code = "query.execution"
+    | .backends[0].queries[0].detail = "unacknowledged transport error"
+    | .backends[0].queries[0].measurements[0].outcome = "error"
+    | .backends[0].queries[0].measurements[0].actual_count = null
+    | .backends[0].queries[0].measurements[0].detail = "unacknowledged transport error"
+' "$temporary_directory/baseline/sail.json" >"$unproved_remote_error"
+expect_failure "fail-closed remote error followed by another sample" \
+    "$merge" "$temporary_directory/rejected-unproved-remote-error.json" \
+    "$unproved_remote_error"
 failure_summary="$temporary_directory/failure-summary"
 "$summarize" "$temporary_directory/accepted-failure.json" "$failure_summary" >/dev/null
 awk -F, '
@@ -591,7 +681,10 @@ jq '
     .backends[0].queries[0].measurements = [{
         iteration: 1,
         query_position: 1,
+        setup_ns: 1,
         elapsed_ns: 1,
+        recovery_ns: 1,
+        termination: "normal-exit",
         actual_count: 8,
         outcome: "pass",
         detail: null
@@ -653,6 +746,8 @@ jq '
     .valid = false
     | .backends[0].setup_outcome = "error"
     | .backends[0].setup_detail = "qualified external service setup failed"
+    | .backends[0].lifecycle.load_strategy = "not-executed"
+    | .backends[0].lifecycle.recovery_contract = "not-applicable"
     | .backends[0].load_ns = null
     | .backends[0].queries |= map(
         .outcome = "error"

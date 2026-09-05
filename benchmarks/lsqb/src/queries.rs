@@ -91,7 +91,7 @@ pub struct DatasetStats {
 }
 
 impl DatasetStats {
-    #[allow(dead_code)] // Used by the schema-v2 matrix runner, not the legacy entry point.
+    #[allow(dead_code)] // Used by the schema-v3 matrix runner, not the legacy entry point.
     pub fn from_graph(graph: &Graph) -> Self {
         Self {
             nodes: graph.nodes.len(),
@@ -152,7 +152,7 @@ pub fn load_adversarial(directory: &Path) -> Result<Vec<QueryCase>, String> {
     )
 }
 
-#[allow(dead_code)] // Used by the schema-v2 matrix runner, not the legacy entry point.
+#[allow(dead_code)] // Used by the schema-v3 matrix runner, not the legacy entry point.
 pub fn load_adversarial_for_scale(
     directory: &Path,
     lsqb_root: &Path,

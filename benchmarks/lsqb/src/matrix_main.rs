@@ -1,19 +1,21 @@
 use std::env;
-use std::future::Future;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use grust_lsqb_runner::backend::{self, PreparedBackend, QueryExecutionError};
+use grust_lsqb_runner::backend;
 use grust_lsqb_runner::dataset;
 use grust_lsqb_runner::matrix_args::MatrixArguments;
 use grust_lsqb_runner::matrix_catalog::{self, BackendCatalogEntry, QueryCapability};
 use grust_lsqb_runner::matrix_progress::{self, PhaseProgress, QueryPhase};
+use grust_lsqb_runner::matrix_worker;
+use grust_lsqb_runner::observation_process::{self, WorkerOutcome};
 use grust_lsqb_runner::provenance;
 use grust_lsqb_runner::queries::{self, DatasetStats, QueryCase};
 use grust_lsqb_runner::report::{
-    self, BackendCellV2, COMPARISON_REPORT_SCHEMA_VERSION, ComparisonEnvironmentV2,
-    ComparisonReportV2, ExecutionClass, ExecutionDescriptorV2, OutcomeStatus, QueryObservationV2,
-    QueryOrder, QueryOutcomeV2, SuiteIdentityV2, TimingBoundary, TimingProtocolV2,
+    self, BackendCellV3, BackendLifecycleV3, COMPARISON_REPORT_SCHEMA_VERSION_V3,
+    ComparisonEnvironmentV2, ComparisonReportV3, ExecutionClass, ExecutionDescriptorV2,
+    LoadStrategyV3, ObservationTerminationV3, OutcomeStatus, QueryObservationV3, QueryOrder,
+    QueryOutcomeV3, SuiteIdentityV2, TimeoutEnforcementV3, TimingBoundaryV3, TimingProtocolV3,
 };
 use grust_lsqb_runner::safe_output;
 
@@ -28,8 +30,18 @@ const RUST_ROW_BOUND_UNAVAILABLE_DETAIL: &str = "downloaded LSQB tiers refuse Ru
 
 #[tokio::main]
 async fn main() {
-    if let Err(error) = run().await {
-        eprintln!("grust-lsqb-matrix: {error}");
+    let worker = env::args().nth(1).as_deref() == Some(matrix_worker::WORKER_MARKER);
+    let result = if worker {
+        matrix_worker::run_internal().await
+    } else {
+        run().await
+    };
+    if let Err(error) = result {
+        if worker {
+            eprintln!("grust-lsqb-matrix: internal observation worker failed");
+        } else {
+            eprintln!("grust-lsqb-matrix: {error}");
+        }
         std::process::exit(1);
     }
 }
@@ -58,20 +70,24 @@ async fn run() -> Result<(), String> {
         )?,
         _ => unreachable!("MatrixArguments validates suites"),
     };
-    let timing = TimingProtocolV2 {
+    let timing = TimingProtocolV3 {
         warmup_iterations: arguments.warmups,
         measurement_iterations: arguments.runs,
         query_timeout_ms: arguments.query_timeout_ms,
+        worker_ready_timeout_ms: arguments.worker_ready_timeout_ms,
+        query_reap_grace_ms: arguments.query_reap_grace_ms,
+        query_kill_reap_timeout_ms: arguments.query_kill_reap_timeout_ms,
+        query_recovery_timeout_ms: arguments.query_recovery_timeout_ms,
         cell_timeout_ms: arguments.cell_timeout_ms,
+        timeout_enforcement: TimeoutEnforcementV3::CoordinatorProcessGroup,
         query_order: QueryOrder::Rotating,
-        boundary: TimingBoundary::SubmitToScalarConsumed,
-        reload_before_each_iteration: false,
+        boundary: TimingBoundaryV3::CoordinatorGoToResultConsumed,
     };
     let dataset = provenance::lsqb_dataset_identity(&arguments.scale, stats, &fingerprint)?;
     let backend = run_backend(catalog, &arguments, &cases, &data_dir).await?;
     let valid = cell_valid(&backend);
-    let report = ComparisonReportV2 {
-        schema_version: COMPARISON_REPORT_SCHEMA_VERSION,
+    let report = ComparisonReportV3 {
+        schema_version: COMPARISON_REPORT_SCHEMA_VERSION_V3,
         warning: WARNING.to_string(),
         experiment_id: format!("lsqb-{}-sf{}", arguments.suite, arguments.scale),
         suite: suite_identity(&arguments.suite),
@@ -96,7 +112,7 @@ async fn run_backend(
     arguments: &MatrixArguments,
     cases: &[QueryCase],
     data_dir: &Path,
-) -> Result<BackendCellV2, String> {
+) -> Result<BackendCellV3, String> {
     let identity = backend::identity(catalog.id, catalog.adapter);
     if catalog.query_capability == QueryCapability::ExportOnly {
         return nonexecuted_cell(
@@ -135,38 +151,50 @@ async fn run_backend(
         );
     }
 
-    let (prepared, graph) = match prepare_backend(catalog, arguments, data_dir).await {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            if let Some(error) = error.strip_prefix("dataset.load: ") {
+    let (prepared, graph) =
+        match matrix_worker::prepare_for_matrix(catalog, &arguments.scale, data_dir).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if let Some(error) = error.strip_prefix("dataset.load: ") {
+                    return nonexecuted_cell(
+                        identity,
+                        cases,
+                        OutcomeStatus::Error,
+                        "dataset.load",
+                        error,
+                        catalog,
+                        &arguments.scale,
+                    );
+                }
+                let (status, code) =
+                    classify_setup_failure(&error, identity.resource_components > 1);
+                let detail = if status == OutcomeStatus::Unavailable {
+                    "backend service is unavailable"
+                } else {
+                    "backend setup failed"
+                };
                 return nonexecuted_cell(
                     identity,
                     cases,
-                    OutcomeStatus::Error,
-                    "dataset.load",
-                    error,
+                    status,
+                    code,
+                    detail,
                     catalog,
                     &arguments.scale,
                 );
             }
-            let (status, code) = classify_setup_failure(&error, identity.resource_components > 1);
-            return nonexecuted_cell(
-                identity,
-                cases,
-                status,
-                code,
-                &error,
-                catalog,
-                &arguments.scale,
-            );
-        }
-    };
-    let queries = execute_protocol(&prepared, &graph, cases, arguments, catalog.id).await?;
-    Ok(BackendCellV2 {
+        };
+    let load_ns = prepared.load_ns;
+    let queries = execute_protocol(prepared, graph, cases, arguments, catalog.id).await?;
+    Ok(BackendCellV3 {
         backend: identity,
+        lifecycle: BackendLifecycleV3 {
+            load_strategy: backend::load_strategy(catalog.id, true),
+            recovery_contract: backend::recovery_contract(catalog.id, true),
+        },
         setup_outcome: OutcomeStatus::Pass,
         setup_detail: None,
-        load_ns: Some(prepared.load_ns),
+        load_ns: Some(load_ns),
         queries,
     })
 }
@@ -175,57 +203,18 @@ fn admitted_at_scale(capability: QueryCapability, scale: &str) -> bool {
     scale == "example" || capability != QueryCapability::MaterializeThenReference
 }
 
-async fn prepare_backend(
-    catalog: &BackendCatalogEntry,
-    arguments: &MatrixArguments,
-    data_dir: &Path,
-) -> Result<(PreparedBackend, grust_core::Graph), String> {
-    if streams_projected_dataset(catalog.id, &arguments.scale) {
-        let chunks = dataset::projected_dataset_chunks(data_dir, 10_000)
-            .map_err(|error| format!("dataset.load: {error}"))?;
-        let prepared = PreparedBackend::prepare_projected_chunks(catalog.id, chunks).await?;
-        return Ok((prepared, grust_core::Graph::default()));
-    }
-
-    #[cfg(feature = "falkor")]
-    if catalog.id == "falkor" && arguments.scale != "example" {
-        let chunks = dataset::projected_dataset_chunks(data_dir, 10_000)
-            .map_err(|error| format!("dataset.load: {error}"))?;
-        let prepared = backend::prepare_falkor_chunks(chunks).await?;
-        return Ok((prepared, grust_core::Graph::default()));
-    }
-
-    let graph = dataset::load_projected_dataset(data_dir)
-        .map_err(|error| format!("dataset.load: {error}"))?;
-    let prepared = PreparedBackend::prepare(catalog.id, &graph).await?;
-    let source = if catalog.query_capability == QueryCapability::MaterializeThenReference {
-        graph
-    } else {
-        // Row-source/native backends own their loaded state. Retaining a second
-        // full source graph during measurement would unfairly consume the
-        // runner memory limit; query-level reference fallback is rejected on
-        // downloaded scales below.
-        grust_core::Graph::default()
-    };
-    Ok((prepared, source))
-}
-
-fn streams_projected_dataset(backend: &str, scale: &str) -> bool {
-    scale != "example" && matches!(backend, "memory" | "turso" | "postgres" | "sail")
-}
-
 async fn execute_protocol(
-    backend: &PreparedBackend,
-    graph: &grust_core::Graph,
+    backend: backend::PreparedBackend,
+    graph: grust_core::Graph,
     cases: &[QueryCase],
     arguments: &MatrixArguments,
     backend_id: &str,
-) -> Result<Vec<QueryOutcomeV2>, String> {
+) -> Result<Vec<QueryOutcomeV3>, String> {
     let mut outcomes = cases
         .iter()
         .map(|case| match backend.execution(case) {
             Ok(execution) => query_outcome_for_scale(case, execution, &arguments.scale),
-            Err(error) => Ok(QueryOutcomeV2 {
+            Err(error) => Ok(QueryOutcomeV3 {
                 id: case.id.clone(),
                 source_sha256: case.source_sha256.clone(),
                 adapter_sha256: Some(queries::sha256(case.executable.as_bytes())),
@@ -245,13 +234,16 @@ async fn execute_protocol(
             }),
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // No worker inherits Rust state from this Tokio process. Persistent
+    // service backends retain their loaded state and workers reconnect;
+    // process-owned backends reload explicitly before each READY record.
+    drop(backend);
+    drop(graph);
 
     run_phase(
-        backend,
-        graph,
         cases,
         &mut outcomes,
-        arguments.query_timeout_ms,
+        arguments,
         PhaseProgress::new(
             backend_id,
             &arguments.suite,
@@ -260,13 +252,11 @@ async fn execute_protocol(
             arguments.warmups,
         ),
     )
-    .await;
+    .await?;
     run_phase(
-        backend,
-        graph,
         cases,
         &mut outcomes,
-        arguments.query_timeout_ms,
+        arguments,
         PhaseProgress::new(
             backend_id,
             &arguments.suite,
@@ -275,7 +265,7 @@ async fn execute_protocol(
             arguments.runs,
         ),
     )
-    .await;
+    .await?;
     for outcome in &mut outcomes {
         if outcome.execution.class.is_some() && outcome.outcome != OutcomeStatus::Unsupported {
             finalize_query_outcome(outcome);
@@ -285,21 +275,19 @@ async fn execute_protocol(
 }
 
 async fn run_phase(
-    backend: &PreparedBackend,
-    graph: &grust_core::Graph,
     cases: &[QueryCase],
-    outcomes: &mut [QueryOutcomeV2],
-    timeout_ms: u64,
+    outcomes: &mut [QueryOutcomeV3],
+    arguments: &MatrixArguments,
     progress: PhaseProgress<'_>,
-) {
+) -> Result<(), String> {
     if cases.is_empty() {
-        return;
+        return Ok(());
     }
     let query_total = u32::try_from(cases.len()).unwrap_or(u32::MAX);
     for iteration in 1..=progress.iteration_total() {
         let rotation = (iteration as usize - 1) % cases.len();
         for position in 0..cases.len() {
-            let index = (position + rotation) % cases.len();
+            let index = rotated_index(position, rotation, cases.len());
             if outcomes[index].execution.class.is_none()
                 || outcomes[index].outcome == OutcomeStatus::Unsupported
             {
@@ -312,36 +300,90 @@ async fn run_phase(
                 &cases[index].id,
             );
             matrix_progress::query_start(query_progress);
-            let (result, elapsed_ns) =
-                execute_with_timeout(backend, &cases[index], graph, timeout_ms).await;
-            let observation = match result {
-                Ok(count) => QueryObservationV2 {
+            let token = format!(
+                "g{}-{}-{iteration}-{}",
+                std::process::id(),
+                if progress.is_warmup() { "w" } else { "m" },
+                position + 1
+            );
+            let mut command = matrix_worker::command(
+                arguments,
+                &cases[index].id,
+                &token,
+                matrix_worker::uses_attach_worker(&arguments.backend),
+            )?;
+            let mut isolated = observation_process::run_with_ready(
+                &mut command,
+                &token,
+                arguments.query_timeout_ms,
+                arguments.query_reap_grace_ms,
+                arguments.query_kill_reap_timeout_ms,
+                arguments.worker_ready_timeout_ms,
+                |setup_ns| matrix_progress::query_ready(query_progress, setup_ns),
+            )?;
+            if requires_backend_recovery(isolated.outcome, isolated.termination) {
+                let recovery_started = Instant::now();
+                backend::recover_after_unacknowledged_exit(
+                    &arguments.backend,
+                    &token,
+                    arguments.query_recovery_timeout_ms,
+                )
+                .await
+                .map_err(|_| {
+                    format!(
+                        "backend {} could not prove quiescence after an unacknowledged query exit",
+                        arguments.backend
+                    )
+                })?;
+                isolated.recovery_ns = isolated
+                    .recovery_ns
+                    .saturating_add(elapsed_ns(recovery_started));
+            }
+            let observation = match isolated.outcome {
+                WorkerOutcome::Pass => {
+                    let count = isolated.actual_count.ok_or_else(|| {
+                        "observation worker omitted a successful scalar result".to_string()
+                    })?;
+                    QueryObservationV3 {
+                        iteration,
+                        query_position: position as u32 + 1,
+                        setup_ns: isolated.setup_ns,
+                        elapsed_ns: isolated.elapsed_ns,
+                        recovery_ns: isolated.recovery_ns,
+                        termination: isolated.termination,
+                        actual_count: Some(count),
+                        outcome: if count == cases[index].expected_count {
+                            OutcomeStatus::Pass
+                        } else {
+                            OutcomeStatus::Mismatch
+                        },
+                        detail: None,
+                    }
+                }
+                WorkerOutcome::Error => QueryObservationV3 {
                     iteration,
                     query_position: position as u32 + 1,
-                    elapsed_ns,
-                    actual_count: Some(count),
-                    outcome: if count == cases[index].expected_count {
-                        OutcomeStatus::Pass
-                    } else {
-                        OutcomeStatus::Mismatch
-                    },
-                    detail: None,
-                },
-                Err(QueryExecutionError::Error(error)) => QueryObservationV2 {
-                    iteration,
-                    query_position: position as u32 + 1,
-                    elapsed_ns,
+                    setup_ns: isolated.setup_ns,
+                    elapsed_ns: isolated.elapsed_ns,
+                    recovery_ns: isolated.recovery_ns,
+                    termination: isolated.termination,
                     actual_count: None,
                     outcome: OutcomeStatus::Error,
-                    detail: Some(error),
+                    detail: Some("observation worker reported a query execution error".to_string()),
                 },
-                Err(QueryExecutionError::Timeout(detail)) => QueryObservationV2 {
+                WorkerOutcome::Timeout => QueryObservationV3 {
                     iteration,
                     query_position: position as u32 + 1,
-                    elapsed_ns,
+                    setup_ns: isolated.setup_ns,
+                    elapsed_ns: isolated.elapsed_ns,
+                    recovery_ns: isolated.recovery_ns,
+                    termination: isolated.termination,
                     actual_count: None,
                     outcome: OutcomeStatus::Timeout,
-                    detail: Some(detail),
+                    detail: Some(
+                        "query deadline enforced and quiescence proved before the next observation"
+                            .to_string(),
+                    ),
                 },
             };
             matrix_progress::query_finish(
@@ -356,70 +398,31 @@ async fn run_phase(
             }
         }
     }
+    Ok(())
 }
 
-async fn execute_with_timeout(
-    backend: &PreparedBackend,
-    case: &QueryCase,
-    graph: &grust_core::Graph,
-    timeout_ms: u64,
-) -> (Result<i64, QueryExecutionError>, u64) {
-    let started = Instant::now();
-    let result = if backend.manages_query_timeout() {
-        backend.execute_count(case, graph, timeout_ms).await
-    } else {
-        quiescent_timeout(backend.execute_count(case, graph, timeout_ms), timeout_ms).await
-    };
-    // Use this same elapsed observation for both deadline classification and
-    // the report. Two separately sampled timers can otherwise turn a valid
-    // near-deadline result into a non-timeout observation whose recorded
-    // duration exceeds the receipt validator's deadline.
-    let elapsed = started.elapsed();
-    finish_timed_result(result, elapsed, timeout_ms)
+fn rotated_index(position: usize, rotation: usize, query_count: usize) -> usize {
+    (position + rotation) % query_count
 }
 
-fn finish_timed_result(
-    result: Result<i64, QueryExecutionError>,
-    elapsed: Duration,
-    timeout_ms: u64,
-) -> (Result<i64, QueryExecutionError>, u64) {
-    let result = if elapsed > Duration::from_millis(timeout_ms)
-        && !matches!(&result, Err(QueryExecutionError::Timeout(_)))
-    {
-        Err(QueryExecutionError::Timeout(format!(
-            "exceeded {timeout_ms} ms; backend work completed and quiesced after the deadline"
-        )))
-    } else {
-        result
-    };
-    let elapsed_ns = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
-    (result, elapsed_ns)
+fn requires_backend_recovery(
+    outcome: WorkerOutcome,
+    termination: ObservationTerminationV3,
+) -> bool {
+    outcome == WorkerOutcome::Error
+        || matches!(
+            termination,
+            ObservationTerminationV3::DeadlineObservedExit
+                | ObservationTerminationV3::DeadlineSigterm
+                | ObservationTerminationV3::DeadlineSigkill
+        )
 }
 
-async fn quiescent_timeout<F>(future: F, timeout_ms: u64) -> Result<i64, QueryExecutionError>
-where
-    F: Future<Output = Result<i64, QueryExecutionError>>,
-{
-    let started = Instant::now();
-    tokio::pin!(future);
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), future.as_mut()).await {
-        Ok(result) if started.elapsed() <= Duration::from_millis(timeout_ms) => result,
-        Ok(_) => Err(QueryExecutionError::Timeout(format!(
-            "exceeded {timeout_ms} ms; non-yielding backend work completed and quiesced after the deadline"
-        ))),
-        Err(_) => {
-            // Dropping an in-flight database/Spark future does not prove that
-            // its server-side work stopped. Await completion before the next
-            // sample so a timeout can never overlap or contaminate it.
-            let _completed_after_deadline = future.await;
-            Err(QueryExecutionError::Timeout(format!(
-                "exceeded {timeout_ms} ms; backend work quiesced before the next sample"
-            )))
-        }
-    }
+fn elapsed_ns(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
-fn finalize_query_outcome(outcome: &mut QueryOutcomeV2) {
+fn finalize_query_outcome(outcome: &mut QueryOutcomeV3) {
     let observations = || outcome.warmups.iter().chain(outcome.measurements.iter());
     let status = if observations().any(|item| item.outcome == OutcomeStatus::Error) {
         OutcomeStatus::Error
@@ -447,8 +450,8 @@ fn query_outcome(
     case: &QueryCase,
     execution: ExecutionDescriptorV2,
     rust_rows: Option<queries::RustRowEstimate>,
-) -> QueryOutcomeV2 {
-    QueryOutcomeV2 {
+) -> QueryOutcomeV3 {
+    QueryOutcomeV3 {
         id: case.id.clone(),
         source_sha256: case.source_sha256.clone(),
         adapter_sha256: Some(queries::sha256(case.executable.as_bytes())),
@@ -467,13 +470,13 @@ fn query_outcome_for_scale(
     case: &QueryCase,
     mut execution: ExecutionDescriptorV2,
     scale: &str,
-) -> Result<QueryOutcomeV2, String> {
+) -> Result<QueryOutcomeV3, String> {
     let rust_rows = rust_rows_for_execution(case, &execution, scale)?;
     if scale != "example"
         && execution.class == Some(ExecutionClass::BackendMaterializeRustReference)
     {
         execution.transport = "not executed".to_string();
-        return Ok(QueryOutcomeV2 {
+        return Ok(QueryOutcomeV3 {
             id: case.id.clone(),
             source_sha256: case.source_sha256.clone(),
             adapter_sha256: Some(queries::sha256(case.executable.as_bytes())),
@@ -506,7 +509,7 @@ fn query_outcome_for_scale(
     };
     if let Some((reason, detail)) = rust_row_refusal {
         execution.transport = "not executed".to_string();
-        return Ok(QueryOutcomeV2 {
+        return Ok(QueryOutcomeV3 {
             id: case.id.clone(),
             source_sha256: case.source_sha256.clone(),
             adapter_sha256: Some(queries::sha256(case.executable.as_bytes())),
@@ -560,12 +563,12 @@ fn nonexecuted_cell(
     detail: &str,
     catalog: &BackendCatalogEntry,
     scale: &str,
-) -> Result<BackendCellV2, String> {
+) -> Result<BackendCellV3, String> {
     let queries = cases
         .iter()
         .map(|case| {
             let execution = catalog_execution_for_case(catalog, case)?;
-            Ok(QueryOutcomeV2 {
+            Ok(QueryOutcomeV3 {
                 id: case.id.clone(),
                 source_sha256: case.source_sha256.clone(),
                 adapter_sha256: Some(queries::sha256(case.executable.as_bytes())),
@@ -580,8 +583,12 @@ fn nonexecuted_cell(
             })
         })
         .collect::<Result<Vec<_>, String>>()?;
-    Ok(BackendCellV2 {
+    Ok(BackendCellV3 {
         backend: identity,
+        lifecycle: BackendLifecycleV3 {
+            load_strategy: LoadStrategyV3::NotExecuted,
+            recovery_contract: backend::recovery_contract(catalog.id, false),
+        },
         setup_outcome: status,
         setup_detail: Some(detail.to_string()),
         load_ns: None,
@@ -689,7 +696,7 @@ fn environment() -> ComparisonEnvironmentV2 {
     }
 }
 
-fn cell_valid(cell: &BackendCellV2) -> bool {
+fn cell_valid(cell: &BackendCellV3) -> bool {
     cell.setup_outcome != OutcomeStatus::Error
         && cell.queries.iter().all(|query| {
             !matches!(
@@ -699,16 +706,13 @@ fn cell_valid(cell: &BackendCellV2) -> bool {
         })
 }
 
-fn write_report(path: &Path, report: &ComparisonReportV2) -> Result<(), String> {
+fn write_report(path: &Path, report: &ComparisonReportV3) -> Result<(), String> {
     let json = serde_json::to_string_pretty(report).map_err(|err| err.to_string())?;
     safe_output::write_new(path, format!("{json}\n").as_bytes())
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     use super::*;
 
     #[test]
@@ -735,12 +739,24 @@ mod tests {
     #[test]
     fn downloaded_owned_and_row_source_backends_stream_projected_data() {
         for backend in ["memory", "turso", "postgres", "sail"] {
-            assert!(streams_projected_dataset(backend, "0.1"), "{backend}");
-            assert!(streams_projected_dataset(backend, "0.3"), "{backend}");
-            assert!(!streams_projected_dataset(backend, "example"), "{backend}");
+            assert!(
+                matrix_worker::streams_projected_dataset(backend, "0.1"),
+                "{backend}"
+            );
+            assert!(
+                matrix_worker::streams_projected_dataset(backend, "0.3"),
+                "{backend}"
+            );
+            assert!(
+                !matrix_worker::streams_projected_dataset(backend, "example"),
+                "{backend}"
+            );
         }
         for backend in ["falkor", "ladybug"] {
-            assert!(!streams_projected_dataset(backend, "0.3"), "{backend}");
+            assert!(
+                !matrix_worker::streams_projected_dataset(backend, "0.3"),
+                "{backend}"
+            );
         }
     }
 
@@ -931,46 +947,36 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn async_timeout_waits_until_backend_work_is_quiescent() {
-        let finished = Arc::new(AtomicBool::new(false));
-        let worker_finished = Arc::clone(&finished);
-        let started = Instant::now();
-        let result = quiescent_timeout(
-            async move {
-                tokio::time::sleep(Duration::from_millis(30)).await;
-                worker_finished.store(true, Ordering::SeqCst);
-                Ok(1)
-            },
-            1,
-        )
-        .await;
-
-        assert!(matches!(result, Err(QueryExecutionError::Timeout(_))));
-        assert!(finished.load(Ordering::SeqCst));
-        assert!(started.elapsed() >= Duration::from_millis(25));
-    }
-
-    #[tokio::test]
-    async fn non_yielding_completion_after_deadline_is_timeout() {
-        let result = quiescent_timeout(
-            async {
-                std::thread::sleep(Duration::from_millis(20));
-                Ok(1)
-            },
-            1,
-        )
-        .await;
-
-        assert!(matches!(result, Err(QueryExecutionError::Timeout(_))));
+    #[test]
+    fn rotation_remains_deterministic_after_any_prior_outcome() {
+        let orders = (0..3)
+            .map(|iteration| {
+                (0..3)
+                    .map(|position| rotated_index(position, iteration, 3))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(orders, vec![vec![0, 1, 2], vec![1, 2, 0], vec![2, 0, 1]]);
     }
 
     #[test]
-    fn late_completion_and_reported_elapsed_share_one_deadline_observation() {
-        let (result, elapsed_ns) = finish_timed_result(Ok(1), Duration::from_millis(2), 1);
-
-        assert!(matches!(result, Err(QueryExecutionError::Timeout(_))));
-        assert_eq!(elapsed_ns, 2_000_000);
+    fn unacknowledged_worker_error_requires_recovery_before_another_sample() {
+        assert!(requires_backend_recovery(
+            WorkerOutcome::Error,
+            ObservationTerminationV3::NormalExit
+        ));
+        assert!(requires_backend_recovery(
+            WorkerOutcome::Timeout,
+            ObservationTerminationV3::DeadlineSigkill
+        ));
+        assert!(requires_backend_recovery(
+            WorkerOutcome::Timeout,
+            ObservationTerminationV3::DeadlineObservedExit
+        ));
+        assert!(!requires_backend_recovery(
+            WorkerOutcome::Pass,
+            ObservationTerminationV3::NormalExit
+        ));
     }
 
     #[test]
@@ -996,18 +1002,24 @@ mod tests {
                 rows: 1,
             }),
         );
-        outcome.warmups.push(QueryObservationV2 {
+        outcome.warmups.push(QueryObservationV3 {
             iteration: 1,
             query_position: 1,
+            setup_ns: 1,
             elapsed_ns: 1,
+            recovery_ns: 1,
+            termination: ObservationTerminationV3::NormalExit,
             actual_count: None,
             outcome: OutcomeStatus::Error,
             detail: Some("warmup failed".to_string()),
         });
-        outcome.measurements.push(QueryObservationV2 {
+        outcome.measurements.push(QueryObservationV3 {
             iteration: 1,
             query_position: 1,
+            setup_ns: 1,
             elapsed_ns: 1,
+            recovery_ns: 1,
+            termination: ObservationTerminationV3::NormalExit,
             actual_count: Some(1),
             outcome: OutcomeStatus::Pass,
             detail: None,

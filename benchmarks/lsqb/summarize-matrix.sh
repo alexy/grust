@@ -5,7 +5,7 @@ usage() {
     cat >&2 <<'USAGE'
 Usage: summarize-matrix.sh MATRIX.json OUTPUT_DIRECTORY
 
-Validate a schema-v2 LSQB comparison matrix and write deterministic
+Validate a schema-v3 LSQB comparison matrix and write deterministic
 capabilities.csv and latency.csv summaries. Latency is summarized per
 query/backend cell; execution classes are retained and are never ranked or
 combined into a cross-class score.
@@ -109,7 +109,7 @@ for ((index = 0; index < backend_count; index++)); do
 done
 rebuilt="$validation_directory/rebuilt.json"
 if ! "$merge" "$rebuilt" "${validation_reports[@]}" >/dev/null; then
-    echo "summarize-matrix.sh: invalid schema-v2 comparison matrix: $matrix" >&2
+    echo "summarize-matrix.sh: invalid schema-v3 comparison matrix: $matrix" >&2
     exit 1
 fi
 jq -S -c --argjson order "$canonical_backends" '
