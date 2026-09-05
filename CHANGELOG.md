@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Record each completed LSQB observation immediately as a flushed JSON line in
+  the host-captured cell log, including counts, timing, termination, and recovery.
+  Interrupted runs retain diagnostics without claiming a completion receipt.
 - Upgraded LSQB comparison evidence to schema v3 with a fresh process-group
   worker per observation, nonce-bound READY/GO timing, hard query deadlines,
   bounded TERM/KILL/reap handling, backend-specific recovery proofs, and

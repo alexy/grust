@@ -494,6 +494,16 @@ It never retries a short write from an exotic sink. Query events are explicitly
 flushed outside the timed query boundary. Neither line type alters the
 receipt-bound watchdog completion schema.
 
+Each completed observation additionally emits an `observation-recorded` JSON
+line to stdout, captured incrementally in the host-side cell log. Unlike the
+bounded progress telemetry, this includes the full scalar count, setup/query/
+recovery timings, outcome, and termination mechanism. The record is flushed
+outside query timing before starting another observation; a write failure fails
+the cell. These partial records are diagnostic, not a completion receipt, and
+must not be pooled or published as a completed comparison. A machine power loss
+can still lose buffered filesystem writes; a Docker process failure does not
+erase records already captured by the host logger.
+
 `load_ns` is diagnostic and is not compared across adapter classes. At
 downloaded scales Memory decodes bounded node-first/edge-next chunks directly
 into its single owned in-process graph. Turso, PostgreSQL, a qualified Sail

@@ -386,6 +386,12 @@ async fn run_phase(
                     ),
                 },
             };
+            grust_lsqb_runner::observation_journal::record(
+                arguments,
+                &cases[index].id,
+                progress.is_warmup(),
+                &observation,
+            )?;
             matrix_progress::query_finish(
                 query_progress,
                 observation.outcome,
