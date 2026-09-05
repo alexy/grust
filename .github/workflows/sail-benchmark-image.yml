@@ -1,0 +1,40 @@
+name: Publish pinned Sail benchmark image
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.repository == 'querygraph/grust' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Build and verify the immutable upstream wheel
+        env:
+          IMAGE: ghcr.io/querygraph/grust-sail-benchmark
+        run: |
+          set -euo pipefail
+          docker build --platform linux/arm64 --progress plain \
+            -f benchmarks/lsqb/Dockerfile.sail \
+            --build-arg GRUST_SOURCE_REVISION="$GITHUB_SHA" \
+            -t "$IMAGE:0.7.1-$GITHUB_SHA" .
+          test "$(docker run --rm "$IMAGE:0.7.1-$GITHUB_SHA" --version)" = 'sail 0.7.1'
+      - name: Publish source-bound image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ghcr.io/querygraph/grust-sail-benchmark
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:0.7.1-$GITHUB_SHA"
+          docker buildx imagetools inspect "$IMAGE:0.7.1-$GITHUB_SHA"
+          docker logout ghcr.io

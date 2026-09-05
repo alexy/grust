@@ -187,7 +187,9 @@ PostgreSQL, FalkorDB, SurrealDB, and pgGraph have pinned, orchestrator-owned
 service images. Sail, PostgreSQL PGQ, and Helix remain unavailable by default,
 so a run cannot silently discover or reuse a local service. PostgreSQL 19 Beta
 3 and the Helix local-development runtime now provide explicit opt-in image
-contracts; Sail still requires an operator-built and registry-published image.
+contracts; Sail can use the Grust-built image from `Dockerfile.sail` and the
+manual `sail-benchmark-image.yml` publication workflow. A vendor-hosted image
+is not required; the resulting registry manifest still needs qualification.
 The exact qualified candidates and their platform/config digests are recorded
 in [`BACKENDS.md`](BACKENDS.md). Ladybug and LanceDB are embedded. Set
 `SMOKE=1` for a one-run Memory-only infrastructure check:

@@ -12,16 +12,23 @@ use tonic::transport::Channel;
 
 use super::*;
 
+fn sail_test_port() -> u16 {
+    std::env::var("GRUST_SAIL_TEST_PORT")
+        .map(|value| value.parse::<u16>().expect("valid GRUST_SAIL_TEST_PORT"))
+        .unwrap_or(50051)
+}
+
 fn sail_available() -> bool {
-    TcpStream::connect("127.0.0.1:50051").is_ok()
+    TcpStream::connect(("127.0.0.1", sail_test_port())).is_ok()
 }
 
 async fn store() -> SailGraphStore {
     assert!(
         sail_available(),
-        "live Sail integration tests require a Sail server on 127.0.0.1:50051; run scripts/integration-test.sh --backend sail"
+        "live Sail integration tests require a local Sail server (default port 50051, override GRUST_SAIL_TEST_PORT)"
     );
     let config = SailConfig {
+        endpoint: format!("http://127.0.0.1:{}", sail_test_port()),
         warehouse: SailWarehouse::LocalSessionScoped,
         ..SailConfig::default()
     };
@@ -31,6 +38,32 @@ async fn store() -> SailGraphStore {
     store.bootstrap().await.expect("bootstrap Sail tables");
     store.clear().await.expect("clear Sail tables");
     store
+}
+
+#[tokio::test]
+#[ignore = "requires a live Sail server; GRUST_SAIL_TEST_PORT selects the port"]
+async fn close_releases_only_the_owned_session() {
+    let owned = store().await;
+    let other = store().await;
+    let graph = sample_graph();
+    owned.put_graph(&graph).await.unwrap();
+    other.put_graph(&graph).await.unwrap();
+    let mut released_config = owned.config.clone();
+    released_config.warehouse = SailWarehouse::ServerManaged;
+    assert!(!owned.read_graph().await.unwrap().nodes.is_empty());
+    owned.close().await.expect("acknowledged session release");
+    let probe = SailGraphStore::connect(released_config).await.unwrap();
+    assert!(
+        probe
+            .query_arrow_ipc("SELECT * FROM grust_nodes")
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        other.read_graph().await.unwrap().nodes.len(),
+        graph.nodes.len()
+    );
+    other.close().await.expect("independent session release");
 }
 
 fn request_store() -> SailGraphStore {
@@ -1198,6 +1231,7 @@ async fn test_read_pushdown_matches_reference() {
         "MATCH (n:Person) WHERE n.name STARTS WITH 'A' RETURN n.name ORDER BY n.name",
         "MATCH (n:Person) WHERE n.active = true RETURN n.name ORDER BY n.name",
         // Relationship-segment join pushdown.
+        "MATCH (:Person)-[:KNOWS]->(:Person) RETURN count(*) AS count",
         "MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name AS a, b.name AS b ORDER BY a, b",
         "MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE b.age >= 40 RETURN b.name ORDER BY b.name",
         "MATCH (a:Person {name:'Ada'})-[r:KNOWS]->(b) RETURN b.name ORDER BY b.name",
@@ -1212,6 +1246,9 @@ async fn test_read_pushdown_matches_reference() {
         "MATCH (a:Person)-[:KNOWS]->(b), (a)-[:KNOWS]->(c) RETURN a.name, b.name, c.name ORDER BY a.name, b.name, c.name",
         // WITH horizon (leading scan pushed, horizon in Rust).
         "MATCH (n:Person) WHERE n.age >= 40 WITH n.age AS age RETURN avg(age) AS mean",
+        // Sail cannot execute recursive CTEs; these must use the reference.
+        "MATCH (a:Person)-[:KNOWS*0..0]->(b:Person) RETURN count(*) AS count",
+        "MATCH (a:Person)-[:KNOWS*1..2]->(b:Person) RETURN a.name, b.name ORDER BY a.name, b.name",
         // Not pushable (OPTIONAL MATCH): exercises the read_graph fallback branch.
         "MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name ORDER BY a.name",
     ];

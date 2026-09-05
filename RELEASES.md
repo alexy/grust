@@ -15,8 +15,10 @@ history.
 - Prawn — 0.13.0 (2026-09-04)
 - Crayfish — 0.13.1 (2026-09-04; scoped registry patch: `grust-sail`,
   `grust-surreal`, and `grust-graph`; all other publishable crates remain on
-  0.13.0) ← current
-- Krill
+  0.13.0)
+- Krill — 0.13.2 (2026-09-05; scoped registry patch: `grust-cypher`,
+  `grust-sail`, and `grust-graph`; Surreal remains 0.13.1, other publishable
+  crates remain 0.13.0) ← current
 
 ## Barnacles
 - Acorn

@@ -90,6 +90,19 @@ enum Backend {
 }
 
 impl PreparedBackend {
+    /// Release per-observation remote state after the result has been emitted.
+    /// Persistent service backends keep their dataset for the next attachment.
+    pub async fn finish(self) -> Result<(), String> {
+        #[cfg(feature = "sail")]
+        if let Backend::Sail(store) = self.inner {
+            return store
+                .close()
+                .await
+                .map_err(|_| "release Sail observation session failed".to_string());
+        }
+        Ok(())
+    }
+
     pub async fn prepare(id: &str, graph: &Graph) -> Result<Self, String> {
         match id {
             "memory" => prepare_memory(graph).await,
@@ -980,12 +993,12 @@ pub fn identity(id: &str, adapter: &str) -> BackendIdentityV2 {
 }
 
 fn adapter_version(id: &str) -> &'static str {
-    // Crayfish is an intentionally scoped registry patch: only the Sail and
-    // Surreal adapters and facade moved to 0.13.1. The internal benchmark
+    // Scoped registry patches move only affected adapters. The internal benchmark
     // runner stays at 0.13.0 with every unchanged adapter, so its own package
     // version is the correct default for the remaining adapter identities.
     match id {
-        "sail" | "surreal" => "0.13.1",
+        "sail" => "0.13.2",
+        "surreal" => "0.13.1",
         _ => env!("CARGO_PKG_VERSION"),
     }
 }
@@ -1212,7 +1225,7 @@ mod tests {
 
     #[test]
     fn scoped_patch_reports_the_actual_adapter_versions() {
-        assert_eq!(adapter_version("sail"), "0.13.1");
+        assert_eq!(adapter_version("sail"), "0.13.2");
         assert_eq!(adapter_version("surreal"), "0.13.1");
         assert_eq!(adapter_version("memory"), "0.13.0");
     }

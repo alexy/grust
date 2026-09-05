@@ -318,7 +318,7 @@ Enable the `memory` feature to use `MemoryGraphStore` from the public facade:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.13.1", features = ["memory"] }
+grust = { package = "grust-graph", version = "0.13.2", features = ["memory"] }
 ```
 
 The facade re-exports the full `grust-memory` crate surface when the feature is
@@ -449,7 +449,7 @@ Backend crates are optional facade features:
 ```toml
 [dependencies.grust]
 package = "grust-graph"
-version = "0.13.1"
+version = "0.13.2"
 features = [
   "cocoindex", "cypher", "falkor", "lancedb", "memory", "postgres",
   "postgres-pgq", "pggraph", "sail", "surreal", "turso",
@@ -464,9 +464,9 @@ The additional `turso-sync` feature enables Turso Cloud synchronization and
 implies `turso`; `typed-garde` and `typed-zod-rs` enable typed ingestion rather
 than storage backends.
 
-Crayfish is a scoped registry patch: `grust-graph`, `grust-sail`, and
-`grust-surreal` are 0.13.1. Consumers that depend directly on any other
-publishable Grust crate continue to use 0.13.0.
+Krill is a scoped registry patch: `grust-graph`, `grust-cypher`, and
+`grust-sail` are 0.13.2. `grust-surreal` remains 0.13.1; consumers that depend
+directly on any other publishable Grust crate continue to use 0.13.0.
 
 For Arrow-native data sources, enable `sail` to stage Arrow IPC streams as
 Spark temp views. The internal Ladybug adapter also has an Arrow IPC surface
@@ -986,9 +986,9 @@ backend-specific extension traits later.
 
 ## Status
 
-Grust 0.13.1 "Crayfish" is the current release line. It is a scoped patch for
-`grust-sail`, `grust-surreal`, and the `grust-graph` facade; every other
-publishable crate remains on 0.13.0. The core model and reference execution paths are stable
+Grust 0.13.2 "Krill" is the current source release line. It is a scoped patch for
+`grust-cypher`, `grust-sail`, and the `grust-graph` facade; Surreal remains
+0.13.1 and other publishable crates remain on 0.13.0. The core model and reference execution paths are stable
 enough for real use, while backend-native feature parity remains intentionally
 explicit rather than implied by the common trait.
 

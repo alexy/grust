@@ -305,7 +305,7 @@ The typed layer is optional. It is enabled through Cargo features:
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.13.1", features = ["typed-garde"] }
+grust = { package = "grust-graph", version = "0.13.2", features = ["typed-garde"] }
 ```
 
 `typed-garde` adds Rust-struct validation and typed lowering. A second feature,
@@ -313,7 +313,7 @@ grust = { package = "grust-graph", version = "0.13.1", features = ["typed-garde"
 
 ```toml
 [dependencies]
-grust = { package = "grust-graph", version = "0.13.1", features = ["typed-zod-rs"] }
+grust = { package = "grust-graph", version = "0.13.2", features = ["typed-zod-rs"] }
 ```
 
 `typed-zod-rs` implies `typed-garde`. That relationship matters: zod-rs checks
@@ -1304,6 +1304,25 @@ data in Spark DataFrames backed by Delta tables. SQL commands and reads are
 sent as Spark Connect SQL relation plans, and read results are decoded from
 Arrow IPC streams.
 
+Portable count projections may lower to `SELECT 1` when no named binding must
+be returned. Sail sends that row-presence marker as an Arrow integer rather
+than a string. Grust decodes integer markers alongside text columns, preserving
+one row per match for the shared Rust projection; it does not mistake this
+path for a server-side aggregate. This boundary is regression-tested for
+multiple result batches, nulls, and empty results.
+Sail 0.7.1 cannot execute the generated recursive walk CTE, so variable-length
+path reads use the shared reference fallback. Benchmark evidence labels this
+as graph materialization plus Rust execution, not native Sail path performance;
+downloaded-scale admission may reject that materialization path.
+
+Call `SailGraphStore::close().await` after a session's operations finish to
+release its remote temporary views and session state. This consumes the Rust
+client and invalidates any other client sharing that session ID; durable
+warehouse files are not deleted. Ordinary Rust drop cannot perform this
+asynchronous cleanup. Bound the close future if your application requires a
+deadline, and treat timeout or failure as uncertain cleanup. A release
+acknowledgement alone does not prove an interrupted query has stopped.
+
 Connection establishment validates the client configuration. The default
 `SailWarehouse::ServerManaged` policy does not set
 `spark.sql.warehouse.dir`; Sail's catalog and warehouse configuration remain
@@ -1481,11 +1500,12 @@ Docker Compose where a service is available. The repository-level
 `docs/INTEGRATION.md` guide covers profiles, modes, Docker image pins,
 source-checkout configuration, and CI strategy.
 
-Crayfish 0.13.1 is a scoped registry patch: `grust-sail`, `grust-surreal`, and
-the `grust-graph` facade move to 0.13.1, while consumers naming any other
-published Grust crate directly continue to use 0.13.0. Sail connection
-failures no longer render configured endpoints or transport errors that might
-echo credentials. It inherits Prawn's dependency
+Krill 0.13.2 is a scoped registry patch: `grust-cypher`, `grust-sail`, and
+the `grust-graph` facade move to 0.13.2. Surreal remains 0.13.1, while consumers
+naming any other published Grust crate directly continue to use 0.13.0.
+Krill corrects Sail integer row-marker decoding and recursive-path admission,
+and adds explicit remote-session cleanup. It retains Crayfish's endpoint-safe
+connection errors and faithful Surreal logical identities, and inherits Prawn's dependency
 qualification: Redis client 1.6.0 and FalkorDB service v4.20.4, SurrealDB Rust
 SDK and service 3.2.4 with reqwest 0.13.4, pgGraph service 1.2.0,
 tokio-postgres 0.7.18, and stable Turso 0.7.2. These are tested compatibility
@@ -1547,7 +1567,7 @@ resource-limited external service.
 
 This is a conformance and reproducibility microbenchmark, and LSQB is not an
 official LDBC benchmark. Only a clean orchestrated run with a valid publication
-receipt is admitted as 0.13.1 evidence; diagnostic and discovery runs are not
+receipt is admitted as release evidence; diagnostic and discovery runs are not
 publication evidence. That receipt inventories one normalized watchdog record
 per cell, binding the configured hard limit and elapsed wall time to the child
 exit status and exact container ID, name, project, and service observed by the

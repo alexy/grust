@@ -861,10 +861,7 @@ fn signal_process_group(process_group: u32, signal: i32) -> Result<SignalDeliver
 }
 
 #[cfg(not(unix))]
-fn signal_process_group(
-    _process_group: u32,
-    _signal: i32,
-) -> Result<SignalDelivery, String> {
+fn signal_process_group(_process_group: u32, _signal: i32) -> Result<SignalDelivery, String> {
     Err("hard observation isolation requires a Unix process group".to_string())
 }
 
@@ -923,6 +920,10 @@ fn valid_go_nonce(value: &str) -> bool {
 fn duration_ns(duration: Duration) -> u64 {
     u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
 }
+
+#[cfg(all(test, unix))]
+#[path = "observation_process/cleanup_tests.rs"]
+mod cleanup_tests;
 
 #[cfg(test)]
 mod tests {

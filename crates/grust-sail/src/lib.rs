@@ -45,9 +45,12 @@ use sc::{
 // ── Config ────────────────────────────────────────────────────────────────────
 
 mod arrow_ipc;
+mod text_rows;
+use text_rows::parse_text_rows_from_arrow;
 mod config;
 pub use config::{SailConfig, SailWarehouse};
 
+mod session_close;
 mod session_config;
 mod spark_client;
 pub use spark_client::{
@@ -3634,43 +3637,6 @@ fn scalar_kind_of(ty: &FieldType) -> Option<grust_cypher::pushdown::ScalarKind> 
         FieldType::String => Some(ScalarKind::Str),
         _ => None,
     }
-}
-
-/// Parse an Arrow IPC chunk whose columns are all UTF-8 strings into rows of
-/// optional text cells, preserving column order. Used by segment pushdown.
-fn parse_text_rows_from_arrow(data: &[u8]) -> Result<Vec<Vec<Option<String>>>> {
-    let reader = StreamReader::try_new(Cursor::new(data), None)
-        .map_err(|e| GrustError::Backend(format!("Arrow IPC read failed: {e}")))?;
-    let mut out = Vec::new();
-    for batch in reader {
-        let batch = batch.map_err(|e| GrustError::Backend(format!("Arrow batch error: {e}")))?;
-        let columns: Vec<&StringArray> = (0..batch.num_columns())
-            .map(|i| {
-                batch
-                    .column(i)
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .ok_or_else(|| {
-                        GrustError::Schema(format!("pushdown result column {i} is not a string"))
-                    })
-            })
-            .collect::<Result<_>>()?;
-        for row in 0..batch.num_rows() {
-            out.push(
-                columns
-                    .iter()
-                    .map(|c| {
-                        if c.is_null(row) {
-                            None
-                        } else {
-                            Some(c.value(row).to_string())
-                        }
-                    })
-                    .collect(),
-            );
-        }
-    }
-    Ok(out)
 }
 
 fn parse_nodes_from_arrow(data: &[u8]) -> Result<Vec<Node>> {

@@ -3445,7 +3445,7 @@ dependencies = [
 
 [[package]]
 name = "grust-cypher"
-version = "0.13.0"
+version = "0.13.2"
 dependencies = [
  "async-trait",
  "criterion",
@@ -3470,7 +3470,7 @@ dependencies = [
 
 [[package]]
 name = "grust-graph"
-version = "0.13.1"
+version = "0.13.2"
 dependencies = [
  "garde",
  "grust-cocoindex",
@@ -3589,7 +3589,7 @@ dependencies = [
 
 [[package]]
 name = "grust-sail"
-version = "0.13.1"
+version = "0.13.2"
 dependencies = [
  "arrow 58.3.0",
  "async-trait",

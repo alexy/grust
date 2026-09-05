@@ -237,7 +237,7 @@ async fn execute_protocol(
     // No worker inherits Rust state from this Tokio process. Persistent
     // service backends retain their loaded state and workers reconnect;
     // process-owned backends reload explicitly before each READY record.
-    drop(backend);
+    backend.finish().await?;
     drop(graph);
 
     run_phase(

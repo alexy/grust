@@ -86,7 +86,11 @@ pub async fn run_internal() -> Result<(), String> {
         outcome,
         count,
         elapsed_ns,
-    )
+    )?;
+    // The flushed result ends measured query time. Session cleanup then lies
+    // inside the coordinator's bounded reap/recovery phase. Failed or hung
+    // cleanup cannot be accepted as a successful observation worker exit.
+    backend.finish().await
 }
 
 pub fn command(

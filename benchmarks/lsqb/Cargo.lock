@@ -3103,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "grust-cypher"
-version = "0.13.0"
+version = "0.13.2"
 dependencies = [
  "async-trait",
  "grust-core",
@@ -3229,7 +3229,7 @@ dependencies = [
 
 [[package]]
 name = "grust-sail"
-version = "0.13.1"
+version = "0.13.2"
 dependencies = [
  "arrow",
  "async-trait",

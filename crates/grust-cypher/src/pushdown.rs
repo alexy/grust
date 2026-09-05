@@ -415,8 +415,8 @@ pub trait SqlDialect {
     }
 
     /// Whether the engine executes `WITH RECURSIVE` (the var-length leaf).
-    /// Defaults to true to preserve the existing Sail/SQLite behavior; the
-    /// embedded Turso engine (limbo) overrides false and falls back.
+    /// Defaults to true for SQLite-compatible dialects. Engines without an
+    /// executable recursive CTE implementation override false and fall back.
     fn recursive_cte_supported(&self) -> bool {
         true
     }
@@ -464,6 +464,11 @@ pub trait SqlDialect {
 pub struct SparkDialect;
 
 impl SqlDialect for SparkDialect {
+    fn recursive_cte_supported(&self) -> bool {
+        // Sail 0.7.1 accepts the syntax but cannot resolve the recursive
+        // relation (`walk`). Do not advertise executable recursive pushdown.
+        false
+    }
     fn nodes_table(&self) -> &str {
         "grust_nodes"
     }
@@ -5523,10 +5528,12 @@ mod tests {
         );
         assert!(und.contains(" WHERE w.depth >= 2"), "{und}");
 
-        // Spark renders the same recursive shape with GET_JSON_OBJECT.
+        // Rendering remains inspectable, but Sail cannot execute this shape:
+        // callers must gate the plan and use the reference fallback.
         let spark = varlen("MATCH (a:Person {name:'Ada'})-[:KNOWS*1..2]->(b) RETURN b.name")
-            .expect("pushable")
-            .to_sql(&SparkDialect);
+            .expect("lowerable");
+        assert!(!spark.supported_by(&SparkDialect));
+        let spark = spark.to_sql(&SparkDialect);
         assert!(
             spark.contains("GET_JSON_OBJECT(n0.props, '$.name') = 'Ada'"),
             "{spark}"

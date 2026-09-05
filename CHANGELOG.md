@@ -6,6 +6,21 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+## 0.13.2 "Krill" - 2026-09-05
+
+Krill is a scoped patch for `grust-cypher`, `grust-sail`, and `grust-graph`.
+`grust-surreal` remains 0.13.1; other publishable crates remain 0.13.0.
+
+- Added consuming `SailGraphStore::close()` to release caller-owned remote
+  sessions explicitly. Benchmark workers close Sail sessions after emitting
+  their results, within the bounded recovery phase, and the coordinator closes
+  its preliminary session before starting workers.
+- Fixed Sail portable count projections failing on Arrow integer row-presence
+  markers (`SELECT 1`), discovered by executing LSQB q1 on Sail 0.7.1.
+  Decoding preserves match multiplicity, column order, and null values.
+- Corrected Sail's recursive-CTE capability declaration after a live zero-hop
+  attack exposed an unresolved recursive relation. Variable-length path reads
+  use the shared reference fallback rather than submitting unsupported SQL.
 - Record each completed LSQB observation immediately as a flushed JSON line in
   the host-captured cell log, including counts, timing, termination, and recovery.
   Interrupted runs retain diagnostics without claiming a completion receipt.

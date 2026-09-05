@@ -755,10 +755,7 @@ mod v3_tests {
         };
         let value = serde_json::to_value(&timing).unwrap();
         assert_eq!(value["timeout_enforcement"], "coordinator-process-group");
-        assert_eq!(
-            value["boundary"],
-            "coordinator-go-to-result-consumed"
-        );
+        assert_eq!(value["boundary"], "coordinator-go-to-result-consumed");
         assert_eq!(value["query_reap_grace_ms"], 5);
         assert!(value.get("reload_before_each_iteration").is_none());
         assert_eq!(

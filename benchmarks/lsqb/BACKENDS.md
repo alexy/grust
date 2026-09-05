@@ -20,7 +20,7 @@ is never rewritten as an unavailable core-runner fallback.
 | FalkorDB | `redis 1.6.0`; FalkorDB 4.20.4 | executable | Digest-pinned service and backend-native openCypher aggregate. It remains a separate execution class from the reference and hybrid row-source paths admitted at downloaded scales. |
 | SurrealDB | `surrealdb 3.2.4`, `reqwest 0.13.4`; SurrealDB 3.2.4 | executable at `sfexample` | Digest-pinned service; source-label node/edge multiset validation plus shared reference evaluation. |
 | LanceDB | `lancedb 0.30.0`, Arrow `58.3.0` | executable at `sfexample` | Local storage in the runner's writable temporary filesystem; source-label node/edge multiset validation plus shared reference evaluation. |
-| Sail | Arrow `58.3.0`; Sail 0.7.1 service candidate | unavailable by default; externally qualifiable after an immutable image is published | Sail documents an official production Docker build but does not publish a vendor registry image. An operator-built image must be pushed and selected by platform-manifest and config digests before the harness will enable the portable query executor. |
+| Sail | Arrow `58.3.0`; Sail 0.7.1 | local Docker diagnostics pass 9 baseline and 13 adversarial cases; receipt qualification pending | Grust builds the pinned upstream wheel with `Dockerfile.sail`. The manual `sail-benchmark-image.yml` workflow publishes a source-bound ARM64 image for registry attestation. No vendor-built image is required. |
 | pgGraph | pgGraph 1.2.0 | executable at `sfexample` | Fresh digest-pinned PostgreSQL/pgGraph service; source-label node/edge multiset validation plus shared reference evaluation. |
 | PostgreSQL PGQ | PostgreSQL 19 beta API; PostgreSQL 19 Beta 3 | unavailable by default; externally qualifiable at `sfexample` | PostgreSQL 19 Beta 3's official image includes SQL/PGQ. A fresh, explicitly qualified service can exercise the adapter; downloaded scales still reject its whole-store materialization path. |
 | Helix | `helix-db =2.0.0`; local runtime v0.9.0 | unavailable by default; externally qualifiable at `sfexample` | The official CLI uses the `enterprise-dev` runtime and dynamic `/v1/query` endpoint. Qualification requires a fresh isolated container. The runtime image reports a proprietary license identifier even though the public Helix repository is AGPL-3.0, so evidence discloses the exact artifact rather than generalizing its license. |
@@ -44,6 +44,22 @@ must forcibly kill a worker because those services do not expose a sufficient
 post-kill quiescence proof through the current adapters. They never continue
 on process-exit evidence alone, including after an unacknowledged remote query
 error.
+
+Sail workers explicitly close their remote session after emitting the result;
+cleanup is bounded by the recovery/reap phase, not included in query timing.
+The coordinator closes its preliminary session before starting workers. The
+close acknowledgement does not qualify forced-query recovery. Krill corrects
+integer row-marker decoding and disables recursive walk pushdown for Sail
+0.7.1; the zero-hop attack therefore records materialization plus reference
+execution, not native Sail path performance. Diagnostic files under `out/`
+are not publication receipts.
+
+`Dockerfile.sail` pins the ARM64 Python base manifest and the Sail 0.7.1 wheel
+hash, installs no transitive Python dependencies, and verifies the CLI version.
+It uses the upstream wheel, not a custom CPU-tuned source build. The Python
+Spark client is unnecessary for the Rust benchmark client. The manual image
+workflow uses a native ARM64 runner and publishes only a full-source-SHA tag;
+matrix runs still resolve and attest the platform/config digests, never the tag.
 
 “Externally qualifiable” requires an endpoint on an explicit
 `host.docker.internal` port published by the declared container on all host
