@@ -294,6 +294,7 @@ lsqb_open_exclusive_output_fd 3 "$watchdog" "upstream watchdog completion record
 cell_status=0
 python3 "${root}/cell-watchdog.py" \
     --timeout-ms "$cell_timeout_ms" \
+    --heartbeat-ms 30000 \
     --container "$cell_container" \
     --project "$project" \
     --service upstream \

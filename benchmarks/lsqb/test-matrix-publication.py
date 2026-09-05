@@ -627,6 +627,31 @@ class MatrixPublicationTests(unittest.TestCase):
         ):
             self.issue(output)
 
+    def test_progress_and_heartbeat_lines_remain_publishable(self) -> None:
+        case_root = self.root / "progress-log"
+        case_root.mkdir()
+        output = make_bundle(case_root, self.revision)
+        run_log = output / "logs/baseline-memory.log"
+        run_log.write_text(
+            "grust-lsqb-progress "
+            '{"event":"query_start","backend":"memory","suite":"baseline",'
+            '"scale":"example","phase":"measurement","iteration":1,'
+            '"iteration_total":1,"query_position":1,"query_total":9,'
+            '"query_id":"q1"}\n'
+            "cell-watchdog.py: heartbeat "
+            "container=grust-lsqb-matrix-123-456-baseline-memory-cell "
+            "elapsed_ms=30000 remaining_ms=3570000\n"
+            "grust-lsqb-progress "
+            '{"event":"query_finish","backend":"memory","suite":"baseline",'
+            '"scale":"example","phase":"measurement","iteration":1,'
+            '"iteration_total":1,"query_position":1,"query_total":9,'
+            '"query_id":"q1","outcome":"pass","elapsed_ns":42}\n',
+            encoding="utf-8",
+        )
+
+        self.issue(output)
+        self.verify(output)
+
     def test_atomic_writer_refuses_existing_and_broken_symlink_outputs(self) -> None:
         existing = self.root / "existing-output"
         existing.write_bytes(b"original\n")

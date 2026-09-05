@@ -7,6 +7,7 @@ use grust_lsqb_runner::backend::{self, PreparedBackend, QueryExecutionError};
 use grust_lsqb_runner::dataset;
 use grust_lsqb_runner::matrix_args::MatrixArguments;
 use grust_lsqb_runner::matrix_catalog::{self, BackendCatalogEntry, QueryCapability};
+use grust_lsqb_runner::matrix_progress::{self, PhaseProgress, QueryPhase};
 use grust_lsqb_runner::provenance;
 use grust_lsqb_runner::queries::{self, DatasetStats, QueryCase};
 use grust_lsqb_runner::report::{
@@ -160,7 +161,7 @@ async fn run_backend(
             );
         }
     };
-    let queries = execute_protocol(&prepared, &graph, cases, arguments).await?;
+    let queries = execute_protocol(&prepared, &graph, cases, arguments, catalog.id).await?;
     Ok(BackendCellV2 {
         backend: identity,
         setup_outcome: OutcomeStatus::Pass,
@@ -218,6 +219,7 @@ async fn execute_protocol(
     graph: &grust_core::Graph,
     cases: &[QueryCase],
     arguments: &MatrixArguments,
+    backend_id: &str,
 ) -> Result<Vec<QueryOutcomeV2>, String> {
     let mut outcomes = cases
         .iter()
@@ -249,9 +251,14 @@ async fn execute_protocol(
         graph,
         cases,
         &mut outcomes,
-        arguments.warmups,
         arguments.query_timeout_ms,
-        true,
+        PhaseProgress::new(
+            backend_id,
+            &arguments.suite,
+            &arguments.scale,
+            QueryPhase::Warmup,
+            arguments.warmups,
+        ),
     )
     .await;
     run_phase(
@@ -259,9 +266,14 @@ async fn execute_protocol(
         graph,
         cases,
         &mut outcomes,
-        arguments.runs,
         arguments.query_timeout_ms,
-        false,
+        PhaseProgress::new(
+            backend_id,
+            &arguments.suite,
+            &arguments.scale,
+            QueryPhase::Measurement,
+            arguments.runs,
+        ),
     )
     .await;
     for outcome in &mut outcomes {
@@ -277,14 +289,14 @@ async fn run_phase(
     graph: &grust_core::Graph,
     cases: &[QueryCase],
     outcomes: &mut [QueryOutcomeV2],
-    iterations: u32,
     timeout_ms: u64,
-    warmup: bool,
+    progress: PhaseProgress<'_>,
 ) {
     if cases.is_empty() {
         return;
     }
-    for iteration in 1..=iterations {
+    let query_total = u32::try_from(cases.len()).unwrap_or(u32::MAX);
+    for iteration in 1..=progress.iteration_total() {
         let rotation = (iteration as usize - 1) % cases.len();
         for position in 0..cases.len() {
             let index = (position + rotation) % cases.len();
@@ -293,6 +305,13 @@ async fn run_phase(
             {
                 continue;
             }
+            let query_progress = progress.query(
+                iteration,
+                position as u32 + 1,
+                query_total,
+                &cases[index].id,
+            );
+            matrix_progress::query_start(query_progress);
             let (result, elapsed_ns) =
                 execute_with_timeout(backend, &cases[index], graph, timeout_ms).await;
             let observation = match result {
@@ -325,7 +344,12 @@ async fn run_phase(
                     detail: Some(detail),
                 },
             };
-            if warmup {
+            matrix_progress::query_finish(
+                query_progress,
+                observation.outcome,
+                observation.elapsed_ns,
+            );
+            if progress.is_warmup() {
                 outcomes[index].warmups.push(observation);
             } else {
                 outcomes[index].measurements.push(observation);

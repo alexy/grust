@@ -79,7 +79,7 @@ docker() {
 }
 
 python3() {
-    local argument output_directory='' record_fd='' runs='' scale='' threads=''
+    local argument heartbeat_ms='' output_directory='' record_fd='' runs='' scale='' threads=''
     local container='' project='' service='' timeout_ms=''
     case "${1:-}" in
         */cell-watchdog.py)
@@ -107,6 +107,10 @@ python3() {
                         timeout_ms=$2
                         shift 2
                         ;;
+                    --heartbeat-ms)
+                        heartbeat_ms=$2
+                        shift 2
+                        ;;
                     --env)
                         case "$2" in
                             RUNS=*) runs=${2#RUNS=} ;;
@@ -129,7 +133,8 @@ python3() {
             [[ "$record_fd" == 3 && -n "$output_directory" ]] || return 94
             [[ "$runs" == 1 && "$scale" == example && "$threads" == 8 ]] || return 94
             [[ "$container" == "${project}-ladybug-cell" ]] || return 94
-            [[ "$service" == upstream && "$timeout_ms" == 1000 ]] || return 94
+            [[ "$service" == upstream && "$timeout_ms" == 1000 && \
+                "$heartbeat_ms" == 30000 ]] || return 94
             command cp -- "${script_dir}/tests/upstream/upstream-ladybug-run-1.csv" \
                 "${output_directory}/upstream-ladybug-run-1.csv"
             command "$LSQB_UPSTREAM_TEST_REAL_PYTHON" \

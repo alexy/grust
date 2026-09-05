@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
 import signal
 import subprocess
 import sys
+import threading
 import time
-from typing import Any
+from typing import Any, Callable
 
 
 CONTAINER_ID = re.compile(r"^[0-9a-f]{64}$")
@@ -19,6 +21,111 @@ CONTAINER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 WATCHDOG_TIMEOUT_EXIT = 124
 WATCHDOG_ERROR_EXIT = 125
 COMPLETION_SCHEMA = "grust-lsqb-cell-watchdog-completion-v1"
+DEFAULT_HEARTBEAT_MS = 30_000
+ATOMIC_PROGRESS_BYTES = 512
+
+
+class HeartbeatEmitter:
+    """Drop-on-backpressure heartbeat delivery on a disposable daemon thread."""
+
+    _STOP = object()
+
+    def __init__(
+        self,
+        descriptor: int,
+        *,
+        write_once: Callable[[int, bytes], int] = os.write,
+        owns_descriptor: bool = False,
+    ) -> None:
+        self._descriptor = descriptor
+        self._write_once = write_once
+        self._owns_descriptor = owns_descriptor
+        self._messages: queue.Queue[bytes | object] = queue.Queue(maxsize=1)
+        self._outstanding = threading.Semaphore(1)
+        self._stopping = threading.Event()
+        self._worker = threading.Thread(
+            target=self._write_messages,
+            name="grust-lsqb-heartbeat",
+            daemon=True,
+        )
+        self._worker.start()
+
+    @classmethod
+    def for_stderr(cls) -> HeartbeatEmitter | None:
+        """Duplicate stderr without changing flags shared with the child process."""
+        try:
+            descriptor = os.dup(sys.stderr.fileno())
+        except (AttributeError, OSError, ValueError):
+            return None
+        try:
+            return cls(descriptor, owns_descriptor=True)
+        except Exception:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            return None
+
+    def submit(self, content: bytes) -> bool:
+        """Accept one queued-or-writing line without waiting for the output sink."""
+        if (
+            self._stopping.is_set()
+            or not content.endswith(b"\n")
+            or len(content) > ATOMIC_PROGRESS_BYTES
+        ):
+            return False
+        if not self._outstanding.acquire(blocking=False):
+            return False
+        if self._stopping.is_set():
+            self._outstanding.release()
+            return False
+        try:
+            self._messages.put_nowait(content)
+        except queue.Full:
+            self._outstanding.release()
+            return False
+        except Exception:
+            self._outstanding.release()
+            self._stopping.set()
+            return False
+        return True
+
+    def close(self) -> None:
+        """Request daemon shutdown without joining or closing a possibly blocked fd."""
+        self._stopping.set()
+        try:
+            self._messages.put_nowait(self._STOP)
+        except Exception:
+            pass
+
+    def _write_messages(self) -> None:
+        try:
+            while True:
+                content = self._messages.get()
+                if content is self._STOP:
+                    return
+                try:
+                    if self._stopping.is_set():
+                        return
+                    # At this producer fd, POSIX guarantees non-interleaving
+                    # blocking pipe writes through PIPE_BUF; 512 bytes is its
+                    # portable minimum. Never retry an exotic sink's short
+                    # write because a second write could interleave.
+                    written = self._write_once(self._descriptor, content)
+                    if written != len(content):
+                        self._stopping.set()
+                        return
+                except OSError:
+                    self._stopping.set()
+                    return
+                finally:
+                    self._outstanding.release()
+        finally:
+            if self._owns_descriptor:
+                try:
+                    os.close(self._descriptor)
+                except OSError:
+                    pass
 
 
 class WatchdogError(RuntimeError):
@@ -119,6 +226,36 @@ def completion_is_timely(
     return child_exit_status is not None and observed_ns < deadline_ns
 
 
+def next_heartbeat_deadline(
+    scheduled_ns: int, observed_ns: int, interval_ns: int
+) -> int:
+    """Advance to the first heartbeat deadline strictly after an observation."""
+    if observed_ns < scheduled_ns:
+        return scheduled_ns
+    missed_intervals = (observed_ns - scheduled_ns) // interval_ns + 1
+    return scheduled_ns + missed_intervals * interval_ns
+
+
+def heartbeat_line(
+    container: str, started_ns: int, deadline_ns: int, observed_ns: int
+) -> str:
+    remaining_ns = max(0, deadline_ns - observed_ns)
+    remaining_ms = remaining_ns // 1_000_000
+    return (
+        f"cell-watchdog.py: heartbeat container={container} "
+        f"elapsed_ms={elapsed_milliseconds(started_ns, observed_ns)} "
+        f"remaining_ms={remaining_ms}"
+    )
+
+
+def heartbeat_content(
+    container: str, started_ns: int, deadline_ns: int, observed_ns: int
+) -> bytes:
+    return (
+        heartbeat_line(container, started_ns, deadline_ns, observed_ns) + "\n"
+    ).encode("utf-8")
+
+
 def completion_record(
     arguments: argparse.Namespace,
     *,
@@ -172,7 +309,9 @@ def write_completion_record(descriptor: int, record: dict[str, Any]) -> None:
             os.close(duplicate)
 
 
-def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any], str | None]:
+def run(
+    arguments: argparse.Namespace, heartbeat_emitter: HeartbeatEmitter | None = None
+) -> tuple[int, dict[str, Any], str | None]:
     started_ns = time.monotonic_ns()
     command = list(arguments.command)
     if command and command[0] == "--":
@@ -201,6 +340,8 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any], str | None]
         )
         return WATCHDOG_ERROR_EXIT, record, f"cannot start cell command: {error}"
     deadline_ns = started_ns + arguments.timeout_ms * 1_000_000
+    heartbeat_interval_ns = arguments.heartbeat_ms * 1_000_000
+    next_heartbeat_ns = started_ns + heartbeat_interval_ns
     try:
         while True:
             if container_id is None:
@@ -240,6 +381,21 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any], str | None]
                     status="complete",
                 )
                 return child_exit_status, record, None
+            if completion_observed_ns >= next_heartbeat_ns:
+                if heartbeat_emitter is not None:
+                    heartbeat_emitter.submit(
+                        heartbeat_content(
+                            arguments.container,
+                            started_ns,
+                            deadline_ns,
+                            completion_observed_ns,
+                        )
+                    )
+                next_heartbeat_ns = next_heartbeat_deadline(
+                    next_heartbeat_ns,
+                    completion_observed_ns,
+                    heartbeat_interval_ns,
+                )
             time.sleep(min(0.1, remaining_ns / 1_000_000_000))
     except WatchdogError as error:
         stop_process_group(process)
@@ -304,6 +460,7 @@ def run(arguments: argparse.Namespace) -> tuple[int, dict[str, Any], str | None]
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--timeout-ms", required=True, type=int)
+    parser.add_argument("--heartbeat-ms", type=int, default=DEFAULT_HEARTBEAT_MS)
     parser.add_argument("--container", required=True)
     parser.add_argument("--project", required=True)
     parser.add_argument("--service", required=True)
@@ -312,6 +469,8 @@ def parse_arguments() -> argparse.Namespace:
     arguments = parser.parse_args()
     if arguments.timeout_ms <= 0:
         parser.error("--timeout-ms must be greater than zero")
+    if arguments.heartbeat_ms <= 0:
+        parser.error("--heartbeat-ms must be greater than zero")
     if CONTAINER_NAME.fullmatch(arguments.container) is None:
         parser.error("--container is not a safe Docker container name")
     if CONTAINER_NAME.fullmatch(arguments.project) is None:
@@ -326,7 +485,12 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> int:
     try:
         arguments = parse_arguments()
-        status, record, error = run(arguments)
+        heartbeat_emitter = HeartbeatEmitter.for_stderr()
+        try:
+            status, record, error = run(arguments, heartbeat_emitter)
+        finally:
+            if heartbeat_emitter is not None:
+                heartbeat_emitter.close()
         write_completion_record(arguments.record_fd, record)
         if record["status"] == "timeout":
             print(normalized_record(record).decode("utf-8"), end="", file=sys.stderr, flush=True)

@@ -36,6 +36,15 @@ for launcher in run-grust.sh run-upstream.sh; do
         fail "$launcher does not contain both portable snapshot cleanup operations"
 done
 
+grust_heartbeat_count=$(grep -Ec '^[[:space:]]*--heartbeat-ms 30000 \\' \
+    "${root}/run-grust.sh")
+[[ "$grust_heartbeat_count" == 2 ]] || \
+    fail "run-grust.sh does not pass a literal heartbeat interval to both cells"
+upstream_heartbeat_count=$(grep -Ec '^[[:space:]]*--heartbeat-ms 30000 \\' \
+    "${root}/run-upstream.sh")
+[[ "$upstream_heartbeat_count" == 1 ]] || \
+    fail "run-upstream.sh does not pass a literal heartbeat interval to its cell"
+
 mkdir "${work}/snapshot-root"
 mkdir "${work}/snapshot-root/snapshot-directory"
 chmod 0555 "${work}/snapshot-root/snapshot-directory"

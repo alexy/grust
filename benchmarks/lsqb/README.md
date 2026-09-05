@@ -419,6 +419,22 @@ entire Compose run, including container creation/start, dataset load, all
 warm-up and measurement work, and report serialization; the examples above
 use one hour for the tiny graph and four hours for downloaded tiers.
 
+The supervisor emits a secret-safe stderr heartbeat every 30 seconds with only
+the constrained expected container name and elapsed/remaining wall-clock
+milliseconds. The matrix runner also emits `grust-lsqb-progress` JSONL
+start/finish events for each executed query, including its authenticated
+backend/suite/scale/query IDs,
+protocol position, terminal outcome, and measured nanoseconds. It never logs
+query text, counts, errors, paths, endpoints, or environment values. Both
+line types are assembled to at most 512 bytes and issued with one write at
+their producer boundary. That is atomic on a normal blocking POSIX pipe;
+Docker/Compose may reframe output downstream, so no end-to-end atomicity is
+claimed. Heartbeat delivery allows only one queued-or-writing line and drops
+new lines under backpressure so output cannot delay hard-timeout enforcement.
+It never retries a short write from an exotic sink. Query events are explicitly
+flushed outside the timed query boundary. Neither line type alters the
+receipt-bound watchdog completion schema.
+
 `load_ns` is diagnostic and is not compared across adapter classes. At
 downloaded scales Memory decodes bounded node-first/edge-next chunks directly
 into its single owned in-process graph. Turso, PostgreSQL, a qualified Sail

@@ -636,6 +636,7 @@ for backend in "${canonical_backends[@]}"; do
         cell_status=0
         python3 "${root}/cell-watchdog.py" \
             --timeout-ms "$cell_timeout_ms" \
+            --heartbeat-ms 30000 \
             --container "$cell_container" \
             --project "$project" \
             --service benchmark \
@@ -781,6 +782,7 @@ if [[ "$smoke" == 0 && "$scale" == example ]]; then
     policy_status=0
     python3 "${root}/cell-watchdog.py" \
         --timeout-ms "$cell_timeout_ms" \
+        --heartbeat-ms 30000 \
         --container "$policy_container" \
         --project "$project" \
         --service benchmark \
