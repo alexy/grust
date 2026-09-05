@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Stop the three confirmed orphaned test loops after user authorization. Replace
+  unbounded timeout-test spinners with five-second self-expiring fixtures and
+  bound escaped-worker readiness polling; the original leak cause remains open.
+
 - Record orphaned CPU-spinning benchmark test workers and quarantine the
   overlapping native SF0.3 run from performance export pending cleanup and rerun.
 

@@ -1,6 +1,7 @@
 # Orphaned test-loop contention
 
-Status: unresolved; do not use overlapping timings for clean-host comparisons.
+Status: orphaned processes stopped; cleanup hardening and clean reruns pending.
+Do not use overlapping timings for clean-host comparisons.
 
 On September 5, the user reported abandoned watchdog processes. Process
 inspection found three CPU-spinning Grust observation-worker test shells:
@@ -37,11 +38,28 @@ current implementation reproduced the leak without a controlled regression.
 
 ## Remaining actions
 
-1. Obtain the requested confirmation, revalidate process identities, stop only
-   the two owned test process groups, and verify all three shells are gone.
+1. Completed: after explicit user authorization, revalidated all three command
+   lines and sent SIGTERM only to PIDs 35508, 35509 and 35510. A subsequent full
+   process listing confirmed all three absent, with the live benchmark watchdog
+   PID 89004 still running. No Docker containers or unrelated processes changed.
 2. Reproduce the escape safely with an outer supervisor and bounded test-only
    worker lifetime; fix cleanup and prove no descendant survives test completion.
 3. Add preflight/postflight checks for orphaned benchmark workers.
 4. Inventory affected runs, correct public performance claims, and rerun.
 
-No cleanup or rerun is claimed by this incident record.
+Cleanup is verified. No clean rerun or established root cause is claimed.
+
+## Fixture safety follow-up
+
+The timeout-test CPU spinners now have a five-second monotonic lifetime,
+independent of the coordinator. Escaped-worker readiness polling is also bounded.
+A standalone spinner exited without coordinator intervention in 5.11 seconds.
+The focused library test command passed all 12 observation-process tests:
+
+```sh
+cargo test --manifest-path benchmarks/lsqb/Cargo.toml --lib observation_process:: -- --test-threads=1
+```
+
+Post-test process inspection found no remaining fixture spinners or unbounded
+shell busy-loops. This limits fixture damage if a coordinator disappears; it is
+not proof of production cleanup under every parent-termination scenario.

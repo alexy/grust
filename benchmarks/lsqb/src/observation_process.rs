@@ -932,7 +932,17 @@ mod tests {
     #[cfg(unix)]
     fn shell(script: &str, token: &str) -> Command {
         let mut command = Command::new("/bin/sh");
-        command.arg("-c").arg(script).env("TEST_TOKEN", token);
+        command
+            .arg("-c")
+            .arg(script)
+            .env("TEST_TOKEN", token)
+            .env(
+                "TEST_SPINNER",
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/src/observation_process/bounded_spinner.py"
+                ),
+            );
         command
     }
 
@@ -947,7 +957,7 @@ mod tests {
     fn spinning_worker_is_killed_at_deadline_and_next_worker_succeeds() {
         let token = "spin-1";
         let mut spinner = shell(
-            &format!("{READY}; trap '' TERM; while :; do :; done"),
+            &format!("{READY}; trap '' TERM; python3 \"$TEST_SPINNER\""),
             token,
         );
         let started = Instant::now();
@@ -975,7 +985,7 @@ mod tests {
     #[cfg(unix)]
     fn timeout_kills_descendants_in_the_worker_group() {
         let token = "tree-1";
-        let script = format!("{READY}; trap '' TERM; (while :; do :; done) & while :; do :; done");
+        let script = format!("{READY}; trap '' TERM; python3 \"$TEST_SPINNER\" & python3 \"$TEST_SPINNER\"");
         let mut worker = shell(&script, token);
         let observation = run(&mut worker, token, 25, 10, 1_000, 500).unwrap();
         assert_eq!(
@@ -1004,7 +1014,7 @@ mod tests {
     fn escaped_pipe_holder_fails_recovery_within_the_reader_bound() {
         let pid_file = tempfile::NamedTempFile::new().unwrap();
         let script = format!(
-            "python3 -c 'import os,time; os.setsid(); open(os.environ[\"ESCAPED_PID_FILE\"], \"w\").write(str(os.getpid())); time.sleep(10)' & while [ ! -s \"$ESCAPED_PID_FILE\" ]; do :; done; {READY}; trap '' TERM; while :; do :; done"
+            "python3 -c 'import os,time; os.setsid(); open(os.environ[\"ESCAPED_PID_FILE\"], \"w\").write(str(os.getpid())); time.sleep(10)' & attempts=0; while [ ! -s \"$ESCAPED_PID_FILE\" ]; do attempts=$((attempts + 1)); [ \"$attempts\" -lt 100 ] || exit 1; sleep 0.01; done; {READY}; trap '' TERM; python3 \"$TEST_SPINNER\""
         );
         let mut worker = shell(&script, "escaped-1");
         worker.env("ESCAPED_PID_FILE", pid_file.path());
