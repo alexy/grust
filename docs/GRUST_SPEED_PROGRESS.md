@@ -11,7 +11,7 @@ corrected. Raw logs are unchanged, and doctests are counted separately.
 
 ## Completed implementation slices
 
-- Observation `plan` metadata landed separately in local commit `7365486`,
+- Observation `plan` metadata landed separately in local commit `c514e52`,
   before the indexed speed changes. Missing historical plans stay unknown;
   Neo4j and upstream bundles are not backfilled.
 - Immutable typed incoming/outgoing adjacency, cached exact serialized graph
