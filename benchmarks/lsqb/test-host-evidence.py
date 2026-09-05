@@ -40,6 +40,24 @@ class HostRecordTests(unittest.TestCase):
         self.assertEqual(HOST.validate_record(json.dumps(record).encode()), record)
         self.assertIs(record["clean_host_performance_eligible"], False)
 
+    def test_explicit_limit_is_recorded_and_bounded(self):
+        record = FIXTURES.passing_host_preflight()
+        record["total_cpu_limit_percent"] = 400
+        record["samples"][1]["total_cpu_percent"] = 350.25
+        self.assertEqual(HOST.validate_record(json.dumps(record).encode()), record)
+        record["samples"][1]["total_cpu_percent"] = 400
+        with self.assertRaisesRegex(ValueError, "CPU screen"):
+            HOST.validate_record(json.dumps(record).encode())
+        for value in (199, 401, 300.0, "300", None, True):
+            record = FIXTURES.passing_host_preflight()
+            record["total_cpu_limit_percent"] = value
+            with self.subTest(limit=value), self.assertRaises(ValueError):
+                HOST.validate_record(json.dumps(record).encode())
+        legacy = FIXTURES.passing_host_preflight()
+        legacy["samples"][2]["total_cpu_percent"] = 250
+        with self.assertRaisesRegex(ValueError, "CPU screen"):
+            HOST.validate_record(json.dumps(legacy).encode())
+
     def test_record_mutations_fail_closed(self):
         mutations = {
             "schema": [None, "v2"], "startup_screen_passed": [False, 1, None],

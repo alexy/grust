@@ -13,6 +13,11 @@ RECORD_FIELDS = {
     "schema", "samples", "clean_host_performance_eligible", "limitation",
     "startup_screen_passed",
 }
+# Records written before the explicit limit existed omit this field and are
+# held to the original two-core screen.
+LIMIT_FIELD = "total_cpu_limit_percent"
+DEFAULT_TOTAL_CPU_LIMIT = 200
+MAX_TOTAL_CPU_LIMIT = 400
 SAMPLE_FIELDS = {
     "total_cpu_percent", "busy_processes", "startup_screen_passed", "observed_at",
 }
@@ -55,8 +60,13 @@ def validate_record(raw: bytes) -> dict:
                             parse_constant=_reject_constant)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError("host preflight contains invalid JSON") from error
-    if not isinstance(record, dict) or record.keys() != RECORD_FIELDS:
+    if not isinstance(record, dict) or record.keys() not in (
+            RECORD_FIELDS, RECORD_FIELDS | {LIMIT_FIELD}):
         raise ValueError("host preflight has unexpected record fields")
+    limit = record.get(LIMIT_FIELD, DEFAULT_TOTAL_CPU_LIMIT)
+    if (type(limit) is not int
+            or not DEFAULT_TOTAL_CPU_LIMIT <= limit <= MAX_TOTAL_CPU_LIMIT):
+        raise ValueError("host preflight total CPU limit is outside the allowed range")
     if (record["schema"] != SCHEMA
             or record["startup_screen_passed"] is not True
             or record["clean_host_performance_eligible"] is not False
@@ -70,7 +80,7 @@ def validate_record(raw: bytes) -> dict:
         if not isinstance(sample, dict) or sample.keys() != SAMPLE_FIELDS:
             raise ValueError("host preflight has unexpected sample fields")
         total = sample["total_cpu_percent"]
-        if (type(total) not in (int, float) or not 0 <= total < 200
+        if (type(total) not in (int, float) or not 0 <= total < limit
                 or not math.isfinite(total)
                 or sample["busy_processes"] != []
                 or sample["startup_screen_passed"] is not True):

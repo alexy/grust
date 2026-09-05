@@ -1,6 +1,6 @@
 import unittest
 
-from host_preflight import assess
+from host_preflight import assess, parse_total_cpu_limit
 
 
 class HostPreflightTests(unittest.TestCase):
@@ -14,6 +14,20 @@ class HostPreflightTests(unittest.TestCase):
 
     def test_aggregate_contention_blocks(self):
         self.assertFalse(assess('1 0 70 a\n2 0 70 b\n3 0 70 c')['startup_screen_passed'])
+
+    def test_explicit_limit_admits_idle_daemons_but_not_busy_jobs(self):
+        idle = '1 0 90 WindowServer\n2 0 80 media-indexer\n3 0 70 com.docker.virtualization'
+        self.assertFalse(assess(idle)['startup_screen_passed'])
+        self.assertTrue(assess(idle, 400)['startup_screen_passed'])
+        self.assertFalse(assess(idle + '\n4 0 100 et', 400)['startup_screen_passed'])
+        self.assertFalse(assess('1 0 399 a\n2 0 1 b', 400)['startup_screen_passed'])
+
+    def test_limit_is_bounded_and_integral(self):
+        self.assertEqual(parse_total_cpu_limit('400'), 400)
+        self.assertEqual(parse_total_cpu_limit(200), 200)
+        for value in ('199', '401', '250.5', '', 'four', None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_total_cpu_limit(value)
 
     def test_paths_with_spaces_are_not_arguments(self):
         result = assess('123 1 110 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome')

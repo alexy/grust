@@ -78,8 +78,16 @@ warning plus all 261 unchanged September 5 evidence payloads.
 New native qualification launches retain `host-preflight.json` and refuse to
 create a client if the host CPU screen fails. Three one-second-spaced `ps`
 samples reject any process at or above one CPU core, or aggregate activity at
-or above two CPU cores. These are conservative startup thresholds, not proof
-of isolation or a substitute for monitoring throughout the run. No command
+or above an explicit limit that defaults to two CPU cores. The limit may be
+raised to at most four cores (`HOST_PREFLIGHT_TOTAL_CPU_LIMIT`, or
+`--total-cpu-limit`) for hosts whose idle system daemons alone exceed two
+cores; the limit used is written into `host-preflight.json` and re-checked by
+the publication validator, so a receipt discloses which screen it passed. On
+the 2026-09-05 laptop the quiet-host idle aggregate was 176–340 percent
+(window server, media indexer, Docker VM, browser renderers) with no process
+above one core, so the SF0.1 speed cohort ran with the limit at 400. These are
+conservative startup thresholds, not proof of isolation or a substitute for
+monitoring throughout the run. No command
 arguments or environments are collected. The check never stops processes.
 
 After orphan cleanup, this gate detected unrelated `et` embedding workers

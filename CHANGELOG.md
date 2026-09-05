@@ -6,6 +6,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Make the host preflight's aggregate-CPU limit an explicit, recorded
+  parameter (default two cores, at most four); the busy-process rule is
+  unchanged and legacy records without the field are still held to two cores.
 - Harden benchmark cancellation: latch SIGINT/SIGTERM through child creation,
   reap owned process groups, revalidate exact container identity during cleanup,
   and report cleanup failures as errors. Allow an explicit longer logger grace
