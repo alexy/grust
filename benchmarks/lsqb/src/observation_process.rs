@@ -1093,8 +1093,12 @@ mod tests {
             .is_err()
         );
 
+        // Construct the payload before the timed worker starts. Thousands of
+        // shell writes can exhaust the deadline on a loaded host, testing a
+        // legitimate timeout instead of the intended oversized-frame rejection.
         let oversized = format!(
-            "{READY}; i=0; while [ $i -lt 17000 ]; do printf x; i=$((i+1)); done; printf '\\n'"
+            "{READY}; printf '%s\\n' '{}'",
+            "x".repeat(MAX_CONTROL_LINE_BYTES + 1)
         );
         assert!(
             run(
