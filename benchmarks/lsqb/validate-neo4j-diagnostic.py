@@ -30,6 +30,7 @@ CLIENT_PROFILES = {
     'bb4f7c161fdae90cc9fc2b35aaf0870e9da91164':
         'sha256:b68b801a134fc85af5e9a44486a1309b45315b2ff7e67eab8489e24dab51c9ed',
 }
+SAMPLED_SOURCES = set()  # Populated only after the sampled Docker build is pinned.
 SERVER_IMAGE = 'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d'
 
 
@@ -56,6 +57,17 @@ def validate_runtime(directory):
     labels = invocation.get('client_labels', {})
     require(labels.get('org.opencontainers.image.revision') == revision and
             labels.get('io.adversarial.grust.benchmark-feature') == 'neo4j-native', 'client source labels differ')
+    report_path = directory / 'result/diagnostic.json'
+    if report_path.exists():
+        report = json.loads(report_path.read_text())
+        if report.get('schema') == 'grust-neo4j-native-diagnostic-v2':
+            require(revision in SAMPLED_SOURCES, 'source does not qualify the sampling protocol')
+            sampling = report['sampling']
+            command = invocation.get('command', [])
+            require(isinstance(command, list) and len(command) >= 7 and command[-7] == 'qualify' and
+                    command[-4] == report['scale'] and command[-3] == '/out/result' and
+                    command[-2:] == [str(sampling['warmups_per_query']), str(sampling['measurements_per_query'])],
+                    'sampling report differs from the container invocation')
     for role in ('client', 'server'):
         before, after = records[f'{role}-before'], records[f'{role}-after']
         require(isinstance(before.get('container_id'), str) and
@@ -135,9 +147,21 @@ def check_observation(item, expected, seen_tags):
 
 def validate(directory, upstream, attacks):
     report = json.loads((directory / 'result/diagnostic.json').read_text())
-    require(report.get('schema') == 'grust-neo4j-native-diagnostic-v1' and
+    require(report.get('schema') in ('grust-neo4j-native-diagnostic-v1', 'grust-neo4j-native-diagnostic-v2') and
             report.get('complete') is False and report.get('publication_receipt') is None,
             'not a non-publishable diagnostic')
+    sampled = report['schema'] == 'grust-neo4j-native-diagnostic-v2'
+    if sampled:
+        sampling = report.get('sampling', {})
+        warmups, runs = sampling.get('warmups_per_query'), sampling.get('measurements_per_query')
+        require(type(warmups) is int and 0 <= warmups <= 5 and type(runs) is int and 1 <= runs <= 10,
+                'invalid sampling counts')
+        require(sampling.get('order') == 'query-major-warmups-then-measurements' and
+                sampling.get('worker_lifecycle') == 'fresh-process-per-sample', 'sampling protocol differs')
+        schedule = [('warmup', i) for i in range(warmups)] + [('measurement', i) for i in range(runs)]
+    else:
+        require('sampling' not in report, 'legacy diagnostic cannot declare another sampling protocol')
+        warmups, runs, schedule = 0, 1, [(None, None)]
     require((report.get('driver'), report.get('driver_version')) == ('neo4rs', '0.9.0-rc.10'), 'driver differs')
     scale = report.get('scale')
     require(scale in DATASETS, 'unknown dataset')
@@ -161,11 +185,17 @@ def validate(directory, upstream, attacks):
         query_id = f'a{number}-{suffix}'
         digest = hashlib.sha256((attacks / f'{query_id}.cypher').read_bytes()).hexdigest()
         expected.append(('adversarial', query_id, count, digest))
+    expected = [(*case, phase, index) for case in expected for phase, index in schedule]
     observations = report['observations']
-    require(len(observations) == 22, 'incomplete observation set')
+    require(len(observations) == len(expected), 'incomplete observation set')
     tags = set()
     for item, reference in zip(observations, expected):
-        check_observation(item, reference, tags)
+        check_observation(item, reference[:4], tags)
+        if sampled:
+            require(type(item.get('sample_index')) is int and
+                    (item.get('phase'), item['sample_index']) == reference[4:], 'sample identity/order differs')
+        else:
+            require('phase' not in item and 'sample_index' not in item, 'legacy sample is ambiguously phased')
     events = [json.loads(line) for line in (directory / 'result/observations.jsonl').read_text().splitlines()]
     require([x for x in events if x.get('event') == 'observation-recorded'] == observations, 'journal differs')
     pending, index, totals = None, 0, (0, 0, 0)
@@ -178,14 +208,16 @@ def validate(directory, upstream, attacks):
                     all(a <= b for a, b in zip(totals, new)), 'invalid load progress')
             totals = new
         elif kind == 'query-start':
-            require(index < 22 and pending is None and totals[:2] == (nodes, edges), 'invalid query start')
-            pending = (event.get('suite'), event.get('id'))
-            require(pending == expected[index][:2], 'query start order differs')
+            require(index < len(expected) and pending is None and totals[:2] == (nodes, edges), 'invalid query start')
+            pending = (event.get('suite'), event.get('id'), event.get('phase'), event.get('sample_index'))
+            require(pending == (*expected[index][:2], *expected[index][4:]), 'query start order differs')
+            require(not sampled or type(event.get('sample_index')) is int, 'invalid start sample index')
         else:
-            require(kind == 'observation-recorded' and pending == (event.get('suite'), event.get('id')),
+            require(kind == 'observation-recorded' and pending ==
+                    (event.get('suite'), event.get('id'), event.get('phase'), event.get('sample_index')),
                     'unmatched observation')
             pending, index = None, index + 1
-    require(index == 22 and pending is None, 'incomplete journal')
+    require(index == len(expected) and pending is None, 'incomplete journal')
     require(report['load_ns'] >= totals[2] * 1000000, 'load time precedes final load progress')
     watchdog = json.loads((directory / 'watchdog.json').read_text())
     require(watchdog.get('schema') == 'grust-lsqb-cell-watchdog-completion-v1' and
@@ -193,7 +225,14 @@ def validate(directory, upstream, attacks):
             watchdog['child_exit_status'] == 0, 'watchdog did not complete successfully')
     require(integer(watchdog.get('elapsed_wall_ms')) and integer(watchdog.get('timeout_ms')) and
             0 < watchdog['elapsed_wall_ms'] <= watchdog['timeout_ms'], 'invalid watchdog timing')
+    measurements = [x for x in observations if not sampled or x['phase'] == 'measurement']
+    warmup_samples = [x for x in observations if sampled and x['phase'] == 'warmup']
     return {'diagnostic_verified': True, 'publication_qualified': False, 'scale': scale,
+            'warmups_per_query': warmups, 'measurements_per_query': runs,
+            'measurement_outcomes': {key: sum(x['outcome'] == key for x in measurements)
+                                     for key in ('pass', 'mismatch', 'timeout', 'error')},
+            'warmup_outcomes': {key: sum(x['outcome'] == key for x in warmup_samples)
+                               for key in ('pass', 'mismatch', 'timeout', 'error')},
             'outcomes': {key: sum(x['outcome'] == key for x in observations)
                          for key in ('pass', 'mismatch', 'timeout', 'error')}}
 

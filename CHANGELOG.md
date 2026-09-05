@@ -15,6 +15,11 @@ reconstructed from Git history, release commits, and the shipped docs.
   Race-fix Docker deadline/recovery probes pass; publication receipts remain pending;
   diagnostics are not published rankings.
 
+- Native Neo4j benchmark sampling now distinguishes warm-ups from measured
+  repetitions, with per-sample process isolation, recovery, and durable progress.
+  The independent audit rejects missing, reordered, or mislabeled samples and
+  reports warm-up failures separately from measured outcomes.
+
 - Benchmark-only: use 10,000-row Sail bulk-write batches and expose aggregate
   completed-chunk/node/edge counters during projected coordinator loading.
   Worker setup remains private and query observations remain separately recorded.

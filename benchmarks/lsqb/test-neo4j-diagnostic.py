@@ -112,6 +112,44 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(self.audit()['outcomes']['pass'], 22)
         self.assertIs(self.audit()['publication_qualified'], False)
 
+    def sampled_fixture(self):
+        originals = self.report['observations']
+        self.report.update(schema='grust-neo4j-native-diagnostic-v2',
+                           sampling=dict(warmups_per_query=1, measurements_per_query=2,
+                                         order='query-major-warmups-then-measurements',
+                                         worker_lifecycle='fresh-process-per-sample'))
+        self.report['observations'] = []
+        self.events = self.events[:1]
+        for original in originals:
+            for phase, index in [('warmup', 0), ('measurement', 0), ('measurement', 1)]:
+                item = copy.deepcopy(original)
+                item.update(phase=phase, sample_index=index)
+                item['server_recovery']['transaction_tag'] = f'neo4j-7-{len(self.report["observations"])}'
+                self.report['observations'].append(item)
+                self.events += [dict(event='query-start', complete=False, suite=item['suite'], id=item['id'],
+                                     phase=phase, sample_index=index), item]
+
+    def test_warmup_mismatch_does_not_enter_measurement_totals(self):
+        self.sampled_fixture()
+        self.report['observations'][0].update(actual_count=7, outcome='mismatch')
+        result = self.audit()
+        self.assertEqual(result['outcomes']['mismatch'], 1)
+        self.assertEqual(result['measurement_outcomes']['pass'], 44)
+        self.assertEqual(result['measurement_outcomes']['mismatch'], 0)
+
+    def test_mislabeled_and_omitted_samples_are_rejected(self):
+        self.sampled_fixture()
+        self.report['observations'][0]['phase'] = 'measurement'
+        self.events[1]['phase'] = 'measurement'
+        with self.assertRaises(ValueError):
+            self.audit()
+        self.report['observations'][0]['phase'] = 'warmup'
+        self.events[1]['phase'] = 'warmup'
+        self.report['observations'].pop()
+        self.events = self.events[:-2]
+        with self.assertRaises(ValueError):
+            self.audit()
+
     def test_truncated_or_reordered_journal_is_rejected(self):
         original = copy.deepcopy(self.events)
         for events in (original[:-1], original[1:], [original[0], *original[2:]],
@@ -179,6 +217,22 @@ class RuntimeTests(unittest.TestCase):
         for phase in ('before', 'after'):
             self.records[f'client-{phase}']['image_id'] = image
         self.assertTrue(self.audit())
+
+    def test_sampling_requires_capable_source_and_matching_invocation(self):
+        folder = self.root / 'result'
+        folder.mkdir()
+        (folder / 'diagnostic.json').write_text(json.dumps(dict(
+            schema='grust-neo4j-native-diagnostic-v2', scale='example',
+            sampling=dict(warmups_per_query=2, measurements_per_query=10))))
+        self.records['invocation']['command'] = ['qualify', '/opt/lsqb-mounted', '/opt/grust-attacks',
+                                                 'example', '/out/result', '2', '10']
+        with self.assertRaises(ValueError):
+            self.audit()
+        with patch.object(check, 'SAMPLED_SOURCES', {check.SOURCE_REVISION}):
+            self.assertTrue(self.audit())
+            self.records['invocation']['command'][-1] = '1'
+            with self.assertRaises(ValueError):
+                self.audit()
 
     def test_restart_oom_changed_resources_and_wrong_watchdog_fail(self):
         original = copy.deepcopy(self.records)

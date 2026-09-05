@@ -11,6 +11,8 @@ mod process;
 mod qualification;
 #[path = "native_neo4j_recovery.rs"]
 mod recovery;
+#[path = "native_neo4j_sampling.rs"]
+mod sampling;
 
 fn scalar_value(values: &BTreeMap<String, i64>) -> Result<i64, &'static str> {
     if values.len() != 1 {

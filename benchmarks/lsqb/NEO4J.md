@@ -149,6 +149,25 @@ and all client/server before/after records were retained before client cleanup.
 This is the first full native example diagnostic with the new runtime evidence;
 larger-scale runs above still belong to their original source/provenance cohort.
 
+## Repeated measurements
+
+The native binary accepts optional `WARMUPS RUNS` after its four qualification
+arguments. The Docker runner exposes these as paired `--warmups` and `--runs`
+options. Bounds are0–5 warm-ups and1–10 measurements per query. Without them,
+the legacy W0/R1 protocol is unchanged. With them, schema v2 records an explicit
+query-major schedule: warm-ups first, then measurements, each in a fresh worker
+with its own server-recovery proof. Phase and zero-based sample index appear
+in every start/observation record. No warm-up sample enters measurement totals;
+warm-up failures remain visible separately and do not get silently dropped.
+
+The full comparison cohort will use W2/R10 and the explicitly selected
+60second query deadline. Grust matrix defaults are W2/R10 but30seconds, so its
+deadline must be overridden to match; existing W0/R1 results are a separate
+qualification cohort. For repeated runs, the runner computes an emergency outer
+ceiling from the import allowance and all per-sample bounds. This ceiling is not
+an expected duration;30second heartbeats and flushed per-sample records continue
+throughout. Repeated Docker measurements are not yet qualified or published.
+
 ## Required completion gates
 
 1. Reuse the Rust dataset fingerprint/oracle loaders and bounded graph chunks.

@@ -61,7 +61,13 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--scale', choices=('example', '0.1', '0.3'), default='example')
     parser.add_argument('--mode', choices=('qualify', 'deadline-probe', 'recovery-probe'), default='qualify')
+    parser.add_argument('--warmups', type=int)
+    parser.add_argument('--runs', type=int)
     args = parser.parse_args()
+    sampled = args.warmups is not None or args.runs is not None
+    if sampled and (args.mode != 'qualify' or args.warmups is None or args.runs is None or
+                    not 0 <= args.warmups <= 5 or not 1 <= args.runs <= 10):
+        parser.error('sampling requires qualify mode, --warmups 0..5 and --runs 1..10 together')
     if not re.fullmatch(r'grust-lsqb-neo4j-[a-zA-Z0-9-]+', args.server):
         parser.error('server must be an explicitly owned grust-lsqb-neo4j-* container')
     if not re.fullmatch(r'[0-9a-f]{40}', args.source_revision):
@@ -104,6 +110,8 @@ def main():
                '--entrypoint', '/usr/local/bin/grust-lsqb-neo4j', image['Id'], args.mode]
     if args.mode == 'qualify':
         command += ['/opt/lsqb-mounted', '/opt/grust-attacks', args.scale, '/out/result']
+        if sampled:
+            command += [str(args.warmups), str(args.runs)]
     save('invocation.json', dict(diagnostic_only=True, command=command, source_revision=args.source_revision,
                                  client_image_id=image['Id'], client_labels=labels, server_image=SERVER_IMAGE))
     save('server-before.json', snapshot(server))
@@ -111,7 +119,10 @@ def main():
     if not re.fullmatch(r'[0-9a-f]{64}', client_id):
         raise RuntimeError('invalid created client identity')
     save('client-before.json', snapshot(inspect(client_id)))
-    timeout = 600000 if args.scale == 'example' else 3100000
+    # Import allowance plus all per-sample READY/query/reap/recovery bounds.
+    # This is an emergency ceiling, not an estimate of expected wall time.
+    timeout = (600000 + 22 * (args.warmups + args.runs) * 110250) if sampled else (
+        600000 if args.scale == 'example' else 3100000)
     status = 125
     try:
         with (output / 'watchdog.json').open('xb', buffering=0) as watchdog, (output / 'cell.log').open('xb', buffering=0) as log:
