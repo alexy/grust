@@ -7,6 +7,13 @@ comparison on [adversari.al/graph](https://adversari.al/graph/). Helix SDK also
 passes its example Docker cohort, with a diagnostic audit; independent site
 admission and the full-matrix launcher's SDK integration remain pending.
 
+`bundle-helix-sdk.py RUN NEW_OUTPUT --client-build CLIENT_BUILD --server-build
+SERVER_BUILD` freezes the audited Helix cohort with both build receipts, recipes
+and logs. The server recipe defaults to `Dockerfile.helix-sdk-server`; overridden
+paths must contain identical pinned bytes. Each bundle inventories 17 payloads
+by size and SHA-256. This transport manifest deliberately keeps
+`publication_qualified: false`: independent site verification is still required.
+
 | Lane | Grust store | Transport | Endpoint variable |
 | --- | --- | --- | --- |
 | `helix` | `HelixHttpGraphStore` | Direct HTTP | `HELIX_QUERY_URL` |

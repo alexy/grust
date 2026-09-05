@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Freeze Helix SDK example evidence with pinned client and source-built server
+  recipes, logs and provenance; reject altered server identities or build bytes
+  before export. Independent site admission remains pending.
+
 - Run Helix SDK3 against the source-built `/v2/query` server: 108 baseline and
   156 adversarial example observations pass. Add pinned runtime/count/timing
   audit and mutation tests; independent site publication remains pending.

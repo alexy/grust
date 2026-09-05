@@ -30,19 +30,22 @@ def read(path):
     return audit.matrix.read_regular_file(path, str(path))
 
 
-def export(directory, output, client_build):
+def export(directory, output, client_build, *, auditor=audit, backend='surreal-sdk',
+           additional_files=None):
+    audit = auditor
+    feature = backend.removesuffix('-sdk')
     captured = {name: read(directory / name) for name in FILES}
     receipt_bytes = read(client_build / 'build-receipt.json')
     receipt = json.loads(receipt_bytes)
     audit.require(receipt['schema'] == 'grust-sdk-client-build-v1'
                   and receipt['publication_qualified'] is False
-                  and receipt['backend'] == 'surreal-sdk' and receipt['feature'] == 'surreal'
+                  and receipt['backend'] == backend and receipt['feature'] == feature
                   and receipt['source_revision'] == audit.SOURCE
                   and receipt['image_id'] == audit.CLIENT
                   and receipt['platform'] == 'linux/arm64', 'client build identity differs')
     labels = receipt['image_labels']
     audit.require(labels['org.opencontainers.image.revision'] == audit.SOURCE
-                  and labels['io.adversarial.grust.benchmark-feature'] == 'surreal',
+                  and labels['io.adversarial.grust.benchmark-feature'] == feature,
                   'client build labels differ')
     recipe, log = read(client_build / 'Dockerfile'), read(client_build / 'build/command.log')
     audit.require(hashlib.sha256(recipe).hexdigest() == receipt['recipe_sha256'] == RECIPE,
@@ -63,7 +66,12 @@ def export(directory, output, client_build):
     captured.update({'audit.json': canonical(checked),
                      'client-build/build-receipt.json': receipt_bytes,
                      'client-build/Dockerfile': recipe, 'client-build/build.log': log})
-    manifest = dict(schema='grust-sdk-evidence-bundle-v1', track='surreal-sdk',
+    for name, data in (additional_files or {}).items():
+        audit.require(name not in captured and name != 'bundle.json'
+                      and not Path(name).is_absolute() and '..' not in Path(name).parts,
+                      'unsafe or duplicate additional payload')
+        captured[name] = data
+    manifest = dict(schema='grust-sdk-evidence-bundle-v1', track=backend,
                     source_revision=audit.SOURCE, scale=checked['scale'], suite=checked['suite'],
                     publication_qualified=False,
                     files=[dict(path=name, bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
