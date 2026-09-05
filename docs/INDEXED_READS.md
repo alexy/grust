@@ -39,6 +39,17 @@ returned snapshots remain immutable and usable. Cache construction holds the
 store's read lock, so writers wait for that first build. Ordinary `GraphStore`
 reads and traversals retain their existing behavior.
 
+A load into an empty store builds the snapshot as part of `put_graph`, and
+until the next write `traverse` and endpoint-anchored `get_edges` answer from
+its typed adjacency instead of the store's edge maps, with the same results
+and order (except that `Direction::Both` lists outgoing before incoming
+neighbours). Reads without a cached snapshot use the maps and never build one;
+a retired snapshot is released on a detached thread so the invalidating write
+does not pay for the drop. `serialized_graph_bytes()` is measured on first use.
+`GraphStore::traverse_ids` returns the same vertices as `traverse` as ids only;
+the Memory store serves it from the snapshot without cloning nodes, and every
+other store answers through the default implementation over `traverse`.
+
 ```rust
 use grust_core::{Graph, GraphStore};
 use grust_cypher::{CypherParameters, read::run_read_query_indexed};

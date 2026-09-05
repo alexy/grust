@@ -1,6 +1,10 @@
 //! Snapshot-owned, typed adjacency for compact read execution.
 
-use std::{collections::HashMap, io, sync::Arc};
+use std::{
+    collections::HashMap,
+    io,
+    sync::{Arc, OnceLock},
+};
 
 use crate::{Graph, GrustError, Label, NodeId, Result};
 
@@ -227,7 +231,7 @@ impl<'index> TypedAdjacencyView<'index> {
 #[derive(Debug)]
 pub struct TypedGraphIndex {
     graph: Arc<Graph>,
-    serialized_graph_bytes: usize,
+    serialized_graph_bytes: OnceLock<usize>,
     vertex_by_id: HashMap<NodeId, u32>,
     vertices_by_label: HashMap<Label, Vec<u32>>,
     adjacency: HashMap<Label, TypedAdjacency>,
@@ -281,13 +285,9 @@ impl TypedGraphIndex {
             let reverse = Csr::build(graph.nodes.len(), &edges, true);
             adjacency.insert(label, TypedAdjacency { forward, reverse });
         }
-        let mut size = SerializedSize(0);
-        serde_json::to_writer(&mut size, graph.as_ref()).map_err(|error| {
-            GrustError::Serialization(format!("failed to measure indexed graph: {error}"))
-        })?;
         Ok(Self {
             graph,
-            serialized_graph_bytes: size.0,
+            serialized_graph_bytes: OnceLock::new(),
             vertex_by_id,
             vertices_by_label,
             adjacency,
@@ -299,9 +299,26 @@ impl TypedGraphIndex {
     }
 
     /// Exact compact JSON byte length of this immutable graph snapshot.
-    /// Computed once without a graph-sized encoding buffer, for bounded readers.
+    ///
+    /// Measured on first use through a counting writer, never with a
+    /// graph-sized buffer, and cached for every later bounded reader. Plain
+    /// traversals that never ask for it never pay for the measurement.
     pub fn serialized_graph_bytes(&self) -> usize {
-        self.serialized_graph_bytes
+        *self.serialized_graph_bytes.get_or_init(|| {
+            let mut size = SerializedSize(0);
+            serde_json::to_writer(&mut size, self.graph.as_ref())
+                .expect("measuring a graph through a counting writer cannot fail");
+            size.0
+        })
+    }
+
+    /// Every relationship type with at least one edge, in sorted order, so
+    /// callers that walk all types produce the same neighbour order as the
+    /// label-ordered edge maps they replace.
+    pub fn relationship_types(&self) -> impl Iterator<Item = &Label> {
+        let mut types: Vec<&Label> = self.adjacency.keys().collect();
+        types.sort();
+        types.into_iter()
     }
 
     pub fn vertex_index(&self, id: &str) -> Option<u32> {

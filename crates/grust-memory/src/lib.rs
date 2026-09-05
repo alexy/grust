@@ -6,6 +6,7 @@ use std::{
 use async_trait::async_trait;
 use grust_core::{TypedGraphIndex, UniqueValueIndex, prelude::*};
 
+mod indexed_reads;
 mod indexed_snapshot;
 
 type UniqueValueIndexes<Owner> = BTreeMap<Label, BTreeMap<String, UniqueValueIndex<Owner, Value>>>;
@@ -812,15 +813,23 @@ impl GraphStore for MemoryGraphStore {
     }
 
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
-        let mut inner = self.write_inner();
-        if Self::requires_write_validation(&inner) {
-            Self::validate_write_snapshot(&inner, &Self::graph_snapshot_with_graph(&inner, graph))?;
-        }
-        let mut report = LoadReport::default();
-        inner.upsert_nodes(&graph.nodes);
-        report.nodes = graph.nodes.len();
-        inner.upsert_edges(&graph.edges);
-        report.edges = graph.edges.len();
+        let (report, was_empty) = {
+            let mut inner = self.write_inner();
+            if Self::requires_write_validation(&inner) {
+                Self::validate_write_snapshot(
+                    &inner,
+                    &Self::graph_snapshot_with_graph(&inner, graph),
+                )?;
+            }
+            let was_empty = inner.nodes.is_empty() && inner.edges.is_empty();
+            let mut report = LoadReport::default();
+            inner.upsert_nodes(&graph.nodes);
+            report.nodes = graph.nodes.len();
+            inner.upsert_edges(&graph.edges);
+            report.edges = graph.edges.len();
+            (report, was_empty)
+        };
+        self.warm_index_after_load(was_empty);
         Ok(report)
     }
 
@@ -839,6 +848,12 @@ impl GraphStore for MemoryGraphStore {
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>> {
         let inner = self.inner.read().expect("memory graph lock poisoned");
+        if let Some(edges) = self
+            .cached_index()
+            .and_then(|index| indexed_reads::edges_indexed(&index, &query))
+        {
+            return Ok(edges);
+        }
         let matches = |edge: &&Edge| {
             query.from.as_ref().is_none_or(|from| from == &edge.from)
                 && query.to.as_ref().is_none_or(|to| to == &edge.to)
@@ -875,6 +890,27 @@ impl GraphStore for MemoryGraphStore {
 
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
         let inner = self.inner.read().expect("memory graph lock poisoned");
+        if let Some(index) = self.cached_index() {
+            return Ok(indexed_reads::traverse_indexed(&index, &traversal));
+        }
+        Ok(Self::traverse_maps(&inner, traversal))
+    }
+
+    async fn traverse_ids(&self, traversal: Traversal) -> Result<Vec<NodeId>> {
+        let inner = self.inner.read().expect("memory graph lock poisoned");
+        if let Some(index) = self.cached_index() {
+            return Ok(indexed_reads::traverse_ids_indexed(&index, &traversal));
+        }
+        Ok(Self::traverse_maps(&inner, traversal)
+            .into_iter()
+            .map(|node| node.id)
+            .collect())
+    }
+}
+
+impl MemoryGraphStore {
+    /// `traversal` over the edge maps, the path taken when no snapshot is cached.
+    fn traverse_maps(inner: &MemoryGraph, traversal: Traversal) -> Vec<Node> {
         let mut current = match traversal.start {
             Start::Node(id) => inner
                 .nodes
@@ -903,14 +939,14 @@ impl GraphStore for MemoryGraphStore {
                 let incoming = inner.incoming_edges.get(&node.id);
                 match (&step.direction, outgoing, incoming) {
                     (Direction::Out, Some(keys), _) => {
-                        Self::append_traversal_targets(&inner, node, &step, keys.iter(), &mut next)
+                        Self::append_traversal_targets(inner, node, &step, keys.iter(), &mut next)
                     }
                     (Direction::In, _, Some(keys)) => {
-                        Self::append_traversal_targets(&inner, node, &step, keys.iter(), &mut next)
+                        Self::append_traversal_targets(inner, node, &step, keys.iter(), &mut next)
                     }
                     (Direction::Both, Some(outgoing), Some(incoming)) => {
                         Self::append_traversal_targets(
-                            &inner,
+                            inner,
                             node,
                             &step,
                             outgoing.union(incoming),
@@ -918,7 +954,7 @@ impl GraphStore for MemoryGraphStore {
                         );
                     }
                     (Direction::Both, Some(keys), None) | (Direction::Both, None, Some(keys)) => {
-                        Self::append_traversal_targets(&inner, node, &step, keys.iter(), &mut next)
+                        Self::append_traversal_targets(inner, node, &step, keys.iter(), &mut next)
                     }
                     _ => {}
                 }
@@ -929,7 +965,7 @@ impl GraphStore for MemoryGraphStore {
         if let Some(limit) = traversal.limit {
             current.truncate(limit as usize);
         }
-        Ok(current)
+        current
     }
 }
 

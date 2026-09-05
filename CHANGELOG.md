@@ -6,6 +6,18 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Serve Memory `traverse` and endpoint-anchored `get_edges` from the cached
+  typed snapshot when one exists: a load into an empty store builds it, any
+  write invalidates it, and reads without one keep the existing edge-map walk,
+  so point-write workloads never rebuild an index inside a read. Results and
+  order are unchanged except that `Direction::Both` lists outgoing before
+  incoming neighbours. `TypedGraphIndex` measures its serialized size on first
+  use instead of at construction and exposes `relationship_types()`.
+- Add `GraphStore::traverse_ids`, the ids `traverse` would return in the same
+  order, with a default through `traverse` so every store keeps working; the
+  Memory store answers it from the snapshot without cloning nodes.
+- Turso `put_graph` loads every batch inside one transaction: one durable
+  commit for the whole graph instead of one per batch, and the load is atomic.
 - Make the host preflight's aggregate-CPU limit an explicit, recorded
   parameter (default two cores, at most four); the busy-process rule is
   unchanged and legacy records without the field are still held to two cores.
