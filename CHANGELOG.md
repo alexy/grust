@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Run Helix SDK3 against the source-built `/v2/query` server: 108 baseline and
+  156 adversarial example observations pass. Add pinned runtime/count/timing
+  audit and mutation tests; independent site publication remains pending.
+
 - Correct duplicate book chapter numbers by letting the renderer number the
   thirteen chapters, with unnumbered preface and conclusion.
 

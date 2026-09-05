@@ -1518,8 +1518,9 @@ when `remote` is disabled. The unpublished Helix adapter now targets exact
 `helix-db` 3.0.0: its SDK path uses typed nested-AST `QueryRequest` builders and
 `Client::query(request)` rather than `DynamicQueryRequest` and `dynamic_query`.
 The direct HTTP/v1 store remains separate and unchanged. Nineteen unit tests
-pass, including SDK serialization and existing HTTP behavior; live SDK/v2
-service qualification remains pending. Historical HTTP service evidence is not
+pass, including SDK serialization and existing HTTP behavior. The separate
+SDK/v2 Docker example run now has 264 passing observations across baseline and
+adversarial queries, with a retained runtime audit. Historical HTTP service evidence is not
 reused as proof of SDK/v2 compatibility. The repository's
 `benchmarks/lsqb/BACKENDS.md` records the full qualification matrix and live
 gate evidence.
@@ -1551,8 +1552,9 @@ baseline and 156 adversarial observations, with two warm-ups and ten measured
 repetitions per query in rotating order. It measures backend materialization
 plus Rust reference execution, not native Surreal query-engine performance.
 Load, worker setup, query, and recovery timings remain separate. Helix's SDK3
-source-built `/v2/query` service is still undergoing live qualification; its
-public build guide and candidate recipe do not establish a passing result.
+source-built `/v2/query` service also passes all 264 example observations under
+the same sampling protocol. Its independent publication admission is still
+pending; the public build guide and recipe alone do not establish a result.
 
 Reports name the measured execution class as `in-process-reference`,
 `backend-native-aggregate`, `backend-row-source-rust-projection`,

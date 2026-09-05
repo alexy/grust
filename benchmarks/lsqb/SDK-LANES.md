@@ -3,8 +3,9 @@
 The matrix executable has distinct `helix-sdk` and `surreal-sdk` backend IDs.
 The existing `helix` and `surreal` IDs retain their HTTP implementation and
 historical evidence. Surreal SDK now has a separately admitted example Docker
-comparison on [adversari.al/graph](https://adversari.al/graph/). Helix SDK live
-qualification and the full-matrix launcher's SDK integration remain pending.
+comparison on [adversari.al/graph](https://adversari.al/graph/). Helix SDK also
+passes its example Docker cohort, with a diagnostic audit; independent site
+admission and the full-matrix launcher's SDK integration remain pending.
 
 | Lane | Grust store | Transport | Endpoint variable |
 | --- | --- | --- | --- |
@@ -113,10 +114,10 @@ Each output directory must be new. `command.log` retains compiler/test output;
 `progress.jsonl` records elapsed time, output bytes, latest activity and exit
 status. This wrapper is for setup work, not timed benchmark observations.
 
-- Qualify Grust's migrated Helix SDK3 dependency against a matching `/v2/query`
-  runtime. Typed query-builder and existing HTTP unit tests pass, but the
-  historical HTTP service/API must not be presumed compatible. The frozen
-  `945dfa7` benchmark source predates this migration; retain its identity.
+- Extend the now-passing Helix SDK3 example cohort to larger-scale admission
+  and independent site evidence. The matching source-built `/v2/query` runtime
+  is separate from HTTP. The frozen Surreal `945dfa7` source predates the
+  Helix migration; retain its identity and use `ed3febd` for the Helix cohort.
 - Build pinned Docker clients/services and run both SDK lanes, including
   example W2/R10/60-second performance sampling and larger-scale admission.
 - Extend the full Docker launcher and receipt contracts for SDK lanes. Site
