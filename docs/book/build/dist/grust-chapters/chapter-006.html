@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
   <meta name="dcterms.date" content="2026-09-05" />
-  <title>4. Typed Graph Ingestion with garde and zod-rs</title>
+  <title>Typed Graph Ingestion with garde and zod-rs</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
     span.navlink { flex: 1; }
@@ -112,17 +112,17 @@
 </div>
 <div class="sitenav">
 <span class="navlink">
-<span class="navlink-label">Next:</span> <a href="chapter-007.html" accesskey="n" rel="next">5. Traversal as an Intermediate Representation</a>
+<span class="navlink-label">Next:</span> <a href="chapter-007.html" accesskey="n" rel="next">Traversal as an Intermediate Representation</a>
 </span>
 <span class="navlink">
-<span class="navlink-label">Previous:</span> <a href="chapter-005.html" accesskey="p" rel="previous">3. Building Graphs</a>
+<span class="navlink-label">Previous:</span> <a href="chapter-005.html" accesskey="p" rel="previous">Building Graphs</a>
 </span>
 </div>
 </nav>
-<h1 data-number="5"
+<h1 data-number="4"
 id="typed-graph-ingestion-with-garde-and-zod-rs"><span
-class="header-section-number">5</span> 4. Typed Graph Ingestion with
-garde and zod-rs</h1>
+class="header-section-number">4</span> Typed Graph Ingestion with garde
+and zod-rs</h1>
 <p>The core <code>Graph</code>, <code>Node</code>, and <code>Edge</code>
 types are intentionally dynamic. A node has a label and a property map;
 an edge has a label, endpoints, and a property map. That dynamic shape
@@ -156,8 +156,8 @@ second graph model. Once validation succeeds, everything becomes the
 ordinary Grust graph shape. Backends do not need to know whether a node
 came from <code>GraphBuilder</code>, a YAML document, a typed Rust
 struct, or a zod-rs-validated JSON payload.</p>
-<h2 data-number="5.1" id="garde-typed-rust-validation"><span
-class="header-section-number">5.1</span> garde: Typed Rust
+<h2 data-number="4.1" id="garde-typed-rust-validation"><span
+class="header-section-number">4.1</span> garde: Typed Rust
 Validation</h2>
 <p><code>garde</code> is a Rust validation library built around a derive
 macro. You attach validation rules to fields, derive
@@ -266,8 +266,8 @@ class="sourceCode rust"><code class="sourceCode rust"><span id="cb6-1"><a href="
 <p>Edges follow the same pattern with
 <code>WorksOn::from_edge(&amp;edge)?</code>. For validation contexts,
 use <code>from_node_with</code> or <code>from_edge_with</code>.</p>
-<h2 data-number="5.2" id="typed-and-untyped-graphs-coexist"><span
-class="header-section-number">5.2</span> Typed and Untyped Graphs
+<h2 data-number="4.2" id="typed-and-untyped-graphs-coexist"><span
+class="header-section-number">4.2</span> Typed and Untyped Graphs
 Coexist</h2>
 <p>The typed layer is an ingestion layer over the ordinary
 <code>GraphBuilder</code>. It does not force an all-or-nothing choice. A
@@ -315,8 +315,8 @@ needed.</li>
 graph documents while adding typed definitions for the domain facts that
 benefit most from Rust validation. Over time, more labels can move to
 typed constructors without breaking the storage or document formats.</p>
-<h2 data-number="5.3" id="what-zod-means-here"><span
-class="header-section-number">5.3</span> What Zod Means Here</h2>
+<h2 data-number="4.3" id="what-zod-means-here"><span
+class="header-section-number">4.3</span> What Zod Means Here</h2>
 <p>Zod is best known from TypeScript. It lets developers define a
 runtime schema and validate untrusted input before treating it as
 application data. In TypeScript, this closes an important gap: static
@@ -419,8 +419,8 @@ accepts it. This preserves Rust integer types. For example,
 <code>zod-rs</code> validates numbers through a floating-point schema,
 but Serde should still be allowed to decode the original JSON integer
 <code>80</code> into a Rust <code>u8</code>.</p>
-<h2 data-number="5.4" id="how-the-options-interact"><span
-class="header-section-number">5.4</span> How the Options Interact</h2>
+<h2 data-number="4.4" id="how-the-options-interact"><span
+class="header-section-number">4.4</span> How the Options Interact</h2>
 <p>There are four common construction paths:</p>
 <pre class="text"><code>Raw GraphBuilder:
   trusted Rust code -&gt; Node/Edge -&gt; Graph
@@ -471,8 +471,8 @@ class="sourceCode json"><code class="sourceCode json"><span id="cb13-1"><a href=
 <p>That separation gives application authors precise error boundaries.
 Shape errors usually belong near the API or file-ingest boundary. Domain
 errors belong near the typed model.</p>
-<h2 data-number="5.5" id="relationship-to-graphschema"><span
-class="header-section-number">5.5</span> Relationship to
+<h2 data-number="4.5" id="relationship-to-graphschema"><span
+class="header-section-number">4.5</span> Relationship to
 GraphSchema</h2>
 <p><code>GraphSchema</code> and typed ingestion solve different
 problems. <code>GraphSchema</code> describes graph labels, fields,

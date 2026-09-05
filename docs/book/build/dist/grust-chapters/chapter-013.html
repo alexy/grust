@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
   <meta name="dcterms.date" content="2026-09-05" />
-  <title>11. Schema and Validation Direction</title>
+  <title>Schema and Validation Direction</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
     span.navlink { flex: 1; }
@@ -47,15 +47,15 @@
 </div>
 <div class="sitenav">
 <span class="navlink">
-<span class="navlink-label">Next:</span> <a href="chapter-014.html" accesskey="n" rel="next">12. Design Tradeoffs</a>
+<span class="navlink-label">Next:</span> <a href="chapter-014.html" accesskey="n" rel="next">Design Tradeoffs</a>
 </span>
 <span class="navlink">
-<span class="navlink-label">Previous:</span> <a href="chapter-012.html" accesskey="p" rel="previous">10. Example: A Conference Graph</a>
+<span class="navlink-label">Previous:</span> <a href="chapter-012.html" accesskey="p" rel="previous">Example: A Conference Graph</a>
 </span>
 </div>
 </nav>
-<h1 data-number="12" id="schema-and-validation-direction"><span
-class="header-section-number">12</span> 11. Schema and Validation
+<h1 data-number="11" id="schema-and-validation-direction"><span
+class="header-section-number">11</span> Schema and Validation
 Direction</h1>
 <p>Grust has schema types: <code>GraphSchema</code>,
 <code>NodeType</code>, <code>EdgeType</code>, <code>Field</code>,
@@ -124,8 +124,8 @@ DDL through <code>native_constraint_capability</code>.
 portable interchange surface. A typed backend can add native tables,
 fields, indexes, or constraints behind the same <code>GraphStore</code>
 trait.</p>
-<h2 data-number="12.1" id="semantic-model-projection"><span
-class="header-section-number">12.1</span> Semantic Model Projection</h2>
+<h2 data-number="11.1" id="semantic-model-projection"><span
+class="header-section-number">11.1</span> Semantic Model Projection</h2>
 <p>The public facade can also project a versioned semantic model into
 this same property-graph shape. <code>SemanticModelProjection</code>
 describes datasets, their fields and physical sources, metrics, and

@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
   <meta name="dcterms.date" content="2026-09-05" />
-  <title>9. Cypher and GQL</title>
+  <title>Cypher and GQL</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
     span.navlink { flex: 1; }
@@ -47,15 +47,15 @@
 </div>
 <div class="sitenav">
 <span class="navlink">
-<span class="navlink-label">Next:</span> <a href="chapter-012.html" accesskey="n" rel="next">10. Example: A Conference Graph</a>
+<span class="navlink-label">Next:</span> <a href="chapter-012.html" accesskey="n" rel="next">Example: A Conference Graph</a>
 </span>
 <span class="navlink">
-<span class="navlink-label">Previous:</span> <a href="chapter-010.html" accesskey="p" rel="previous">8. Backend Architecture</a>
+<span class="navlink-label">Previous:</span> <a href="chapter-010.html" accesskey="p" rel="previous">Backend Architecture</a>
 </span>
 </div>
 </nav>
-<h1 data-number="10" id="cypher-and-gql"><span
-class="header-section-number">10</span> 9. Cypher and GQL</h1>
+<h1 data-number="9" id="cypher-and-gql"><span
+class="header-section-number">9</span> Cypher and GQL</h1>
 <p>The property graph model so far is a Rust API: builders, traversals,
 and the store contract. <code>grust-cypher</code> adds a query and
 mutation <em>language</em> on top of it — a backend-neutral GQL/Cypher
@@ -66,8 +66,8 @@ semantic analysis pass that resolves bindings and kinds. A conformance
 spine — a <code>GqlFeature</code> taxonomy with structured errors —
 records exactly which constructs are supported, planned, or out of
 profile, so the surface is auditable rather than aspirational.</p>
-<h2 data-number="10.1" id="a-portable-read-core"><span
-class="header-section-number">10.1</span> A portable read core</h2>
+<h2 data-number="9.1" id="a-portable-read-core"><span
+class="header-section-number">9.1</span> A portable read core</h2>
 <p>Reads run through a Memory <em>reference executor</em> over a graph
 snapshot: <code>MATCH</code> and <code>OPTIONAL MATCH</code> (with null
 padding), multi-hop and variable-length paths, a three-valued
@@ -112,8 +112,8 @@ scan, so an outer row cannot reset that work or its deadline.
 Authorization, tenant-safe graph projection, remote-backend deadlines,
 and process isolation remain the host’s responsibility; the cooperative
 timeout is not an operating-system hard kill.</p>
-<h2 data-number="10.2" id="values-procedures-transactions-writes"><span
-class="header-section-number">10.2</span> Values, procedures,
+<h2 data-number="9.2" id="values-procedures-transactions-writes"><span
+class="header-section-number">9.2</span> Values, procedures,
 transactions, writes</h2>
 <p>The value model gains first-class lossless <code>Decimal</code> (SQL
 <code>DECIMAL</code>-style) and ISO 8601 <code>Duration</code> types
@@ -149,8 +149,8 @@ to the established write planner while narrowing the public surface to
 standard Cypher. Pattern-driven writes widen to multiple relationship
 patterns per statement, incoming <code>&lt;-[:T]-</code> edges, and
 cross-variable correlated <code>SET</code>.</p>
-<h2 data-number="10.3" id="a-backed-profile"><span
-class="header-section-number">10.3</span> A backed profile</h2>
+<h2 data-number="9.3" id="a-backed-profile"><span
+class="header-section-number">9.3</span> A backed profile</h2>
 <p>What the layer claims to support is stated precisely in
 <code>docs/GQL_PROFILE_STATEMENT.md</code>: the realized profile is the
 set of <code>Supported</code> features in Grust’s scoped manifest. The

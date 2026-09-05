@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
   <meta name="dcterms.date" content="2026-09-05" />
-  <title>8. Backend Architecture</title>
+  <title>Backend Architecture</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
     span.navlink { flex: 1; }
@@ -112,15 +112,15 @@
 </div>
 <div class="sitenav">
 <span class="navlink">
-<span class="navlink-label">Next:</span> <a href="chapter-011.html" accesskey="n" rel="next">9. Cypher and GQL</a>
+<span class="navlink-label">Next:</span> <a href="chapter-011.html" accesskey="n" rel="next">Cypher and GQL</a>
 </span>
 <span class="navlink">
-<span class="navlink-label">Previous:</span> <a href="chapter-009.html" accesskey="p" rel="previous">7. Rust Concepts Used</a>
+<span class="navlink-label">Previous:</span> <a href="chapter-009.html" accesskey="p" rel="previous">Rust Concepts Used</a>
 </span>
 </div>
 </nav>
-<h1 data-number="9" id="backend-architecture"><span
-class="header-section-number">9</span> 8. Backend Architecture</h1>
+<h1 data-number="8" id="backend-architecture"><span
+class="header-section-number">8</span> Backend Architecture</h1>
 <p>Backends share the same input model but not the same execution
 model:</p>
 <figure>
@@ -131,8 +131,8 @@ model:</p>
 still focus on writes and administrative loading. That is normal for an
 early multi-backend project, and the trait makes the maturity boundary
 explicit.</p>
-<h2 data-number="9.1" id="memory"><span
-class="header-section-number">9.1</span> Memory</h2>
+<h2 data-number="8.1" id="memory"><span
+class="header-section-number">8.1</span> Memory</h2>
 <p><code>grust-memory</code> is the deterministic local backend. It
 stores nodes in a <code>BTreeMap&lt;NodeId, Node&gt;</code> and stores
 edges by source, label, destination, and optional explicit edge ID. That
@@ -159,8 +159,8 @@ class="sourceCode rust"><code class="sourceCode rust"><span id="cb1-1"><a href="
 <span id="cb1-13"><a href="#cb1-13" aria-hidden="true" tabindex="-1"></a>    <span class="op">.</span><span class="kw">await</span><span class="op">?;</span></span>
 <span id="cb1-14"><a href="#cb1-14" aria-hidden="true" tabindex="-1"></a># <span class="cn">Ok</span>(())</span>
 <span id="cb1-15"><a href="#cb1-15" aria-hidden="true" tabindex="-1"></a># <span class="op">}</span></span></code></pre></div>
-<h2 data-number="9.2" id="lancedb"><span
-class="header-section-number">9.2</span> LanceDB</h2>
+<h2 data-number="8.2" id="lancedb"><span
+class="header-section-number">8.2</span> LanceDB</h2>
 <p><code>grust-lancedb</code> treats LanceDB first as a durable
 Arrow-native table store. It uses two tables, one for nodes and one for
 edges. Nodes are keyed by <code>id</code>. Edges are keyed by an
@@ -200,8 +200,8 @@ surface, while schema-labeled rows are mirrored into tables such as
 typed columns for declared fields. That gives analytical consumers and
 future vector extensions a native columnar surface without giving up the
 backend-neutral graph model.</p>
-<h2 data-number="9.3" id="ladybugdb"><span
-class="header-section-number">9.3</span> LadybugDB</h2>
+<h2 data-number="8.3" id="ladybugdb"><span
+class="header-section-number">8.3</span> LadybugDB</h2>
 <p><code>grust-ladybug</code> embeds LadybugDB directly through the Rust
 <code>lbug</code> 0.20.2 crate. It is the durable local graph-database
 backend: no Docker service, no HTTP bridge, and no separate daemon. The
@@ -241,8 +241,8 @@ exactly.</p>
 portable round trips. Later schema lowering can add typed Ladybug
 columns, full-text indexes, vector indexes, and direct graph-RAG
 extension traits without changing the core graph model.</p>
-<h2 data-number="9.4" id="postgresql-and-pggraph"><span
-class="header-section-number">9.4</span> PostgreSQL and pgGraph</h2>
+<h2 data-number="8.4" id="postgresql-and-pggraph"><span
+class="header-section-number">8.4</span> PostgreSQL and pgGraph</h2>
 <p><code>grust-postgres</code> stores the source of truth in ordinary
 PostgreSQL tables:</p>
 <div class="sourceCode" id="cb2"><pre
@@ -310,8 +310,8 @@ limit remain valid, while longer names fail with
 <code>GrustError::Schema</code> before the server can silently truncate
 them into an ambiguous or colliding identifier. Dialects that retain the
 default <code>None</code> keep their existing behavior.</p>
-<h2 data-number="9.5" id="turso"><span
-class="header-section-number">9.5</span> Turso</h2>
+<h2 data-number="8.5" id="turso"><span
+class="header-section-number">8.5</span> Turso</h2>
 <p><code>grust-turso</code> uses the Turso Rust SDK directly. The
 default connection path opens a local in-process Turso database:</p>
 <div class="sourceCode" id="cb3"><pre
@@ -349,8 +349,8 @@ construct a synced store from a local path, remote URL, and optional
 auth token. The <code>GraphStore</code> API continues to operate on the
 local SQL connection; callers decide when to call the store’s
 <code>push</code> and <code>pull</code> helpers.</p>
-<h2 data-number="9.6" id="querygraph-memory-typesec-over-grust"><span
-class="header-section-number">9.6</span> QueryGraph Memory: TypeSec over
+<h2 data-number="8.6" id="querygraph-memory-typesec-over-grust"><span
+class="header-section-number">8.6</span> QueryGraph Memory: TypeSec over
 Grust</h2>
 <p><code>querygraph-memory</code> is a concrete application of the Grust
 backend contract. It implements TypeSec’s synchronous
@@ -558,8 +558,8 @@ replicas. Finally, vault-level tenant checks, restart persistence, and
 running-service conformance do not by themselves constitute a hosted
 multi-tenant service with quotas, migrations, backups, deletion
 propagation, and service-level objectives.</p>
-<h2 data-number="9.7" id="sail"><span
-class="header-section-number">9.7</span> Sail</h2>
+<h2 data-number="8.7" id="sail"><span
+class="header-section-number">8.7</span> Sail</h2>
 <p><code>grust-sail</code> connects to a Sail Spark Connect server over
 gRPC. It stores graph data in Spark DataFrames backed by Delta tables.
 SQL commands and reads are sent as Spark Connect SQL relation plans, and
@@ -670,8 +670,8 @@ staged-Arrow, <code>MERGE INTO</code>, typed-Delta mirror, and delete
 paths as ordinary Grust writes. The plan and report types are
 backend-neutral — Memory, Sail, and Turso all execute them — while Sail
 adds the SQL read pushdown and typed-table mirrors on top.</p>
-<h2 data-number="9.8" id="falkordb-helixdb-and-surrealdb"><span
-class="header-section-number">9.8</span> FalkorDB, HelixDB, and
+<h2 data-number="8.8" id="falkordb-helixdb-and-surrealdb"><span
+class="header-section-number">8.8</span> FalkorDB, HelixDB, and
 SurrealDB</h2>
 <p>The FalkorDB backend writes through Redis <code>GRAPH.QUERY</code>
 using Cypher-like <code>MERGE</code> statements. It batches nodes by
@@ -732,8 +732,8 @@ are stored separately as <code>edge_id</code>; node <code>id</code> and
 <code>labels</code>, relation <code>in</code>/<code>out</code>, and
 internal metadata cannot be overwritten by user properties. HTTP and
 WebSocket failures omit URL userinfo and query secrets.</p>
-<h2 data-number="9.9" id="cocoindex"><span
-class="header-section-number">9.9</span> CocoIndex</h2>
+<h2 data-number="8.9" id="cocoindex"><span
+class="header-section-number">8.9</span> CocoIndex</h2>
 <p><code>grust-cocoindex</code> is intentionally not an ordinary
 <code>GraphStore</code>. CocoIndex is an incremental target-state
 system, so the Grust integration exports a graph as serializable node
@@ -746,8 +746,8 @@ JSON, and requires edge endpoints to exist in the graph so relationship
 source and target labels can be emitted. The import path expects the
 same key shape, validates relationship endpoints against imported nodes,
 and preserves explicit relationship keys as Grust edge IDs.</p>
-<h2 data-number="9.10" id="backend-integration-tests"><span
-class="header-section-number">9.10</span> Backend Integration Tests</h2>
+<h2 data-number="8.10" id="backend-integration-tests"><span
+class="header-section-number">8.10</span> Backend Integration Tests</h2>
 <p>Unit tests stay self-contained, but live backend tests are explicit.
 They are marked ignored in Cargo so a normal workspace test run does not
 accidentally depend on local services. When a live test is requested,
@@ -789,13 +789,14 @@ typed nested-AST <code>QueryRequest</code> builders and
 <code>Client::query(request)</code> rather than
 <code>DynamicQueryRequest</code> and <code>dynamic_query</code>. The
 direct HTTP/v1 store remains separate and unchanged. Nineteen unit tests
-pass, including SDK serialization and existing HTTP behavior; live
-SDK/v2 service qualification remains pending. Historical HTTP service
-evidence is not reused as proof of SDK/v2 compatibility. The
-repository’s <code>benchmarks/lsqb/BACKENDS.md</code> records the full
-qualification matrix and live gate evidence.</p>
-<h2 data-number="9.11" id="lsqb-compatibility-microbenchmark"><span
-class="header-section-number">9.11</span> LSQB Compatibility
+pass, including SDK serialization and existing HTTP behavior. The
+separate SDK/v2 Docker example run now has 264 passing observations
+across baseline and adversarial queries, with a retained runtime audit.
+Historical HTTP service evidence is not reused as proof of SDK/v2
+compatibility. The repository’s <code>benchmarks/lsqb/BACKENDS.md</code>
+records the full qualification matrix and live gate evidence.</p>
+<h2 data-number="8.11" id="lsqb-compatibility-microbenchmark"><span
+class="header-section-number">8.11</span> LSQB Compatibility
 Microbenchmark</h2>
 <p>The repository also carries a Docker-reproducible compatibility
 workload in <a
@@ -824,9 +825,10 @@ adversarial observations, with two warm-ups and ten measured repetitions
 per query in rotating order. It measures backend materialization plus
 Rust reference execution, not native Surreal query-engine performance.
 Load, worker setup, query, and recovery timings remain separate. Helix’s
-SDK3 source-built <code>/v2/query</code> service is still undergoing
-live qualification; its public build guide and candidate recipe do not
-establish a passing result.</p>
+SDK3 source-built <code>/v2/query</code> service also passes all 264
+example observations under the same sampling protocol. Its independent
+publication admission is still pending; the public build guide and
+recipe alone do not establish a result.</p>
 <p>Reports name the measured execution class as
 <code>in-process-reference</code>,
 <code>backend-native-aggregate</code>,

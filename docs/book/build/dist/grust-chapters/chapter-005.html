@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
   <meta name="author" content="Alexy Khrabrov" />
   <meta name="dcterms.date" content="2026-09-05" />
-  <title>3. Building Graphs</title>
+  <title>Building Graphs</title>
   <style>
     div.sitenav { display: flex; flex-direction: row; flex-wrap: wrap; }
     span.navlink { flex: 1; }
@@ -112,15 +112,15 @@
 </div>
 <div class="sitenav">
 <span class="navlink">
-<span class="navlink-label">Next:</span> <a href="chapter-006.html" accesskey="n" rel="next">4. Typed Graph Ingestion with garde and zod-rs</a>
+<span class="navlink-label">Next:</span> <a href="chapter-006.html" accesskey="n" rel="next">Typed Graph Ingestion with garde and zod-rs</a>
 </span>
 <span class="navlink">
-<span class="navlink-label">Previous:</span> <a href="chapter-004.html" accesskey="p" rel="previous">2. The Core Property Graph</a>
+<span class="navlink-label">Previous:</span> <a href="chapter-004.html" accesskey="p" rel="previous">The Core Property Graph</a>
 </span>
 </div>
 </nav>
-<h1 data-number="4" id="building-graphs"><span
-class="header-section-number">4</span> 3. Building Graphs</h1>
+<h1 data-number="3" id="building-graphs"><span
+class="header-section-number">3</span> Building Graphs</h1>
 <p>Most application code should not construct every <code>Node</code>
 and <code>Edge</code> by hand. It should use
 <code>GraphBuilder</code>:</p>
@@ -158,8 +158,8 @@ class="sourceCode rust"><code class="sourceCode rust"><span id="cb2-1"><a href="
 <p>This is an example of Grust’s overall style: put the common
 property-graph case on the simple path, but leave an explicit escape
 hatch for graph models with different identity rules.</p>
-<h2 data-number="4.1" id="loading-and-saving-graph-documents"><span
-class="header-section-number">4.1</span> Loading and Saving Graph
+<h2 data-number="3.1" id="loading-and-saving-graph-documents"><span
+class="header-section-number">3.1</span> Loading and Saving Graph
 Documents</h2>
 <p>A <code>Graph</code> can also move through textual document formats
 without touching a backend. The core crate exposes paired constructors
