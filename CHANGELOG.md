@@ -14,6 +14,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   with fresh borrowing workers and bounded owner-only cleanup. All 22 example
   queries pass a host-client/Docker-service diagnostic; fully Dockerized repeated
   performance evidence and publication admission remain separate requirements.
+  The source-built private-network Docker example run now passes all 264 W2/R10
+  observations, with retained runtime snapshots and an independent diagnostic
+  count/journal/timing audit. Public evidence admission remains pending.
 
 - Derive receipt-bound performance summaries with measured query/setup/recovery
   distributions, per-sample boundary totals, and separate coordinator loading.

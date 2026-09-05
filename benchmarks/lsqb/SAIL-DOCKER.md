@@ -99,8 +99,23 @@ Fresh-process visibility and release isolation have passed live qualification.
 The actual shared-session runner also passed all nine baseline and thirteen
 adversarial example queries (zero warm-ups, one measurement) against this
 Docker-built service. That host-client diagnostic is not the repeated,
-fully Dockerized performance cohort. Forced worker termination still fails the
+fully Dockerized performance cohort. A subsequent private-network Docker run
+at client revision `79ee978411f4803ed5ae2dbbbb7d1507e8507490` passed all 264
+example observations with two warm-ups and ten measurements per query. Its
+counts, rotating journal, timing contract and runtime snapshots pass the
+diagnostic audit; public evidence admission is still pending.
+Forced worker termination still fails the
 cell closed: releasing a session is not proof of remote query quiescence.
+
+`run-sail-source.py` runs one suite against an explicitly disposable server on
+the internal `grust-lsqb-sail-source-qualification` Docker network. Both client
+and service have 8 CPU / 6 GiB limits, with no server host ports. The runner
+checks the retained source-build recipe/log hashes and runtime identity,
+captures container snapshots, journals observations incrementally, emits
+30-second watchdog heartbeats, and stops the selected service afterward.
+`validate-sail-source.py` checks the retained diagnostic observations; it does
+not issue a publication receipt. The pinned recipe revision and newer client
+revision are intentionally distinct.
 
 Stop the owned service when finished:
 
