@@ -136,6 +136,24 @@ class JournalTests(unittest.TestCase):
         self.assertEqual(result['outcomes']['mismatch'], 1)
         self.assertEqual(result['measurement_outcomes']['pass'], 44)
         self.assertEqual(result['measurement_outcomes']['mismatch'], 0)
+        self.assertIsNone(check.summarize_measurements(self.report)[0]['timing_summary'])
+
+    def test_timing_summary_excludes_warmups(self):
+        self.sampled_fixture()
+        self.report['observations'][0]['elapsed_ns'] = 1_000_000
+        self.report['observations'][1]['elapsed_ns'] = 10
+        self.report['observations'][2]['elapsed_ns'] = 20
+        result = check.summarize_measurements(self.report)[0]
+        self.assertEqual(result['measurement_elapsed_ns'], [10, 20])
+        self.assertEqual(result['timing_summary'], dict(min_ns=10, median_ns=15, max_ns=20))
+
+    def test_declared_load_deadline_is_checked(self):
+        self.sampled_fixture()
+        self.report['load_timeout_ms'] = 600000
+        self.assertTrue(self.audit()['diagnostic_verified'])
+        self.report['load_ns'] = 600000 * 1000000 + 1
+        with self.assertRaises(ValueError):
+            self.audit()
 
     def test_mislabeled_and_omitted_samples_are_rejected(self):
         self.sampled_fixture()

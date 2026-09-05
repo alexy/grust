@@ -166,7 +166,25 @@ deadline must be overridden to match; existing W0/R1 results are a separate
 qualification cohort. For repeated runs, the runner computes an emergency outer
 ceiling from the import allowance and all per-sample bounds. This ceiling is not
 an expected duration;30second heartbeats and flushed per-sample records continue
-throughout. Repeated Docker measurements are not yet qualified or published.
+throughout. The W2/R10 example Docker run of source
+`4c385e26135547f1771577f20a90234f830488b6` passed all44 warm-ups and220 measured
+samples in60.812seconds. Its sampling, oracle/journal and runtime audits passed.
+Output: `out/neo4j-sampled-example-4c385e2`. The client platform manifest is
+`sha256:2f68b1f5e47a3627124ec02390de3088660059c860c2ab2461cf133ba9af3aca`.
+Matched repeated larger-scale runs and publication receipts remain pending.
+
+The diagnostic validator's `--summaries` option emits measured-only raw timing
+series and minimum/median/maximum. It withholds a query's timing summary if any
+warm-up or measured sample failed, avoiding a success-only timing summary that
+would conceal failures. These summaries are descriptive, not a ranking against
+unmatched backend cohorts.
+
+Subsequent sampling builds also bound the asynchronous import and database-total
+checks to600seconds, independently of the larger overall sampling ceiling.
+A load failure or deadline aborts the run; the Docker runner stops the owned
+server rather than proceeding to queries. This is separate from the strict
+per-query process deadline. The earlier4c385e2 example run predates this added
+load guard and must not be relabeled as exercising it.
 
 ## Required completion gates
 

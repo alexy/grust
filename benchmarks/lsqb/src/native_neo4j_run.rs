@@ -2,11 +2,20 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use grust_lsqb_runner::{dataset, provenance, queries, safe_output};
 use neo4rs::query;
 use serde_json::json;
+
+async fn bounded_load<T>(
+    budget: Duration,
+    work: impl std::future::Future<Output = Result<T, &'static str>>,
+) -> Result<T, &'static str> {
+    tokio::time::timeout(budget, work)
+        .await
+        .map_err(|_| "native import deadline exceeded; stop dedicated service")?
+}
 
 fn record(file: &mut fs::File, value: &serde_json::Value) -> Result<(), &'static str> {
     let mut line = serde_json::to_vec(value).map_err(|_| "serialize native progress failed")?;
@@ -68,29 +77,36 @@ pub(super) async fn run(args: &[String]) -> Result<(), &'static str> {
         .map_err(|_| "create native journal failed")?;
     let graph = super::connect()?;
     let started = Instant::now();
-    let (mut nodes, mut edges) = (0, 0);
-    super::loading::load(&graph, &directory, |new_nodes, new_edges| {
-        nodes += new_nodes;
-        edges += new_edges;
-        record(
-            &mut journal,
-            &json!({"event":"load-progress", "nodes":nodes, "edges":edges,
+    bounded_load(Duration::from_secs(600), async {
+        let (mut nodes, mut edges) = (0, 0);
+        super::loading::load(&graph, &directory, |new_nodes, new_edges| {
+            nodes += new_nodes;
+            edges += new_edges;
+            record(
+                &mut journal,
+                &json!({"event":"load-progress", "nodes":nodes, "edges":edges,
             "elapsed_ms":started.elapsed().as_millis(), "complete":false}),
-        )
+            )
+        })
+        .await?;
+        if nodes != stats.nodes || edges != stats.edges {
+            return Err("native import totals differ");
+        }
+        for (statement, expected) in [
+            ("MATCH (n) RETURN count(n)", stats.nodes),
+            ("MATCH ()-[r]->() RETURN count(r)", stats.edges),
+        ] {
+            if super::loading::scalar(&graph, query(statement), false).await? != expected as i64 {
+                return Err("native database totals differ after loading");
+            }
+        }
+        Ok(())
     })
     .await?;
-    if nodes != stats.nodes || edges != stats.edges {
-        return Err("native import totals differ");
-    }
-    for (statement, expected) in [
-        ("MATCH (n) RETURN count(n)", stats.nodes),
-        ("MATCH ()-[r]->() RETURN count(r)", stats.edges),
-    ] {
-        if super::loading::scalar(&graph, query(statement), false).await? != expected as i64 {
-            return Err("native database totals differ after loading");
-        }
-    }
     let load_ns = started.elapsed().as_nanos();
+    if load_ns > 600_000_000_000 {
+        return Err("native import exceeded its budget; stop dedicated service");
+    }
     drop(graph);
     let mut observations = Vec::new();
     for (suite, case) in cases {
@@ -134,6 +150,7 @@ pub(super) async fn run(args: &[String]) -> Result<(), &'static str> {
         "observations":observations,"publication_receipt":null});
     if !sampling.legacy {
         report["schema"] = json!("grust-neo4j-native-diagnostic-v2");
+        report["load_timeout_ms"] = json!(600_000);
         report["sampling"] = json!({"warmups_per_query":sampling.warmups,"measurements_per_query":sampling.runs,
             "order":"query-major-warmups-then-measurements","worker_lifecycle":"fresh-process-per-sample"});
     }
@@ -142,4 +159,26 @@ pub(super) async fn run(args: &[String]) -> Result<(), &'static str> {
         &serde_json::to_vec_pretty(&report).map_err(|_| "serialize native report failed")?,
     )
     .map_err(|_| "write native report failed")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stalled_load_does_not_inherit_the_sampling_budget() {
+        assert!(
+            bounded_load::<()>(Duration::from_millis(1), std::future::pending())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            bounded_load(Duration::from_secs(1), async { Ok(42) }).await,
+            Ok(42)
+        );
+        assert_eq!(
+            bounded_load::<()>(Duration::from_secs(1), async { Err("load failed") }).await,
+            Err("load failed")
+        );
+    }
 }

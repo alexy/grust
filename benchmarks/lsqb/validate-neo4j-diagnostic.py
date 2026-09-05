@@ -12,6 +12,7 @@ import io
 import json
 from pathlib import Path
 import re
+import statistics
 
 ORACLE_SHA = 'f2467b14cd6a060e8513d5357471ae6cff486c2f5e38074febe08a4cf4db0d3a'
 DATASETS = {
@@ -29,8 +30,10 @@ CLIENT_PROFILES = {
     SOURCE_REVISION: CLIENT_IMAGE_ID,
     'bb4f7c161fdae90cc9fc2b35aaf0870e9da91164':
         'sha256:b68b801a134fc85af5e9a44486a1309b45315b2ff7e67eab8489e24dab51c9ed',
+    '4c385e26135547f1771577f20a90234f830488b6':
+        'sha256:91e1cec7607127a56f26859bcc7d3750b41d687a40b542f310e8047863117e4c',
 }
-SAMPLED_SOURCES = set()  # Populated only after the sampled Docker build is pinned.
+SAMPLED_SOURCES = {'4c385e26135547f1771577f20a90234f830488b6'}
 SERVER_IMAGE = 'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d'
 
 
@@ -41,6 +44,24 @@ def require(condition, message):
 
 def integer(value):
     return type(value) is int and value >= 0
+
+
+def summarize_measurements(report):
+    """Derive statistics only when every warm-up and measured count passed."""
+    grouped = {}
+    sampled = report['schema'] == 'grust-neo4j-native-diagnostic-v2'
+    for item in report['observations']:
+        grouped.setdefault((item['suite'], item['id']), []).append(item)
+    summaries = []
+    for (suite, query_id), items in grouped.items():
+        measured = [item for item in items if not sampled or item['phase'] == 'measurement']
+        durations = [item['elapsed_ns'] for item in measured]
+        eligible = bool(durations) and all(item['outcome'] == 'pass' for item in items)
+        summaries.append(dict(suite=suite, id=query_id, measurement_samples=len(measured),
+                              measurement_elapsed_ns=durations,
+                              timing_summary=dict(min_ns=min(durations), median_ns=statistics.median(durations),
+                                                  max_ns=max(durations)) if eligible else None))
+    return summaries
 
 
 def validate_runtime(directory):
@@ -168,6 +189,9 @@ def validate(directory, upstream, attacks):
     nodes, edges, people, manifest = DATASETS[scale]
     dataset = report['dataset']
     require(dataset.get('scale_factor') == scale and integer(report.get('load_ns')), 'invalid dataset scale/load timing')
+    if 'load_timeout_ms' in report:
+        require(type(report['load_timeout_ms']) is int and report['load_timeout_ms'] == 600000 and
+                report['load_ns'] <= 600000 * 1000000, 'declared load deadline was not respected')
     require((dataset.get('nodes'), dataset.get('edges'), dataset.get('person_nodes'),
              dataset.get('extracted_manifest_sha256')) == (nodes, edges, people, manifest), 'dataset differs')
     oracle = (upstream / 'expected-output/expected-output.csv').read_bytes()
@@ -243,8 +267,11 @@ if __name__ == '__main__':
     parser.add_argument('--upstream', type=Path, default=Path(__file__).parent / 'upstream/lsqb')
     parser.add_argument('--attacks', type=Path, default=Path(__file__).parent / 'attacks')
     parser.add_argument('--runtime', action='store_true', help='also require retained runtime evidence')
+    parser.add_argument('--summaries', action='store_true', help='include measured-only timing series and summaries')
     args = parser.parse_args()
     result = validate(args.directory, args.upstream, args.attacks)
     if args.runtime:
         result['runtime_verified'] = validate_runtime(args.directory)
+    if args.summaries:
+        result['query_summaries'] = summarize_measurements(json.loads((args.directory / 'result/diagnostic.json').read_text()))
     print(json.dumps(result))
