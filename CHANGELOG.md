@@ -9,7 +9,8 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Ladybug loads through registered Arrow tables and `COPY … FROM (MATCH …)`
   (the crate's `arrow` feature, now on by default): rows grouped per table,
   new ids and `(from, to)` pairs copied, existing ones merged as before, last
-  row per key wins within a load. A traversal step is one query per
+  row per key wins within a load, and tables are resolved once per distinct
+  label rather than once per row. A traversal step is one query per
   relationship table (`MATCH (a)-[r]->(b) WHERE a.id = $id`) instead of one
   point lookup per neighbour, `traverse_ids` returns ids only, and
   `LadybugConfig::buffer_pool_bytes` caps the engine's host-sized buffer pool.

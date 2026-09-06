@@ -1040,15 +1040,28 @@ impl GraphStore for LadybugGraphStore {
                 .iter()
                 .map(|node| (node.id.clone(), node.label.clone()))
                 .collect::<BTreeMap<_, _>>();
+            // Resolve (and, in untyped mode, create) each table once per
+            // distinct label, not once per row: every `ensure_*` call is a
+            // `CREATE … TABLE` attempt plus a metadata `MERGE`, tens of
+            // milliseconds each, which used to run for every node and edge.
+            let mut table_by_label: BTreeMap<&Label, String> = BTreeMap::new();
             let mut node_tables = BTreeMap::new();
             for node in &graph.nodes {
-                let table = if self.config.dynamic_schema {
-                    self.ensure_node_table(conn, &node.label)?.table
-                } else {
-                    self.node_table_name(&node.label)?
+                let table = match table_by_label.get(&node.label) {
+                    Some(table) => table.clone(),
+                    None => {
+                        let table = if self.config.dynamic_schema {
+                            self.ensure_node_table(conn, &node.label)?.table
+                        } else {
+                            self.node_table_name(&node.label)?
+                        };
+                        table_by_label.insert(&node.label, table.clone());
+                        table
+                    }
                 };
                 node_tables.insert(node.id.clone(), table);
             }
+            let mut rel_by_labels: BTreeMap<(&Label, &Label, &Label), String> = BTreeMap::new();
             let mut edge_tables = BTreeMap::new();
             for edge in &graph.edges {
                 let from_label = labels.get(&edge.from).ok_or_else(|| {
@@ -1065,11 +1078,19 @@ impl GraphStore for LadybugGraphStore {
                         edge.to.as_str()
                     ))
                 })?;
-                let rel_table = if self.config.dynamic_schema {
-                    self.ensure_rel_table(conn, &edge.label, from_label, to_label)?
-                        .table
-                } else {
-                    self.rel_table_name(&edge.label, from_label, to_label)?
+                let key = (&edge.label, from_label, to_label);
+                let rel_table = match rel_by_labels.get(&key) {
+                    Some(table) => table.clone(),
+                    None => {
+                        let table = if self.config.dynamic_schema {
+                            self.ensure_rel_table(conn, &edge.label, from_label, to_label)?
+                                .table
+                        } else {
+                            self.rel_table_name(&edge.label, from_label, to_label)?
+                        };
+                        rel_by_labels.insert(key, table.clone());
+                        table
+                    }
                 };
                 let from_table = self.node_table_name(from_label)?;
                 let to_table = self.node_table_name(to_label)?;
