@@ -179,6 +179,54 @@ both process IDs were verified gone afterward.
 These are offline verification tests, not warm-up/measurement observations.
 Live-service tests remain separately qualified.
 
+## Qualified SF0.1 cohort (2026-09-06, laptop, revision `68d1b09`)
+
+The first complete, receipt-bound SF0.1 matrix with the indexed count plans:
+`benchmarks/lsqb/out/matrix-sf0.1-w2r10-68d1b09-f1`, receipt SHA-256
+`4c29af22be0b4437f4b4e221bc2f8d4e10fa8623a4ff4c1ea509584bf6ace1f3`, W2/R10
+rotating, 60 s deadline, 8 CPU / 6 GiB per container, host preflight at the
+recorded 400 percent aggregate limit with no busy process. The receipt was
+issued by hand with the launcher's own arguments after the launcher's receipt
+step hit a bash 3.2 empty-array error (fixed in `12ae290`); `verify` passes.
+`all_required_outcomes_valid` is false: the FalkorDB cells end as declared
+quiescence terminations (q9 and a7 in warm-up 1), and the SQL-routed Turso
+and PostgreSQL queries time out as recorded below.
+
+Medians in ms of ten measured samples, all counts exact; the native column is
+the site's published SF0.1 native comparator bundle, listed for scale only
+(different execution class and query boundary):
+
+| Query | Memory (in-process-reference) | Turso | PostgreSQL | Native comparator |
+|---|---|---|---|---|
+| q1 | 52 | timeout 60 s (sql-count) | timeout 60 s (sql-count) | 1,182 |
+| q2 | 150 | 180 (resident index) | 174 (resident index) | 352 |
+| q3 | 10 | 11 | 9 | 526 |
+| q4 | 123 | 10,187 (sql-count) | 13,843 (sql-count) | 1,975 |
+| q5 | 108 | 128 | 119 | 1,621 |
+| q6 | 6 | 7 | 5 | 3,312 |
+| q7 | 123 | 132 | 121 | 2,546 |
+| q8 | 106 | 126 | 119 | 2,507 |
+| q9 | 14 | 13 | 12 | 3,606 |
+| a1 reversed chain | 51 | timeout 60 s (sql-count) | timeout 60 s (sql-count) | 19,015 |
+| a2 reordered join | 156 | 185 | 187 | 808 |
+| a3 split match | 124 | 140 | 142 | 2,178 |
+| a4 optional fan-out | 107 | 113 | 109 | 2,564 |
+| a5 negated pattern | 108 | 128 | 126 | 4,010 |
+| a6 to a13 | 1.5 to 4.5 | 1.7 to 3.0 | 1.7 to 3.0 (a7 54,208 sql-count) | 6 to 10 |
+
+Cell wall times: Memory 6 + 9 min; Turso 121 + 174 min (59 s per-observation
+reload and index build); PostgreSQL 27 + 35 min (4 s per-observation attach
+and index build); Ladybug, SurrealDB, LanceDB, pgGraph, PGQ and Helix are
+`unsupported` at this scale (materialization refused); Sail `unavailable`;
+CocoIndex `not_applicable`.
+
+Follow-ups recorded for the EC2 session in
+`querygraph/adversarial-graph/docs/notes/task-turso-resident-index.md`: when
+both a `sql-count` entry and a proven `count-factorized` plan exist the worker
+takes the SQL count (q1, q4, a1, a7), and Turso's per-observation reload
+makes the two Turso cells five hours; a prebuilt database copy would keep the
+fresh-process proof at a fraction of that.
+
 ## Measurement discipline
 
 No new qualified performance cohort has been run for these speed changes. Historical
