@@ -217,6 +217,47 @@ Memory is macOS `time -l` maximum resident set size. Retained logs are
 `/tmp/grust-memory-profile-sf03-20260905-01`. The executable SHA-256 is
 `0a5a8060c4f0037ef8f3e6529dee29b4365ee57c3689f394fe317f11adfa6a28`.
 
+### Resident index at SF0.1 (EC2 host, 2026-09-06)
+
+Diagnostic only: `grust-lsqb-matrix` run in-process on the dedicated 4-vCPU
+EC2 host (no Docker envelope, `-discovery` revision marker, one warm-up and
+three measured iterations, official SF0.1 projected-FK dataset: 432,235
+nodes, 2,080,404 edges). The Turso cell is the baseline suite through
+`TursoGraphStore` in memory with the resident typed index; the Memory cell
+is the reference. Every count matched the oracle. The first measured
+iteration overlapped a `cargo build` on the same host and is excluded here
+(it raised worker setup from 71 s to 180 s and pushed q1 past a 600 s
+timeout); the clean rerun is recorded below it.
+
+| Query | Turso route | Turso, iterations 2–3 | Memory (`count-factorized`) |
+|---|---|---:|---:|
+| q1 | `sql-count` (Turso SQL) | 260.2 s, 264.8 s | 70.5 ms |
+| q4 | `sql-count` (Turso SQL) | 14.71 s, 14.70 s | 165.9 ms |
+| q2 | resident index | 202.0 ms, 201.4 ms | 181.6 ms |
+| q3 | resident index | 12.1 ms, 12.1 ms | 12.0 ms |
+| q5 | resident index | 144.4 ms, 143.1 ms | 149.9 ms |
+| q6 | resident index | 6.4 ms, 5.8 ms | 6.3 ms |
+| q7 | resident index | 166.9 ms, 163.4 ms | 159.4 ms |
+| q8 | resident index | 145.0 ms, 144.9 ms | 151.7 ms |
+| q9 | resident index | 18.8 ms, 18.6 ms | 18.4 ms |
+
+Worker setup per observation: Turso 71–73 s (the chunked single-transaction
+load is about 68 s of it, the read-back and index build the rest; the exact
+split is in the `resident_index_built` record of the clean rerun), Memory
+2.7–2.8 s. Two readings:
+
+- Over the resident index, Turso answers within a few percent of Memory:
+  the store's engine is out of the query boundary and the class says so.
+- The two queries the dialect still routes to Turso's own scalar SQL count
+  (q1, q4) are three to four orders of magnitude slower than the same plan
+  over the resident index would be, and q1 sits at the edge of a ten-minute
+  timeout. The route order "scalar SQL first, resident plan second" was a
+  design assumption; at SF0.1 on Turso it is a measured cost. Changing it
+  is a routing decision for the class contract, not a tuning knob, and is
+  not made here.
+
+SF0.3 was not measured on this host.
+
 A finite q9 SF0.1 repeat completed 80 oracle-checked queries. Its retained
 five-second stack sample at
 `/tmp/grust-memory-q9-stack-sample-20260905-01/q9.sample.txt` identifies repeated
