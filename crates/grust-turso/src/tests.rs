@@ -548,3 +548,50 @@ async fn mvcc_concurrent_writers_resolve_conflicts_via_retry() {
     }
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn resident_snapshot_reflects_the_store_and_every_write_drops_it() {
+    let store = TursoGraphStore::in_memory().await.unwrap();
+    store.bootstrap().await.unwrap();
+    let mut builder = GraphBuilder::new();
+    let a = builder.node("Person", "a").finish();
+    let b = builder.node("Person", "b").finish();
+    let c = builder.node("City", "c").finish();
+    let _ = builder.edge("KNOWS", &a, &b).finish();
+    let _ = builder.edge("LIVES_IN", &a, &c).finish();
+    store.put_graph(&builder.build()).await.unwrap();
+
+    let first = store.indexed_snapshot().await.unwrap();
+    let again = store.indexed_snapshot().await.unwrap();
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &again),
+        "the snapshot is shared until a write"
+    );
+    let graph = store.read_graph().await.unwrap();
+    assert_eq!(first.graph().nodes.len(), graph.nodes.len());
+    assert_eq!(first.graph().edges.len(), graph.edges.len());
+    let a_slot = first.vertex_index("a").expect("a is indexed");
+    assert_eq!(first.outgoing(a_slot, "KNOWS").len(), 1);
+    assert_eq!(first.outgoing(a_slot, "LIVES_IN").len(), 1);
+
+    let edge = Edge::new("KNOWS", "b", "c", Props::default());
+    store.put_edge(&edge).await.unwrap();
+    let rebuilt = store.indexed_snapshot().await.unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&first, &rebuilt),
+        "a write invalidates the snapshot"
+    );
+    assert_eq!(rebuilt.graph().edges.len(), 3);
+    assert_eq!(
+        first.graph().edges.len(),
+        2,
+        "an already returned snapshot stays immutable"
+    );
+
+    store
+        .delete_edge(&"b".into(), &"KNOWS".into(), &"c".into())
+        .await
+        .unwrap();
+    let after_delete = store.indexed_snapshot().await.unwrap();
+    assert_eq!(after_delete.graph().edges.len(), 2);
+}

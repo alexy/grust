@@ -1,8 +1,10 @@
 use async_trait::async_trait;
+use grust_core::TypedGraphIndex;
 use grust_core::prelude::*;
 use grust_cypher::pushdown::{NoTypeHints, SqlDialect, StrOp, combine_union, plan_read};
 use grust_cypher::{CypherParameters, CypherResultTable};
 use grust_sql_core::{GraphSqlDialect, UniversalTableRefs};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 mod guarded_commit;
@@ -71,6 +73,9 @@ pub struct TursoGraphStore {
     config: TursoConfig,
     _db: TursoDatabase,
     conn: turso::Connection,
+    /// The resident typed snapshot, built on request from a full read of the
+    /// store and dropped by every statement that could change it.
+    index_cache: std::sync::Mutex<Option<Arc<TypedGraphIndex>>>,
     /// Serializes all operations on `conn` so an explicit guarded transaction
     /// cannot accidentally absorb a concurrent read or write on the same
     /// connection.
@@ -100,6 +105,7 @@ impl TursoGraphStore {
             config,
             _db: TursoDatabase::Local(db),
             conn,
+            index_cache: std::sync::Mutex::new(None),
             connection_gate: tokio::sync::Mutex::new(()),
             transaction_needs_rollback: AtomicBool::new(false),
         };
@@ -267,6 +273,9 @@ impl TursoGraphStore {
     }
 
     async fn execute_unlocked(&self, sql: &str) -> Result<()> {
+        // Every statement that can change the store funnels through here
+        // (writes, DDL, BEGIN/COMMIT); reads go through `conn.query` directly.
+        self.invalidate_snapshot();
         self.conn
             .execute_batch(sql)
             .await
@@ -370,6 +379,10 @@ impl TursoGraphStore {
 
     async fn query_edges(&self, sql: &str) -> Result<Vec<Edge>> {
         let _gate = self.lock_connection().await?;
+        self.query_edges_unlocked(sql).await
+    }
+
+    async fn query_edges_unlocked(&self, sql: &str) -> Result<Vec<Edge>> {
         let mut rows =
             self.conn.query(sql, ()).await.map_err(|err| {
                 GrustError::Backend(format!("Turso edge query failed: {err}: {sql}"))
@@ -958,16 +971,60 @@ impl TursoGraphStore {
         TursoReadDialect::new(&self.config.table_prefix)
     }
 
+    /// The resident typed snapshot of this store: an immutable `TypedGraphIndex`
+    /// over a full read of the node and edge tables, built on the first call
+    /// after any write and shared by every later call until the next write.
+    ///
+    /// The build is a full scan of the store plus index construction, and is
+    /// meant to happen once after a load, outside any query's timing. Reads
+    /// through `GraphStore` are unaffected; the snapshot serves the indexed
+    /// Cypher entrypoints (`grust_cypher::read::run_read_query_indexed`).
+    pub async fn indexed_snapshot(&self) -> Result<Arc<TypedGraphIndex>> {
+        // Hold the connection gate from the read through publication: every
+        // write needs the gate too, so nothing can change the store between
+        // the scan the index is built from and the moment it is cached.
+        let _gate = self.lock_connection().await?;
+        if let Some(index) = self.cached_snapshot() {
+            return Ok(index);
+        }
+        let graph = Arc::new(self.read_graph_unlocked().await?);
+        let index = Arc::new(TypedGraphIndex::new(graph)?);
+        *self
+            .index_cache
+            .lock()
+            .expect("turso index cache lock poisoned") = Some(Arc::clone(&index));
+        Ok(index)
+    }
+
+    fn cached_snapshot(&self) -> Option<Arc<TypedGraphIndex>> {
+        self.index_cache
+            .lock()
+            .expect("turso index cache lock poisoned")
+            .clone()
+    }
+
+    fn invalidate_snapshot(&self) {
+        self.index_cache
+            .lock()
+            .expect("turso index cache lock poisoned")
+            .take();
+    }
+
     /// Materialize the full graph — the reference-executor fallback input.
     pub async fn read_graph(&self) -> Result<Graph> {
+        let _gate = self.lock_connection().await?;
+        self.read_graph_unlocked().await
+    }
+
+    async fn read_graph_unlocked(&self) -> Result<Graph> {
         let nodes = self
-            .query_nodes(&format!(
+            .query_nodes_unlocked(&format!(
                 "SELECT id, label, props FROM {}",
                 self.nodes_table()
             ))
             .await?;
         let edges = self
-            .query_edges(&format!(
+            .query_edges_unlocked(&format!(
                 "SELECT id, from_id, to_id, label, props FROM {}",
                 self.edges_table()
             ))

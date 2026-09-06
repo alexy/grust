@@ -6,6 +6,11 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Turso keeps a resident typed snapshot: `TursoGraphStore::indexed_snapshot`
+  builds a `TypedGraphIndex` from a full read of the store under the
+  connection gate, shares it until any statement that can change the store
+  runs, and serves the indexed Cypher entrypoints; `GraphStore` reads are
+  unchanged.
 - A cell whose backend cannot prove quiescence after an unacknowledged worker
   exit now ends as an explicit error result instead of aborting the matrix:
   the terminal observation is recorded, the lifecycle declares the
