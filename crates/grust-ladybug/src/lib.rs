@@ -32,6 +32,12 @@ pub struct LadybugConfig {
     /// default, which it sizes from the host's physical memory (several
     /// gigabytes resident on a 15 GiB host for a 200k-edge graph).
     pub buffer_pool_bytes: Option<u64>,
+    /// Let writers run concurrently on their own connections, with the
+    /// engine's multi-writer mode (`enable_multi_writes`) on. Off by default,
+    /// as in the engine: every call is then serialized through one lock and
+    /// concurrent writers queue on it. On, the engine resolves conflicting
+    /// write transactions and a losing writer gets its error back.
+    pub concurrent_writes: bool,
 }
 
 impl Default for LadybugConfig {
@@ -42,6 +48,7 @@ impl Default for LadybugConfig {
             dynamic_schema: true,
             query_timeout_ms: None,
             buffer_pool_bytes: None,
+            concurrent_writes: false,
         }
     }
 }
@@ -116,7 +123,8 @@ impl LadybugGraphStore {
         let system = match config.buffer_pool_bytes {
             Some(bytes) => lbug::SystemConfig::default().buffer_pool_size(bytes),
             None => lbug::SystemConfig::default(),
-        };
+        }
+        .enable_multi_writes(config.concurrent_writes);
         let db = match &config.path {
             LadybugPath::InMemory => lbug::Database::in_memory(system),
             LadybugPath::Directory(path) => lbug::Database::new(path, system),
@@ -236,7 +244,10 @@ impl LadybugGraphStore {
     }
 
     fn with_conn<T>(&self, f: impl FnOnce(&lbug::Connection<'_>) -> Result<T>) -> Result<T> {
-        let _guard = self.lock.lock().expect("ladybug store lock poisoned");
+        // `Database` and `Connection` are `Sync`; the lock exists to serialize
+        // writers when the engine's multi-writer mode is off.
+        let _guard = (!self.config.concurrent_writes)
+            .then(|| self.lock.lock().expect("ladybug store lock poisoned"));
         let conn = lbug::Connection::new(&self.db).map_err(ladybug_error)?;
         if let Some(timeout_ms) = self.config.query_timeout_ms {
             conn.set_query_timeout(timeout_ms);

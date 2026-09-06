@@ -569,3 +569,58 @@ async fn bulk_load_keeps_upsert_semantics_and_serves_traversals() {
         .expect("both");
     assert_eq!(both.len(), 3);
 }
+
+#[tokio::test]
+async fn concurrent_writers_all_land_or_report_a_conflict() {
+    let config = LadybugConfig {
+        concurrent_writes: true,
+        ..LadybugConfig::default()
+    };
+    let store = std::sync::Arc::new(LadybugGraphStore::new(config).expect("open"));
+    store
+        .put_graph(&Graph::new(
+            vec![Node::new("V", "hub", Props::default())],
+            Vec::new(),
+        ))
+        .await
+        .expect("seed");
+    let mut tasks = Vec::new();
+    for writer in 0..4 {
+        let store = std::sync::Arc::clone(&store);
+        tasks.push(tokio::spawn(async move {
+            let mut accepted = 0usize;
+            for i in 0..5 {
+                let id = format!("w{writer}-{i}");
+                let graph = Graph::new(
+                    vec![
+                        Node::new("V", id.as_str(), Props::default()),
+                        Node::new("V", "hub", Props::default()),
+                    ],
+                    vec![Edge::new("E", "hub", id.as_str(), Props::default())],
+                );
+                if store.put_graph(&graph).await.is_ok() {
+                    accepted += 1;
+                }
+            }
+            accepted
+        }));
+    }
+    let mut accepted = 0;
+    for task in tasks {
+        accepted += task.await.expect("writer task");
+    }
+    let degree = store
+        .get_edges(EdgeQuery {
+            from: Some("hub".into()),
+            to: None,
+            label: Some("E".into()),
+        })
+        .await
+        .expect("degree")
+        .len();
+    assert_eq!(
+        degree, accepted,
+        "every accepted write is visible, no accepted write is lost"
+    );
+    assert!(accepted > 0);
+}

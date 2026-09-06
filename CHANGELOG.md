@@ -13,7 +13,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   label rather than once per row. A traversal step is one query per
   relationship table (`MATCH (a)-[r]->(b) WHERE a.id = $id`) instead of one
   point lookup per neighbour, `traverse_ids` returns ids only, and
-  `LadybugConfig::buffer_pool_bytes` caps the engine's host-sized buffer pool.
+  `LadybugConfig::buffer_pool_bytes` caps the engine's host-sized buffer pool,
+  and `concurrent_writes` turns on the engine's multi-writer mode and lets
+  writers run on their own connections instead of queueing on one lock.
 - Turso keeps a resident typed snapshot: `TursoGraphStore::indexed_snapshot`
   builds a `TypedGraphIndex` from a full read of the store under the
   connection gate, shares it until any statement that can change the store
