@@ -49,6 +49,8 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    let cell_started = std::time::Instant::now();
+    let steal_before_ms = matrix_progress::host_cpu_steal_ms();
     let arguments = MatrixArguments::parse()?;
     let catalog = matrix_catalog::backend(&arguments.backend)?;
     let data_dir = arguments.lsqb_root.join(format!(
@@ -101,6 +103,10 @@ async fn run() -> Result<(), String> {
         valid,
     };
     write_report(&arguments.output, &report)?;
+    matrix_progress::host_cpu_steal(
+        steal_before_ms,
+        u64::try_from(cell_started.elapsed().as_millis()).unwrap_or(u64::MAX),
+    );
     println!("{}", arguments.output.display());
     if valid {
         Ok(())

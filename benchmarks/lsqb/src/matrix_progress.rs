@@ -132,6 +132,42 @@ struct QueryStartEvent<'a> {
     query_id: &'a str,
 }
 
+/// Cumulative CPU time the hypervisor withheld from this guest, summed over
+/// every vCPU, in milliseconds: the `steal` column of the `cpu` line in
+/// `/proc/stat` (USER_HZ is 100 on Linux). A burstable instance out of CPU
+/// credits shows it while the load average stays flat, so a cell's delta is
+/// the only record of a throttled measurement. `None` where not reported.
+pub fn host_cpu_steal_ms() -> Option<u64> {
+    let stat = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = stat.lines().find(|line| line.starts_with("cpu "))?;
+    let ticks: u64 = line.split_whitespace().nth(8)?.parse().ok()?;
+    Some(ticks * 10)
+}
+
+/// One record at the end of a cell with the host steal accrued while it ran.
+pub fn host_cpu_steal(steal_before_ms: Option<u64>, wall_ms: u64) {
+    let Some((before, after)) = steal_before_ms.zip(host_cpu_steal_ms()) else {
+        return;
+    };
+    let stderr = io::stderr();
+    let mut writer = stderr.lock();
+    let _ = write_event(
+        &mut writer,
+        &HostStealEvent {
+            event: "host_cpu_steal",
+            steal_ms: after.saturating_sub(before),
+            wall_ms,
+        },
+    );
+}
+
+#[derive(Serialize)]
+struct HostStealEvent {
+    event: &'static str,
+    steal_ms: u64,
+    wall_ms: u64,
+}
+
 #[derive(Serialize)]
 struct QueryFinishEvent<'a> {
     event: &'static str,
