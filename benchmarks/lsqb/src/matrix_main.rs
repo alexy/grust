@@ -13,9 +13,10 @@ use grust_lsqb_runner::provenance;
 use grust_lsqb_runner::queries::{self, DatasetStats, QueryCase};
 use grust_lsqb_runner::report::{
     self, BackendCellV3, BackendLifecycleV3, COMPARISON_REPORT_SCHEMA_VERSION_V3,
-    ComparisonEnvironmentV2, ComparisonReportV3, ExecutionClass, ExecutionDescriptorV2,
-    LoadStrategyV3, ObservationTerminationV3, OutcomeStatus, QueryObservationV3, QueryOrder,
-    QueryOutcomeV3, SuiteIdentityV2, TimeoutEnforcementV3, TimingBoundaryV3, TimingProtocolV3,
+    CellTerminationV3, ComparisonEnvironmentV2, ComparisonReportV3, ExecutionClass,
+    ExecutionDescriptorV2, LoadStrategyV3, ObservationTerminationV3, OutcomeStatus,
+    QueryObservationV3, QueryOrder, QueryOutcomeV3, SuiteIdentityV2, TimeoutEnforcementV3,
+    TimingBoundaryV3, TimingProtocolV3,
 };
 use grust_lsqb_runner::safe_output;
 use grust_lsqb_runner::sample_schedule::rotated_index;
@@ -186,12 +187,14 @@ async fn run_backend(
             }
         };
     let load_ns = prepared.load_ns;
-    let queries = execute_protocol(prepared, graph, cases, arguments, catalog.id).await?;
+    let (queries, terminated) =
+        execute_protocol(prepared, graph, cases, arguments, catalog.id).await?;
     Ok(BackendCellV3 {
         backend: identity,
         lifecycle: BackendLifecycleV3 {
             load_strategy: backend::load_strategy(catalog.id, true),
             recovery_contract: backend::recovery_contract(catalog.id, true),
+            terminated,
         },
         setup_outcome: OutcomeStatus::Pass,
         setup_detail: None,
@@ -210,7 +213,7 @@ async fn execute_protocol(
     cases: &[QueryCase],
     arguments: &MatrixArguments,
     backend_id: &str,
-) -> Result<Vec<QueryOutcomeV3>, String> {
+) -> Result<(Vec<QueryOutcomeV3>, Option<CellTerminationV3>), String> {
     let outcomes = cases
         .iter()
         .map(|case| match backend.execution(case) {
@@ -254,7 +257,7 @@ async fn execute_protocol(
     drop(graph);
 
     let execution = async {
-        run_phase(
+        let terminated = run_phase(
             cases,
             &mut outcomes,
             arguments,
@@ -268,6 +271,11 @@ async fn execute_protocol(
             ),
         )
         .await?;
+        if terminated.is_some() {
+            // The backend's state is unproven: no further observation may be
+            // taken in this cell, in this phase or the next.
+            return Ok(terminated);
+        }
         run_phase(
             cases,
             &mut outcomes,
@@ -288,14 +296,22 @@ async fn execute_protocol(
         Some(owner) => owner.finish().await,
         None => Ok(()),
     };
-    execution?;
+    let terminated = execution?;
     cleanup?;
     for outcome in &mut outcomes {
         if outcome.execution.class.is_some() && outcome.outcome != OutcomeStatus::Unsupported {
             finalize_query_outcome(outcome);
         }
     }
-    Ok(outcomes)
+    if let Some(termination) = &terminated {
+        finalize_terminated_cell(
+            &mut outcomes,
+            termination,
+            arguments.warmups,
+            arguments.runs,
+        );
+    }
+    Ok((outcomes, terminated))
 }
 
 async fn run_phase(
@@ -304,9 +320,9 @@ async fn run_phase(
     arguments: &MatrixArguments,
     coordinator: Option<&backend::PreparedBackend>,
     progress: PhaseProgress<'_>,
-) -> Result<(), String> {
+) -> Result<Option<CellTerminationV3>, String> {
     if cases.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let query_total = u32::try_from(cases.len()).unwrap_or(u32::MAX);
     for iteration in 1..=progress.iteration_total() {
@@ -351,21 +367,68 @@ async fn run_phase(
             )?;
             if requires_backend_recovery(isolated.outcome, isolated.termination) {
                 let recovery_started = Instant::now();
-                backend::recover_after_unacknowledged_exit(
+                let recovered = backend::recover_after_unacknowledged_exit(
                     &arguments.backend,
                     &token,
                     arguments.query_recovery_timeout_ms,
                 )
-                .await
-                .map_err(|_| {
-                    format!(
-                        "backend {} could not prove quiescence after an unacknowledged query exit",
-                        arguments.backend
-                    )
-                })?;
+                .await;
                 isolated.recovery_ns = isolated
                     .recovery_ns
                     .saturating_add(elapsed_ns(recovery_started));
+                if recovered.is_err() {
+                    // Fail closed, but as evidence: record this observation as
+                    // the cell's terminal error and stop taking observations.
+                    // The component report is still written so the matrix
+                    // continues and the receipt shows the failure.
+                    let detail = format!(
+                        "backend {} could not prove quiescence after an unacknowledged query exit; no further observation was taken in this cell",
+                        arguments.backend
+                    );
+                    let observation = QueryObservationV3 {
+                        iteration,
+                        query_position: position as u32 + 1,
+                        plan: isolated.plan,
+                        setup_ns: isolated.setup_ns,
+                        elapsed_ns: isolated.elapsed_ns,
+                        recovery_ns: isolated.recovery_ns,
+                        termination: isolated.termination,
+                        actual_count: None,
+                        outcome: OutcomeStatus::Error,
+                        detail: Some(detail.clone()),
+                    };
+                    grust_lsqb_runner::observation_journal::record(
+                        arguments,
+                        &cases[index].id,
+                        progress.is_warmup(),
+                        &observation,
+                    )?;
+                    matrix_progress::query_finish(
+                        query_progress,
+                        observation.outcome,
+                        observation.elapsed_ns,
+                    );
+                    if progress.is_warmup() {
+                        outcomes[index].warmups.push(observation);
+                    } else {
+                        outcomes[index].measurements.push(observation);
+                    }
+                    eprintln!(
+                        "grust-lsqb-matrix: {detail}; the cell ends as an explicit error result"
+                    );
+                    return Ok(Some(CellTerminationV3 {
+                        query_id: cases[index].id.clone(),
+                        phase: if progress.is_warmup() {
+                            "warmup"
+                        } else {
+                            "measurement"
+                        }
+                        .to_string(),
+                        iteration,
+                        reason_code: report::QUIESCENCE_UNPROVEN.to_string(),
+                        detail,
+                    }));
+                }
             }
             let plan = isolated.require_declared_plan()?;
             plan.validate_execution(&outcomes[index].execution, outcomes[index].rust_rows)?;
@@ -437,7 +500,42 @@ async fn run_phase(
             }
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+/// After a declared termination, every admitted query short of the sampling
+/// contract is an explicit error carrying the termination's reason code; the
+/// terminating query keeps the termination detail, the others say they were
+/// not observed. Queries that completed both phases keep their own outcome.
+fn finalize_terminated_cell(
+    outcomes: &mut [QueryOutcomeV3],
+    termination: &CellTerminationV3,
+    warmups: u32,
+    runs: u32,
+) {
+    for outcome in outcomes.iter_mut() {
+        if outcome.execution.class.is_none() || outcome.outcome == OutcomeStatus::Unsupported {
+            continue;
+        }
+        let short =
+            outcome.warmups.len() < warmups as usize || outcome.measurements.len() < runs as usize;
+        if !short {
+            continue;
+        }
+        outcome.outcome = OutcomeStatus::Error;
+        outcome.reason_code = Some(termination.reason_code.clone());
+        outcome.detail = Some(if outcome.id == termination.query_id {
+            termination.detail.clone()
+        } else {
+            format!(
+                "not observed to the sampling contract: the cell terminated at {} {} iteration {} ({})",
+                termination.query_id,
+                termination.phase,
+                termination.iteration,
+                termination.reason_code
+            )
+        });
+    }
 }
 
 fn requires_backend_recovery(
@@ -631,6 +729,7 @@ fn nonexecuted_cell(
         lifecycle: BackendLifecycleV3 {
             load_strategy: LoadStrategyV3::NotExecuted,
             recovery_contract: backend::recovery_contract(catalog.id, false),
+            terminated: None,
         },
         setup_outcome: status,
         setup_detail: Some(detail.to_string()),
@@ -878,6 +977,80 @@ mod tests {
         let example = query_outcome_for_scale(&case, execution, "example").unwrap();
         assert_eq!(example.outcome, OutcomeStatus::Error);
         assert_eq!(example.execution.transport, "would materialize");
+    }
+
+    #[test]
+    fn terminated_cell_marks_every_short_query_as_an_explicit_error() {
+        let case = |id: &str| QueryCase {
+            id: id.to_string(),
+            executable: "MATCH (n) RETURN count(*)".to_string(),
+            source_sha256: "0".repeat(64),
+            expected_count: 1,
+            claim: "test".to_string(),
+        };
+        let execution = ExecutionDescriptorV2 {
+            class: Some(ExecutionClass::BackendNativeAggregate),
+            language: "test".to_string(),
+            transport: "test".to_string(),
+            backend_query_sha256: Some("1".repeat(64)),
+        };
+        let observation = |iteration: u32, outcome: OutcomeStatus| QueryObservationV3 {
+            iteration,
+            query_position: 1,
+            plan: None,
+            setup_ns: 1,
+            elapsed_ns: 1,
+            recovery_ns: 1,
+            termination: ObservationTerminationV3::NormalExit,
+            actual_count: (outcome == OutcomeStatus::Pass).then_some(1),
+            outcome,
+            detail: (outcome != OutcomeStatus::Pass).then(|| "x".to_string()),
+        };
+        let mut complete = query_outcome(&case("q1"), execution.clone(), None);
+        complete.warmups = vec![observation(1, OutcomeStatus::Pass)];
+        complete.measurements = vec![observation(1, OutcomeStatus::Pass)];
+        let mut terminating = query_outcome(&case("q2"), execution.clone(), None);
+        terminating.warmups = vec![observation(1, OutcomeStatus::Error)];
+        let mut unobserved = query_outcome(&case("q3"), execution.clone(), None);
+        unobserved.warmups = vec![observation(1, OutcomeStatus::Pass)];
+        let mut unsupported = query_outcome(&case("q4"), execution, None);
+        unsupported.outcome = OutcomeStatus::Unsupported;
+        let mut outcomes = vec![complete, terminating, unobserved, unsupported];
+        for outcome in &mut outcomes[..3] {
+            finalize_query_outcome(outcome);
+        }
+        let termination = CellTerminationV3 {
+            query_id: "q2".to_string(),
+            phase: "warmup".to_string(),
+            iteration: 1,
+            reason_code: report::QUIESCENCE_UNPROVEN.to_string(),
+            detail: "backend could not prove quiescence".to_string(),
+        };
+        finalize_terminated_cell(&mut outcomes, &termination, 1, 1);
+        assert_eq!(outcomes[0].outcome, OutcomeStatus::Pass);
+        assert_eq!(outcomes[0].reason_code, None);
+        assert_eq!(outcomes[1].outcome, OutcomeStatus::Error);
+        assert_eq!(
+            outcomes[1].reason_code.as_deref(),
+            Some(report::QUIESCENCE_UNPROVEN)
+        );
+        assert_eq!(
+            outcomes[1].detail.as_deref(),
+            Some("backend could not prove quiescence")
+        );
+        assert_eq!(outcomes[2].outcome, OutcomeStatus::Error);
+        assert_eq!(
+            outcomes[2].reason_code.as_deref(),
+            Some(report::QUIESCENCE_UNPROVEN)
+        );
+        assert!(
+            outcomes[2]
+                .detail
+                .as_deref()
+                .unwrap()
+                .starts_with("not observed")
+        );
+        assert_eq!(outcomes[3].outcome, OutcomeStatus::Unsupported);
     }
 
     #[test]

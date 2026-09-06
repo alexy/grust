@@ -6,6 +6,12 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- A cell whose backend cannot prove quiescence after an unacknowledged worker
+  exit now ends as an explicit error result instead of aborting the matrix:
+  the terminal observation is recorded, the lifecycle declares the
+  termination (`backend.quiescence-unproven`), short queries are explicit
+  errors, and the receipt shows the failure. FalkorDB q9 at SF0.1 is the
+  first such case.
 - Reserve up to five seconds (was one) of the coordinator deadline for
   FalkorDB's native TIMEOUT acknowledgement; at SF0.1 q9 overshot the
   one-second reserve and the unacknowledged kill aborted the cell.

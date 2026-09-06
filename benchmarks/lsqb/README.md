@@ -440,8 +440,13 @@ whole group, waits `query_reap_grace_ms`, escalates to SIGKILL, and requires the
 group to disappear within `query_kill_reap_timeout_ms`. It then performs the
 cell's backend-specific quiescence proof within
 `query_recovery_timeout_ms`; a backend without cancellation or introspection
-fails the cell after forced termination rather than starting a possibly
-overlapping sample. An unacknowledged transport/query error follows the same
+ends the cell after forced termination rather than starting a possibly
+overlapping sample: the observation is recorded as the cell's terminal
+`error`, the lifecycle declares the termination (`terminated` with query,
+phase, iteration and reason `backend.quiescence-unproven`), every query left
+short of the sampling contract is an explicit error with that reason, the
+component report is still written, and the matrix continues to the next
+cell. An undeclared short cell remains invalid. An unacknowledged transport/query error follows the same
 rule: process-owned work is gone, PostgreSQL sessions are probed, and other
 remote services fail closed. READY itself is bounded by
 `worker_ready_timeout_ms`, so a stalled load/connect is a prompt

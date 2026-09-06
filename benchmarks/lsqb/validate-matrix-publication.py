@@ -850,6 +850,90 @@ def nonnegative_integer(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
+
+CELL_TERMINATION_FIELDS = frozenset({"query_id", "phase", "iteration", "reason_code", "detail"})
+QUIESCENCE_UNPROVEN = "backend.quiescence-unproven"
+
+
+def is_terminal_observation(lifecycle: Any, query: Any, phase: str, observation: Any) -> bool:
+    terminated = lifecycle.get("terminated") if isinstance(lifecycle, dict) else None
+    if not isinstance(terminated, dict) or not isinstance(query, dict):
+        return False
+    return (
+        terminated.get("query_id") == query.get("id")
+        and terminated.get("phase") == ("warmup" if phase == "warmups" else "measurement")
+        and terminated.get("iteration") == observation.get("iteration")
+    )
+
+
+def validate_cell_termination(cell: dict, terminated: Any, path: str) -> None:
+    """A declared early stop: the named observation is the cell's last, and
+    every query left short of the sampling contract is an explicit error with
+    the same reason code. Undeclared short cells stay invalid."""
+    require(
+        cell.get("setup_outcome") == "pass"
+        and isinstance(terminated, dict)
+        and set(terminated) == CELL_TERMINATION_FIELDS,
+        f"malformed cell termination: {path}",
+    )
+    require(
+        terminated["reason_code"] == QUIESCENCE_UNPROVEN
+        and terminated["phase"] in ("warmup", "measurement")
+        and nonnegative_integer(terminated["iteration"])
+        and terminated["iteration"] >= 1
+        and isinstance(terminated["detail"], str)
+        and terminated["detail"] != "",
+        f"cell termination has an invalid reason, phase, iteration or detail: {path}",
+    )
+    queries = cell.get("queries")
+    require(isinstance(queries, list), f"terminated cell has no queries: {path}")
+    named = [q for q in queries if isinstance(q, dict) and q.get("id") == terminated["query_id"]]
+    require(len(named) == 1, f"cell termination names an unknown query: {path}")
+    phase_key = "warmups" if terminated["phase"] == "warmup" else "measurements"
+    observations = named[0].get(phase_key)
+    require(
+        isinstance(observations, list)
+        and observations
+        and isinstance(observations[-1], dict)
+        and observations[-1].get("iteration") == terminated["iteration"]
+        and observations[-1].get("outcome") == "error"
+        and observations[-1].get("detail") == terminated["detail"],
+        f"cell termination does not name its terminal error observation: {path}",
+    )
+    require(
+        named[0].get("outcome") == "error"
+        and named[0].get("reason_code") == QUIESCENCE_UNPROVEN
+        and named[0].get("detail") == terminated["detail"],
+        f"terminating query is not an explicit quiescence error: {path}",
+    )
+    terminal = observations[-1]
+
+    def after(observation: Any) -> bool:
+        return isinstance(observation, dict) and (
+            observation.get("iteration", 0) > terminated["iteration"]
+            or (observation.get("iteration") == terminated["iteration"]
+                and observation.get("query_position", 0) > terminal.get("query_position", 0))
+        )
+
+    for query in queries:
+        if not isinstance(query, dict):
+            continue
+        warmups = query.get("warmups") or []
+        measurements = query.get("measurements") or []
+        later = (
+            (bool(measurements) or any(after(o) for o in warmups))
+            if terminated["phase"] == "warmup"
+            else any(after(o) for o in measurements)
+        )
+        require(not later, f"cell has observations after its declared termination: {path}")
+    for query in queries:
+        if not isinstance(query, dict) or query.get("reason_code") != QUIESCENCE_UNPROVEN:
+            continue
+        require(
+            query.get("outcome") == "error" and isinstance(query.get("detail"), str) and query["detail"],
+            f"quiescence-unproven query is not an explicit error: {path}",
+        )
+
 def validate_v3_timeout_contract(report: dict[str, Any], path: str) -> None:
     timing = report.get("timing")
     require(isinstance(timing, dict), f"missing timing contract: {path}")
@@ -894,10 +978,15 @@ def validate_v3_timeout_contract(report: dict[str, Any], path: str) -> None:
         lifecycle = cell.get("lifecycle")
         require(
             isinstance(lifecycle, dict)
-            and set(lifecycle) == {"load_strategy", "recovery_contract"},
+            and set(lifecycle) in (
+                {"load_strategy", "recovery_contract"},
+                {"load_strategy", "recovery_contract", "terminated"},
+            ),
             f"backend cell has a malformed lifecycle: {path}",
         )
         executed = cell.get("setup_outcome") == "pass"
+        if "terminated" in lifecycle:
+            validate_cell_termination(cell, lifecycle["terminated"], path)
         expected_load = LOAD_STRATEGY.get(backend) if executed else "not-executed"
         expected_recovery = RECOVERY_CONTRACT.get(backend) if executed else "not-applicable"
         require(expected_load is not None, f"unknown backend lifecycle: {path}")
@@ -965,6 +1054,12 @@ def validate_v3_timeout_contract(report: dict[str, Any], path: str) -> None:
                         },
                         f"invalid observation termination: {path}",
                     )
+                    if is_terminal_observation(lifecycle, query, phase, observation):
+                        # The declared terminal observation ended the cell
+                        # precisely because recovery could not be proven; it
+                        # is an error by declaration, not a derived timeout.
+                        require(outcome == "error", f"terminal observation is not an error: {path}")
+                        continue
                     if termination == "normal-exit":
                         require(outcome != "timeout", f"normal exit claims timeout: {path}")
                         require(

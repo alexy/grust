@@ -472,7 +472,26 @@ pub struct TimingProtocolV3 {
 pub struct BackendLifecycleV3 {
     pub load_strategy: LoadStrategyV3,
     pub recovery_contract: RecoveryContractV3,
+    /// Present only when the cell stopped early because the backend could
+    /// not prove quiescence after an unacknowledged worker exit. The named
+    /// observation is the last one taken; every query left short of the
+    /// sampling contract is an explicit `error` with the same reason code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminated: Option<CellTerminationV3>,
 }
+
+/// Why and where an executed cell stopped taking observations.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CellTerminationV3 {
+    pub query_id: String,
+    /// `warmup` or `measurement`.
+    pub phase: String,
+    pub iteration: u32,
+    pub reason_code: String,
+    pub detail: String,
+}
+
+pub const QUIESCENCE_UNPROVEN: &str = "backend.quiescence-unproven";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct QueryObservationV3 {
