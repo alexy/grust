@@ -128,15 +128,18 @@ OBSERVATION_V3_REQUIRED_FIELDS = frozenset(
 OBSERVATION_V3_FIELDS = OBSERVATION_V3_REQUIRED_FIELDS | {"actual_count", "detail", "plan"}
 OBSERVATION_PLAN_CLASSES = {
     "clause-pipeline": {"in-process-reference", "backend-materialize-rust-reference"},
-    "count-factorized": {"in-process-reference"},
+    "count-factorized": {"in-process-reference", "backend-resident-index-rust-count"},
     "sql-row-source": {"backend-row-source-rust-projection"},
     "sql-count": {"backend-native-aggregate"},
     "backend-native": {"backend-native-aggregate"},
 }
 OBSERVATION_PLAN_BACKENDS = {
-    "count-factorized": {"memory"},
+    "count-factorized": {"memory", "turso"},
     "sql-count": {"turso", "postgres"},
 }
+# Durable stores whose worker may build a resident typed index of the store's
+# own contents outside the query boundary and run the count plan over it.
+RESIDENT_INDEX_BACKENDS = {"turso"}
 EXECUTION_PLAN_REGISTRY_SCHEMA = "grust-lsqb-execution-plan-registry-v1"
 EXECUTION_PLAN_ENTRY_FIELDS = frozenset(
     {
@@ -396,6 +399,17 @@ def manifest_execution_plans(
                     == {"kind": "not-materialized", "rows": 0}
                     and entry.get("backend_query_sha256") is None,
                     f"invalid count-factorized registry entry: {backend}/{query_id}",
+                )
+            elif (
+                backend in RESIDENT_INDEX_BACKENDS
+                and entry.get("plan") == "count-factorized"
+            ):
+                require(
+                    entry.get("execution_class") == "backend-resident-index-rust-count"
+                    and entry.get("rust_rows")
+                    == {"kind": "not-materialized", "rows": 0}
+                    and entry.get("backend_query_sha256") is None,
+                    f"invalid resident-index registry entry: {backend}/{query_id}",
                 )
             else:
                 require(

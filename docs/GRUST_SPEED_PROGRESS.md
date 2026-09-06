@@ -11,6 +11,19 @@ corrected. Raw logs are unchanged, and doctests are counted separately.
 
 ## Completed implementation slices
 
+- 2026-09-06 (EC2 session): `TursoGraphStore::indexed_snapshot`, the
+  resident typed index for a durable store, built from a full read of the
+  store under the connection gate and dropped by every statement that could
+  change it. The LSQB harness routes a Turso query with no scalar SQL count
+  but a proven `count-factorized` plan over that index under the distinct
+  class `backend-resident-index-rust-count`; the snapshot is built in the
+  worker's `load_ns`, never inside the query boundary. Registry, validator
+  (`validate-matrix-publication.py`) and site verifier (`allowedClasses`)
+  admit the class, each with tests. Differential validation at example scale
+  is the count-plan integration test; SF0.1/SF0.3 diagnostics and the
+  PostgreSQL read-back path are still to be measured. Resume mode for
+  `run-grust.sh` is not implemented yet.
+
 - Observation `plan` metadata landed separately in local commit `c514e52`,
   before the indexed speed changes. Missing historical plans stay unknown;
   Neo4j and upstream bundles are not backfilled.

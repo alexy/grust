@@ -6,6 +6,17 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- LSQB matrix: a durable store with a resident typed index built inside its
+  worker's load interval declares the distinct execution class
+  `backend-resident-index-rust-count` for queries whose structural proof admits
+  `count-factorized` and whose dialect renders no scalar SQL count. Turso is
+  the first such store (`TursoGraphStore::indexed_snapshot`): its worker reads
+  the loaded store back, builds the `TypedGraphIndex`, and runs the same
+  non-materializing count plans Memory runs, under the new class, with the
+  registry-bound not-materialized row exemption. The plan registry, the
+  publication validator and the site verifier's per-backend class allowlist
+  admit the class; the row-source and materialize routes remain for every
+  query without such a proof.
 - Ladybug loads through registered Arrow tables and `COPY … FROM (MATCH …)`
   (the crate's `arrow` feature, now on by default): rows grouped per table,
   new ids and `(from, to)` pairs copied, existing ones merged as before, last

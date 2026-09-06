@@ -26,17 +26,19 @@ fn registry_matches_every_optimized_plan_without_authorizing_fallbacks() {
         for case in &cases {
             let memory = id == "memory";
             let sql = backend::scalar_sql_query(id, case).unwrap();
+            let resident =
+                id == "turso" && sql.is_none() && backend::resident_count_plan(case).unwrap();
             let eligible = if memory {
                 backend::memory_execution_plan(case).unwrap() == ExecutionPlan::CountFactorized
             } else {
-                sql.is_some()
+                sql.is_some() || resident
             };
             // Widening this contract is deliberate work, not an incidental
             // classifier change hidden by automatic inventory regeneration.
             let expected = matches!(
                 case.id.as_str(),
                 "q1" | "q4" | "a1-reversed-chain" | "a7-cartesian-count"
-            ) || (memory
+            ) || ((memory || id == "turso")
                 && matches!(
                     case.id.as_str(),
                     "q2" | "q3"
@@ -68,11 +70,11 @@ fn registry_matches_every_optimized_plan_without_authorizing_fallbacks() {
             }
             optimized += 1;
             let expected_entry = json!({
-                "plan": if memory { "count-factorized" } else { "sql-count" },
+                "plan": if memory || resident { "count-factorized" } else { "sql-count" },
                 "source_sha256": case.source_sha256,
                 "adapter_sha256": queries::sha256(case.executable.as_bytes()),
                 "execution_class": backend::portable_execution_class(id, case).unwrap(),
-                "rust_rows": if memory {
+                "rust_rows": if memory || resident {
                     json!({"kind": "not-materialized", "rows": 0})
                 } else {
                     Value::Null

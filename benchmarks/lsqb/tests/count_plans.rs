@@ -9,7 +9,8 @@ use grust_core::{Graph, Value};
 use grust_cypher::CypherParameters;
 use grust_cypher::pushdown::{NoTypeHints, plan_read, plan_scalar_count_read};
 use grust_lsqb_runner::backend::{
-    PreparedBackend, memory_execution_plan, portable_execution_class, scalar_sql_query,
+    PreparedBackend, memory_execution_plan, portable_execution_class, resident_count_plan,
+    scalar_sql_query,
 };
 use grust_lsqb_runner::dataset::{fingerprint_projected_dataset, load_projected_dataset};
 use grust_lsqb_runner::provenance::lsqb_dataset_identity;
@@ -85,6 +86,12 @@ fn expected_turso_route(case: &QueryCase) -> (ExecutionClass, ExecutionPlan) {
             ExecutionPlan::SqlCount,
         );
     }
+    if resident_count_plan(case).unwrap() {
+        return (
+            ExecutionClass::BackendResidentIndexRustCount,
+            ExecutionPlan::CountFactorized,
+        );
+    }
     if plan_read(&case.executable, &params, &NoTypeHints)
         .unwrap()
         .is_some_and(|plan| plan.supported_by(&TursoReadDialect::new("grust")))
@@ -148,18 +155,13 @@ fn check_descriptor(backend: &PreparedBackend, id: &str, case: &QueryCase) {
         );
     }
     if case.id == "a3-split-match" {
-        assert_eq!(
-            plan,
-            if id == "memory" {
-                ExecutionPlan::CountFactorized
-            } else {
-                ExecutionPlan::ClausePipeline
-            }
-        );
+        // Memory proves a non-materializing plan; Turso runs the same plan
+        // over its resident index and declares the distinct class for it.
+        assert_eq!(plan, ExecutionPlan::CountFactorized);
         if id == "turso" {
             assert_eq!(
                 descriptor.class,
-                Some(ExecutionClass::BackendMaterializeRustReference)
+                Some(ExecutionClass::BackendResidentIndexRustCount)
             );
             assert!(descriptor.backend_query_sha256.is_none());
         }

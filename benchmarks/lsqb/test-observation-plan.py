@@ -45,6 +45,15 @@ def manifest_with_registry(backend='memory', query_id='q1'):
             adapter_sha256=canonical['adapter_sha256'],
             rust_rows={'kind': 'not-materialized', 'rows': 0},
             backend_query_sha256=None)
+    elif backend == 'turso' and query_id == 'q6':
+        # A durable store's resident-index route: the same non-materializing
+        # plan as Memory under its own, distinct execution class.
+        entry = dict(
+            plan='count-factorized', execution_class='backend-resident-index-rust-count',
+            source_sha256=canonical['source_sha256'],
+            adapter_sha256=canonical['adapter_sha256'],
+            rust_rows={'kind': 'not-materialized', 'rows': 0},
+            backend_query_sha256=None)
     else:
         entry = dict(
             plan='sql-count', execution_class='backend-native-aggregate',
@@ -133,6 +142,7 @@ class ObservationPlanTests(unittest.TestCase):
     def test_optimized_plans_are_restricted_to_their_backends(self):
         for plan, backend, execution_class in (
                 ('count-factorized', 'ladybug', 'in-process-reference'),
+                ('count-factorized', 'lancedb', 'backend-resident-index-rust-count'),
                 ('sql-count', 'memory', 'backend-native-aggregate')):
             value = report()
             value['backends'][0]['backend']['name'] = backend
@@ -161,6 +171,21 @@ class ExecutionPlanRegistryTests(unittest.TestCase):
                 manifest, value = optimized_report(backend)
                 publication.manifest_execution_plans(manifest)
                 self.validate(manifest, value)
+
+    def test_resident_index_registry_contract_is_accepted_for_turso_only(self):
+        manifest, value = optimized_report('turso', 'q6')
+        publication.manifest_execution_plans(manifest)
+        self.validate(manifest, value)
+        # The same entry under a backend without a resident index is rejected.
+        manifest['execution_plans']['entries'] = {
+            'postgres': manifest['execution_plans']['entries']['turso']}
+        with self.assertRaisesRegex(publication.PublicationError, 'sql-count registry entry'):
+            publication.manifest_execution_plans(manifest)
+        # And a resident entry may not borrow the in-process reference class.
+        manifest, _ = optimized_report('turso', 'q6')
+        manifest['execution_plans']['entries']['turso']['q6']['execution_class'] = 'in-process-reference'
+        with self.assertRaisesRegex(publication.PublicationError, 'resident-index registry entry'):
+            publication.manifest_execution_plans(manifest)
 
     def test_planned_nonexecuted_shape_is_evidence_but_not_an_observation(self):
         for backend in ('memory', 'turso'):

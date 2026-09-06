@@ -43,12 +43,17 @@ impl ExecutionPlan {
                     )
             }
             Self::CountFactorized => {
-                execution.class == Some(ExecutionClass::InProcessReference)
-                    && rust_rows
-                        == Some(RustRowEstimate {
-                            kind: RustRowCardinality::NotMaterialized,
-                            rows: 0,
-                        })
+                matches!(
+                    execution.class,
+                    Some(
+                        ExecutionClass::InProcessReference
+                            | ExecutionClass::BackendResidentIndexRustCount
+                    )
+                ) && rust_rows
+                    == Some(RustRowEstimate {
+                        kind: RustRowCardinality::NotMaterialized,
+                        rows: 0,
+                    })
             }
             Self::SqlRowSource => {
                 materialized
