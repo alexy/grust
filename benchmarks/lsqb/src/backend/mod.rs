@@ -202,10 +202,12 @@ impl PreparedBackend {
                 // The coordinator loaded the store once; every observation
                 // worker reads it back and builds its own resident index
                 // before READY, so the build lands in setup, never in a query.
+                let build_started = Instant::now();
                 let resident = store
                     .indexed_snapshot()
                     .await
                     .map_err(|err| format!("attach: resident index: {err}"))?;
+                crate::load_progress::resident_index_built(&resident, build_started);
                 Ok(Self {
                     inner: Backend::Postgres { store, resident },
                     load_ns: 0,
@@ -630,10 +632,12 @@ async fn prepare_turso(graph: &Graph) -> Result<PreparedBackend, String> {
         .put_graph(graph)
         .await
         .map_err(|err| err.to_string())?;
+    let build_started = Instant::now();
     let resident = store
         .indexed_snapshot()
         .await
         .map_err(|err| format!("dataset.load: resident index: {err}"))?;
+    crate::load_progress::resident_index_built(&resident, build_started);
     Ok(PreparedBackend {
         inner: Backend::Turso { store, resident },
         load_ns: elapsed_ns(started)?,
@@ -650,10 +654,12 @@ where
     let started = Instant::now();
     store.bootstrap().await.map_err(|err| err.to_string())?;
     put_projected_chunks(&store, chunks).await?;
+    let build_started = Instant::now();
     let resident = store
         .indexed_snapshot()
         .await
         .map_err(|err| format!("dataset.load: resident index: {err}"))?;
+    crate::load_progress::resident_index_built(&resident, build_started);
     Ok(PreparedBackend {
         inner: Backend::Turso { store, resident },
         load_ns: elapsed_ns(started)?,
@@ -685,10 +691,12 @@ async fn prepare_postgres(graph: &Graph) -> Result<PreparedBackend, String> {
         .put_graph(graph)
         .await
         .map_err(|err| err.to_string())?;
+    let build_started = Instant::now();
     let resident = store
         .indexed_snapshot()
         .await
         .map_err(|err| format!("dataset.load: resident index: {err}"))?;
+    crate::load_progress::resident_index_built(&resident, build_started);
     Ok(PreparedBackend {
         inner: Backend::Postgres { store, resident },
         load_ns: elapsed_ns(started)?,
@@ -706,10 +714,12 @@ where
     store.bootstrap().await.map_err(|err| err.to_string())?;
     store.clear().await.map_err(|err| err.to_string())?;
     put_projected_chunks(&store, chunks).await?;
+    let build_started = Instant::now();
     let resident = store
         .indexed_snapshot()
         .await
         .map_err(|err| format!("dataset.load: resident index: {err}"))?;
+    crate::load_progress::resident_index_built(&resident, build_started);
     Ok(PreparedBackend {
         inner: Backend::Postgres { store, resident },
         load_ns: elapsed_ns(started)?,
