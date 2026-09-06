@@ -6,6 +6,15 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- LSQB matrix resume mode: `RESUME_FROM=<prior OUTPUT_DIR>` makes a
+  publication run copy in every cell of a prior publication run whose
+  outputs verify against the prior receipt's hashes and were produced at the
+  same revision, images and cell timeout as a valid cell, and execute only
+  the rest. The receipt's new `reused_cells` list names each reused cell with
+  the prior directory, receipt digest and Compose project; the publication
+  validator and the site verifier check reused cells' watchdog records
+  against it and reject unexplained foreign records, reused failures, and a
+  run that executed nothing.
 - LSQB matrix: a durable store with a resident typed index built inside its
   worker's load interval declares the distinct execution class
   `backend-resident-index-rust-count` for queries whose structural proof admits

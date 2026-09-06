@@ -264,6 +264,28 @@ independently rejected `-discovery` marker to the revision (in addition to any
 and must not be checked in, deployed, or described as result evidence. It
 cannot be combined with `SMOKE=1`.
 
+A change to one backend does not have to cost a full matrix. With
+`RESUME_FROM=<prior OUTPUT_DIR>`, a publication run copies in every cell of
+the prior run that still verifies, and executes only the rest:
+
+```sh
+CELL_TIMEOUT_MS=3600000 SF=0.1 RESUME_FROM=benchmarks/lsqb/out/matrix-sf0.1-prior \
+  OUTPUT_DIR=benchmarks/lsqb/out/matrix-sf0.1-next benchmarks/lsqb/run-grust.sh
+```
+
+A cell is reused only when its component report, run log, watchdog record
+and (where the contract has one) service log exist in the prior directory,
+match the hashes the prior publication receipt recorded, were produced at the
+same source revision, runner image, service image and cell timeout, and
+finished as a valid cell with a clean watchdog completion. Anything else runs
+fresh, and at least one cell must run. The new receipt lists every reused
+cell with the prior directory, the prior receipt's digest and the prior
+watchdog record's Compose project (`reused_cells`), so a reused cell is
+distinguishable from an executed one; the validator and the site verifier
+check each reused cell's watchdog record against that list. `RESUME_FROM`
+cannot be combined with `SMOKE=1` or `DISCOVERY=1`, and the prior directory
+is never modified.
+
 After the example conformance gate passes, run the authenticated downloaded
 tiers in fresh directories:
 
