@@ -9,6 +9,9 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Reserve up to five seconds (was one) of the coordinator deadline for
   FalkorDB's native TIMEOUT acknowledgement; at SF0.1 q9 overshot the
   one-second reserve and the unacknowledged kill aborted the cell.
+- Reserve up to five seconds (was one) of the coordinator deadline for
+  FalkorDB's native TIMEOUT acknowledgement; at SF0.1 q9 overshot the
+  one-second reserve and the unacknowledged kill aborted the cell.
 - Make the host preflight's aggregate-CPU limit an explicit, recorded
   parameter (default two cores, at most four); the busy-process rule is
   unchanged and legacy records without the field are still held to two cores.
