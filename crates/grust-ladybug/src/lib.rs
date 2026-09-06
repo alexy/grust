@@ -15,6 +15,10 @@ use arrow::{
 use async_trait::async_trait;
 use grust_core::prelude::*;
 
+#[cfg(feature = "arrow")]
+mod bulk_load;
+mod traversal;
+
 #[derive(Clone, Debug)]
 pub struct LadybugConfig {
     pub path: LadybugPath,
@@ -24,6 +28,10 @@ pub struct LadybugConfig {
     /// is the strict typed mode where `apply_schema` must run first.
     pub dynamic_schema: bool,
     pub query_timeout_ms: Option<u64>,
+    /// Cap on the engine's buffer pool in bytes. `None` keeps the engine's
+    /// default, which it sizes from the host's physical memory (several
+    /// gigabytes resident on a 15 GiB host for a 200k-edge graph).
+    pub buffer_pool_bytes: Option<u64>,
 }
 
 impl Default for LadybugConfig {
@@ -33,6 +41,7 @@ impl Default for LadybugConfig {
             table_prefix: "grust".to_string(),
             dynamic_schema: true,
             query_timeout_ms: None,
+            buffer_pool_bytes: None,
         }
     }
 }
@@ -104,11 +113,13 @@ struct RelTable {
 
 impl LadybugGraphStore {
     pub fn new(config: LadybugConfig) -> Result<Self> {
+        let system = match config.buffer_pool_bytes {
+            Some(bytes) => lbug::SystemConfig::default().buffer_pool_size(bytes),
+            None => lbug::SystemConfig::default(),
+        };
         let db = match &config.path {
-            LadybugPath::InMemory => lbug::Database::in_memory(lbug::SystemConfig::default()),
-            LadybugPath::Directory(path) => {
-                lbug::Database::new(path, lbug::SystemConfig::default())
-            }
+            LadybugPath::InMemory => lbug::Database::in_memory(system),
+            LadybugPath::Directory(path) => lbug::Database::new(path, system),
         }
         .map_err(ladybug_error)?;
         Ok(Self {
@@ -646,6 +657,98 @@ impl LadybugGraphStore {
         rows.map(row_to_rel_table).collect()
     }
 
+    /// Write every node and edge of `graph` into the tables resolved for them.
+    /// With the `arrow` feature the rows are grouped by table and loaded
+    /// through registered Arrow tables and `COPY`; otherwise one statement per
+    /// row, which costs the engine tens of milliseconds each.
+    fn write_graph_rows_locked(
+        &self,
+        conn: &lbug::Connection<'_>,
+        graph: &Graph,
+        node_tables: &BTreeMap<NodeId, String>,
+        edge_tables: &BTreeMap<String, (String, String, String)>,
+    ) -> Result<LoadReport> {
+        let mut nodes_by_table: BTreeMap<&str, Vec<&Node>> = BTreeMap::new();
+        for node in &graph.nodes {
+            let table = node_tables.get(&node.id).ok_or_else(|| {
+                GrustError::Schema(format!(
+                    "Ladybug node table missing for '{}'",
+                    node.id.as_str()
+                ))
+            })?;
+            nodes_by_table.entry(table).or_default().push(node);
+        }
+        let mut edges_by_table: BTreeMap<&(String, String, String), Vec<&Edge>> = BTreeMap::new();
+        for edge in &graph.edges {
+            let edge_key = checked_edge_key(edge)?;
+            let tables = edge_tables.get(&edge_key).ok_or_else(|| {
+                GrustError::Schema(format!(
+                    "Ladybug relationship table missing for edge '{edge_key}'"
+                ))
+            })?;
+            edges_by_table.entry(tables).or_default().push(edge);
+        }
+        let mut report = LoadReport::default();
+        for (table, nodes) in &nodes_by_table {
+            report.nodes += self.write_nodes_locked(conn, table, nodes)?;
+        }
+        for ((rel_table, from_table, to_table), edges) in &edges_by_table {
+            report.edges +=
+                self.write_edges_locked(conn, rel_table, from_table, to_table, edges)?;
+        }
+        Ok(report)
+    }
+
+    #[cfg(feature = "arrow")]
+    fn write_nodes_locked(
+        &self,
+        conn: &lbug::Connection<'_>,
+        table: &str,
+        nodes: &[&Node],
+    ) -> Result<usize> {
+        self.bulk_write_nodes_locked(conn, table, nodes)
+    }
+
+    #[cfg(not(feature = "arrow"))]
+    fn write_nodes_locked(
+        &self,
+        conn: &lbug::Connection<'_>,
+        table: &str,
+        nodes: &[&Node],
+    ) -> Result<usize> {
+        for node in nodes {
+            self.write_node_locked(conn, node, table)?;
+        }
+        Ok(nodes.len())
+    }
+
+    #[cfg(feature = "arrow")]
+    fn write_edges_locked(
+        &self,
+        conn: &lbug::Connection<'_>,
+        rel_table: &str,
+        from_table: &str,
+        to_table: &str,
+        edges: &[&Edge],
+    ) -> Result<usize> {
+        self.bulk_write_edges_locked(conn, rel_table, from_table, to_table, edges)
+    }
+
+    #[cfg(not(feature = "arrow"))]
+    fn write_edges_locked(
+        &self,
+        conn: &lbug::Connection<'_>,
+        rel_table: &str,
+        from_table: &str,
+        to_table: &str,
+        edges: &[&Edge],
+    ) -> Result<usize> {
+        for edge in edges {
+            self.write_edge_locked(conn, edge, rel_table, from_table, to_table)?;
+        }
+        Ok(edges.len())
+    }
+
     fn put_node_locked(&self, conn: &lbug::Connection<'_>, node: &Node) -> Result<PutOutcome> {
         self.bootstrap_locked(conn)?;
         let table = if self.config.dynamic_schema {
@@ -973,32 +1076,7 @@ impl GraphStore for LadybugGraphStore {
                 edge_tables.insert(checked_edge_key(edge)?, (rel_table, from_table, to_table));
             }
             Self::exec(conn, "BEGIN TRANSACTION;")?;
-            let result = (|| {
-                let mut report = LoadReport::default();
-                for node in &graph.nodes {
-                    let table = node_tables.get(&node.id).ok_or_else(|| {
-                        GrustError::Schema(format!(
-                            "Ladybug node table missing for '{}'",
-                            node.id.as_str()
-                        ))
-                    })?;
-                    self.write_node_locked(conn, node, table)?;
-                    report.nodes += 1;
-                }
-                for edge in &graph.edges {
-                    let edge_key = checked_edge_key(edge)?;
-                    let (rel_table, from_table, to_table) =
-                        edge_tables.get(&edge_key).ok_or_else(|| {
-                            GrustError::Schema(format!(
-                                "Ladybug relationship table missing for edge '{}'",
-                                edge_key
-                            ))
-                        })?;
-                    self.write_edge_locked(conn, edge, rel_table, from_table, to_table)?;
-                    report.edges += 1;
-                }
-                Ok(report)
-            })();
+            let result = self.write_graph_rows_locked(conn, graph, &node_tables, &edge_tables);
             match result {
                 Ok(report) => {
                     Self::exec(conn, "COMMIT;")?;
@@ -1033,57 +1111,11 @@ impl GraphStore for LadybugGraphStore {
     }
 
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>> {
-        self.with_conn(|conn| {
-            self.bootstrap_locked(conn)?;
-            let mut current = self.start_nodes(conn, traversal.start)?;
-            for step in traversal.steps {
-                let mut next_by_id = BTreeMap::<NodeId, Node>::new();
-                for node in &current {
-                    let mut out_query = EdgeQuery {
-                        from: Some(node.id.clone()),
-                        to: None,
-                        label: step.edge.clone(),
-                    };
-                    let mut in_query = EdgeQuery {
-                        from: None,
-                        to: Some(node.id.clone()),
-                        label: step.edge.clone(),
-                    };
-                    let edge_sets = match step.direction {
-                        Direction::Out => {
-                            vec![self.get_edges_locked(conn, shift_query(&mut out_query))?]
-                        }
-                        Direction::In => {
-                            vec![self.get_edges_locked(conn, shift_query(&mut in_query))?]
-                        }
-                        Direction::Both => vec![
-                            self.get_edges_locked(conn, shift_query(&mut out_query))?,
-                            self.get_edges_locked(conn, shift_query(&mut in_query))?,
-                        ],
-                    };
-                    for edge in edge_sets.into_iter().flatten() {
-                        let target_id = if edge.from == node.id {
-                            &edge.to
-                        } else {
-                            &edge.from
-                        };
-                        if let Some(target) = self.get_node_locked(conn, target_id)?
-                            && step
-                                .node
-                                .as_ref()
-                                .is_none_or(|label| label == &target.label)
-                        {
-                            next_by_id.insert(target.id.clone(), target);
-                        }
-                    }
-                }
-                current = next_by_id.into_values().collect();
-            }
-            if let Some(limit) = traversal.limit {
-                current.truncate(limit as usize);
-            }
-            Ok(current)
-        })
+        self.with_conn(|conn| self.traverse_locked(conn, traversal))
+    }
+
+    async fn traverse_ids(&self, traversal: Traversal) -> Result<Vec<NodeId>> {
+        self.with_conn(|conn| self.traverse_ids_locked(conn, traversal))
     }
 }
 
@@ -1151,10 +1183,6 @@ fn arrow_batch_to_ipc(batch: &ArrowRecordBatch) -> Result<Vec<u8>> {
             .map_err(|err| GrustError::Backend(format!("Arrow IPC write failed: {err}")))?;
     }
     Ok(data)
-}
-
-fn shift_query(query: &mut EdgeQuery) -> EdgeQuery {
-    std::mem::take(query)
 }
 
 fn props_to_string(props: &Props) -> Result<String> {

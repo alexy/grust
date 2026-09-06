@@ -6,6 +6,13 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Ladybug loads through registered Arrow tables and `COPY … FROM (MATCH …)`
+  (the crate's `arrow` feature, now on by default): rows grouped per table,
+  new ids and `(from, to)` pairs copied, existing ones merged as before, last
+  row per key wins within a load. A traversal step is one query per
+  relationship table (`MATCH (a)-[r]->(b) WHERE a.id = $id`) instead of one
+  point lookup per neighbour, `traverse_ids` returns ids only, and
+  `LadybugConfig::buffer_pool_bytes` caps the engine's host-sized buffer pool.
 - Turso keeps a resident typed snapshot: `TursoGraphStore::indexed_snapshot`
   builds a `TypedGraphIndex` from a full read of the store under the
   connection gate, shares it until any statement that can change the store

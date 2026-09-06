@@ -467,3 +467,105 @@ mod arrow_tests {
         Ok(())
     }
 }
+
+#[tokio::test]
+async fn bulk_load_keeps_upsert_semantics_and_serves_traversals() {
+    let store = LadybugGraphStore::in_memory().expect("open");
+    // Two rows for the same id and the same (from, to) pair in one load: the
+    // last one wins, as a sequence of MERGEs would leave it.
+    let first = Graph::new(
+        vec![
+            Node::new("V", "a", props(&[("v", Value::from(1))])),
+            Node::new("V", "b", Props::default()),
+            Node::new("V", "c", Props::default()),
+            Node::new("V", "a", props(&[("v", Value::from(2))])),
+        ],
+        vec![
+            Edge::new("E", "a", "b", props(&[("w", Value::from(1))])),
+            Edge::new("E", "a", "c", Props::default()),
+            Edge::new("E", "a", "b", props(&[("w", Value::from(2))])),
+        ],
+    );
+    let report = store.put_graph(&first).await.expect("bulk load");
+    assert_eq!((report.nodes, report.edges), (4, 3));
+    let a = store
+        .get_node(&"a".into())
+        .await
+        .expect("read")
+        .expect("a exists");
+    assert_eq!(a.props.get("v"), Some(&Value::from(2)));
+    let out = store
+        .get_edges(EdgeQuery {
+            from: Some("a".into()),
+            to: None,
+            label: Some("E".into()),
+        })
+        .await
+        .expect("edges");
+    assert_eq!(out.len(), 2, "one edge per pair");
+    let ab = out
+        .iter()
+        .find(|edge| edge.to.as_str() == "b")
+        .expect("a->b");
+    assert_eq!(ab.props.get("w"), Some(&Value::from(2)));
+
+    // A second load with an existing id and pair updates them and adds the rest.
+    let second = Graph::new(
+        vec![
+            Node::new("V", "a", props(&[("v", Value::from(3))])),
+            Node::new("V", "b", Props::default()),
+            Node::new("V", "d", Props::default()),
+        ],
+        vec![
+            Edge::new("E", "a", "b", props(&[("w", Value::from(3))])),
+            Edge::new("E", "d", "a", Props::default()),
+        ],
+    );
+    store.put_graph(&second).await.expect("second load");
+    let a = store
+        .get_node(&"a".into())
+        .await
+        .expect("read")
+        .expect("a exists");
+    assert_eq!(a.props.get("v"), Some(&Value::from(3)));
+    let out = store
+        .get_edges(EdgeQuery {
+            from: Some("a".into()),
+            to: None,
+            label: Some("E".into()),
+        })
+        .await
+        .expect("edges");
+    assert_eq!(out.len(), 2);
+    assert_eq!(
+        out.iter()
+            .find(|e| e.to.as_str() == "b")
+            .unwrap()
+            .props
+            .get("w"),
+        Some(&Value::from(3))
+    );
+
+    let mut reached: Vec<_> = store
+        .traverse_ids(Traversal::from_node("a").out("E"))
+        .await
+        .expect("traverse_ids")
+        .into_iter()
+        .map(|id| id.as_str().to_string())
+        .collect();
+    reached.sort();
+    assert_eq!(reached, ["b", "c"]);
+    let incoming = store
+        .traverse(Traversal::from_node("a").in_("E"))
+        .await
+        .expect("traverse");
+    assert_eq!(
+        incoming.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+        ["d"]
+    );
+    let both = store
+        .traverse_ids(Traversal::from_node("a").both("E"))
+        .await
+        .expect("both");
+    assert_eq!(both.len(), 3);
+}
