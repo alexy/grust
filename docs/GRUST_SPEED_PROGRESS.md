@@ -227,6 +227,42 @@ takes the SQL count (q1, q4, a1, a7), and Turso's per-observation reload
 makes the two Turso cells five hours; a prebuilt database copy would keep the
 fresh-process proof at a fraction of that.
 
+## Qualified SF0.1 cohort after the route and reload changes (2026-09-06, laptop, revision `7429fc7`)
+
+`benchmarks/lsqb/out/matrix-sf0.1-w2r10-7429fc7-g1`, receipt SHA-256
+`eb05aa3199443cb58248b4fbe7d48f9cb781a41858b222eb0567309788900669`, the same
+W2/R10, 60 s, 8 CPU / 6 GiB protocol and host screen as the `68d1b09` cohort
+above; every cell records zero host CPU steal. 83 minutes end to end
+(the `68d1b09` run took 6 h 40 min). `all_required_outcomes_valid` is false
+only because FalkorDB's two cells are declared quiescence terminations (q9
+and a7 in warm-up 1), unchanged.
+
+Memory, Turso and PostgreSQL each pass all 22 cases with exact counts; Turso
+and PostgreSQL route every case through the resident index. Medians in ms of
+ten measured samples; the native column is the site's published SF0.1 native
+comparator bundle, listed for scale only:
+
+| Query | Memory | Turso (resident) | PostgreSQL (resident) | Native comparator |
+|---|---|---|---|---|
+| q1 | 52 | 50 | 50 | 1,182 |
+| q2 | 149 | 172 | 174 | 352 |
+| q3 | 9 | 9 | 9 | 526 |
+| q4 | 121 | 128 | 130 | 1,975 |
+| q5 | 106 | 118 | 118 | 1,621 |
+| q6 | 6 | 4 | 5 | 3,312 |
+| q7 | 122 | 118 | 120 | 2,546 |
+| q8 | 105 | 118 | 118 | 2,507 |
+| q9 | 15 | 12 | 12 | 3,606 |
+| a1 reversed chain | 50 | 51 | 51 | 19,015 |
+| a2 to a5 | 104 to 153 | 107 to 181 | 108 to 182 | 808 to 4,010 |
+| a6 to a13 | 1.8 to 5.2 | 1.5 to 4.5 | 1.7 to 4.6 | 6 to 10 |
+
+Cell wall times: Memory 5.6 + 8.3 min; Turso 8.4 + 12.4 min (prebuilt store
+copy, 4.7 s per observation); PostgreSQL 10.4 + 14.9 min; FalkorDB 3.9 + 3.2
+min to termination; the rest seconds. Published on adversari.al/graph as the
+second bundle of 2026-09-06 (`grust/sf0.1-7429fc7`); the `68d1b09` bundle
+stays as the pre-change baseline.
+
 ## Measurement discipline
 
 No new qualified performance cohort has been run for these speed changes. Historical
