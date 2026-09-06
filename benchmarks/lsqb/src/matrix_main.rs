@@ -519,7 +519,7 @@ fn finalize_terminated_cell(
         }
         let short =
             outcome.warmups.len() < warmups as usize || outcome.measurements.len() < runs as usize;
-        if !short {
+        if !short && outcome.id != termination.query_id {
             continue;
         }
         outcome.outcome = OutcomeStatus::Error;

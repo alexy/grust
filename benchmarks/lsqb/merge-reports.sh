@@ -248,7 +248,7 @@ for report in "${reports[@]}"; do
                 else
                     (($query_index - (($iteration - 1) % $query_count) + $query_count) % $query_count) + 1
                 end;
-            def observation_valid($observation; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract; $class; $required_plan):
+            def observation_valid($observation; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract; $class; $required_plan; $terminal):
                 ($observation | type == "object")
                 and ($observation | has("iteration") and has("query_position")
                     and has("setup_ns") and has("elapsed_ns") and has("recovery_ns")
@@ -288,7 +288,11 @@ for report in "${reports[@]}"; do
                     end
                 )
                 and (
-                    if $observation.termination == "normal-exit" then
+                    if $terminal then
+                        # The declared terminal observation ended the cell because
+                        # recovery could not be proven; it is an error by declaration.
+                        $observation.outcome == "error"
+                    elif $observation.termination == "normal-exit" then
                         $observation.outcome != "timeout"
                         and $observation.elapsed_ns <= $timeout_ns
                         and (
@@ -317,11 +321,18 @@ for report in "${reports[@]}"; do
                         )
                     end
                 );
-            def phase_valid($observations; $iterations; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract; $class; $required_plan):
-                ($observations | type == "array" and length == $iterations)
-                and (($observations | map(.iteration) | sort) == [range(1; $iterations + 1)])
+            def phase_valid($observations; $iterations; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract; $class; $required_plan; $terminated; $query_id; $phase_name):
+                ($observations | type == "array")
+                and (
+                    if $terminated == null then ($observations | length == $iterations)
+                    else ($observations | length <= $iterations)
+                    end
+                )
+                and (($observations | map(.iteration) | sort) == [range(1; ($observations | length) + 1)])
                 and all($observations[];
-                    observation_valid(.; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract; $class; $required_plan)
+                    observation_valid(.; $expected; $query_index; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract; $class; $required_plan;
+                        ($terminated != null and $terminated.query_id == $query_id
+                            and $terminated.phase == $phase_name and $terminated.iteration == .iteration))
                 );
             def reduced_outcome($observations):
                 if any($observations[]; .outcome == "error") then
@@ -394,7 +405,7 @@ for report in "${reports[@]}"; do
                     )
                     or optimized_query_shape($query; $backend)
                 );
-            def executed_query_valid($query; $canonical; $backend; $scale; $warmups; $measurements; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract):
+            def executed_query_valid($query; $canonical; $backend; $scale; $warmups; $measurements; $query_count; $order; $timeout_ns; $ready_ns; $term_grace_ns; $recovery_contract; $terminated):
                 common_query_valid($query; $canonical; $backend; $scale)
                 and (
                     if $query.execution.class == null then
@@ -449,7 +460,10 @@ for report in "${reports[@]}"; do
                             $term_grace_ns;
                             $recovery_contract;
                             $query.execution.class;
-                            $required_plan
+                            $required_plan;
+                            $terminated;
+                            $query.id;
+                            "warmup"
                         )
                         and phase_valid(
                             $query.measurements;
@@ -463,11 +477,34 @@ for report in "${reports[@]}"; do
                             $term_grace_ns;
                             $recovery_contract;
                             $query.execution.class;
-                            $required_plan
+                            $required_plan;
+                            $terminated;
+                            $query.id;
+                            "measurement"
                         )
-                        and ($query.outcome == reduced_outcome($query.warmups + $query.measurements))
                         and (
-                            if $query.outcome == "pass" then
+                            (($query.warmups | length) < $warmups
+                                or ($query.measurements | length) < $measurements) as $short
+                            | if $short then
+                                # Only a declared termination leaves a query short, and
+                                # then it is an explicit error, never a derived pass.
+                                $terminated != null
+                                and $query.outcome == "error"
+                                and $query.reason_code == "backend.quiescence-unproven"
+                                and ($query.detail | nonempty_string)
+                                and ($query.id != $terminated.query_id
+                                    or $query.detail == $terminated.detail)
+                              elif $terminated != null and $query.id == $terminated.query_id then
+                                # The terminating query carries the declaration even when its
+                                # terminal observation was the last one its contract required.
+                                $query.outcome == "error"
+                                and $query.reason_code == "backend.quiescence-unproven"
+                                and $query.detail == $terminated.detail
+                              else
+                                $query.reason_code != "backend.quiescence-unproven"
+                                and ($query.outcome == reduced_outcome($query.warmups + $query.measurements))
+                                and (
+                                    if $query.outcome == "pass" then
                                 $query.reason_code == null
                             elif $query.outcome == "mismatch" then
                                 $query.reason_code == "query.oracle-mismatch"
@@ -480,6 +517,8 @@ for report in "${reports[@]}"; do
                             else
                                 false
                             end
+                                )
+                              end
                         )
                     end
                 );
@@ -683,7 +722,45 @@ for report in "${reports[@]}"; do
                     and ($cell.backend.image_id | . == null or (string and test("^sha256:[0-9a-f]{64}$")))
                     and ($cell.backend.worker_threads | . == null or positive_integer)
                     and ($cell.lifecycle | type == "object")
-                    and (($cell.lifecycle | keys) == ["load_strategy", "recovery_contract"])
+                    and (($cell.lifecycle | keys) == ["load_strategy", "recovery_contract"]
+                        or ($cell.lifecycle | keys) == ["load_strategy", "recovery_contract", "terminated"])
+                    and (
+                        $cell.lifecycle.terminated as $terminated
+                        | $terminated == null
+                        or (
+                            $cell.setup_outcome == "pass"
+                            and ($terminated | type == "object")
+                            and (($terminated | keys) == ["detail", "iteration", "phase", "query_id", "reason_code"])
+                            and $terminated.reason_code == "backend.quiescence-unproven"
+                            and ($terminated.phase == "warmup" or $terminated.phase == "measurement")
+                            and ($terminated.iteration | positive_integer)
+                            and ($terminated.detail | nonempty_string)
+                            and (
+                                [$cell.queries[] | select(.id == $terminated.query_id)] as $named
+                                | ($named | length == 1)
+                                and (
+                                    (if $terminated.phase == "warmup" then $named[0].warmups else $named[0].measurements end) as $phase
+                                    | ($phase | length > 0)
+                                    and ($phase[-1] as $last
+                                        | $last.iteration == $terminated.iteration
+                                        and $last.outcome == "error"
+                                        and $last.detail == $terminated.detail
+                                        # Nothing may follow the terminal observation in rotation order.
+                                        and all($cell.queries[];
+                                            (if $terminated.phase == "warmup" then
+                                                (.measurements | length == 0)
+                                                and all(.warmups[]; .iteration < $terminated.iteration
+                                                    or (.iteration == $terminated.iteration and .query_position <= $last.query_position))
+                                             else
+                                                all(.measurements[]; .iteration < $terminated.iteration
+                                                    or (.iteration == $terminated.iteration and .query_position <= $last.query_position))
+                                             end)
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
                     and ($cell.lifecycle.load_strategy as $load_strategy
                         | $load_strategy == "once-worker-attach"
                         or $load_strategy == "per-observation-worker-reload"
@@ -792,7 +869,8 @@ for report in "${reports[@]}"; do
                                     $timeout_ns;
                                     $ready_ns;
                                     $term_grace_ns;
-                                    $cell.lifecycle.recovery_contract
+                                    $cell.lifecycle.recovery_contract;
+                                    $cell.lifecycle.terminated
                                 )
                             )
                         elif $cell.setup_outcome == "error" then

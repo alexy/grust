@@ -788,6 +788,65 @@ jq '
 expect_failure "non-timeout observation after its declared deadline" \
     "$merge" "$temporary_directory/rejected-late-success.json" "$late_success"
 
+# A declared early stop: the backend could not prove quiescence after an
+# unacknowledged worker exit, the terminal observation is an error, nothing
+# follows it in rotation order, and every short query is an explicit error.
+terminated_detail="backend falkor could not prove quiescence after an unacknowledged query exit; no further observation was taken in this cell"
+terminate_component() {
+    local declare=$1 keep_later=$2
+    jq --arg detail "$terminated_detail" --argjson declare "$declare" --argjson keep_later "$keep_later" '
+        .timing.warmup_iterations as $warmups
+        | .timing.measurement_iterations as $measurements
+        | .backends[0].queries[1].id as $terminal_id
+        | .backends[0].queries |= (
+            to_entries | map(
+                .key as $index
+                | .value
+                | if $index == 0 then
+                    .measurements |= map(select(.iteration == 1))
+                  elif $index == 1 then
+                    .measurements |= (map(select(.iteration == 1))
+                        | .[0] |= (. + {outcome: "error", detail: $detail, termination: "deadline-sigterm", elapsed_ns: 100000000000}
+                                   | del(.actual_count)))
+                  else
+                    .measurements |= (if $keep_later then map(select(.iteration == 1)) else [] end)
+                  end
+                | if .id == $terminal_id or (.warmups | length) < $warmups or (.measurements | length) < $measurements then
+                    .outcome = "error"
+                    | .reason_code = "backend.quiescence-unproven"
+                    | .detail = (if .id == $terminal_id then $detail
+                                 else "not observed to the sampling contract: the cell terminated at \($terminal_id) measurement iteration 1 (backend.quiescence-unproven)" end)
+                  else . end
+            )
+        )
+        | if $declare then
+            .backends[0].lifecycle.terminated = {
+                query_id: $terminal_id, phase: "measurement", iteration: 1,
+                reason_code: "backend.quiescence-unproven", detail: $detail }
+          else . end
+        | .valid = false
+    ' "$temporary_directory/baseline/falkor.json"
+}
+terminated_cell="$temporary_directory/terminated-falkor.json"
+terminate_component true false >"$terminated_cell"
+"$merge" "$temporary_directory/accepted-terminated.json" "$terminated_cell" >/dev/null || {
+    echo "test-evidence-tools.sh: declared quiescence termination was rejected" >&2
+    exit 1
+}
+jq -e '.valid == false and .complete == false and (.backends[0].lifecycle.terminated.query_id == .backends[0].queries[1].id)' \
+    "$temporary_directory/accepted-terminated.json" >/dev/null || {
+    echo "test-evidence-tools.sh: merged terminated cell lost its declaration or validity" >&2
+    exit 1
+}
+undeclared_cell="$temporary_directory/undeclared-terminated-falkor.json"
+terminate_component false false >"$undeclared_cell"
+expect_failure "undeclared short cell" \
+    "$merge" "$temporary_directory/rejected-undeclared.json" "$undeclared_cell"
+late_cell="$temporary_directory/terminated-with-later-observation.json"
+terminate_component true true >"$late_cell"
+expect_failure "observation after a declared termination" \
+    "$merge" "$temporary_directory/rejected-late-terminated.json" "$late_cell"
+
 query_fallback="$downloaded_directory/query-materialization-refused.json"
 jq '
     .backends[0].queries[0] |= (
