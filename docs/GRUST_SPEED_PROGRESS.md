@@ -120,6 +120,18 @@ These changes are still in the worktree unless a source commit is named above.
 
 ## Verification and remaining work
 
+- 2026-09-06 (EC2, strain harness A8): the clause-pipeline reference
+  executor's grouped aggregation is quadratic in the number of groups.
+  `MATCH (c:Message {kind: 'Comment'})-[:REPLY_OF]->(m:Message) RETURN
+  m.id AS root, count(c) AS replies ORDER BY replies DESC, root LIMIT 20`
+  over a 200,000-edge SNB slice (151k comments, about 100k distinct roots)
+  took 1,230 s, while the same shape over 1.5k groups (posts per creator,
+  136k rows) took 66 ms and over 16k groups (tag popularity, 290k rows)
+  400 ms. Turso's row-source pushdown answered the same query in about a
+  second. The harness now gives the oracle the same 120 s budget as the
+  store and records the shape as not comparable; the executor's group
+  lookup is the thing to fix.
+
 | Area | Verified locally | Still required |
 |---|---|---|
 | Memory counts | All 22 pinned example answers match independent/reference oracles; all 22 example workers execute their declared fast plans; all 22 counts also pass one-pass SF0.1/SF0.3 diagnostics | Qualified container cohorts and performance comparison |
