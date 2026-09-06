@@ -204,10 +204,10 @@
       "postgres": {
         "a1-reversed-chain": {
           "adapter_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
-          "backend_query_sha256": "fdb13fa230427ed1885148a526a20e8a8bb8ed214f22a7c6a5e4d45187ab2a3b",
-          "execution_class": "backend-native-aggregate",
-          "plan": "sql-count",
-          "rust_rows": null,
+          "backend_query_sha256": null,
+          "execution_class": "backend-resident-index-rust-count",
+          "plan": "count-factorized",
+          "rust_rows": {"kind": "not-materialized", "rows": 0},
           "source_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261"
         },
         "a10-unicode-literal": {
@@ -284,10 +284,10 @@
         },
         "a7-cartesian-count": {
           "adapter_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
-          "backend_query_sha256": "228c5adb4f82519e9acdd5947a89fa93f8bba21077db79cf5320de00aa9be76c",
-          "execution_class": "backend-native-aggregate",
-          "plan": "sql-count",
-          "rust_rows": null,
+          "backend_query_sha256": null,
+          "execution_class": "backend-resident-index-rust-count",
+          "plan": "count-factorized",
+          "rust_rows": {"kind": "not-materialized", "rows": 0},
           "source_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3"
         },
         "a8-union-dedup": {
@@ -308,10 +308,10 @@
         },
         "q1": {
           "adapter_sha256": "3f1048adb40cd8666593a587a83b93a02c2fa3e901bee00979fd46deab67fbf9",
-          "backend_query_sha256": "13216a5bf6d888bcb9dcd60691b9a99d9f4e7703a88766ddbb949d415d5490de",
-          "execution_class": "backend-native-aggregate",
-          "plan": "sql-count",
-          "rust_rows": null,
+          "backend_query_sha256": null,
+          "execution_class": "backend-resident-index-rust-count",
+          "plan": "count-factorized",
+          "rust_rows": {"kind": "not-materialized", "rows": 0},
           "source_sha256": "e08571bf8c877508cd3745ee7dcc8c061259c3b4d5a3fb17a952fbac4f9145ed"
         },
         "q2": {
@@ -332,10 +332,10 @@
         },
         "q4": {
           "adapter_sha256": "9bca16043cb3c2e644405a7a8aa029542cb6a157c2f8324974d7cf8853ab662d",
-          "backend_query_sha256": "004495bdb34aafc1eeb3c969f9d22d51ee0f2c7213d5498b918744a87f2a32fb",
-          "execution_class": "backend-native-aggregate",
-          "plan": "sql-count",
-          "rust_rows": null,
+          "backend_query_sha256": null,
+          "execution_class": "backend-resident-index-rust-count",
+          "plan": "count-factorized",
+          "rust_rows": {"kind": "not-materialized", "rows": 0},
           "source_sha256": "1675c38f7cc117ba9be4de8fc0c1d7073901a03cfc5a174f2241e14c602c9a9f"
         },
         "q5": {
@@ -382,10 +382,10 @@
       "turso": {
         "a1-reversed-chain": {
           "adapter_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261",
-          "backend_query_sha256": "88b6f7a70066a5f2e66a73195e0d82503d4e972fdd82e1ec3e1946774f1cef8c",
-          "execution_class": "backend-native-aggregate",
-          "plan": "sql-count",
-          "rust_rows": null,
+          "backend_query_sha256": null,
+          "execution_class": "backend-resident-index-rust-count",
+          "plan": "count-factorized",
+          "rust_rows": {"kind": "not-materialized", "rows": 0},
           "source_sha256": "b57f873b0c8122e9e01489b42085d90af60c8edf0ffd5b866f70a70db38ff261"
         },
         "a10-unicode-literal": {
@@ -462,10 +462,10 @@
         },
         "a7-cartesian-count": {
           "adapter_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3",
-          "backend_query_sha256": "dd657c13cc3a94174077e795ef82b66973000fe46567dceec27f4d8a87b1bbb3",
-          "execution_class": "backend-native-aggregate",
-          "plan": "sql-count",
-          "rust_rows": null,
+          "backend_query_sha256": null,
+          "execution_class": "backend-resident-index-rust-count",
+          "plan": "count-factorized",
+          "rust_rows": {"kind": "not-materialized", "rows": 0},
           "source_sha256": "5de0ea92c548c0c218e026b239817a0748ea5d0ea7f90cc20dab17652ba43ac3"
         },
         "a8-union-dedup": {
@@ -486,10 +486,10 @@
         },
         "q1": {
           "adapter_sha256": "3f1048adb40cd8666593a587a83b93a02c2fa3e901bee00979fd46deab67fbf9",
-          "backend_query_sha256": "732c1e7166751adf7835770fbe82e06b2cfc6694564a9b96a737752ccf31686c",
-          "execution_class": "backend-native-aggregate",
-          "plan": "sql-count",
-          "rust_rows": null,
+          "backend_query_sha256": null,
+          "execution_class": "backend-resident-index-rust-count",
+          "plan": "count-factorized",
+          "rust_rows": {"kind": "not-materialized", "rows": 0},
           "source_sha256": "e08571bf8c877508cd3745ee7dcc8c061259c3b4d5a3fb17a952fbac4f9145ed"
         },
         "q2": {
@@ -510,10 +510,10 @@
         },
         "q4": {
           "adapter_sha256": "9bca16043cb3c2e644405a7a8aa029542cb6a157c2f8324974d7cf8853ab662d",
-          "backend_query_sha256": "32f7af2d3357524cafc3ec13a076d9ca59d02dfa5db35f0d8b022fcee535d618",
-          "execution_class": "backend-native-aggregate",
-          "plan": "sql-count",
-          "rust_rows": null,
+          "backend_query_sha256": null,
+          "execution_class": "backend-resident-index-rust-count",
+          "plan": "count-factorized",
+          "rust_rows": {"kind": "not-materialized", "rows": 0},
           "source_sha256": "1675c38f7cc117ba9be4de8fc0c1d7073901a03cfc5a174f2241e14c602c9a9f"
         },
         "q5": {

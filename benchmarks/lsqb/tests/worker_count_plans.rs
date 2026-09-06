@@ -64,7 +64,7 @@ fn memory_worker_declares_and_executes_every_pinned_count_plan() {
 }
 
 #[test]
-fn turso_worker_declares_scalar_sql_and_reference_routes() {
-    check_worker("turso", "q1", ExecutionPlan::SqlCount);
+fn turso_worker_declares_the_resident_route_for_every_pinned_case() {
+    check_worker("turso", "q1", ExecutionPlan::CountFactorized);
     check_worker("turso", "q6", ExecutionPlan::CountFactorized);
 }

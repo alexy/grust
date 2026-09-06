@@ -66,11 +66,17 @@ reloads the store per observation, so the read-back and build land inside
 `load_ns`; PostgreSQL's worker attaches to the service the coordinator loaded
 once and builds its own index from a read over the wire, inside its setup
 interval. Either way the build precedes GO and is never inside the timed
-query. A query whose dialect renders no scalar SQL count but whose structural
-proof admits `count-factorized` then runs that plan in Rust over the resident
-index and declares the distinct class `backend-resident-index-rust-count`:
-the store held the data and the index was built from it, but the store's
-engine does no work inside the query boundary.
+query. A query whose structural proof admits `count-factorized` then runs
+that plan in Rust over the resident index and declares the distinct class
+`backend-resident-index-rust-count`, whether or not the dialect could also
+render a scalar SQL count: the store held the data and the index was built
+from it, but the store's engine does no work inside the query boundary. The
+resident plan comes first on measurement, not assumption: at SF0.1 Turso's
+own `SELECT COUNT(*)` took 260 s for q1 and 14.7 s for q4 where the same
+plan over the resident index takes 66 ms and 165 ms (see
+`docs/GRUST_SPEED_PROGRESS.md`, "Resident index at SF0.1"). `sql-count`
+remains the route, under its own class, for a count the proof does not admit
+but the dialect renders.
 It is neither the in-process reference (no store) nor backend-native (the
 engine). Its timings are reported under that class, never pooled with either.
 The registry binds these entries with the not-materialized row shape exactly as
@@ -93,8 +99,8 @@ The pinned example's compiler-derived plan inventory is:
 | Backend | Optimized query IDs | Plan |
 |---|---|---|
 | Memory | All 22: q1–q9 and a1–a13 | `count-factorized` |
-| Turso, PostgreSQL | q1, q4, a1, a7 | `sql-count` |
-| Turso, PostgreSQL | the other 18 | `count-factorized` over the resident index (`backend-resident-index-rust-count`) |
+| Turso, PostgreSQL | All 22 | `count-factorized` over the resident index (`backend-resident-index-rust-count`) |
+| Turso, PostgreSQL | none of the pinned set (q1, q4, a1 and a7 render one but the proof claims them first) | `sql-count` |
 
 These are structural classifications, not performance results. The offline
 integration tests compare all 22 example cases with the pinned oracle and

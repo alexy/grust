@@ -311,9 +311,10 @@ Two readings of the table:
   (q1, q4) are three to four orders of magnitude slower than the same plan
   over the resident index would be, and q1 sits at the edge of a ten-minute
   timeout. The route order "scalar SQL first, resident plan second" was a
-  design assumption; at SF0.1 on Turso it is a measured cost. Changing it
-  is a routing decision for the class contract, not a tuning knob, and is
-  not made here.
+  design assumption; at SF0.1 on Turso it is a measured cost. The order was
+  reversed on the strength of this table (the resident plan whenever it is
+  proven, `sql-count` under its own class otherwise), for Turso and
+  PostgreSQL; all 22 pinned cases now register as resident entries.
 
 SF0.3 was not measured on this host.
 

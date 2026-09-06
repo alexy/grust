@@ -917,15 +917,21 @@ mod tests {
             expected_count: 1,
             claim: "test".to_string(),
         };
-        let pushed = case("q1", "MATCH (n:Person) RETURN count(*) AS count");
+        let proven = case("q1", "MATCH (n:Person) RETURN count(*) AS count");
+        let pushed = case("q2", "MATCH (n) WHERE n.kind = 'Comment' RETURN count(*)");
         let fallback = case("q9", "MATCH (a)-[:KNOWS]->(b), (a)-[:KNOWS]-(c) RETURN a");
 
         for backend_id in ["turso", "postgres"] {
             let catalog = matrix_catalog::backend(backend_id).unwrap();
             assert_eq!(
+                catalog_execution_for_case(catalog, &proven).unwrap().class,
+                Some(ExecutionClass::BackendResidentIndexRustCount),
+                "{backend_id} should take the resident route for a proven count"
+            );
+            assert_eq!(
                 catalog_execution_for_case(catalog, &pushed).unwrap().class,
                 Some(ExecutionClass::BackendNativeAggregate),
-                "{backend_id} should push the simple count"
+                "{backend_id} should push a count the proof does not admit"
             );
             assert_eq!(
                 catalog_execution_for_case(catalog, &fallback)

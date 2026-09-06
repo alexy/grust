@@ -6,6 +6,13 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- LSQB matrix: a durable store with a resident index takes the proven
+  `count-factorized` plan over that index before its own scalar SQL count,
+  for Turso and PostgreSQL alike; `sql-count` stays the route, under its own
+  class, only for a count the proof does not admit. Measured at SF0.1 on
+  Turso: 260 s (q1) and 14.7 s (q4) through the store's `SELECT COUNT(*)`
+  against 66 ms and 165 ms for the same plan over the index. All 22 pinned
+  cases now register as resident-index entries for both stores.
 - Fix the publication receipt step under macOS bash 3.2: an empty
   `create_arguments` array (no `RESUME_FROM`) was an unbound-variable error
   after all 24 cells had run. The SF0.1 run at `68d1b09` was receipted by

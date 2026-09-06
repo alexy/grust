@@ -25,8 +25,13 @@ fn registry_matches_every_optimized_plan_without_authorizing_fallbacks() {
         let mut optimized = 0;
         for case in &cases {
             let memory = id == "memory";
+            let resident = !memory && backend::resident_count_plan(case).unwrap();
             let sql = backend::scalar_sql_query(id, case).unwrap();
-            let resident = !memory && sql.is_none() && backend::resident_count_plan(case).unwrap();
+            assert!(
+                !(resident && sql.is_some()),
+                "{id}/{}: a resident case submits no SQL",
+                case.id
+            );
             let eligible = if memory {
                 backend::memory_execution_plan(case).unwrap() == ExecutionPlan::CountFactorized
             } else {

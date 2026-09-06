@@ -90,6 +90,12 @@ fn expected_resident_store_route(
     dialect: &dyn grust_cypher::pushdown::SqlDialect,
 ) -> (ExecutionClass, ExecutionPlan) {
     let params = CypherParameters::new();
+    if resident_count_plan(case).unwrap() {
+        return (
+            ExecutionClass::BackendResidentIndexRustCount,
+            ExecutionPlan::CountFactorized,
+        );
+    }
     if plan_scalar_count_read(&case.executable, &params, &NoTypeHints)
         .unwrap()
         .is_some_and(|plan| plan.supported_by(dialect))
@@ -97,12 +103,6 @@ fn expected_resident_store_route(
         return (
             ExecutionClass::BackendNativeAggregate,
             ExecutionPlan::SqlCount,
-        );
-    }
-    if resident_count_plan(case).unwrap() {
-        return (
-            ExecutionClass::BackendResidentIndexRustCount,
-            ExecutionPlan::CountFactorized,
         );
     }
     if plan_read(&case.executable, &params, &NoTypeHints)
@@ -150,24 +150,17 @@ fn check_descriptor(backend: &PreparedBackend, id: &str, case: &QueryCase) {
         case.id
     );
 
-    // All pinned Memory cases must take a proven row-free route. SQL still
-    // admits only its separate, narrower scalar subset.
-    if id == "memory" {
-        assert_eq!(plan, ExecutionPlan::CountFactorized, "memory/{}", case.id);
-    }
-    if matches!(
-        case.id.as_str(),
-        "q1" | "q4" | "a1-reversed-chain" | "a7-cartesian-count"
-    ) {
-        assert_eq!(
-            plan,
-            if id == "memory" {
-                ExecutionPlan::CountFactorized
-            } else {
-                ExecutionPlan::SqlCount
-            }
-        );
-    }
+    // Every pinned case has a proven row-free plan; Memory runs it as the
+    // reference and the durable stores run it over their resident index, so
+    // none of them submits a scalar SQL count for the pinned set (q1, q4, a1
+    // and a7 would render one, and did route there before the SF0.1
+    // measurement in docs/GRUST_SPEED_PROGRESS.md).
+    assert_eq!(plan, ExecutionPlan::CountFactorized, "{id}/{}", case.id);
+    assert!(
+        descriptor.backend_query_sha256.is_none(),
+        "{id}/{}",
+        case.id
+    );
     if case.id == "a3-split-match" {
         // Memory proves a non-materializing plan; Turso runs the same plan
         // over its resident index and declares the distinct class for it.
@@ -266,9 +259,10 @@ fn native_sql_hashes_match_the_exact_adapter_renderers_without_services() {
             ),
         ] {
             let actual = scalar_sql_query(backend, case).unwrap();
+            // A case the resident plan claims submits no SQL at all.
             let expected = plan
                 .as_ref()
-                .filter(|plan| plan.supported_by(dialect))
+                .filter(|plan| plan.supported_by(dialect) && !resident_count_plan(case).unwrap())
                 .map(|plan| plan.to_sql(dialect).unwrap());
             assert_eq!(actual, expected, "{backend}/{} exact SQL", case.id);
             if let Some(sql) = actual {
@@ -348,5 +342,5 @@ fn postgres_declares_the_resident_route_without_a_service() {
             case.id
         );
     }
-    assert_eq!(resident, 18, "resident cases in the pinned example set");
+    assert_eq!(resident, 22, "resident cases in the pinned example set");
 }

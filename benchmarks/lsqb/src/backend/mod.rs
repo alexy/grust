@@ -344,7 +344,7 @@ impl PreparedBackend {
                 blocking_count_with_timeout(timeout_ms, move || indexed_count(&index, &case)).await
             }
             Backend::Turso { store, resident } => {
-                if scalar_sql_query("turso", case)?.is_none() && resident_count_plan(case)? {
+                if resident_count_plan(case)? {
                     let index = Arc::clone(resident);
                     let case = case.clone();
                     return blocking_count_with_timeout(timeout_ms, move || {
@@ -360,7 +360,7 @@ impl PreparedBackend {
                 query_result(count_from(table))
             }
             Backend::Postgres { store, resident } => {
-                if scalar_sql_query("postgres", case)?.is_none() && resident_count_plan(case)? {
+                if resident_count_plan(case)? {
                     let index = Arc::clone(resident);
                     let case = case.clone();
                     return blocking_count_with_timeout(timeout_ms, move || {

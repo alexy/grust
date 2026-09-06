@@ -15,6 +15,15 @@ impl PreparedBackend {
         if matches!(&self.inner, Backend::Memory(_)) {
             return memory_execution_plan(case);
         }
+        // A durable store with a resident index runs a proven count plan over
+        // that index before anything else (see resident_store_execution_class).
+        if matches!(
+            &self.inner,
+            Backend::Turso { .. } | Backend::Postgres { .. }
+        ) && resident_count_plan(case)?
+        {
+            return Ok(ExecutionPlan::CountFactorized);
+        }
         let scalar = match &self.inner {
             Backend::Turso { .. } => {
                 scalar_count_plan(case, &super::TursoReadDialect::new("grust"))?
@@ -27,13 +36,6 @@ impl PreparedBackend {
         };
         if scalar.is_some() {
             return Ok(ExecutionPlan::SqlCount);
-        }
-        if matches!(
-            &self.inner,
-            Backend::Turso { .. } | Backend::Postgres { .. }
-        ) && resident_count_plan(case)?
-        {
-            return Ok(ExecutionPlan::CountFactorized);
         }
         let class = self
             .execution(case)?
@@ -71,34 +73,41 @@ pub fn resident_count_plan(case: &QueryCase) -> Result<bool, String> {
     Ok(memory_execution_plan(case)? == ExecutionPlan::CountFactorized)
 }
 
-/// The route a durable store with a resident index takes for `case`: its own
-/// scalar SQL count when the dialect renders one, the resident count plan
-/// when the indexed executor proves one, otherwise the store's existing
-/// row-source or materialize class.
+/// The route a durable store with a resident index takes for `case`: the
+/// resident count plan whenever the indexed executor proves one, else its
+/// own scalar SQL count when the dialect renders one, otherwise the store's
+/// existing row-source or materialize class.
+///
+/// The resident plan comes first on measurement, not assumption: at SF0.1
+/// Turso's own `SELECT COUNT(*)` took 260 s for q1 and 14.7 s for q4 where
+/// the same plan over the resident index takes 66 ms and 165 ms
+/// (docs/GRUST_SPEED_PROGRESS.md, "Resident index at SF0.1").
 pub fn resident_store_execution_class(
     case: &QueryCase,
     dialect: &dyn SqlDialect,
 ) -> Result<ExecutionClass, String> {
-    if scalar_count_plan(case, dialect)?.is_some() {
-        Ok(ExecutionClass::BackendNativeAggregate)
-    } else if resident_count_plan(case)? {
+    if resident_count_plan(case)? {
         Ok(ExecutionClass::BackendResidentIndexRustCount)
+    } else if scalar_count_plan(case, dialect)?.is_some() {
+        Ok(ExecutionClass::BackendNativeAggregate)
     } else {
         super::sql_execution_class(case, dialect)
     }
 }
 
-/// Exact SQL submitted by the two opt-in scalar-count adapters. Other backends
-/// retain their own execution routes; in particular Sail is not opted in.
+/// Exact SQL submitted by the two opt-in scalar-count adapters, for a case
+/// the resident plan does not already claim. Other backends retain their own
+/// execution routes; in particular Sail is not opted in.
 pub fn scalar_sql_query(backend: &str, case: &QueryCase) -> Result<Option<String>, String> {
-    match backend {
-        "turso" => render_scalar_sql(case, &super::TursoReadDialect::new("grust")),
-        "postgres" => render_scalar_sql(
-            case,
-            &super::PostgresReadDialect::new(&super::postgres_config()),
-        ),
-        _ => Ok(None),
+    let dialect: &dyn SqlDialect = match backend {
+        "turso" => &super::TursoReadDialect::new("grust"),
+        "postgres" => &super::PostgresReadDialect::new(&super::postgres_config()),
+        _ => return Ok(None),
+    };
+    if resident_count_plan(case)? {
+        return Ok(None);
     }
+    render_scalar_sql(case, dialect)
 }
 
 fn render_scalar_sql(case: &QueryCase, dialect: &dyn SqlDialect) -> Result<Option<String>, String> {
@@ -176,9 +185,11 @@ mod tests {
             ExecutionPlan::CountFactorized
         );
         for backend in ["turso", "postgres"] {
+            // A proven plan is the resident route for the durable stores too,
+            // ahead of the scalar SQL count the dialect would render.
             assert_eq!(
                 portable_execution_class(backend, &query).unwrap(),
-                ExecutionClass::BackendNativeAggregate
+                ExecutionClass::BackendResidentIndexRustCount
             );
             let fallback = case("MATCH (n) WHERE id(n) = 'a' RETURN count(*)");
             assert_eq!(
@@ -194,8 +205,8 @@ mod tests {
         let exact = case("MATCH (n {kind:'Comment'}) RETURN count(*)");
         let unsupported = grust_cypher::pushdown::SparkDialect;
         assert!(scalar_count_plan(&exact, &unsupported).unwrap().is_none());
-        // Without a scalar SQL count the resident-store route falls through to
-        // the structural proof, which admits this inline property scan.
+        // The structural proof admits this inline property scan, so the
+        // resident-store route takes it regardless of the dialect.
         assert_eq!(
             resident_store_execution_class(&exact, &unsupported).unwrap(),
             ExecutionClass::BackendResidentIndexRustCount
@@ -257,14 +268,32 @@ mod tests {
             prepared.execution(&projection).unwrap().class,
             Some(ExecutionClass::BackendRowSourceRustProjection)
         );
+        // A proven plan takes the resident route even where the dialect
+        // renders a scalar SQL count, and then no SQL is submitted at all.
+        assert!(resident_count_plan(&exact).unwrap());
         assert_eq!(
             prepared.execution_plan(&exact).unwrap(),
+            ExecutionPlan::CountFactorized
+        );
+        for backend in ["turso", "postgres"] {
+            assert!(scalar_sql_query(backend, &exact).unwrap().is_none());
+            assert_eq!(
+                portable_execution_class(backend, &exact).unwrap(),
+                ExecutionClass::BackendResidentIndexRustCount
+            );
+        }
+        // The scalar SQL count remains the route for a count the proof does
+        // not admit but the dialect renders: a general WHERE on a string.
+        let native = case("MATCH (n) WHERE n.kind = 'Comment' RETURN count(*)");
+        assert!(!resident_count_plan(&native).unwrap());
+        assert_eq!(
+            prepared.execution_plan(&native).unwrap(),
             ExecutionPlan::SqlCount
         );
         for backend in ["turso", "postgres"] {
-            assert!(scalar_sql_query(backend, &exact).unwrap().is_some());
+            assert!(scalar_sql_query(backend, &native).unwrap().is_some());
             assert_eq!(
-                portable_execution_class(backend, &exact).unwrap(),
+                portable_execution_class(backend, &native).unwrap(),
                 ExecutionClass::BackendNativeAggregate
             );
         }
