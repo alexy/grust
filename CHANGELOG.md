@@ -6,6 +6,10 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- Fix the publication receipt step under macOS bash 3.2: an empty
+  `create_arguments` array (no `RESUME_FROM`) was an unbound-variable error
+  after all 24 cells had run. The SF0.1 run at `68d1b09` was receipted by
+  hand with the same arguments.
 - LSQB matrix resume mode: `RESUME_FROM=<prior OUTPUT_DIR>` makes a
   publication run copy in every cell of a prior publication run whose
   outputs verify against the prior receipt's hashes and were produced at the

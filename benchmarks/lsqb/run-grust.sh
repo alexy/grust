@@ -933,7 +933,7 @@ if [[ "$smoke" == 0 && "$discovery" == 0 ]]; then
         --scale "$scale" \
         --revision "$source_revision" \
         --repository "$repo" \
-        "${create_arguments[@]}"
+        ${create_arguments[@]+"${create_arguments[@]}"}
     python3 "${root}/validate-matrix-publication.py" verify \
         --output-dir "$BENCHMARK_OUTPUT_ROOT"
 fi
