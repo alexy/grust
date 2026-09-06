@@ -289,10 +289,21 @@ timeout); the clean rerun is recorded below it.
 | q8 | resident index | 145.0 ms, 144.9 ms | 151.7 ms |
 | q9 | resident index | 18.8 ms, 18.6 ms | 18.4 ms |
 
-Worker setup per observation: Turso 71–73 s (the chunked single-transaction
-load is about 68 s of it, the read-back and index build the rest; the exact
-split is in the `resident_index_built` record of the clean rerun), Memory
-2.7–2.8 s. Two readings:
+Worker setup per observation: Turso 71–73 s, of which the chunked
+single-transaction load is about 67 s and the read-back plus index build
+5.0 s (`resident_index_built`: 432,235 nodes, 2,080,404 edges,
+359,300,479 serialized bytes, 4,957 ms); Memory 2.7–2.8 s. A one-iteration
+A/B on a quiet host with the binary before and after the telemetry change
+agreed on every query (q1 260.0 s / 261.4 s, q2 194 / 197 ms, setup 71–72 s).
+
+The host is a burstable t2.xlarge. A full repeat of the Turso cell started
+after 2.5 h of continuous compute ran uniformly 2× slower (setup 133 s, q1
+490 s, q2 390 ms) with no other load on the machine, and `/proc/stat`
+carried 8.2 h of accumulated CPU steal; after five idle hours the A/B above
+ran at the original speed with zero steal. CPU-credit throttling does not
+show in the load average the harness records, so timing runs on this host
+need either a non-burstable instance or steal-time accounting per run.
+Two readings of the table:
 
 - Over the resident index, Turso answers within a few percent of Memory:
   the store's engine is out of the query boundary and the class says so.
