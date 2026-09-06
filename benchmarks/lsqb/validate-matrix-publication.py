@@ -160,7 +160,7 @@ EXECUTION_PLAN_ENTRY_FIELDS = frozenset(
 )
 LOAD_STRATEGY = {
     "memory": "per-observation-worker-reload",
-    "turso": "per-observation-worker-reload",
+    "turso": "per-observation-worker-copy",
     "ladybug": "per-observation-worker-reload",
     "lancedb": "per-observation-worker-reload",
     "sail": "once-worker-attach",

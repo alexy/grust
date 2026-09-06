@@ -6,12 +6,23 @@
 use std::path::Path;
 use std::process::Command;
 
+use grust_lsqb_runner::backend::turso_snapshot;
+use grust_lsqb_runner::dataset::load_projected_dataset;
 use grust_lsqb_runner::matrix_worker::WORKER_MARKER;
 use grust_lsqb_runner::observation_process::{self, WorkerOutcome};
 use grust_lsqb_runner::queries::{load_adversarial, load_baseline_for_scale};
 use grust_lsqb_runner::report::{ExecutionPlan, ObservationTerminationV3};
 
 fn check_worker(backend: &str, query_id: &str, plan: ExecutionPlan) {
+    check_worker_with(backend, query_id, plan, &[]);
+}
+
+fn check_worker_with(
+    backend: &str,
+    query_id: &str,
+    plan: ExecutionPlan,
+    extra_env: &[(&str, &Path)],
+) {
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
     let upstream = directory.join("upstream/lsqb");
     let (suite, cases) = if query_id.starts_with('a') {
@@ -40,6 +51,9 @@ fn check_worker(backend: &str, query_id: &str, plan: ExecutionPlan) {
         .env("GRUST_LSQB_WORKER_TOKEN", &token)
         .env("GRUST_LSQB_WORKER_QUERY_TIMEOUT_MS", "10000")
         .env("GRUST_LSQB_WORKER_ATTACH", "0");
+    for (name, value) in extra_env {
+        command.env(name, value);
+    }
     // The production coordinator owns setup/query/reap deadlines and cleans
     // up the complete child process group even when a test assertion fails.
     let observed = observation_process::run(&mut command, &token, 10_000, 100, 2_000, 10_000)
@@ -65,6 +79,22 @@ fn memory_worker_declares_and_executes_every_pinned_count_plan() {
 
 #[test]
 fn turso_worker_declares_the_resident_route_for_every_pinned_case() {
-    check_worker("turso", "q1", ExecutionPlan::CountFactorized);
-    check_worker("turso", "q6", ExecutionPlan::CountFactorized);
+    // A Turso worker copies the coordinator's prebuilt store; this test plays
+    // the coordinator, keeping the file alive across both workers.
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let graph = load_projected_dataset(
+        &directory.join("upstream/lsqb/data/social-network-sfexample-projected-fk"),
+    )
+    .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let coordinator = runtime
+        .block_on(turso_snapshot::prepare_from_chunks(std::iter::once(Ok(
+            graph,
+        ))))
+        .unwrap();
+    let source = coordinator.turso_snapshot_path().unwrap();
+    let env = [(turso_snapshot::ENV_SNAPSHOT, source)];
+    check_worker_with("turso", "q1", ExecutionPlan::CountFactorized, &env);
+    check_worker_with("turso", "q6", ExecutionPlan::CountFactorized, &env);
+    drop(coordinator);
 }

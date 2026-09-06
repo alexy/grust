@@ -316,6 +316,16 @@ Two readings of the table:
   proven, `sql-count` under its own class otherwise), for Turso and
   PostgreSQL; all 22 pinned cases now register as resident entries.
 
+Both follow-ups from the first SF0.1 cohort landed the same day and were
+rerun on the same cell (one measured iteration, quiet host, zero steal):
+with the resident plan preferred, q1 and q4 take 65.9 ms and 176.0 ms over
+the index instead of 260 s and 14.7 s through Turso's SQL; with the
+coordinator's file-backed store copied into each worker
+(`per-observation-worker-copy`, 553 MB, 0.24 s to copy) the worker's setup
+is 4.7–4.8 s per observation instead of 71–73 s, and the whole nine-query
+cell ran in 2 min 9 s. Every count matched the oracle and no store file was
+left behind.
+
 SF0.3 was not measured on this host.
 
 A finite q9 SF0.1 repeat completed 80 oracle-checked queries. Its retained

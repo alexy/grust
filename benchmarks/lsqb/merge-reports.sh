@@ -780,6 +780,7 @@ for report in "${reports[@]}"; do
                     and ($cell.lifecycle.load_strategy as $load_strategy
                         | $load_strategy == "once-worker-attach"
                         or $load_strategy == "per-observation-worker-reload"
+                        or $load_strategy == "per-observation-worker-copy"
                         or $load_strategy == "not-executed")
                     and ($cell.lifecycle.recovery_contract as $recovery_contract
                         | $recovery_contract == "process-group-absent"
@@ -833,8 +834,10 @@ for report in "${reports[@]}"; do
                             ($cell.setup_detail == null)
                             and ($cell.load_ns | nonnegative_integer)
                             and (
-                                if $cell.backend.name == "memory"
-                                    or $cell.backend.name == "turso"
+                                if $cell.backend.name == "turso" then
+                                    $cell.lifecycle.load_strategy == "per-observation-worker-copy"
+                                    and $cell.lifecycle.recovery_contract == "process-group-absent"
+                                elif $cell.backend.name == "memory"
                                     or $cell.backend.name == "ladybug"
                                     or $cell.backend.name == "lancedb"
                                 then

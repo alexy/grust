@@ -61,11 +61,14 @@ See [indexed reads](../../docs/INDEXED_READS.md) for exact scope and APIs.
 Turso and PostgreSQL additionally keep a **resident typed index**
 (`TursoGraphStore::indexed_snapshot`, `PostgresGraphStore::indexed_snapshot`):
 before READY, the worker reads the store's node and edge tables back and
-builds the same immutable `TypedGraphIndex` Memory uses. Turso's worker
-reloads the store per observation, so the read-back and build land inside
-`load_ns`; PostgreSQL's worker attaches to the service the coordinator loaded
-once and builds its own index from a read over the wire, inside its setup
-interval. Either way the build precedes GO and is never inside the timed
+builds the same immutable `TypedGraphIndex` Memory uses. Turso's coordinator
+loads the dataset once into a file-backed store; every observation worker
+copies that file into a private path, opens the copy and builds the index,
+so a fresh process still owns its state (`per-observation-worker-copy`) and
+the copy, open, read-back and build land inside its setup interval (about
+5 s at SF0.1 against 67 s for reloading the CSVs). PostgreSQL's worker
+attaches to the service the coordinator loaded once and builds its own index
+from a read over the wire, inside its setup interval. Either way the build precedes GO and is never inside the timed
 query. A query whose structural proof admits `count-factorized` then runs
 that plan in Rust over the resident index and declares the distinct class
 `backend-resident-index-rust-count`, whether or not the dialect could also

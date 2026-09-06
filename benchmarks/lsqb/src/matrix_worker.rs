@@ -122,6 +122,24 @@ pub async fn prepare_for_matrix(
     scale: &str,
     data_dir: &Path,
 ) -> Result<(PreparedBackend, grust_core::Graph), String> {
+    if catalog.id == "turso" {
+        // An observation worker copies the coordinator's prebuilt store; the
+        // coordinator itself loads the dataset once into that store.
+        if let Some(source) = env::var_os(backend::turso_snapshot::ENV_SNAPSHOT) {
+            let prepared = backend::turso_snapshot::prepare_from_copy(Path::new(&source)).await?;
+            return Ok((prepared, grust_core::Graph::default()));
+        }
+        let prepared = if streams_projected_dataset(catalog.id, scale) {
+            let chunks = dataset::projected_dataset_chunks(data_dir, 10_000)
+                .map_err(|error| format!("dataset.load: {error}"))?;
+            backend::turso_snapshot::prepare_from_chunks(chunks).await?
+        } else {
+            let graph = dataset::load_projected_dataset(data_dir)
+                .map_err(|error| format!("dataset.load: {error}"))?;
+            backend::turso_snapshot::prepare_from_chunks(std::iter::once(Ok(graph))).await?
+        };
+        return Ok((prepared, grust_core::Graph::default()));
+    }
     if streams_projected_dataset(catalog.id, scale) {
         let chunks = dataset::projected_dataset_chunks(data_dir, 10_000)
             .map_err(|error| format!("dataset.load: {error}"))?;

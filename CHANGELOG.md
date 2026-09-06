@@ -6,6 +6,15 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- LSQB matrix: a Turso observation worker no longer reloads the CSVs; the
+  coordinator loads the dataset once into a file-backed store and each
+  worker copies that file into a private path, opens the copy and builds its
+  resident index before READY, under the new lifecycle strategy
+  `per-observation-worker-copy` (process exit still proves recovery). At
+  SF0.1 that is a 0.24 s copy of a 553 MB file plus about 5 s of read-back
+  and index build in place of a 67 s reload per observation. The validator
+  expects the new strategy for Turso; the site verifier admits either
+  process-owned strategy so earlier receipts still verify.
 - LSQB matrix: a durable store with a resident index takes the proven
   `count-factorized` plan over that index before its own scalar SQL count,
   for Turso and PostgreSQL alike; `sql-count` stays the route, under its own

@@ -165,7 +165,8 @@ make_component() {
                 lifecycle: {
                     load_strategy: (
                         if $setup_outcome != "pass" then "not-executed"
-                        elif $backend == "memory" or $backend == "turso"
+                        elif $backend == "turso" then "per-observation-worker-copy"
+                        elif $backend == "memory"
                             or $backend == "ladybug" or $backend == "lancedb"
                         then "per-observation-worker-reload"
                         else "once-worker-attach"

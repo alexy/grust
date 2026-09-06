@@ -484,8 +484,12 @@ re-sessions and closes every inherited pipe. The exact container watchdog is
 the full-tree outer safety boundary. A descendant that escapes while retaining
 a pipe makes the cell fail because pipe closure cannot be proven.
 
-Process exit proves recovery for Memory, in-memory Turso, Ladybug, and local
-LanceDB, which therefore reload inside each observation worker. Persistent
+Process exit proves recovery for Memory, Turso, Ladybug, and local LanceDB,
+which therefore own their state inside each observation worker: Memory,
+Ladybug and LanceDB reload it, and a Turso worker copies the file-backed
+store the coordinator loaded once (`per-observation-worker-copy`), which
+keeps the fresh-process proof and turns a 67 s CSV reload at SF0.1 into a
+0.24 s copy plus a 5 s read-back and index build. Persistent
 PostgreSQL-family services load once; workers attach with a unique
 `application_name` and server `statement_timeout`, and forced recovery polls
 `pg_stat_activity` until those sessions disappear. FalkorDB's native TIMEOUT

@@ -439,6 +439,11 @@ pub enum ObservationTerminationV3 {
 pub enum LoadStrategyV3 {
     OnceWorkerAttach,
     PerObservationWorkerReload,
+    /// The coordinator loaded the store once into a file; every observation
+    /// worker copies that file into a private path and opens the copy, so a
+    /// fresh process still owns its state and process exit still proves
+    /// recovery.
+    PerObservationWorkerCopy,
     NotExecuted,
 }
 

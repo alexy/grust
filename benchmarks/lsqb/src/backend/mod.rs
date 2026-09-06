@@ -9,6 +9,7 @@
 mod materialize;
 
 mod execution_plan;
+pub mod turso_snapshot;
 pub use execution_plan::{
     memory_execution_plan, resident_count_plan, resident_store_execution_class, scalar_sql_query,
 };
@@ -80,6 +81,9 @@ enum Backend {
     Turso {
         store: TursoGraphStore,
         resident: Arc<TypedGraphIndex>,
+        /// The store file this process owns: the coordinator's prebuilt
+        /// store or a worker's private copy; `None` for an in-memory store.
+        file: Option<turso_snapshot::OwnedDatabaseFile>,
     },
     /// A PostgreSQL store with the resident typed index its worker built
     /// from the store's own rows before READY (`indexed_snapshot`).
@@ -116,11 +120,24 @@ enum Backend {
 
 impl PreparedBackend {
     pub fn configure_worker(&self, command: &mut std::process::Command) {
-        let _ = command;
+        if let Some(path) = self.turso_snapshot_path() {
+            command.env(turso_snapshot::ENV_SNAPSHOT, path);
+        }
         #[cfg(feature = "sail")]
         if let Backend::Sail(session) = &self.inner {
             session.configure_worker(command);
         }
+    }
+
+    /// Whether the coordinator must keep this backend alive while workers
+    /// run, because each worker's environment is derived from it.
+    pub fn configures_workers(&self) -> bool {
+        self.turso_snapshot_path().is_some()
+    }
+
+    /// The prebuilt Turso store file workers copy, when this backend owns one.
+    pub fn turso_snapshot_path(&self) -> Option<&std::path::Path> {
+        turso_snapshot::snapshot_path(&self.inner)
     }
 
     /// Release coordinator-owned remote state; borrowed workers only detach.
@@ -343,7 +360,9 @@ impl PreparedBackend {
                 let case = case.clone();
                 blocking_count_with_timeout(timeout_ms, move || indexed_count(&index, &case)).await
             }
-            Backend::Turso { store, resident } => {
+            Backend::Turso {
+                store, resident, ..
+            } => {
                 if resident_count_plan(case)? {
                     let index = Arc::clone(resident);
                     let case = case.clone();
@@ -466,6 +485,8 @@ pub fn load_strategy(id: &str, executed: bool) -> LoadStrategyV3 {
             | "sail"
     ) {
         LoadStrategyV3::OnceWorkerAttach
+    } else if id == "turso" {
+        LoadStrategyV3::PerObservationWorkerCopy
     } else {
         LoadStrategyV3::PerObservationWorkerReload
     }
@@ -639,7 +660,11 @@ async fn prepare_turso(graph: &Graph) -> Result<PreparedBackend, String> {
         .map_err(|err| format!("dataset.load: resident index: {err}"))?;
     crate::load_progress::resident_index_built(&resident, build_started);
     Ok(PreparedBackend {
-        inner: Backend::Turso { store, resident },
+        inner: Backend::Turso {
+            store,
+            resident,
+            file: None,
+        },
         load_ns: elapsed_ns(started)?,
     })
 }
@@ -661,7 +686,11 @@ where
         .map_err(|err| format!("dataset.load: resident index: {err}"))?;
     crate::load_progress::resident_index_built(&resident, build_started);
     Ok(PreparedBackend {
-        inner: Backend::Turso { store, resident },
+        inner: Backend::Turso {
+            store,
+            resident,
+            file: None,
+        },
         load_ns: elapsed_ns(started)?,
     })
 }
@@ -1405,6 +1434,14 @@ mod tests {
         assert_eq!(
             load_strategy("memory", true),
             LoadStrategyV3::PerObservationWorkerReload
+        );
+        assert_eq!(
+            load_strategy("turso", true),
+            LoadStrategyV3::PerObservationWorkerCopy
+        );
+        assert_eq!(
+            recovery_contract("turso", true),
+            RecoveryContractV3::ProcessGroupAbsent
         );
         assert_eq!(
             recovery_contract("memory", true),
