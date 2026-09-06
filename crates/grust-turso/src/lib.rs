@@ -130,6 +130,24 @@ impl TursoGraphStore {
     }
 
     /// Run a query expected to yield a single text cell in its first row.
+    /// Run a statement whose result rows carry nothing the store needs, such
+    /// as `PRAGMA wal_checkpoint`, draining them so the statement completes.
+    async fn execute_discarding_rows(&self, sql: &str) -> Result<()> {
+        let _gate = self.lock_connection().await?;
+        let mut rows = self
+            .conn
+            .query(sql, ())
+            .await
+            .map_err(|err| GrustError::Backend(format!("Turso query failed: {err}: {sql}")))?;
+        while rows
+            .next()
+            .await
+            .map_err(|err| GrustError::Backend(format!("Turso row read failed: {err}: {sql}")))?
+            .is_some()
+        {}
+        Ok(())
+    }
+
     async fn query_scalar_text(&self, sql: &str) -> Result<Option<String>> {
         let _gate = self.lock_connection().await?;
         let mut rows = self
@@ -409,20 +427,39 @@ impl GraphStore for TursoGraphStore {
         Ok(PutOutcome::Upserted)
     }
 
+    /// Load the whole graph in one transaction: one durable commit for all
+    /// of its batches instead of one per batch, and either every batch lands
+    /// or none does. The lowered SQL for every batch is held in memory for
+    /// the transaction's duration, a constant factor of the graph itself.
     async fn put_graph(&self, graph: &Graph) -> Result<LoadReport> {
         let batch_size = self.config.batch_size.max(1);
-        let mut report = LoadReport::default();
-        for chunk in graph.nodes.chunks(batch_size) {
-            self.execute_data(&upsert_nodes_sql(&self.nodes_table(), chunk)?)
+        let nodes_table = self.nodes_table();
+        let edges_table = self.edges_table();
+        let node_batches = graph
+            .nodes
+            .chunks(batch_size)
+            .map(|chunk| upsert_nodes_sql(&nodes_table, chunk));
+        let edge_batches = graph
+            .edges
+            .chunks(batch_size)
+            .map(|chunk| upsert_edges_sql(&edges_table, chunk));
+        let statements = node_batches
+            .chain(edge_batches)
+            .collect::<Result<Vec<_>>>()?;
+        let concurrent = self.config.journal_mode == TursoJournalMode::Mvcc;
+        self.execute_transaction(&statements, concurrent).await?;
+        // In WAL mode one transaction leaves the whole load in the
+        // write-ahead log, and every read until the next checkpoint pays to
+        // look through it; checkpointing here keeps that cost inside the load
+        // interval. MVCC mode has no equivalent the engine allows by default.
+        if !concurrent {
+            self.execute_discarding_rows("PRAGMA wal_checkpoint(TRUNCATE)")
                 .await?;
-            report.nodes += chunk.len();
         }
-        for chunk in graph.edges.chunks(batch_size) {
-            self.execute_data(&upsert_edges_sql(&self.edges_table(), chunk)?)
-                .await?;
-            report.edges += chunk.len();
-        }
-        Ok(report)
+        Ok(LoadReport {
+            nodes: graph.nodes.len(),
+            edges: graph.edges.len(),
+        })
     }
 
     async fn get_node(&self, id: &NodeId) -> Result<Option<Node>> {

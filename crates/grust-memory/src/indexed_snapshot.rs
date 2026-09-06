@@ -39,12 +39,30 @@ impl MemoryGraphStore {
     /// plans that partially apply cannot leave a stale snapshot cached.
     pub(super) fn write_inner(&self) -> RwLockWriteGuard<'_, MemoryGraph> {
         let inner = self.inner.write().expect("memory graph lock poisoned");
-        self.index_cache
+        let retired = self
+            .index_cache
             .lock()
             .expect("memory index cache lock poisoned")
             .take();
+        if let Some(index) = retired {
+            release_in_background(index);
+        }
         inner
     }
+}
+
+/// Free a retired snapshot off the writer's path.
+///
+/// When the cache held the last reference, dropping it frees every cloned
+/// node and edge of the snapshot, tens of milliseconds for a few hundred
+/// thousand elements, and that would land on the latency of the one write
+/// that invalidated it. A detached thread takes the drop instead; if no
+/// thread can be spawned the closure is dropped here, releasing it inline.
+fn release_in_background(index: Arc<TypedGraphIndex>) {
+    std::thread::Builder::new()
+        .name("grust-memory-snapshot-release".into())
+        .spawn(move || drop(index))
+        .ok();
 }
 
 #[cfg(test)]
