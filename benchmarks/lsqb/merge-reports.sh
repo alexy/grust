@@ -79,11 +79,24 @@ if ! jq -e '
                         and $entry.execution_class == "in-process-reference"
                         and $entry.rust_rows == {kind: "not-materialized", rows: 0}
                         and $entry.backend_query_sha256 == null
+                    elif $backend == "turso" or $backend == "postgres" then
+                        (
+                            $entry.plan == "sql-count"
+                            and $entry.execution_class == "backend-native-aggregate"
+                            and $entry.rust_rows == null
+                            and ($entry.backend_query_sha256 | sha256)
+                        ) or (
+                            # The durable store worker builds a resident typed
+                            # index outside the query boundary and runs the
+                            # proven count plan over it: its own class, not the
+                            # in-process reference and not backend-native.
+                            $entry.plan == "count-factorized"
+                            and $entry.execution_class == "backend-resident-index-rust-count"
+                            and $entry.rust_rows == {kind: "not-materialized", rows: 0}
+                            and $entry.backend_query_sha256 == null
+                        )
                     else
-                        $entry.plan == "sql-count"
-                        and $entry.execution_class == "backend-native-aggregate"
-                        and $entry.rust_rows == null
-                        and ($entry.backend_query_sha256 | sha256)
+                        false
                     end
                 )
             )
@@ -104,7 +117,7 @@ canonical_service_contracts=$(jq -c \
 canonical_runtime_versions=$(jq -c \
     '[.backends[] | {key: .id, value: (.runtime_version // .service_identity.version // null)}] | from_entries' "$manifest_path")
 allowed_outcomes='["pass","mismatch","unsupported","unavailable","timeout","error","not_applicable"]'
-allowed_execution_classes='["in-process-reference","backend-native-aggregate","backend-row-source-rust-projection","backend-materialize-rust-reference","backend-neutral-policy"]'
+allowed_execution_classes='["in-process-reference","backend-native-aggregate","backend-row-source-rust-projection","backend-materialize-rust-reference","backend-neutral-policy","backend-resident-index-rust-count"]'
 allowed_terminations='["normal-exit","backend-timeout","deadline-observed-exit","deadline-sigterm","deadline-sigkill"]'
 
 first=${reports[0]}
@@ -215,7 +228,10 @@ for report in "${reports[@]}"; do
                     $class == "backend-row-source-rust-projection"
                     or $class == "backend-materialize-rust-reference"
                     or (
-                        $class == "backend-native-aggregate"
+                        (
+                            $class == "backend-native-aggregate"
+                            or $class == "backend-resident-index-rust-count"
+                        )
                         and optimized_query_shape($query; $backend)
                     )
                 elif $backend == "sail" then
