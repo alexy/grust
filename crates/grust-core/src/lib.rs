@@ -3051,6 +3051,19 @@ pub trait GraphStore: Send + Sync {
 
     async fn get_edges(&self, query: EdgeQuery) -> Result<Vec<Edge>>;
     async fn traverse(&self, traversal: Traversal) -> Result<Vec<Node>>;
+
+    /// The ids of the nodes [`GraphStore::traverse`] would return, in the
+    /// same order, for callers that walk a graph and never read the nodes
+    /// themselves. The default answers through `traverse`; a store can
+    /// override it to skip materializing nodes it would only discard.
+    async fn traverse_ids(&self, traversal: Traversal) -> Result<Vec<NodeId>> {
+        Ok(self
+            .traverse(traversal)
+            .await?
+            .into_iter()
+            .map(|node| node.id)
+            .collect())
+    }
 }
 
 #[async_trait]

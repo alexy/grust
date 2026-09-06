@@ -26,37 +26,37 @@ fn registry_matches_every_optimized_plan_without_authorizing_fallbacks() {
         for case in &cases {
             let memory = id == "memory";
             let sql = backend::scalar_sql_query(id, case).unwrap();
+            let resident = !memory && sql.is_none() && backend::resident_count_plan(case).unwrap();
             let eligible = if memory {
                 backend::memory_execution_plan(case).unwrap() == ExecutionPlan::CountFactorized
             } else {
-                sql.is_some()
+                sql.is_some() || resident
             };
             // Widening this contract is deliberate work, not an incidental
             // classifier change hidden by automatic inventory regeneration.
             let expected = matches!(
                 case.id.as_str(),
                 "q1" | "q4" | "a1-reversed-chain" | "a7-cartesian-count"
-            ) || (memory
-                && matches!(
-                    case.id.as_str(),
-                    "q2" | "q3"
-                        | "q5"
-                        | "q6"
-                        | "q7"
-                        | "q8"
-                        | "q9"
-                        | "a2-reordered-join"
-                        | "a3-split-match"
-                        | "a4-optional-fanout"
-                        | "a5-negated-pattern"
-                        | "a6-range-expansion"
-                        | "a8-union-dedup"
-                        | "a9-path-zero-hop"
-                        | "a10-unicode-literal"
-                        | "a11-schema-null-probe"
-                        | "a12-parser-comment-trivia"
-                        | "a13-resource-edge-scan"
-                ));
+            ) || matches!(
+                case.id.as_str(),
+                "q2" | "q3"
+                    | "q5"
+                    | "q6"
+                    | "q7"
+                    | "q8"
+                    | "q9"
+                    | "a2-reordered-join"
+                    | "a3-split-match"
+                    | "a4-optional-fanout"
+                    | "a5-negated-pattern"
+                    | "a6-range-expansion"
+                    | "a8-union-dedup"
+                    | "a9-path-zero-hop"
+                    | "a10-unicode-literal"
+                    | "a11-schema-null-probe"
+                    | "a12-parser-comment-trivia"
+                    | "a13-resource-edge-scan"
+            );
             assert_eq!(eligible, expected, "{id}/{} eligibility", case.id);
             if !eligible {
                 assert!(
@@ -68,11 +68,11 @@ fn registry_matches_every_optimized_plan_without_authorizing_fallbacks() {
             }
             optimized += 1;
             let expected_entry = json!({
-                "plan": if memory { "count-factorized" } else { "sql-count" },
+                "plan": if memory || resident { "count-factorized" } else { "sql-count" },
                 "source_sha256": case.source_sha256,
                 "adapter_sha256": queries::sha256(case.executable.as_bytes()),
                 "execution_class": backend::portable_execution_class(id, case).unwrap(),
-                "rust_rows": if memory {
+                "rust_rows": if memory || resident {
                     json!({"kind": "not-materialized", "rows": 0})
                 } else {
                     Value::Null

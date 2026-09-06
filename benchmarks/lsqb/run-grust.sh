@@ -9,6 +9,8 @@ source "${root}/dataset-integrity.sh"
 source "${root}/output-safety.sh"
 # shellcheck source=benchmarks/lsqb/external-service.sh
 source "${root}/external-service.sh"
+# shellcheck source=benchmarks/lsqb/resume-cells.sh
+source "${root}/resume-cells.sh"
 compose_file="${root}/compose.yaml"
 scale=${SF:-example}
 runs=${RUNS:-5}
@@ -21,6 +23,11 @@ query_recovery_timeout_ms=${QUERY_RECOVERY_TIMEOUT_MS:-10000}
 cell_timeout_ms=${CELL_TIMEOUT_MS:-}
 smoke=${SMOKE:-0}
 discovery=${DISCOVERY:-0}
+resume_from=${RESUME_FROM:-}
+resume_receipt_sha256=
+resume_manifest=
+reused_cell_count=0
+fresh_cell_count=0
 dataset_snapshot_root=
 dataset_snapshot_parent=
 dataset_snapshot_directory=
@@ -84,6 +91,7 @@ cleanup_services() {
 cleanup() {
     cleanup_services || true
     cleanup_dataset_snapshot || true
+    cleanup_resume_manifest || true
 }
 
 trap cleanup EXIT
@@ -120,6 +128,9 @@ done
 if [[ "$discovery" == 1 ]]; then
     echo "run-grust.sh: DISCOVERY=1 permits dirty-revision reports for development only; publication validation is intentionally skipped" >&2
 fi
+if [[ -n "$resume_from" && ( "$smoke" == 1 || "$discovery" == 1 ) ]]; then
+    die "RESUME_FROM reuses cells of a prior publication run and cannot be combined with SMOKE=1 or DISCOVERY=1"
+fi
 
 source_revision=$(git -C "$repo" rev-parse HEAD) || die "cannot resolve source revision"
 [[ "$source_revision" =~ ^[0-9a-f]{40}$ ]] || die \
@@ -142,6 +153,37 @@ if [[ "$discovery" == 1 ]]; then
     # from a clean checkout from being relabelled as publication evidence.
     GRUST_SOURCE_REVISION="${GRUST_SOURCE_REVISION}-discovery"
 fi
+
+if [[ -n "$resume_from" ]]; then
+    [[ -d "$resume_from" && ! -L "$resume_from" ]] || die \
+        "RESUME_FROM is not a regular directory: $resume_from"
+    resume_from=$(cd -- "$resume_from" && pwd -P)
+    resume_receipt_sha256=$(lsqb_resume_load "$resume_from" "$GRUST_SOURCE_REVISION" "$scale") || die \
+        "RESUME_FROM does not hold a publication run at this revision and scale: $resume_from"
+    resume_manifest=$(mktemp "${TMPDIR:-/tmp}/grust-lsqb-resume.XXXXXX") || die \
+        "cannot create the reused-cell list"
+    printf '[]\n' > "$resume_manifest"
+    echo "run-grust.sh: RESUME_FROM=${resume_from} (receipt ${resume_receipt_sha256}); verified cells are copied, everything else runs fresh" >&2
+fi
+
+# shellcheck disable=SC2329 # Invoked by the EXIT-trap cleanup function.
+cleanup_resume_manifest() {
+    [[ -n "$resume_manifest" ]] || return 0
+    case "$resume_manifest" in
+        "${TMPDIR:-/tmp}"/grust-lsqb-resume.*) rm -f -- "$resume_manifest" ;;
+    esac
+}
+
+# record_reused_cell CELL PROJECT
+record_reused_cell() {
+    local cell=$1 project=$2 updated
+    updated=$(jq --arg cell "$cell" --arg root "$resume_from" \
+        --arg sha "$resume_receipt_sha256" --arg project "$project" \
+        '. + [{cell: $cell, source_output_root: $root, source_receipt_sha256: $sha, watchdog_project: $project}] | sort_by(.cell)' \
+        "$resume_manifest") || die "cannot record reused cell: $cell"
+    printf '%s\n' "$updated" > "$resume_manifest"
+    reused_cell_count=$((reused_cell_count + 1))
+}
 
 verify_publication_source() {
     local current_revision
@@ -580,6 +622,30 @@ for backend in "${canonical_backends[@]}"; do
         lsqb_reject_existing_output "$service_log" "backend service log" || die \
             "backend service log already exists"
 
+        if [[ -n "$resume_from" ]]; then
+            has_service_log=0
+            if [[ -n "$service" || "$external_contract" == 1 ]]; then
+                has_service_log=1
+            fi
+            if reused_project=$(lsqb_resume_cell "$resume_from" "$BENCHMARK_OUTPUT_ROOT" \
+                "$suite" "$backend" "$scale" "$GRUST_SOURCE_REVISION" "$cell_timeout_ms" \
+                "${feature:-core}" "$image_tag" "$image_id" \
+                "${service_image:-none}" "${configured_service_image_id:-none}" \
+                "$has_service_log"); then
+                record_reused_cell "${suite}-${backend}" "$reused_project"
+                verify_output_directories || die "benchmark output directories changed during cell reuse"
+                printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                    "$suite" "$backend" "${feature:-core}" "$image_tag" "$image_id" \
+                    "${service_image:-none}" "${configured_service_image_id:-none}" >&3
+                lsqb_verify_output_fd 3 "$image_manifest" "image manifest" || die \
+                    "image manifest path changed during execution"
+                echo "run-grust.sh: reused ${suite}/${backend} from ${resume_from} (project ${reused_project})" >&2
+                continue
+            fi
+            echo "run-grust.sh: ${suite}/${backend} runs fresh" >&2
+        fi
+        fresh_cell_count=$((fresh_cell_count + 1))
+
         cleanup_services
         reset_endpoint "$backend"
         service_image_id=$configured_service_image_id
@@ -746,6 +812,11 @@ done
 lsqb_close_output_fd 3 "$image_manifest" "image manifest" || die \
     "image manifest path changed during execution"
 verify_output_directories || die "benchmark output directories changed during matrix execution"
+if [[ -n "$resume_from" ]]; then
+    (( fresh_cell_count > 0 )) || die \
+        "every cell was reused from ${resume_from}; a resumed run must execute at least one cell, so change something or run without RESUME_FROM"
+    echo "run-grust.sh: ${reused_cell_count} cell(s) reused, ${fresh_cell_count} executed" >&2
+fi
 
 for suite in "${matrix_suites[@]}"; do
     reports=()
@@ -853,11 +924,16 @@ if [[ "$smoke" == 0 && "$discovery" == 0 ]]; then
         "bundled evidence manifest already exists"
     lsqb_reject_existing_output "$publication_receipt" "publication receipt" || die \
         "publication receipt already exists"
+    create_arguments=()
+    if [[ -n "$resume_manifest" ]]; then
+        create_arguments+=(--reused-cells "$resume_manifest")
+    fi
     python3 "${root}/validate-matrix-publication.py" create \
         --output-dir "$BENCHMARK_OUTPUT_ROOT" \
         --scale "$scale" \
         --revision "$source_revision" \
-        --repository "$repo"
+        --repository "$repo" \
+        "${create_arguments[@]}"
     python3 "${root}/validate-matrix-publication.py" verify \
         --output-dir "$BENCHMARK_OUTPUT_ROOT"
 fi

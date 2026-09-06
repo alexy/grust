@@ -238,6 +238,11 @@ impl OutcomeStatus {
 pub enum ExecutionClass {
     InProcessReference,
     BackendNativeAggregate,
+    /// A durable store whose worker built a resident typed index of its own
+    /// contents outside the query boundary; the count then runs in Rust over
+    /// that index. Distinct from the in-process reference (no store) and
+    /// from backend-native execution (the store's own engine).
+    BackendResidentIndexRustCount,
     BackendRowSourceRustProjection,
     BackendMaterializeRustReference,
     BackendNeutralPolicy,

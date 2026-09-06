@@ -1272,6 +1272,136 @@ class MatrixPublicationTests(unittest.TestCase):
         self.assertEqual(receipt["suite_valid"], {"baseline": False, "adversarial": True})
         self.assertFalse(receipt["all_required_outcomes_valid"])
 
+    def reuse_cell(self, output: Path, cell: str, project: str) -> None:
+        """Make CELL's watchdog record look copied from a prior run at PROJECT."""
+        suite, backend = cell.split("-", 1)
+        watchdog_path = output / "watchdogs" / f"{cell}.json"
+        record = read_jsonl(watchdog_path)[0]
+        record["project"] = project
+        record["container_name"] = f"{project}-{suite}-{backend}-cell"
+        write_jsonl(watchdog_path, [record])
+
+    def issue_resumed(self, output: Path, reused: list[dict], scale: str = "example") -> dict:
+        listing = output.parent / f"{output.name}-reused.json"
+        listing.write_text(json.dumps(reused))
+        arguments = argparse.Namespace(
+            revision=self.revision,
+            repository=self.repository,
+            output_dir=output,
+            scale=scale,
+            reused_cells=listing,
+        )
+        with mock.patch.object(PUBLICATION, "run_semantic_validators"):
+            PUBLICATION.issue_receipt(arguments, SCRIPT_DIRECTORY)
+        return json.loads((output / PUBLICATION.RECEIPT_NAME).read_text())
+
+    def test_fresh_receipt_lists_no_reused_cells_and_legacy_receipts_still_verify(self) -> None:
+        receipt = json.loads((self.output / PUBLICATION.RECEIPT_NAME).read_text())
+        self.assertEqual(receipt["reused_cells"], [])
+        legacy = self.clone("legacy")
+        del receipt["reused_cells"]
+        (legacy / PUBLICATION.RECEIPT_NAME).write_bytes(PUBLICATION.canonical_json(receipt))
+        self.verify(legacy)
+
+    def test_resumed_run_names_its_reused_cells_and_their_prior_run(self) -> None:
+        case_root = self.root / "resumed"
+        case_root.mkdir()
+        output = make_bundle(case_root, self.revision)
+        prior_project = "grust-lsqb-matrix-11-22"
+        for cell in ("adversarial-turso", "baseline-turso"):
+            self.reuse_cell(output, cell, prior_project)
+        entry = {
+            "cell": "baseline-turso",
+            "source_output_root": "/prior/matrix-sfexample",
+            "source_receipt_sha256": "f" * 64,
+            "watchdog_project": prior_project,
+        }
+        reused = [dict(entry, cell="adversarial-turso"), entry]
+        receipt = self.issue_resumed(output, reused)
+        self.assertEqual(receipt["reused_cells"], reused)
+        self.assertNotEqual(receipt["watchdog"]["project"], prior_project)
+        self.verify(output)
+
+        # The list is part of the canonical receipt: dropping it makes the
+        # foreign records unexplained.
+        tampered = json.loads((output / PUBLICATION.RECEIPT_NAME).read_text())
+        del tampered["reused_cells"]
+        (output / PUBLICATION.RECEIPT_NAME).write_bytes(PUBLICATION.canonical_json(tampered))
+        self.assert_rejected(output, "do not share one Compose project")
+
+    def test_reused_cells_must_match_their_watchdog_records(self) -> None:
+        prior_project = "grust-lsqb-matrix-11-22"
+        entry = {
+            "cell": "baseline-turso",
+            "source_output_root": "/prior/matrix-sfexample",
+            "source_receipt_sha256": "f" * 64,
+            "watchdog_project": prior_project,
+        }
+        # A record from an unlisted foreign project is not a reused cell.
+        unlisted = self.root / "unlisted"
+        unlisted.mkdir()
+        output = make_bundle(unlisted, self.revision)
+        self.reuse_cell(output, "baseline-turso", prior_project)
+        with self.assertRaisesRegex(PUBLICATION.PublicationError, "do not share one Compose project"):
+            self.issue_resumed(output, [])
+        # A listed cell whose record carries another project was not copied
+        # from the run the receipt names.
+        with self.assertRaisesRegex(PUBLICATION.PublicationError, "not produced by the prior run"):
+            self.issue_resumed(output, [dict(entry, watchdog_project="grust-lsqb-matrix-33-44")])
+        # A listed cell whose record carries this run's own project is a lie.
+        own = self.root / "own"
+        own.mkdir()
+        output = make_bundle(own, self.revision)
+        record = read_jsonl(output / "watchdogs/baseline-turso.json")[0]
+        with self.assertRaisesRegex(PUBLICATION.PublicationError, "own Compose project"):
+            self.issue_resumed(output, [dict(entry, watchdog_project=record["project"])])
+        # Reused cells are named once, sorted, with every field well formed.
+        for broken, phrase in (
+            ([entry, entry], "listed twice"),
+            ([dict(entry, cell="baseline-nowhere")], "not a matrix cell"),
+            ([dict(entry, source_receipt_sha256="nope")], "invalid prior receipt digest"),
+            ([dict(entry, source_output_root="relative")], "absolute prior output"),
+            ([dict(entry, watchdog_project="other")], "invalid prior Compose project"),
+            ([dict(entry, extra=1)], "unexpected fields"),
+        ):
+            with self.assertRaisesRegex(PUBLICATION.PublicationError, phrase):
+                self.issue_resumed(output, broken)
+        # A failed cell is never reused: its record must be a clean completion.
+        failed = self.root / "failed"
+        failed.mkdir()
+        output = make_bundle(failed, self.revision)
+        self.reuse_cell(output, "baseline-turso", prior_project)
+        component_path = output / "components/baseline-turso-sfexample.json"
+        component = json.loads(component_path.read_text())
+        component["valid"] = False
+        write_json(component_path, component)
+        matrix_path = output / "matrix-baseline-sfexample.json"
+        matrix = json.loads(matrix_path.read_text())
+        matrix["valid"] = False
+        write_json(matrix_path, matrix)
+        record = read_jsonl(output / "watchdogs/baseline-turso.json")[0]
+        record["child_exit_status"] = 1
+        write_jsonl(output / "watchdogs/baseline-turso.json", [record])
+        with self.assertRaisesRegex(PUBLICATION.PublicationError, "reuses a failed cell"):
+            self.issue_resumed(output, [entry])
+        # A run that reused every cell executed nothing. (At sfexample the
+        # policy cell always runs, so this can only happen at a downloaded
+        # scale.)
+        everything = self.root / "everything"
+        everything.mkdir()
+        output = make_bundle(everything, self.revision, "0.1")
+        reused = []
+        for suite in PUBLICATION.SUITES:
+            for backend_entry in json.loads(
+                (SCRIPT_DIRECTORY / "evidence-manifest-v2.json").read_text()
+            )["backends"]:
+                cell = f"{suite}-{backend_entry['id']}"
+                self.reuse_cell(output, cell, prior_project)
+                reused.append(dict(entry, cell=cell))
+        reused.sort(key=lambda item: item["cell"])
+        with self.assertRaisesRegex(PUBLICATION.PublicationError, "every cell was reused"):
+            self.issue_resumed(output, reused, "0.1")
+
     def test_bundled_manifest_mutation_is_rejected(self) -> None:
         mutated = self.clone("manifest-mutation")
         manifest_path = mutated / PUBLICATION.MANIFEST_NAME

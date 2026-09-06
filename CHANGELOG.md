@@ -6,6 +6,45 @@ reconstructed from Git history, release commits, and the shipped docs.
 
 ## Unreleased
 
+- LSQB matrix resume mode: `RESUME_FROM=<prior OUTPUT_DIR>` makes a
+  publication run copy in every cell of a prior publication run whose
+  outputs verify against the prior receipt's hashes and were produced at the
+  same revision, images and cell timeout as a valid cell, and execute only
+  the rest. The receipt's new `reused_cells` list names each reused cell with
+  the prior directory, receipt digest and Compose project; the publication
+  validator and the site verifier check reused cells' watchdog records
+  against it and reject unexplained foreign records, reused failures, and a
+  run that executed nothing.
+- LSQB matrix: a durable store with a resident typed index built inside its
+  worker's load interval declares the distinct execution class
+  `backend-resident-index-rust-count` for queries whose structural proof admits
+  `count-factorized` and whose dialect renders no scalar SQL count. Turso is
+  the first such store (`TursoGraphStore::indexed_snapshot`): its worker reads
+  the loaded store back, builds the `TypedGraphIndex`, and runs the same
+  non-materializing count plans Memory runs, under the new class, with the
+  registry-bound not-materialized row exemption. The plan registry, the
+  publication validator and the site verifier's per-backend class allowlist
+  admit the class; the row-source and materialize routes remain for every
+  query without such a proof.
+- Ladybug loads through registered Arrow tables and `COPY … FROM (MATCH …)`
+  (the crate's `arrow` feature, now on by default): rows grouped per table,
+  new ids and `(from, to)` pairs copied, existing ones merged as before, last
+  row per key wins within a load, and tables are resolved once per distinct
+  label rather than once per row. A traversal step is one query per
+  relationship table (`MATCH (a)-[r]->(b) WHERE a.id = $id`) instead of one
+  point lookup per neighbour, `traverse_ids` returns ids only, and
+  `LadybugConfig::buffer_pool_bytes` caps the engine's host-sized buffer pool,
+  and `concurrent_writes` turns on the engine's multi-writer mode and lets
+  writers run on their own connections instead of queueing on one lock.
+- Turso and PostgreSQL keep a resident typed snapshot:
+  `TursoGraphStore::indexed_snapshot` and `PostgresGraphStore::indexed_snapshot`
+  build a `TypedGraphIndex` from a full read of the store under the
+  connection gate, share it until any command that can change the store
+  runs, and serve the indexed Cypher entrypoints; `GraphStore` reads are
+  unchanged. In the LSQB matrix a PostgreSQL observation worker builds its
+  index from a read-back of the once-loaded service before READY and takes
+  the same `backend-resident-index-rust-count` route as Turso; the registry,
+  validator and site verifier admit the class for both.
 - A cell whose backend cannot prove quiescence after an unacknowledged worker
   exit now ends as an explicit error result instead of aborting the matrix:
   the terminal observation is recorded, the lifecycle declares the
@@ -18,6 +57,18 @@ reconstructed from Git history, release commits, and the shipped docs.
 - Reserve up to five seconds (was one) of the coordinator deadline for
   FalkorDB's native TIMEOUT acknowledgement; at SF0.1 q9 overshot the
   one-second reserve and the unacknowledged kill aborted the cell.
+- Serve Memory `traverse` and endpoint-anchored `get_edges` from the cached
+  typed snapshot when one exists: a load into an empty store builds it, any
+  write invalidates it, and reads without one keep the existing edge-map walk,
+  so point-write workloads never rebuild an index inside a read. Results and
+  order are unchanged except that `Direction::Both` lists outgoing before
+  incoming neighbours. `TypedGraphIndex` measures its serialized size on first
+  use instead of at construction and exposes `relationship_types()`.
+- Add `GraphStore::traverse_ids`, the ids `traverse` would return in the same
+  order, with a default through `traverse` so every store keeps working; the
+  Memory store answers it from the snapshot without cloning nodes.
+- Turso `put_graph` loads every batch inside one transaction: one durable
+  commit for the whole graph instead of one per batch, and the load is atomic.
 - Make the host preflight's aggregate-CPU limit an explicit, recorded
   parameter (default two cores, at most four); the busy-process rule is
   unchanged and legacy records without the field are still held to two cores.

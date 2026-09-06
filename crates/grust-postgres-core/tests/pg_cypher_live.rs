@@ -280,3 +280,55 @@ async fn transaction_scripts_commit_and_roll_back_atomically() {
     .unwrap();
     assert!(store.get_node(&NodeId::from("p9")).await.unwrap().is_none());
 }
+
+#[tokio::test]
+#[ignore = "requires live PostgreSQL (GRUST_PG_URL)"]
+async fn resident_snapshot_reflects_the_store_and_every_write_drops_it() {
+    let store = store_with("pgsnap", &fixture()).await;
+    let first = store.indexed_snapshot().await.unwrap();
+    let again = store.indexed_snapshot().await.unwrap();
+    assert!(
+        std::sync::Arc::ptr_eq(&first, &again),
+        "an unchanged store shares one snapshot"
+    );
+    let count = |index: &grust_core::TypedGraphIndex, cypher: &str| {
+        let table =
+            grust_cypher::read::run_read_query_indexed(index, cypher, &CypherParameters::new())
+                .unwrap();
+        match table.rows[0].as_slice() {
+            [Value::Int(count)] => *count,
+            other => panic!("expected one integer, got {other:?}"),
+        }
+    };
+    let people = count(&first, "MATCH (n:Person) RETURN count(n)");
+    assert_eq!(
+        people,
+        store
+            .read_graph()
+            .await
+            .unwrap()
+            .nodes
+            .iter()
+            .filter(|node| node.label.as_str() == "Person")
+            .count() as i64
+    );
+
+    store
+        .put_node(&node("Person", "p-new", &[("name", Value::from("New"))]))
+        .await
+        .unwrap();
+    let after_write = store.indexed_snapshot().await.unwrap();
+    assert!(
+        !std::sync::Arc::ptr_eq(&first, &after_write),
+        "a write drops the snapshot"
+    );
+    assert_eq!(
+        count(&after_write, "MATCH (n:Person) RETURN count(n)"),
+        people + 1
+    );
+
+    // A whole-store clear is a write like any other.
+    store.clear().await.unwrap();
+    let after_clear = store.indexed_snapshot().await.unwrap();
+    assert_eq!(count(&after_clear, "MATCH (n) RETURN count(n)"), 0);
+}

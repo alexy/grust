@@ -25,16 +25,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     json!({"kind": "not-materialized", "rows": 0}),
                     None,
                 )
-            } else {
-                let Some(sql) = backend::scalar_sql_query(id, case)? else {
-                    continue;
-                };
+            } else if let Some(sql) = backend::scalar_sql_query(id, case)? {
                 (
                     "sql-count",
                     "backend-native-aggregate",
                     Value::Null,
                     Some(queries::sha256(sql.as_bytes())),
                 )
+            } else if backend::resident_count_plan(case)? {
+                (
+                    "count-factorized",
+                    "backend-resident-index-rust-count",
+                    json!({"kind": "not-materialized", "rows": 0}),
+                    None,
+                )
+            } else {
+                continue;
             };
             plans.insert(
                 case.id.clone(),

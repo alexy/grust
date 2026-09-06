@@ -1,6 +1,7 @@
 mod sql_safety;
 
 use async_trait::async_trait;
+use grust_core::TypedGraphIndex;
 use grust_core::prelude::*;
 use grust_cypher::pushdown::{NoTypeHints, SqlDialect, StrOp, combine_union, plan_read};
 use grust_cypher::{CypherParameters, CypherResultTable};
@@ -10,6 +11,7 @@ use sql_safety::{
     validate_autocommit_sql, validate_identifier_length, validate_typed_column_alias,
 };
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_postgres::{Client, NoTls};
 
@@ -45,6 +47,9 @@ pub struct PostgresGraphStore {
     /// held, the next caller recovers the abandoned transaction first.
     transaction_needs_rollback: AtomicBool,
     connection_task: JoinHandle<()>,
+    /// The resident typed snapshot, built by `indexed_snapshot` and dropped
+    /// by every command that could change the store.
+    index_cache: Mutex<Option<Arc<TypedGraphIndex>>>,
 }
 
 impl PostgresGraphStore {
@@ -68,6 +73,7 @@ impl PostgresGraphStore {
             connection_gate: tokio::sync::Mutex::new(()),
             transaction_needs_rollback: AtomicBool::new(false),
             connection_task,
+            index_cache: Mutex::new(None),
         })
     }
 
@@ -107,6 +113,10 @@ impl PostgresGraphStore {
     }
 
     async fn execute_unlocked(&self, sql: &str) -> Result<()> {
+        // Every command reaches the store through here, transaction control
+        // included; dropping the snapshot on all of them keeps the rule
+        // simple and over-invalidation is only a rebuild.
+        self.invalidate_snapshot();
         self.client
             .batch_execute(sql)
             .await
@@ -331,16 +341,60 @@ impl PostgresGraphStore {
         PostgresReadDialect::new(&self.config)
     }
 
+    /// The resident typed snapshot of this store: an immutable `TypedGraphIndex`
+    /// over a full read of the node and edge tables, built on the first call
+    /// after any write and shared by every later call until the next write.
+    ///
+    /// The build is a full read over the wire plus index construction, and is
+    /// meant to happen once after a load, outside any query's timing. Reads
+    /// through `GraphStore` are unaffected; the snapshot serves the indexed
+    /// Cypher entrypoints (`grust_cypher::read::run_read_query_indexed`).
+    pub async fn indexed_snapshot(&self) -> Result<Arc<TypedGraphIndex>> {
+        // Hold the connection gate from the read through publication: every
+        // write needs the gate too, so nothing can change the store between
+        // the scan the index is built from and the moment it is cached.
+        let _gate = self.lock_connection().await?;
+        if let Some(index) = self.cached_snapshot() {
+            return Ok(index);
+        }
+        let graph = Arc::new(self.read_graph_unlocked().await?);
+        let index = Arc::new(TypedGraphIndex::new(graph)?);
+        *self
+            .index_cache
+            .lock()
+            .expect("postgres index cache lock poisoned") = Some(Arc::clone(&index));
+        Ok(index)
+    }
+
+    fn cached_snapshot(&self) -> Option<Arc<TypedGraphIndex>> {
+        self.index_cache
+            .lock()
+            .expect("postgres index cache lock poisoned")
+            .clone()
+    }
+
+    fn invalidate_snapshot(&self) {
+        self.index_cache
+            .lock()
+            .expect("postgres index cache lock poisoned")
+            .take();
+    }
+
     /// Materialize the full graph — the reference-executor fallback input.
     pub async fn read_graph(&self) -> Result<Graph> {
+        let _gate = self.lock_connection().await?;
+        self.read_graph_unlocked().await
+    }
+
+    async fn read_graph_unlocked(&self) -> Result<Graph> {
         let nodes = self
-            .query_nodes(&format!(
+            .query_nodes_unlocked(&format!(
                 "SELECT id, label, props::text AS props FROM {}",
                 self.nodes_table()
             ))
             .await?;
         let edges = self
-            .query_edges(&format!(
+            .query_edges_unlocked(&format!(
                 "SELECT id, from_id, to_id, label, props::text AS props FROM {}",
                 self.edges_table()
             ))

@@ -9,8 +9,9 @@
 mod materialize;
 
 mod execution_plan;
-use execution_plan::scalar_sql_execution_class;
-pub use execution_plan::{memory_execution_plan, scalar_sql_query};
+pub use execution_plan::{
+    memory_execution_plan, resident_count_plan, resident_store_execution_class, scalar_sql_query,
+};
 
 #[cfg(feature = "falkor")]
 mod falkor;
@@ -74,8 +75,18 @@ impl From<String> for QueryExecutionError {
 
 enum Backend {
     Memory(Arc<TypedGraphIndex>),
-    Turso(TursoGraphStore),
-    Postgres(PostgresGraphStore),
+    /// Turso plus the resident typed index the worker built from the store
+    /// after loading it, inside `load_ns`.
+    Turso {
+        store: TursoGraphStore,
+        resident: Arc<TypedGraphIndex>,
+    },
+    /// A PostgreSQL store with the resident typed index its worker built
+    /// from the store's own rows before READY (`indexed_snapshot`).
+    Postgres {
+        store: PostgresGraphStore,
+        resident: Arc<TypedGraphIndex>,
+    },
     #[cfg(feature = "ladybug")]
     Ladybug(LadybugGraphStore),
     #[cfg(feature = "falkor")]
@@ -184,14 +195,22 @@ impl PreparedBackend {
                 inner: Backend::Sail(sail_session::Session::borrow().await?),
                 load_ns: 0,
             }),
-            "postgres" => Ok(Self {
-                inner: Backend::Postgres(
-                    PostgresGraphStore::connect(postgres_config())
-                        .await
-                        .map_err(|_| "connect to PostgreSQL failed".to_string())?,
-                ),
-                load_ns: 0,
-            }),
+            "postgres" => {
+                let store = PostgresGraphStore::connect(postgres_config())
+                    .await
+                    .map_err(|_| "connect to PostgreSQL failed".to_string())?;
+                // The coordinator loaded the store once; every observation
+                // worker reads it back and builds its own resident index
+                // before READY, so the build lands in setup, never in a query.
+                let resident = store
+                    .indexed_snapshot()
+                    .await
+                    .map_err(|err| format!("attach: resident index: {err}"))?;
+                Ok(Self {
+                    inner: Backend::Postgres { store, resident },
+                    load_ns: 0,
+                })
+            }
             #[cfg(feature = "falkor")]
             "falkor" => {
                 let redis_url =
@@ -253,19 +272,19 @@ impl PreparedBackend {
                 "Grust portable Cypher",
                 "in-process",
             ),
-            Backend::Turso(_) => (
-                scalar_sql_execution_class(case, &TursoReadDialect::new("grust"))?,
+            Backend::Turso { .. } => (
+                resident_store_execution_class(case, &TursoReadDialect::new("grust"))?,
                 "Grust portable Cypher",
                 "embedded",
             ),
-            Backend::Postgres(_) => {
-                let config = postgres_config();
-                (
-                    scalar_sql_execution_class(case, &PostgresReadDialect::new(&config))?,
-                    "Grust portable Cypher",
-                    "PostgreSQL wire",
-                )
-            }
+            Backend::Postgres { .. } => (
+                resident_store_execution_class(
+                    case,
+                    &PostgresReadDialect::new(&postgres_config()),
+                )?,
+                "Grust portable Cypher",
+                "PostgreSQL wire",
+            ),
             #[cfg(feature = "falkor")]
             Backend::Falkor { .. } => (
                 ExecutionClass::BackendNativeAggregate,
@@ -322,7 +341,15 @@ impl PreparedBackend {
                 let case = case.clone();
                 blocking_count_with_timeout(timeout_ms, move || indexed_count(&index, &case)).await
             }
-            Backend::Turso(store) => {
+            Backend::Turso { store, resident } => {
+                if scalar_sql_query("turso", case)?.is_none() && resident_count_plan(case)? {
+                    let index = Arc::clone(resident);
+                    let case = case.clone();
+                    return blocking_count_with_timeout(timeout_ms, move || {
+                        indexed_count(&index, &case)
+                    })
+                    .await;
+                }
                 let table = query_result(
                     store
                         .run_read_query(&case.executable, &CypherParameters::new())
@@ -330,7 +357,15 @@ impl PreparedBackend {
                 )?;
                 query_result(count_from(table))
             }
-            Backend::Postgres(store) => {
+            Backend::Postgres { store, resident } => {
+                if scalar_sql_query("postgres", case)?.is_none() && resident_count_plan(case)? {
+                    let index = Arc::clone(resident);
+                    let case = case.clone();
+                    return blocking_count_with_timeout(timeout_ms, move || {
+                        indexed_count(&index, &case)
+                    })
+                    .await;
+                }
                 let table = query_result(
                     store
                         .run_read_query(&case.executable, &CypherParameters::new())
@@ -401,9 +436,9 @@ impl PreparedBackend {
     fn backend_query(&self, case: &QueryCase) -> Result<String, String> {
         let _ = case;
         match &self.inner {
-            Backend::Turso(_) => scalar_sql_query("turso", case)?
+            Backend::Turso { .. } => scalar_sql_query("turso", case)?
                 .ok_or_else(|| "query has no native Turso count plan".to_string()),
-            Backend::Postgres(_) => scalar_sql_query("postgres", case)?
+            Backend::Postgres { .. } => scalar_sql_query("postgres", case)?
                 .ok_or_else(|| "query has no native PostgreSQL count plan".to_string()),
             #[cfg(feature = "falkor")]
             Backend::Falkor { .. } => Ok(falkor::adapt_query(case)),
@@ -595,8 +630,12 @@ async fn prepare_turso(graph: &Graph) -> Result<PreparedBackend, String> {
         .put_graph(graph)
         .await
         .map_err(|err| err.to_string())?;
+    let resident = store
+        .indexed_snapshot()
+        .await
+        .map_err(|err| format!("dataset.load: resident index: {err}"))?;
     Ok(PreparedBackend {
-        inner: Backend::Turso(store),
+        inner: Backend::Turso { store, resident },
         load_ns: elapsed_ns(started)?,
     })
 }
@@ -611,8 +650,12 @@ where
     let started = Instant::now();
     store.bootstrap().await.map_err(|err| err.to_string())?;
     put_projected_chunks(&store, chunks).await?;
+    let resident = store
+        .indexed_snapshot()
+        .await
+        .map_err(|err| format!("dataset.load: resident index: {err}"))?;
     Ok(PreparedBackend {
-        inner: Backend::Turso(store),
+        inner: Backend::Turso { store, resident },
         load_ns: elapsed_ns(started)?,
     })
 }
@@ -642,8 +685,12 @@ async fn prepare_postgres(graph: &Graph) -> Result<PreparedBackend, String> {
         .put_graph(graph)
         .await
         .map_err(|err| err.to_string())?;
+    let resident = store
+        .indexed_snapshot()
+        .await
+        .map_err(|err| format!("dataset.load: resident index: {err}"))?;
     Ok(PreparedBackend {
-        inner: Backend::Postgres(store),
+        inner: Backend::Postgres { store, resident },
         load_ns: elapsed_ns(started)?,
     })
 }
@@ -659,8 +706,12 @@ where
     store.bootstrap().await.map_err(|err| err.to_string())?;
     store.clear().await.map_err(|err| err.to_string())?;
     put_projected_chunks(&store, chunks).await?;
+    let resident = store
+        .indexed_snapshot()
+        .await
+        .map_err(|err| format!("dataset.load: resident index: {err}"))?;
     Ok(PreparedBackend {
-        inner: Backend::Postgres(store),
+        inner: Backend::Postgres { store, resident },
         load_ns: elapsed_ns(started)?,
     })
 }
@@ -1135,10 +1186,9 @@ fn sql_execution_class(
 pub fn portable_execution_class(id: &str, case: &QueryCase) -> Result<ExecutionClass, String> {
     match id {
         "memory" => Ok(ExecutionClass::InProcessReference),
-        "turso" => scalar_sql_execution_class(case, &TursoReadDialect::new("grust")),
+        "turso" => resident_store_execution_class(case, &TursoReadDialect::new("grust")),
         "postgres" => {
-            let config = postgres_config();
-            scalar_sql_execution_class(case, &PostgresReadDialect::new(&config))
+            resident_store_execution_class(case, &PostgresReadDialect::new(&postgres_config()))
         }
         #[cfg(feature = "sail")]
         "sail" => sql_execution_class(case, &grust_cypher::pushdown::SparkDialect),

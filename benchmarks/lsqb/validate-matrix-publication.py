@@ -81,6 +81,13 @@ EXTERNAL_BINDING_FIELDS = frozenset(
 EXTERNAL_STATIC_FIELDS = frozenset({"backend", "mode", "reason"})
 CONTAINER_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 MATRIX_PROJECT_RE = re.compile(r"^grust-lsqb-matrix-[0-9]+-[0-9]+$")
+SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
+# A cell copied in from a prior publication run by run-grust.sh's RESUME_FROM
+# mode: the receipt names the cell, the prior output directory, the prior
+# receipt's digest and the prior watchdog record's Compose project.
+REUSED_CELL_FIELDS = frozenset(
+    {"cell", "source_output_root", "source_receipt_sha256", "watchdog_project"}
+)
 WATCHDOG_FIELDS = frozenset(
     {
         "child_exit_status",
@@ -128,15 +135,18 @@ OBSERVATION_V3_REQUIRED_FIELDS = frozenset(
 OBSERVATION_V3_FIELDS = OBSERVATION_V3_REQUIRED_FIELDS | {"actual_count", "detail", "plan"}
 OBSERVATION_PLAN_CLASSES = {
     "clause-pipeline": {"in-process-reference", "backend-materialize-rust-reference"},
-    "count-factorized": {"in-process-reference"},
+    "count-factorized": {"in-process-reference", "backend-resident-index-rust-count"},
     "sql-row-source": {"backend-row-source-rust-projection"},
     "sql-count": {"backend-native-aggregate"},
     "backend-native": {"backend-native-aggregate"},
 }
 OBSERVATION_PLAN_BACKENDS = {
-    "count-factorized": {"memory"},
+    "count-factorized": {"memory", "turso", "postgres"},
     "sql-count": {"turso", "postgres"},
 }
+# Durable stores whose worker may build a resident typed index of the store's
+# own contents outside the query boundary and run the count plan over it.
+RESIDENT_INDEX_BACKENDS = {"turso", "postgres"}
 EXECUTION_PLAN_REGISTRY_SCHEMA = "grust-lsqb-execution-plan-registry-v1"
 EXECUTION_PLAN_ENTRY_FIELDS = frozenset(
     {
@@ -396,6 +406,17 @@ def manifest_execution_plans(
                     == {"kind": "not-materialized", "rows": 0}
                     and entry.get("backend_query_sha256") is None,
                     f"invalid count-factorized registry entry: {backend}/{query_id}",
+                )
+            elif (
+                backend in RESIDENT_INDEX_BACKENDS
+                and entry.get("plan") == "count-factorized"
+            ):
+                require(
+                    entry.get("execution_class") == "backend-resident-index-rust-count"
+                    and entry.get("rust_rows")
+                    == {"kind": "not-materialized", "rows": 0}
+                    and entry.get("backend_query_sha256") is None,
+                    f"invalid resident-index registry entry: {backend}/{query_id}",
                 )
             else:
                 require(
@@ -1458,12 +1479,51 @@ def validate_reports(
     return matrices, components, policy_valid
 
 
+def validate_reused_cells(value: Any, manifest: dict[str, Any]) -> dict[str, str]:
+    """The receipt's reused-cell list, as {cell: prior Compose project}."""
+    cells = {
+        f"{suite}-{entry['id']}" for suite in SUITES for entry in manifest_backends(manifest)
+    }
+    require(isinstance(value, list), "reused cells must be a list")
+    reused: dict[str, str] = {}
+    for entry in value:
+        require(
+            isinstance(entry, dict) and set(entry) == REUSED_CELL_FIELDS,
+            "reused cell entry has unexpected fields",
+        )
+        cell = entry["cell"]
+        require(cell in cells, f"reused cell is not a matrix cell: {cell!r}")
+        require(cell not in reused, f"reused cell is listed twice: {cell}")
+        require(
+            isinstance(entry["source_output_root"], str)
+            and entry["source_output_root"].startswith("/"),
+            f"reused cell {cell} has no absolute prior output directory",
+        )
+        require(
+            isinstance(entry["source_receipt_sha256"], str)
+            and SHA256_HEX_RE.fullmatch(entry["source_receipt_sha256"]) is not None,
+            f"reused cell {cell} has an invalid prior receipt digest",
+        )
+        project = entry["watchdog_project"]
+        require(
+            isinstance(project, str) and MATRIX_PROJECT_RE.fullmatch(project) is not None,
+            f"reused cell {cell} has an invalid prior Compose project",
+        )
+        reused[cell] = project
+    require(
+        [entry["cell"] for entry in value] == sorted(reused),
+        "reused cells are not sorted by cell",
+    )
+    return reused
+
+
 def validate_watchdog_records(
     files: dict[str, bytes],
     manifest: dict[str, Any],
     scale: str,
     components: dict[str, dict[str, dict[str, Any]]],
     policy_valid: bool | None,
+    reused: dict[str, str],
 ) -> dict[str, Any]:
     expected: list[tuple[str, str]] = [
         (f"watchdogs/{suite}-{entry['id']}.json", f"{suite}-{entry['id']}")
@@ -1475,6 +1535,7 @@ def validate_watchdog_records(
         expected.append(("watchdogs/policy-portable.json", "policy"))
 
     projects: set[str] = set()
+    reused_projects: set[str] = set()
     timeouts: set[int] = set()
     container_ids: set[str] = set()
     for relative, cell in expected:
@@ -1542,11 +1603,28 @@ def validate_watchdog_records(
             child_exit_status == expected_child_exit_status,
             f"{label} child exit status does not match report validity",
         )
-        projects.add(project)
+        if cell in reused:
+            require(
+                project == reused[cell],
+                f"{label} was not produced by the prior run the receipt names",
+            )
+            require(child_exit_status == 0, f"{label} reuses a failed cell")
+            reused_projects.add(project)
+        else:
+            projects.add(project)
         timeouts.add(timeout_ms)
         container_ids.add(container_id)
 
-    require(len(projects) == 1, "cell watchdog records do not share one Compose project")
+    require(
+        len(projects) == 1,
+        "cell watchdog records do not share one Compose project"
+        if projects
+        else "every cell was reused; a resumed run must execute at least one cell",
+    )
+    require(
+        not (projects & reused_projects),
+        "a reused cell claims this run's own Compose project",
+    )
     require(len(timeouts) == 1, "cell watchdog records do not share one configured timeout")
     return {
         "cell_count": len(expected),
@@ -1705,6 +1783,7 @@ def build_receipt(
     suite_valid: dict[str, bool],
     policy_valid: bool | None,
     watchdog: dict[str, Any],
+    reused_cells: list[dict[str, str]] | None,
 ) -> dict[str, Any]:
     inventory = [
         {"path": path, "bytes": len(raw), "sha256": sha256(raw)}
@@ -1712,7 +1791,7 @@ def build_receipt(
         if path != RECEIPT_NAME
     ]
     digests = {entry["path"]: entry["sha256"] for entry in inventory}
-    return {
+    receipt: dict[str, Any] = {
         "schema": RECEIPT_SCHEMA,
         "status": "complete",
         "mode": "publication",
@@ -1732,6 +1811,11 @@ def build_receipt(
         "output_bytes": sum(entry["bytes"] for entry in inventory),
         "output_inventory": inventory,
     }
+    if reused_cells is not None:
+        # Receipts issued before resume mode existed carry no list; a new
+        # receipt always does, empty when every cell ran in this invocation.
+        receipt["reused_cells"] = reused_cells
+    return receipt
 
 
 def write_atomic(path: Path, content: bytes, label: str) -> None:
@@ -1831,9 +1915,11 @@ def inspect_bundle(
     scale: str,
     include_receipt: bool,
     semantic: bool = True,
+    reused_cells: list[dict[str, str]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
     require(REVISION_RE.fullmatch(revision) is not None, "source revision is not a clean 40-hex commit")
     manifest, manifest_digest = load_manifest(output_directory)
+    reused = validate_reused_cells(reused_cells, manifest) if reused_cells is not None else {}
     expected_files, artifacts, expected_directories = expected_layout(
         manifest, scale, include_receipt
     )
@@ -1857,7 +1943,7 @@ def inspect_bundle(
     )
     validate_external_service_logs(files, manifest, images, matrices)
     watchdog = validate_watchdog_records(
-        files, manifest, scale, components, policy_valid
+        files, manifest, scale, components, policy_valid, reused
     )
     if semantic:
         run_semantic_validators(script_directory, output_directory, scale)
@@ -1871,6 +1957,7 @@ def inspect_bundle(
         {suite: matrices[suite]["valid"] for suite in SUITES},
         policy_valid,
         watchdog,
+        reused_cells,
     )
     return receipt, files
 
@@ -1884,6 +1971,7 @@ def issue_receipt(arguments: argparse.Namespace, script_directory: Path) -> Path
     )
     bundled_manifest = arguments.output_dir / MANIFEST_NAME
     receipt_path = arguments.output_dir / RECEIPT_NAME
+    reused_cells = load_reused_cells(getattr(arguments, "reused_cells", None))
     receipt_raw: bytes | None = None
     manifest_written = False
     receipt_written = False
@@ -1896,6 +1984,7 @@ def issue_receipt(arguments: argparse.Namespace, script_directory: Path) -> Path
             revision,
             arguments.scale,
             include_receipt=False,
+            reused_cells=reused_cells,
         )
         require(
             receipt["evidence_manifest_sha256"] == sha256(manifest_raw),
@@ -1916,6 +2005,19 @@ def issue_receipt(arguments: argparse.Namespace, script_directory: Path) -> Path
     return receipt_path
 
 
+def load_reused_cells(path: Path | None) -> list[dict[str, str]]:
+    """The reused-cell list run-grust.sh hands to `create`; empty without one."""
+    if path is None:
+        return []
+    raw = read_regular_file(path, "reused cell list")
+    try:
+        value = json.loads(raw, object_pairs_hook=reject_duplicate_keys)
+    except ValueError as error:
+        raise PublicationError(f"reused cell list is not JSON: {path}: {error}") from error
+    require(isinstance(value, list), "reused cell list is not a JSON list")
+    return value
+
+
 def verify_receipt(output_directory: Path, script_directory: Path) -> Path:
     receipt_path = output_directory / RECEIPT_NAME
     observed, raw = load_json(receipt_path, "publication receipt")
@@ -1924,6 +2026,9 @@ def verify_receipt(output_directory: Path, script_directory: Path) -> Path:
     scale = observed.get("scale_factor")
     require(isinstance(revision, str), "publication receipt has no source revision")
     require(isinstance(scale, str), "publication receipt has no scale factor")
+    # The list is the receipt's own claim; inspect_bundle checks every named
+    # cell's watchdog record against it and rebuilds the receipt around it.
+    reused_cells = observed.get("reused_cells") if "reused_cells" in observed else None
     expected, _ = inspect_bundle(
         script_directory,
         output_directory,
@@ -1931,6 +2036,7 @@ def verify_receipt(output_directory: Path, script_directory: Path) -> Path:
         scale,
         include_receipt=True,
         semantic=False,
+        reused_cells=reused_cells,
     )
     require(observed == expected, "publication receipt does not match the output inventory")
     return receipt_path
@@ -1943,6 +2049,11 @@ def parse_arguments() -> argparse.Namespace:
     issue.add_argument("--output-dir", required=True, type=Path)
     issue.add_argument("--scale", required=True)
     issue.add_argument("--revision", required=True)
+    issue.add_argument(
+        "--reused-cells",
+        type=Path,
+        help="JSON list of cells copied from a prior run (run-grust.sh RESUME_FROM)",
+    )
     issue.add_argument("--repository", required=True, type=Path)
     verify = subparsers.add_parser("verify", help="verify an existing publication receipt")
     verify.add_argument("--output-dir", required=True, type=Path)

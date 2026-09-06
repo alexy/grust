@@ -677,8 +677,10 @@ fn rust_rows_for_execution(
     execution: &ExecutionDescriptorV2,
     scale: &str,
 ) -> Result<Option<queries::RustRowEstimate>, String> {
-    if execution.class == Some(ExecutionClass::InProcessReference)
-        && backend::memory_execution_plan(case)? == report::ExecutionPlan::CountFactorized
+    if matches!(
+        execution.class,
+        Some(ExecutionClass::InProcessReference | ExecutionClass::BackendResidentIndexRustCount)
+    ) && backend::memory_execution_plan(case)? == report::ExecutionPlan::CountFactorized
     {
         return Ok(Some(queries::RustRowEstimate {
             kind: queries::RustRowCardinality::NotMaterialized,
@@ -687,7 +689,9 @@ fn rust_rows_for_execution(
     }
     let plan = match execution.class {
         Some(
-            ExecutionClass::InProcessReference | ExecutionClass::BackendMaterializeRustReference,
+            ExecutionClass::InProcessReference
+            | ExecutionClass::BackendMaterializeRustReference
+            | ExecutionClass::BackendResidentIndexRustCount,
         ) => queries::RustRowPlan::InProcess,
         Some(ExecutionClass::BackendRowSourceRustProjection) => queries::RustRowPlan::RowSource,
         Some(ExecutionClass::BackendNativeAggregate | ExecutionClass::BackendNeutralPolicy)
