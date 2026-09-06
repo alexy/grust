@@ -19,7 +19,7 @@ impl PreparedBackend {
             Backend::Turso { .. } => {
                 scalar_count_plan(case, &super::TursoReadDialect::new("grust"))?
             }
-            Backend::Postgres(_) => scalar_count_plan(
+            Backend::Postgres { .. } => scalar_count_plan(
                 case,
                 &super::PostgresReadDialect::new(&super::postgres_config()),
             )?,
@@ -28,7 +28,11 @@ impl PreparedBackend {
         if scalar.is_some() {
             return Ok(ExecutionPlan::SqlCount);
         }
-        if matches!(&self.inner, Backend::Turso { .. }) && resident_count_plan(case)? {
+        if matches!(
+            &self.inner,
+            Backend::Turso { .. } | Backend::Postgres { .. }
+        ) && resident_count_plan(case)?
+        {
             return Ok(ExecutionPlan::CountFactorized);
         }
         let class = self
@@ -58,17 +62,6 @@ fn scalar_count_plan(
     plan_scalar_count_read(&case.executable, &CypherParameters::new(), &NoTypeHints)
         .map(|plan| plan.filter(|plan| plan.supported_by(dialect)))
         .map_err(|error| error.to_string())
-}
-
-pub(super) fn scalar_sql_execution_class(
-    case: &QueryCase,
-    dialect: &dyn SqlDialect,
-) -> Result<ExecutionClass, String> {
-    if scalar_count_plan(case, dialect)?.is_some() {
-        Ok(ExecutionClass::BackendNativeAggregate)
-    } else {
-        super::sql_execution_class(case, dialect)
-    }
 }
 
 /// Whether the indexed executor proves a non-materializing count plan for
@@ -201,19 +194,20 @@ mod tests {
         let exact = case("MATCH (n {kind:'Comment'}) RETURN count(*)");
         let unsupported = grust_cypher::pushdown::SparkDialect;
         assert!(scalar_count_plan(&exact, &unsupported).unwrap().is_none());
+        // Without a scalar SQL count the resident-store route falls through to
+        // the structural proof, which admits this inline property scan.
         assert_eq!(
-            scalar_sql_execution_class(&exact, &unsupported).unwrap(),
-            ExecutionClass::BackendRowSourceRustProjection
+            resident_store_execution_class(&exact, &unsupported).unwrap(),
+            ExecutionClass::BackendResidentIndexRustCount
         );
 
         let prepared = PreparedBackend::prepare("turso", &grust_core::Graph::default())
             .await
             .unwrap();
         // Counts the scalar SQL opt-in declines. Where the indexed executor
-        // proves a plan (inline property scans), Turso runs it over its
-        // resident index under the distinct class; where it does not (a
-        // general WHERE), Turso keeps SQL row-source. PostgreSQL, with no
-        // resident index, keeps SQL row-source throughout.
+        // proves a plan (inline property scans), Turso and PostgreSQL run it
+        // over their resident index under the distinct class; where it does
+        // not (a general WHERE), both keep SQL row-source.
         let mut proven = 0;
         for query in [
             "MATCH (n) WHERE n.age = 7 RETURN count(*)",
@@ -245,7 +239,7 @@ mod tests {
             );
             assert_eq!(
                 portable_execution_class("postgres", &query).unwrap(),
-                ExecutionClass::BackendRowSourceRustProjection
+                expected_class
             );
         }
         assert!(

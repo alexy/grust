@@ -26,8 +26,7 @@ fn registry_matches_every_optimized_plan_without_authorizing_fallbacks() {
         for case in &cases {
             let memory = id == "memory";
             let sql = backend::scalar_sql_query(id, case).unwrap();
-            let resident =
-                id == "turso" && sql.is_none() && backend::resident_count_plan(case).unwrap();
+            let resident = !memory && sql.is_none() && backend::resident_count_plan(case).unwrap();
             let eligible = if memory {
                 backend::memory_execution_plan(case).unwrap() == ExecutionPlan::CountFactorized
             } else {
@@ -38,27 +37,26 @@ fn registry_matches_every_optimized_plan_without_authorizing_fallbacks() {
             let expected = matches!(
                 case.id.as_str(),
                 "q1" | "q4" | "a1-reversed-chain" | "a7-cartesian-count"
-            ) || ((memory || id == "turso")
-                && matches!(
-                    case.id.as_str(),
-                    "q2" | "q3"
-                        | "q5"
-                        | "q6"
-                        | "q7"
-                        | "q8"
-                        | "q9"
-                        | "a2-reordered-join"
-                        | "a3-split-match"
-                        | "a4-optional-fanout"
-                        | "a5-negated-pattern"
-                        | "a6-range-expansion"
-                        | "a8-union-dedup"
-                        | "a9-path-zero-hop"
-                        | "a10-unicode-literal"
-                        | "a11-schema-null-probe"
-                        | "a12-parser-comment-trivia"
-                        | "a13-resource-edge-scan"
-                ));
+            ) || matches!(
+                case.id.as_str(),
+                "q2" | "q3"
+                    | "q5"
+                    | "q6"
+                    | "q7"
+                    | "q8"
+                    | "q9"
+                    | "a2-reordered-join"
+                    | "a3-split-match"
+                    | "a4-optional-fanout"
+                    | "a5-negated-pattern"
+                    | "a6-range-expansion"
+                    | "a8-union-dedup"
+                    | "a9-path-zero-hop"
+                    | "a10-unicode-literal"
+                    | "a11-schema-null-probe"
+                    | "a12-parser-comment-trivia"
+                    | "a13-resource-edge-scan"
+            );
             assert_eq!(eligible, expected, "{id}/{} eligibility", case.id);
             if !eligible {
                 assert!(

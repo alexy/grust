@@ -58,14 +58,19 @@ enumerates matching rows. Other shapes retain `clause-pipeline` and its row boun
 empty materialized result is not evidence of a non-materializing algorithm.
 See [indexed reads](../../docs/INDEXED_READS.md) for exact scope and APIs.
 
-Turso additionally keeps a **resident typed index** (`TursoGraphStore::indexed_snapshot`):
-after the worker loads the store, and before READY, it reads the store's node
-and edge tables back and builds the same immutable `TypedGraphIndex` Memory
-uses, inside `load_ns`. A query whose dialect renders no scalar SQL count but
-whose structural proof admits `count-factorized` then runs that plan in Rust
-over the resident index and declares the distinct class
-`backend-resident-index-rust-count`: the store held the data and the index was
-built from it, but the store's engine does no work inside the query boundary.
+Turso and PostgreSQL additionally keep a **resident typed index**
+(`TursoGraphStore::indexed_snapshot`, `PostgresGraphStore::indexed_snapshot`):
+before READY, the worker reads the store's node and edge tables back and
+builds the same immutable `TypedGraphIndex` Memory uses. Turso's worker
+reloads the store per observation, so the read-back and build land inside
+`load_ns`; PostgreSQL's worker attaches to the service the coordinator loaded
+once and builds its own index from a read over the wire, inside its setup
+interval. Either way the build precedes GO and is never inside the timed
+query. A query whose dialect renders no scalar SQL count but whose structural
+proof admits `count-factorized` then runs that plan in Rust over the resident
+index and declares the distinct class `backend-resident-index-rust-count`:
+the store held the data and the index was built from it, but the store's
+engine does no work inside the query boundary.
 It is neither the in-process reference (no store) nor backend-native (the
 engine). Its timings are reported under that class, never pooled with either.
 The registry binds these entries with the not-materialized row shape exactly as
@@ -89,12 +94,12 @@ The pinned example's compiler-derived plan inventory is:
 |---|---|---|
 | Memory | All 22: q1–q9 and a1–a13 | `count-factorized` |
 | Turso, PostgreSQL | q1, q4, a1, a7 | `sql-count` |
-| Turso | the other 18 | `count-factorized` over the resident index (`backend-resident-index-rust-count`) |
+| Turso, PostgreSQL | the other 18 | `count-factorized` over the resident index (`backend-resident-index-rust-count`) |
 
 These are structural classifications, not performance results. The offline
 integration tests compare all 22 example cases with the pinned oracle and
 reference executor, execute Memory and embedded Turso, and check PostgreSQL's
-SQL without requiring a server. They do not qualify a live PostgreSQL service
+SQL and route classification without requiring a server. They do not qualify a live PostgreSQL service
 or a larger-scale timing cohort.
 
 ## Plan-bound row admission

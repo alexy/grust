@@ -27,11 +27,15 @@ reconstructed from Git history, release commits, and the shipped docs.
   `LadybugConfig::buffer_pool_bytes` caps the engine's host-sized buffer pool,
   and `concurrent_writes` turns on the engine's multi-writer mode and lets
   writers run on their own connections instead of queueing on one lock.
-- Turso keeps a resident typed snapshot: `TursoGraphStore::indexed_snapshot`
-  builds a `TypedGraphIndex` from a full read of the store under the
-  connection gate, shares it until any statement that can change the store
-  runs, and serves the indexed Cypher entrypoints; `GraphStore` reads are
-  unchanged.
+- Turso and PostgreSQL keep a resident typed snapshot:
+  `TursoGraphStore::indexed_snapshot` and `PostgresGraphStore::indexed_snapshot`
+  build a `TypedGraphIndex` from a full read of the store under the
+  connection gate, share it until any command that can change the store
+  runs, and serve the indexed Cypher entrypoints; `GraphStore` reads are
+  unchanged. In the LSQB matrix a PostgreSQL observation worker builds its
+  index from a read-back of the once-loaded service before READY and takes
+  the same `backend-resident-index-rust-count` route as Turso; the registry,
+  validator and site verifier admit the class for both.
 - A cell whose backend cannot prove quiescence after an unacknowledged worker
   exit now ends as an explicit error result instead of aborting the matrix:
   the terminal observation is recorded, the lifecycle declares the

@@ -50,6 +50,16 @@ does not pay for the drop. `serialized_graph_bytes()` is measured on first use.
 the Memory store serves it from the snapshot without cloning nodes, and every
 other store answers through the default implementation over `traverse`.
 
+Durable stores keep the same kind of snapshot: `TursoGraphStore::indexed_snapshot()`
+and `PostgresGraphStore::indexed_snapshot()` are `async`, hold the store's
+connection gate from the full read of the node and edge tables through
+publication, and share the built `Arc<TypedGraphIndex>` until any command that
+could change the store runs (every statement sent through the store's command
+path drops it; a rebuild is the only cost of over-invalidation). The read is a
+full scan, over the wire for PostgreSQL, so the build belongs after a load or
+in a worker's setup, never inside a query's timing. `GraphStore` reads through
+these stores are unchanged; the snapshot serves the indexed Cypher entrypoints.
+
 ```rust
 use grust_core::{Graph, GraphStore};
 use grust_cypher::{CypherParameters, read::run_read_query_indexed};

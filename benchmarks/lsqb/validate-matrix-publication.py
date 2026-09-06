@@ -134,12 +134,12 @@ OBSERVATION_PLAN_CLASSES = {
     "backend-native": {"backend-native-aggregate"},
 }
 OBSERVATION_PLAN_BACKENDS = {
-    "count-factorized": {"memory", "turso"},
+    "count-factorized": {"memory", "turso", "postgres"},
     "sql-count": {"turso", "postgres"},
 }
 # Durable stores whose worker may build a resident typed index of the store's
 # own contents outside the query boundary and run the count plan over it.
-RESIDENT_INDEX_BACKENDS = {"turso"}
+RESIDENT_INDEX_BACKENDS = {"turso", "postgres"}
 EXECUTION_PLAN_REGISTRY_SCHEMA = "grust-lsqb-execution-plan-registry-v1"
 EXECUTION_PLAN_ENTRY_FIELDS = frozenset(
     {

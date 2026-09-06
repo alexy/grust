@@ -32,7 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Value::Null,
                     Some(queries::sha256(sql.as_bytes())),
                 )
-            } else if id == "turso" && backend::resident_count_plan(case)? {
+            } else if backend::resident_count_plan(case)? {
                 (
                     "count-factorized",
                     "backend-resident-index-rust-count",
