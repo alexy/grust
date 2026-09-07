@@ -324,6 +324,8 @@ reconstructed from Git history, release commits, and the shipped docs.
   preserve earlier query-major runs as a separate diagnostic cohort.
   Require runtime evidence plus rotating W2/R10/60-second sampling through an
   explicit comparison-cohort audit gate; the example cohort passes all 264 samples.
+  Qualify the SF0.3 rotating client profile so its runtime audit can run; the
+  scale-0.3 cohort passes all 264 samples on the linux/amd64 server image.
   Export frozen, checksummed native evidence bundles for independent site admission,
   without treating the transport manifest as a publication receipt.
 

@@ -36,10 +36,14 @@ CLIENT_PROFILES = {
         'sha256:7e20f8504f9ad0a04aa72226d4493c501cdaa2ebc62cd8041824fbcd2333f27e',
     '4995115ad95e7e12215e86bcc13e60a78ddcea00':
         'sha256:4934c9343e3a5edb03e4f13f0b8ccea48ec7a16142e3497bdb4ab649aded69b4',
+    '65b5416243a39a01014b2bf3f48737f29786162f':
+        'sha256:8b1372a46cecb8dfeefcb034da147bc93f5dc7c173283f1e1d16c0ba72b651b5',
 }
 SAMPLED_SOURCES = {'4c385e26135547f1771577f20a90234f830488b6', '242b6b842836e64fb76e667f8ad5609e7cb2c115',
-                   '4995115ad95e7e12215e86bcc13e60a78ddcea00'}
-ROTATING_SOURCES = {'4995115ad95e7e12215e86bcc13e60a78ddcea00'}
+                   '4995115ad95e7e12215e86bcc13e60a78ddcea00',
+                   '65b5416243a39a01014b2bf3f48737f29786162f'}
+ROTATING_SOURCES = {'4995115ad95e7e12215e86bcc13e60a78ddcea00',
+                    '65b5416243a39a01014b2bf3f48737f29786162f'}
 # The pinned tag's platform images (one multi-platform index, sha256:dbc377fb9cd8fe8dabc19d3041b197d5ca0ef8bae514cea175b8df265e5b7a76):
 # a run's server must be one of them, and its retained image ID must match the
 # one its invocation names.

@@ -251,6 +251,14 @@ runtime, and matched-sampling audits passed. Evidence is retained in
 Use `--runtime --matched-sampling` with the diagnostic validator to require the
 rotating W2/R10 cohort and 60-second query deadline. The gate rejects historical
 query-major cohorts even when their repetition counts agree.
+The rotating SF0.3 run of source `65b5416243a39a01014b2bf3f48737f29786162f`
+passed all 44 warm-ups and 220 measured executions against the linux/amd64
+server image, importing in 236.4 s. Its client profile is
+`sha256:8b1372a46cecb8dfeefcb034da147bc93f5dc7c173283f1e1d16c0ba72b651b5`,
+frozen from a clean worktree at that revision (369 allowlisted inputs,
+aggregate `71ac2df3c4794cc1ed6841646809f1392d12b6921696a7b6c164fec0ad6fb7ae`).
+Evidence is retained in `out/neo4j-rotating-sf03-65b5416`; scale 0.3 is a
+larger cohort than the example runs and must not be pooled with them.
 The validator supports both historical and rotating schedules and binds each
 declared order to source-image capability. Identical repetition counts alone
 do not establish a matched comparison protocol.
