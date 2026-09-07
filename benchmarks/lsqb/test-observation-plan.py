@@ -104,7 +104,13 @@ class ObservationPlanTests(unittest.TestCase):
                 with self.subTest(plan=plan, execution_class=execution_class):
                     value = report()
                     if plan == 'sql-count':
-                        value['backends'][0]['backend']['name'] = 'turso'
+                        # The plan is only Turso's or PostgreSQL's, and a cell
+                        # must tell the truth about the backend it names: the
+                        # lifecycle moves with the name.
+                        cell = value['backends'][0]
+                        cell['backend']['name'] = 'turso'
+                        cell['lifecycle']['load_strategy'] = publication.LOAD_STRATEGY['turso']
+                        cell['lifecycle']['recovery_contract'] = publication.RECOVERY_CONTRACT['turso']
                     query = value['backends'][0]['queries'][0]
                     query['execution']['class'] = execution_class
                     for sample in query['warmups'] + query['measurements']:
