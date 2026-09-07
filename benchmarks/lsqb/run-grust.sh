@@ -366,12 +366,18 @@ BENCHMARK_GID=$(id -g)
 components_dir="${BENCHMARK_OUTPUT_ROOT}/components"
 logs_dir="${BENCHMARK_OUTPUT_ROOT}/logs"
 watchdogs_dir="${BENCHMARK_OUTPUT_ROOT}/watchdogs"
+# A cell whose container the kernel takes away under the per-container memory
+# limit leaves no runner to write a component report. The launcher declares
+# that outcome here instead of inferring one, and the matrix continues.
+terminations_dir="${BENCHMARK_OUTPUT_ROOT}/terminations"
 lsqb_ensure_regular_directory "$components_dir" "component output directory" || die \
     "cannot prepare component output directory"
 lsqb_ensure_regular_directory "$logs_dir" "log output directory" || die \
     "cannot prepare log output directory"
 lsqb_ensure_regular_directory "$watchdogs_dir" "watchdog output directory" || die \
     "cannot prepare watchdog output directory"
+lsqb_ensure_regular_directory "$terminations_dir" "cell termination output directory" || die \
+    "cannot prepare cell termination output directory"
 output_root_identity=$(lsqb_directory_identity "$BENCHMARK_OUTPUT_ROOT") || die \
     "cannot pin benchmark output directory identity"
 components_dir_identity=$(lsqb_directory_identity "$components_dir") || die \
@@ -380,6 +386,8 @@ logs_dir_identity=$(lsqb_directory_identity "$logs_dir") || die \
     "cannot pin log output directory identity"
 watchdogs_dir_identity=$(lsqb_directory_identity "$watchdogs_dir") || die \
     "cannot pin watchdog output directory identity"
+terminations_dir_identity=$(lsqb_directory_identity "$terminations_dir") || die \
+    "cannot pin cell termination output directory identity"
 
 verify_output_directories() {
     lsqb_verify_directory_identity \
@@ -389,7 +397,9 @@ verify_output_directories() {
         lsqb_verify_directory_identity \
             "$logs_dir" "$logs_dir_identity" "log output directory" &&
         lsqb_verify_directory_identity \
-            "$watchdogs_dir" "$watchdogs_dir_identity" "watchdog output directory"
+            "$watchdogs_dir" "$watchdogs_dir_identity" "watchdog output directory" &&
+        lsqb_verify_directory_identity \
+            "$terminations_dir" "$terminations_dir_identity" "cell termination output directory"
 }
 
 verify_output_directories || die "benchmark output directories changed during setup"
@@ -569,6 +579,7 @@ control_image_id=$(docker image inspect --format '{{.Id}}' "$control_image")
 verify_runner_image "$control_image" "$control_image_id" ''
 
 matrix_failed=0
+declared_terminations=()
 for backend in "${canonical_backends[@]}"; do
     feature=$(feature_for "$backend") || die "no feature mapping for backend: $backend"
     image_tag=$control_image
@@ -756,8 +767,38 @@ for backend in "${canonical_backends[@]}"; do
             matrix_failed=1
         fi
 
-        [[ -s "$component" && ! -L "$component" ]] || die \
-            "backend produced no regular non-symlink component report: $backend/$suite"
+        if [[ ! -s "$component" || -L "$component" ]]; then
+            # No component report. Either the runner failed to write one, which
+            # is fatal, or the kernel took the container away under its memory
+            # limit and there was no runner left to write anything. Only the
+            # second is a declarable outcome, and only the container's own
+            # retained state can tell them apart.
+            termination_record="${terminations_dir}/${suite}-${backend}.json"
+            lsqb_reject_existing_output "$termination_record" \
+                "cell termination record" || die \
+                "cell termination record already exists"
+            declaration_status=0
+            python3 "${root}/declare-cell-termination.py" \
+                --watchdog "$watchdog_record" \
+                --output "$termination_record" \
+                --suite "$suite" \
+                --backend "$backend" \
+                --scale "$scale" \
+                --component "$component_name" \
+                --runner-image "$image_tag" \
+                --runner-image-id "$image_id" \
+                --memory-limit-bytes "$BENCHMARK_MEMORY_LIMIT_BYTES" \
+                --cell-timeout-ms "$cell_timeout_ms" || declaration_status=$?
+            if (( declaration_status == 0 )); then
+                declared_terminations+=("${suite}/${backend}")
+                echo "run-grust.sh: ${suite}/${backend} cell container exceeded its ${BENCHMARK_MEMORY_LIMIT_BYTES}-byte memory limit; declared in ${termination_record}" >&2
+                matrix_failed=1
+                continue
+            elif (( declaration_status != 3 )); then
+                die "cannot declare the memory-exceeded cell $backend/$suite"
+            fi
+            die "backend produced no regular non-symlink component report: $backend/$suite"
+        fi
         jq -e --arg backend "$backend" \
             '.schema_version == 3 and .backends[0].backend.name == $backend' \
             "$component" >/dev/null || die "invalid component report: $component"
@@ -816,6 +857,15 @@ if [[ -n "$resume_from" ]]; then
     (( fresh_cell_count > 0 )) || die \
         "every cell was reused from ${resume_from}; a resumed run must execute at least one cell, so change something or run without RESUME_FROM"
     echo "run-grust.sh: ${reused_cell_count} cell(s) reused, ${fresh_cell_count} executed" >&2
+fi
+
+if (( ${#declared_terminations[@]} > 0 )); then
+    # Every other cell ran and is on disk. The merged matrix cannot represent a
+    # declared memory-exceeded cell yet, so no matrix is written and nothing
+    # here is publishable; the declarations name what the budget did not hold.
+    echo "run-grust.sh: declared memory-exceeded cell(s): ${declared_terminations[*]}" >&2
+    echo "run-grust.sh: their records are in ${terminations_dir}; every other cell's component report is in ${components_dir}" >&2
+    die "no matrix is merged while a cell is declared memory-exceeded; publication is forbidden"
 fi
 
 for suite in "${matrix_suites[@]}"; do

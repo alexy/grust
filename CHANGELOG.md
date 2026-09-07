@@ -326,6 +326,10 @@ reconstructed from Git history, release commits, and the shipped docs.
   explicit comparison-cohort audit gate; the example cohort passes all 264 samples.
   Qualify the SF0.3 rotating client profile so its runtime audit can run; the
   scale-0.3 cohort passes all 264 samples on the linux/amd64 server image.
+  Retain a failed cell container's own exit and OOM flag in the watchdog's
+  completion record, and declare a cell whose container exceeded its memory
+  limit from that evidence instead of stopping the matrix at a missing
+  component report.
   Export frozen, checksummed native evidence bundles for independent site admission,
   without treating the transport manifest as a publication receipt.
 

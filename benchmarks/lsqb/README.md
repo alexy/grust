@@ -468,7 +468,23 @@ overlapping sample: the observation is recorded as the cell's terminal
 phase, iteration and reason `backend.quiescence-unproven`), every query left
 short of the sampling contract is an explicit error with that reason, the
 component report is still written, and the matrix continues to the next
-cell. An undeclared short cell remains invalid. An unacknowledged transport/query error follows the same
+cell. An undeclared short cell remains invalid.
+
+A cell whose container the kernel takes away under the per-container memory
+limit is a different case: there is no runner left to record anything, so the
+component report is missing rather than short. The cell watchdog reads the
+container's own `ExitCode` and `OOMKilled` before removing it and retains them
+in its completion record (only for a cell that exited non-zero), and
+`declare-cell-termination.py` turns exactly that evidence into a
+`grust-lsqb-cell-memory-exceeded-v1` declaration under `terminations/`. A
+missing component report with no such proof stays fatal. The declaration is a
+host/budget outcome for one cell, not a component report and not a backend
+finding: it asserts nothing that only the dead runner could have known. The
+launcher then runs every remaining cell instead of stopping at the first one,
+so one run shows every cell that fits the budget; no matrix is merged while a
+cell is declared, and nothing from such a run is publishable until the merged
+matrix, `validate-matrix-publication.py` and the site's matrix verifier
+represent a declared cell. An unacknowledged transport/query error follows the same
 rule: process-owned work is gone, PostgreSQL sessions are probed, and other
 remote services fail closed. READY itself is bounded by
 `worker_ready_timeout_ms`, so a stalled load/connect is a prompt
