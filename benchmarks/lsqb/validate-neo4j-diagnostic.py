@@ -47,6 +47,9 @@ SERVER_IMAGES = {
     'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d',  # linux/arm64
     'neo4j:2026.07.1-community@sha256:a9d46c947a02de4fbaecc9adcca17d197661e32d31df8a944b4294259816a7a9',  # linux/amd64
 }
+# The platform image of the published runs (linux/arm64); tests build their
+# fixtures from it.
+SERVER_IMAGE = 'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d'
 
 
 def require(condition, message):
