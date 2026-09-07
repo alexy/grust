@@ -532,6 +532,166 @@ def make_pass_without_external_identity(output: Path, backend: str = "sail") -> 
         write_json(component_path, component)
 
 
+def declare_cell(output: Path, suite: str, backend: str, scale: str = "example") -> dict:
+    """Turn one measured cell of a bundle into a declared memory-exceeded one.
+
+    The component report goes, its watchdog record gains the container's own
+    OOM exit, a declaration takes the component's place, and the matrix loses
+    the cell: not complete any more, accounted for instead.
+    """
+    component_path = output / f"components/{suite}-{backend}-sf{scale}.json"
+    component = json.loads(component_path.read_text())
+    component_path.unlink()
+
+    watchdog_path = output / "watchdogs" / f"{suite}-{backend}.json"
+    record = read_jsonl(watchdog_path)[0]
+    record["child_exit_status"] = PUBLICATION.CONTAINER_OOM_EXIT_STATUS
+    record["container_termination"] = {
+        "exit_code": PUBLICATION.CONTAINER_OOM_EXIT_STATUS,
+        "oom_killed": True,
+    }
+    write_jsonl(watchdog_path, [record])
+
+    identity = component["backends"][0]["backend"]
+    declaration = {
+        "backend": backend,
+        "cell_timeout_ms": component["timing"]["cell_timeout_ms"],
+        "component": f"{suite}-{backend}-sf{scale}.json",
+        "declared_by": "run-grust.sh",
+        "limitation": (
+            "The cell container was terminated by its memory limit before the "
+            "runner wrote a component report; no query in this cell was observed."
+        ),
+        "memory_limit_bytes": component["environment"]["memory_limit_bytes"],
+        "publication_qualified": False,
+        "runner_image": identity["runner_image"],
+        "runner_image_id": identity["runner_image_id"],
+        "scale": scale,
+        "schema": PUBLICATION.TERMINATION_SCHEMA,
+        "suite": suite,
+        "watchdog": record,
+    }
+    (output / PUBLICATION.TERMINATION_DIRECTORY).mkdir(exist_ok=True)
+    write_json(output / PUBLICATION.TERMINATION_DIRECTORY / f"{suite}-{backend}.json", declaration)
+
+    matrix_path = output / f"matrix-{suite}-sf{scale}.json"
+    matrix = json.loads(matrix_path.read_text())
+    matrix["backends"] = [
+        cell for cell in matrix["backends"] if cell["backend"]["name"] != backend
+    ]
+    matrix["complete"] = False
+    matrix["accounted"] = True
+    matrix["declared_terminations"] = [
+        {
+            "backend": backend,
+            "cell_timeout_ms": declaration["cell_timeout_ms"],
+            "limitation": declaration["limitation"],
+            "memory_limit_bytes": declaration["memory_limit_bytes"],
+            "reason_code": PUBLICATION.MEMORY_EXCEEDED_REASON,
+            "runner_image": declaration["runner_image"],
+            "runner_image_id": declaration["runner_image_id"],
+            "scale": scale,
+            "suite": suite,
+            "watchdog": record,
+        }
+    ]
+    write_json(matrix_path, matrix)
+    return declaration
+
+
+class DeclaredCellPublicationTests(unittest.TestCase):
+    """A cell whose container exceeded its memory limit, through the bundle."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory(prefix="grust-declared-test.")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.repository, self.revision = make_repository(self.root)
+        self.output = make_bundle(self.root, self.revision)
+        self.declaration = declare_cell(self.output, "baseline", "turso")
+
+    def issue(self) -> None:
+        arguments = argparse.Namespace(
+            revision=self.revision, repository=self.repository,
+            output_dir=self.output, scale="example",
+        )
+        with mock.patch.object(PUBLICATION, "run_semantic_validators"):
+            PUBLICATION.issue_receipt(arguments, SCRIPT_DIRECTORY)
+
+    def verify(self) -> None:
+        with mock.patch.object(PUBLICATION, "run_semantic_validators"):
+            PUBLICATION.verify_receipt(self.output, SCRIPT_DIRECTORY)
+
+    def assert_rejected(self, phrase: str) -> None:
+        with self.assertRaisesRegex(PUBLICATION.PublicationError, phrase):
+            self.issue()
+
+    def test_declared_bundle_is_accounted_for_and_names_its_cell(self) -> None:
+        self.issue()
+        self.verify()
+        receipt = json.loads((self.output / PUBLICATION.RECEIPT_NAME).read_text())
+        self.assertEqual(receipt["status"], "accounted")
+        self.assertEqual(
+            receipt["declared_terminations"],
+            [{"suite": "baseline", "backend": "turso",
+              "reason_code": PUBLICATION.MEMORY_EXCEEDED_REASON}],
+        )
+        inventory = {entry["path"] for entry in receipt["output_inventory"]}
+        self.assertIn("terminations/baseline-turso.json", inventory)
+        self.assertNotIn("components/baseline-turso-sfexample.json", inventory)
+        # The declared cell's watchdog record is still hashed into the receipt.
+        self.assertIn("watchdogs/baseline-turso.json", inventory)
+
+    def test_a_declaration_without_its_oom_proof_is_refused(self) -> None:
+        path = self.output / PUBLICATION.TERMINATION_DIRECTORY / "baseline-turso.json"
+        declaration = json.loads(path.read_text())
+        declaration["watchdog"]["container_termination"]["oom_killed"] = False
+        write_json(path, declaration)
+        self.assert_rejected("does not prove a container memory termination")
+
+    def test_a_declaration_that_claims_publication_is_refused(self) -> None:
+        path = self.output / PUBLICATION.TERMINATION_DIRECTORY / "baseline-turso.json"
+        declaration = json.loads(path.read_text())
+        declaration["publication_qualified"] = True
+        write_json(path, declaration)
+        self.assert_rejected("claims publication qualification")
+
+    def test_a_watchdog_record_that_differs_from_its_declaration_is_refused(self) -> None:
+        path = self.output / "watchdogs" / "baseline-turso.json"
+        record = read_jsonl(path)[0]
+        record["elapsed_wall_ms"] += 1
+        write_jsonl(path, [record])
+        self.assert_rejected("differs from its declaration")
+
+    def test_a_declared_cell_may_not_also_have_a_component_report(self) -> None:
+        source = self.output / "components/baseline-memory-sfexample.json"
+        shutil.copyfile(source, self.output / "components/baseline-turso-sfexample.json")
+        self.assert_rejected("output file set mismatch")
+
+    def test_a_matrix_that_hides_the_declaration_is_refused(self) -> None:
+        matrix_path = self.output / "matrix-baseline-sfexample.json"
+        matrix = json.loads(matrix_path.read_text())
+        matrix.pop("declared_terminations")
+        matrix.pop("accounted")
+        matrix["complete"] = True
+        write_json(matrix_path, matrix)
+        self.assert_rejected("not accounted for")
+
+    def test_a_declaration_for_another_scale_is_refused(self) -> None:
+        path = self.output / PUBLICATION.TERMINATION_DIRECTORY / "baseline-turso.json"
+        declaration = json.loads(path.read_text())
+        declaration["scale"] = "0.3"
+        write_json(path, declaration)
+        self.assert_rejected("names another scale")
+
+    def test_an_undeclared_matrix_may_not_claim_declarations(self) -> None:
+        matrix_path = self.output / "matrix-adversarial-sfexample.json"
+        matrix = json.loads(matrix_path.read_text())
+        matrix["accounted"] = True
+        write_json(matrix_path, matrix)
+        self.assert_rejected("declares a cell the bundle does not")
+
+
 class MatrixPublicationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory(prefix="grust-publication-test.")

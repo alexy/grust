@@ -3,13 +3,39 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<'USAGE'
-Usage: validate-evidence.sh MATRIX.json [ONE-BACKEND-REPORT.json ...]
+Usage: validate-evidence.sh [--declaration FILE ...] MATRIX.json
+                            [ONE-BACKEND-REPORT.json ...]
 
 Validate a complete schema-v3 matrix and print a SHA-256 line for every input.
 When component reports are supplied, they must deterministically rebuild the
 matrix through merge-reports.sh.
+
+--declaration names a cell declared memory-exceeded. A matrix with
+declarations is never complete; it must be accounted for instead, and the
+declarations must rebuild it exactly as the component reports do.
 USAGE
 }
+
+declarations=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --declaration)
+            if [[ $# -lt 2 ]]; then
+                usage
+                exit 2
+            fi
+            declarations+=("$2")
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 if [[ $# -lt 1 ]]; then
     usage
@@ -19,6 +45,17 @@ fi
 matrix=$1
 shift
 reports=("$@")
+merge_declarations=()
+declared_backends=()
+for declaration in "${declarations[@]:-}"; do
+    [[ -n "$declaration" ]] || continue
+    if [[ ! -f "$declaration" ]] || ! jq -e . "$declaration" >/dev/null 2>&1; then
+        echo "validate-evidence.sh: declaration does not exist or is invalid JSON: $declaration" >&2
+        exit 1
+    fi
+    merge_declarations+=(--declaration "$declaration")
+    declared_backends+=("$(jq -r '.backend' "$declaration")")
+done
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 merge="$script_dir/merge-reports.sh"
 manifest_path="$script_dir/evidence-manifest-v2.json"
@@ -188,6 +225,13 @@ trap cleanup EXIT
 split_reports=()
 for index in "${!canonical_backends[@]}"; do
     backend=${canonical_backends[$index]}
+    declared=0
+    for declared_backend in "${declared_backends[@]:-}"; do
+        [[ -n "$declared_backend" && "$declared_backend" == "$backend" ]] && declared=1
+    done
+    # A declared cell is not in the matrix's backends; its declaration stands
+    # in its place when the matrix is rebuilt.
+    (( declared == 1 )) && continue
     part="$temporary_dir/$(printf '%02d' "$index")-$backend.json"
     jq --arg backend "$backend" '
         def neutral:
@@ -206,11 +250,16 @@ for index in "${!canonical_backends[@]}"; do
 done
 
 rebuilt="$temporary_dir/rebuilt.json"
-if ! "$merge" "$rebuilt" "${split_reports[@]}" >/dev/null; then
+if ! "$merge" "${merge_declarations[@]:+${merge_declarations[@]}}" "$rebuilt" "${split_reports[@]}" >/dev/null; then
     echo "validate-evidence.sh: matrix failed schema-v3 cell validation: $matrix" >&2
     exit 1
 fi
-if ! jq -e '.complete == true' "$rebuilt" >/dev/null; then
+if (( ${#merge_declarations[@]} > 0 )); then
+    if ! jq -e '.complete == false and .accounted == true' "$rebuilt" >/dev/null; then
+        echo "validate-evidence.sh: matrix with declared cell(s) is not accounted for: $matrix" >&2
+        exit 1
+    fi
+elif ! jq -e '.complete == true' "$rebuilt" >/dev/null; then
     echo "validate-evidence.sh: matrix is incomplete: $matrix" >&2
     exit 1
 fi
@@ -223,11 +272,16 @@ fi
 
 if [[ ${#reports[@]} -gt 0 ]]; then
     from_components="$temporary_dir/from-components.json"
-    if ! "$merge" "$from_components" "${reports[@]}" >/dev/null; then
+    if ! "$merge" "${merge_declarations[@]:+${merge_declarations[@]}}" "$from_components" "${reports[@]}" >/dev/null; then
         echo "validate-evidence.sh: component reports failed validation" >&2
         exit 1
     fi
-    if ! jq -e '.complete == true' "$from_components" >/dev/null; then
+    if (( ${#merge_declarations[@]} > 0 )); then
+        if ! jq -e '.complete == false and .accounted == true' "$from_components" >/dev/null; then
+            echo "validate-evidence.sh: component reports and declarations do not account for all twelve backends" >&2
+            exit 1
+        fi
+    elif ! jq -e '.complete == true' "$from_components" >/dev/null; then
         echo "validate-evidence.sh: component reports do not contain all twelve backends" >&2
         exit 1
     fi
@@ -246,7 +300,7 @@ sha256() {
     fi
 }
 
-for report in "$matrix" "${reports[@]:-}"; do
+for report in "$matrix" "${reports[@]:-}" "${declarations[@]:-}"; do
     if [[ -n "$report" ]]; then
         printf '%s  %s\n' "$(sha256 "$report")" "$report"
     fi

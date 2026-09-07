@@ -1418,6 +1418,17 @@ jq -e '
     exit 1
 }
 
+"$validate" --declaration "$declaration" "$declared_matrix" "${declared_components[@]}" \
+    >"$declaration_directory/hashes.txt"
+# One line per input: the matrix, eleven components, and the declaration.
+[[ $(wc -l <"$declaration_directory/hashes.txt") -eq 13 ]] || {
+    echo "test-evidence-tools.sh: declared matrix hash lines differ" >&2
+    exit 1
+}
+# The same matrix without its declaration is not accounted for.
+expect_failure "declared matrix without its declaration" \
+    "$validate" "$declared_matrix" "${declared_components[@]}"
+
 # A matrix with no declaration keeps exactly the shape it always had.
 partial_matrix="$declaration_directory/partial.json"
 "$merge" "$partial_matrix" "${declared_components[@]}" >/dev/null

@@ -860,23 +860,32 @@ if [[ -n "$resume_from" ]]; then
 fi
 
 if (( ${#declared_terminations[@]} > 0 )); then
-    # Every other cell ran and is on disk. The merged matrix cannot represent a
-    # declared memory-exceeded cell yet, so no matrix is written and nothing
-    # here is publishable; the declarations name what the budget did not hold.
     echo "run-grust.sh: declared memory-exceeded cell(s): ${declared_terminations[*]}" >&2
-    echo "run-grust.sh: their records are in ${terminations_dir}; every other cell's component report is in ${components_dir}" >&2
-    die "no matrix is merged while a cell is declared memory-exceeded; publication is forbidden"
+    echo "run-grust.sh: their records are in ${terminations_dir}" >&2
 fi
 
 for suite in "${matrix_suites[@]}"; do
     reports=()
+    merge_declarations=()
     for backend in "${canonical_backends[@]}"; do
-        reports+=("${components_dir}/${suite}-${backend}-sf${scale}.json")
+        component="${components_dir}/${suite}-${backend}-sf${scale}.json"
+        declaration="${terminations_dir}/${suite}-${backend}.json"
+        # A declared cell has no component report; the merge carries the
+        # declaration in its place and the matrix is never complete.
+        if [[ -s "$declaration" && ! -L "$declaration" ]]; then
+            merge_declarations+=(--declaration "$declaration")
+        else
+            reports+=("$component")
+        fi
     done
     matrix="${BENCHMARK_OUTPUT_ROOT}/matrix-${suite}-sf${scale}.json"
     lsqb_reject_existing_output "$matrix" "merged matrix report" || die \
         "matrix output already exists"
-    "${root}/merge-reports.sh" "$matrix" "${reports[@]}" >/dev/null
+    if (( ${#merge_declarations[@]} > 0 )); then
+        "${root}/merge-reports.sh" "${merge_declarations[@]}" "$matrix" "${reports[@]}" >/dev/null
+    else
+        "${root}/merge-reports.sh" "$matrix" "${reports[@]}" >/dev/null
+    fi
     [[ -f "$matrix" && ! -L "$matrix" ]] || die \
         "merge did not create a regular non-symlink matrix report: $matrix"
     if [[ "$smoke" == 1 ]]; then
@@ -889,8 +898,21 @@ for suite in "${matrix_suites[@]}"; do
             matrix_failed=1
         fi
     else
-        "${root}/validate-evidence.sh" "$matrix" "${reports[@]}"
-        if ! jq -e '.complete == true and .valid == true' "$matrix" >/dev/null; then
+        if (( ${#merge_declarations[@]} > 0 )); then
+            "${root}/validate-evidence.sh" "${merge_declarations[@]}" "$matrix" "${reports[@]}"
+        else
+            "${root}/validate-evidence.sh" "$matrix" "${reports[@]}"
+        fi
+        # A matrix with a declared memory-exceeded cell is never complete. It
+        # is accounted for when every canonical backend has a component report
+        # or a declaration; the run still fails, because a cell that did not
+        # run is not a result.
+        if (( ${#merge_declarations[@]} > 0 )); then
+            jq -e '.complete == false and .accounted == true and .valid == true' \
+                "$matrix" >/dev/null || die \
+                "matrix with declared cell(s) is neither accounted for nor valid: $matrix"
+            matrix_failed=1
+        elif ! jq -e '.complete == true and .valid == true' "$matrix" >/dev/null; then
             matrix_failed=1
         fi
     fi

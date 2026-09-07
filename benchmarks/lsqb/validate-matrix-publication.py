@@ -88,6 +88,30 @@ SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 REUSED_CELL_FIELDS = frozenset(
     {"cell", "source_output_root", "source_receipt_sha256", "watchdog_project"}
 )
+# A cell whose container was terminated by its memory limit before its runner
+# could write a component report. The launcher declares it from the watchdog's
+# retained container state; nothing about the backend's behaviour is claimed.
+TERMINATION_SCHEMA = "grust-lsqb-cell-memory-exceeded-v1"
+MEMORY_EXCEEDED_REASON = "backend.memory-exceeded"
+CONTAINER_OOM_EXIT_STATUS = 137
+TERMINATION_FIELDS = frozenset(
+    {
+        "backend",
+        "cell_timeout_ms",
+        "component",
+        "declared_by",
+        "limitation",
+        "memory_limit_bytes",
+        "publication_qualified",
+        "runner_image",
+        "runner_image_id",
+        "scale",
+        "schema",
+        "suite",
+        "watchdog",
+    }
+)
+CONTAINER_TERMINATION_FIELDS = frozenset({"exit_code", "oom_killed"})
 WATCHDOG_FIELDS = frozenset(
     {
         "child_exit_status",
@@ -431,8 +455,83 @@ def manifest_execution_plans(
     return entries
 
 
+TERMINATION_DIRECTORY = "terminations"
+
+
+def discover_declarations(output_directory: Path, backend_ids: list[str]) -> set[tuple[str, str]]:
+    """Which cells the bundle declares memory-exceeded, by file name alone.
+
+    Read before the bundle is scanned so the expected layout can put a
+    declaration where a component report would otherwise be required. The file
+    names decide nothing on their own: every declaration is validated, and a
+    declaration for a cell that also has a component report is refused.
+    """
+    directory = output_directory / TERMINATION_DIRECTORY
+    if directory.is_symlink() or not directory.is_dir():
+        return set()
+    declared: set[tuple[str, str]] = set()
+    for entry in sorted(os.scandir(directory), key=lambda item: item.name):
+        require(
+            entry.is_file(follow_symlinks=False),
+            f"declaration directory holds a non-file entry: {entry.name}",
+        )
+        name = entry.name
+        require(name.endswith(".json"), f"declaration is not a JSON file: {name}")
+        stem = name[: -len(".json")]
+        suite, separator, backend = stem.partition("-")
+        require(
+            separator == "-" and suite in SUITES and backend in backend_ids,
+            f"declaration does not name a cell of this matrix: {name}",
+        )
+        declared.add((suite, backend))
+    return declared
+
+
+def validate_declaration(
+    raw: bytes, suite: str, backend: str, scale: str, relative: str
+) -> dict[str, Any]:
+    """A declaration carries its own proof and nothing a dead runner would know."""
+    declaration = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys)
+    require(isinstance(declaration, dict), f"declaration is not an object: {relative}")
+    require(set(declaration) == TERMINATION_FIELDS, f"declaration has unexpected fields: {relative}")
+    require(declaration["schema"] == TERMINATION_SCHEMA, f"declaration has the wrong schema: {relative}")
+    require(declaration["suite"] == suite, f"declaration names another suite: {relative}")
+    require(declaration["backend"] == backend, f"declaration names another backend: {relative}")
+    require(declaration["scale"] == scale, f"declaration names another scale: {relative}")
+    require(
+        declaration["publication_qualified"] is False,
+        f"declaration claims publication qualification: {relative}",
+    )
+    require(
+        declaration["component"] == f"{suite}-{backend}-sf{scale}.json",
+        f"declaration names another component report: {relative}",
+    )
+    require(concrete_string(declaration["declared_by"]), f"declaration has no declaring tool: {relative}")
+    require(concrete_string(declaration["limitation"]), f"declaration has no limitation: {relative}")
+    require(concrete_string(declaration["runner_image"]), f"declaration has no runner image: {relative}")
+    require(
+        IMAGE_ID_RE.fullmatch(str(declaration["runner_image_id"])) is not None,
+        f"declaration has no runner image ID: {relative}",
+    )
+    require(positive_integer(declaration["memory_limit_bytes"]), f"declaration has no memory limit: {relative}")
+    require(positive_integer(declaration["cell_timeout_ms"]), f"declaration has no cell timeout: {relative}")
+    record = declaration["watchdog"]
+    require(isinstance(record, dict), f"declaration has no watchdog record: {relative}")
+    termination = record.get("container_termination")
+    require(
+        isinstance(termination, dict)
+        and set(termination) == CONTAINER_TERMINATION_FIELDS
+        and termination["oom_killed"] is True
+        and termination["exit_code"] == CONTAINER_OOM_EXIT_STATUS
+        and record.get("child_exit_status") == CONTAINER_OOM_EXIT_STATUS,
+        f"declaration does not prove a container memory termination: {relative}",
+    )
+    return declaration
+
+
 def expected_layout(
-    manifest: dict[str, Any], scale: str, include_receipt: bool
+    manifest: dict[str, Any], scale: str, include_receipt: bool,
+    declared: set[tuple[str, str]] | None = None,
 ) -> tuple[set[str], list[str], set[str]]:
     datasets = manifest.get("datasets")
     require(isinstance(datasets, dict) and scale in datasets, f"unsupported scale: {scale}")
@@ -443,10 +542,16 @@ def expected_layout(
     if requires_host_preflight(manifest):
         artifacts.add(host_evidence.FILENAME)
     artifacts.update(f"matrix-{suite}-sf{scale}.json" for suite in SUITES)
+    declared = declared or set()
     artifacts.update(
         f"components/{suite}-{backend}-sf{scale}.json"
         for suite in SUITES
         for backend in backend_ids
+        if (suite, backend) not in declared
+    )
+    # A declared cell has a declaration where its component report would be.
+    artifacts.update(
+        f"{TERMINATION_DIRECTORY}/{suite}-{backend}.json" for suite, backend in declared
     )
     watchdogs = {
         f"watchdogs/{suite}-{backend}.json"
@@ -477,7 +582,10 @@ def expected_layout(
     files = artifacts | logs
     if include_receipt:
         files.add(RECEIPT_NAME)
-    return files, sorted(artifacts), {"components", "logs", "watchdogs"}
+    directories = {"components", "logs", "watchdogs"}
+    if declared:
+        directories.add(TERMINATION_DIRECTORY)
+    return files, sorted(artifacts), directories
 
 
 def scan_output(
@@ -1246,6 +1354,8 @@ def validate_reports(
     revision: str,
     scale: str,
     images: dict[tuple[str, str], dict[str, str]],
+    declared: set[tuple[str, str]] | None = None,
+    declarations: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> tuple[
     dict[str, dict[str, Any]],
     dict[str, dict[str, dict[str, Any]]],
@@ -1267,7 +1377,53 @@ def validate_reports(
         if report_schema is None:
             report_schema = schema
         validate_report_execution_plans(matrix, manifest, matrix_path.name)
-        require(matrix.get("complete") is True, f"matrix is not complete: {matrix_path.name}")
+        suite_declared = sorted(
+            backend for declared_suite, backend in (declared or set()) if declared_suite == suite
+        )
+        measured_backends = [
+            backend for backend in backend_ids if backend not in suite_declared
+        ]
+        if suite_declared:
+            # A declared cell was never observed, so this matrix is not
+            # complete and never becomes so; it is accounted for instead.
+            require(
+                matrix.get("complete") is False and matrix.get("accounted") is True,
+                f"matrix with declared cell(s) is not accounted for: {matrix_path.name}",
+            )
+            entries = matrix.get("declared_terminations")
+            require(
+                isinstance(entries, list)
+                and [entry.get("backend") for entry in entries] == suite_declared,
+                f"matrix declarations do not match the bundle: {matrix_path.name}",
+            )
+            for entry in entries:
+                declaration = (declarations or {})[(suite, entry["backend"])]
+                require(
+                    entry.get("reason_code") == MEMORY_EXCEEDED_REASON
+                    and entry.get("suite") == suite
+                    and entry.get("scale") == scale
+                    and all(
+                        entry.get(key) == declaration[key]
+                        for key in (
+                            "backend", "cell_timeout_ms", "limitation",
+                            "memory_limit_bytes", "runner_image",
+                            "runner_image_id", "watchdog",
+                        )
+                    ),
+                    f"matrix declaration differs from its record: {matrix_path.name}",
+                )
+                image = images[(suite, entry["backend"])]
+                require(
+                    declaration["runner_image"] == image["runner_image"]
+                    and declaration["runner_image_id"] == image["runner_image_id"],
+                    f"declared cell's runner image differs from images.tsv: {matrix_path.name}",
+                )
+        else:
+            require(matrix.get("complete") is True, f"matrix is not complete: {matrix_path.name}")
+            require(
+                "declared_terminations" not in matrix and "accounted" not in matrix,
+                f"matrix declares a cell the bundle does not: {matrix_path.name}",
+            )
         require(isinstance(matrix.get("valid"), bool), f"matrix has no validity result: {matrix_path.name}")
         cells = matrix.get("backends")
         require(isinstance(cells, list), f"matrix has no backend cells: {matrix_path.name}")
@@ -1275,9 +1431,9 @@ def validate_reports(
             cell.get("backend", {}).get("name") if isinstance(cell, dict) else None
             for cell in cells
         ]
-        require(observed_backends == backend_ids, f"matrix backend order is not canonical: {matrix_path.name}")
+        require(observed_backends == measured_backends, f"matrix backend order is not canonical: {matrix_path.name}")
 
-        for index, backend in enumerate(backend_ids):
+        for index, backend in enumerate(measured_backends):
             relative = f"components/{suite}-{backend}-sf{scale}.json"
             component, _ = load_json(output_directory / relative, f"component {suite}/{backend}")
             report_identity(component, relative, revision, scale, suite, report_schema)
@@ -1419,6 +1575,9 @@ def validate_reports(
         )
 
     for backend in backend_ids:
+        # A backend declared in one track has no component there to compare.
+        if backend not in components["baseline"] or backend not in components["adversarial"]:
+            continue
         baseline_identity = components["baseline"][backend]["backends"][0]["backend"]
         adversarial_identity = components["adversarial"][backend]["backends"][0]["backend"]
         require(
@@ -1524,6 +1683,7 @@ def validate_watchdog_records(
     components: dict[str, dict[str, dict[str, Any]]],
     policy_valid: bool | None,
     reused: dict[str, str],
+    declarations: dict[tuple[str, str], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     expected: list[tuple[str, str]] = [
         (f"watchdogs/{suite}-{entry['id']}.json", f"{suite}-{entry['id']}")
@@ -1543,7 +1703,20 @@ def validate_watchdog_records(
         records = parse_normalized_jsonl(files[relative], label)
         require(len(records) == 1, f"{label} must contain exactly one record")
         record = records[0]
-        require(set(record) == WATCHDOG_FIELDS, f"{label} has unexpected fields")
+        declaration = None
+        if cell != "policy":
+            declaration = (declarations or {}).get(tuple(cell.split("-", 1)))
+        if declaration is None:
+            require(set(record) == WATCHDOG_FIELDS, f"{label} has unexpected fields")
+        else:
+            # A declared cell's container was taken by its memory limit; the
+            # record carries the container's own exit and must be the very
+            # record the declaration was made from.
+            require(
+                set(record) == WATCHDOG_FIELDS | {"container_termination"},
+                f"{label} has unexpected fields",
+            )
+            require(record == declaration["watchdog"], f"{label} differs from its declaration")
         require(record["schema"] == WATCHDOG_COMPLETION_SCHEMA, f"{label} has the wrong schema")
         require(record["status"] == "complete", f"{label} is not complete")
 
@@ -1562,10 +1735,13 @@ def validate_watchdog_records(
             and 0 <= elapsed_wall_ms <= timeout_ms,
             f"{label} has an invalid elapsed wall time",
         )
+        allowed_exit_statuses = (
+            (CONTAINER_OOM_EXIT_STATUS,) if declaration is not None else (0, 1)
+        )
         require(
             isinstance(child_exit_status, int)
             and not isinstance(child_exit_status, bool)
-            and child_exit_status in (0, 1),
+            and child_exit_status in allowed_exit_statuses,
             f"{label} has an invalid child exit status",
         )
         project = record["project"]
@@ -1588,7 +1764,13 @@ def validate_watchdog_records(
         )
         require(container_id not in container_ids, f"duplicate watchdog container ID: {container_id}")
 
-        if cell != "policy":
+        if declaration is not None:
+            require(
+                timeout_ms == declaration["cell_timeout_ms"],
+                f"{label} timeout does not match the declaration",
+            )
+            expected_child_exit_status = CONTAINER_OOM_EXIT_STATUS
+        elif cell != "policy":
             suite, backend = cell.split("-", 1)
             component = components[suite][backend]
             report_timeout = component.get("timing", {}).get("cell_timeout_ms")
@@ -1708,9 +1890,15 @@ def run_validator(command: list[str], label: str) -> None:
         raise PublicationError(f"{label} rejected publication evidence: {detail}")
 
 
-def run_semantic_validators(script_directory: Path, output_directory: Path, scale: str) -> None:
+def run_semantic_validators(
+    script_directory: Path,
+    output_directory: Path,
+    scale: str,
+    declared: set[tuple[str, str]] | None = None,
+) -> None:
     manifest, _ = load_manifest(output_directory)
     backend_ids = [entry["id"] for entry in manifest_backends(manifest)]
+    declared = declared or set()
     with tempfile.TemporaryDirectory(prefix="grust-lsqb-publication-validator.") as temporary:
         tools_directory = Path(temporary)
         for name in (
@@ -1729,10 +1917,19 @@ def run_semantic_validators(script_directory: Path, output_directory: Path, scal
             components = [
                 output_directory / f"components/{suite}-{backend}-sf{scale}.json"
                 for backend in backend_ids
+                if (suite, backend) not in declared
             ]
+            declaration_arguments: list[str] = []
+            for declared_suite, backend in sorted(declared):
+                if declared_suite == suite:
+                    declaration_arguments += [
+                        "--declaration",
+                        str(output_directory / f"{TERMINATION_DIRECTORY}/{suite}-{backend}.json"),
+                    ]
             run_validator(
                 [
                     str(tools_directory / "validate-evidence.sh"),
+                    *declaration_arguments,
                     str(matrix),
                     *map(str, components),
                 ],
@@ -1784,6 +1981,7 @@ def build_receipt(
     policy_valid: bool | None,
     watchdog: dict[str, Any],
     reused_cells: list[dict[str, str]] | None,
+    declared: set[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     inventory = [
         {"path": path, "bytes": len(raw), "sha256": sha256(raw)}
@@ -1815,6 +2013,14 @@ def build_receipt(
         # Receipts issued before resume mode existed carry no list; a new
         # receipt always does, empty when every cell ran in this invocation.
         receipt["reused_cells"] = reused_cells
+    if declared:
+        # A cell that did not run is named in the receipt, and the receipt
+        # says so about itself: this bundle measured fewer than every cell.
+        receipt["status"] = "accounted"
+        receipt["declared_terminations"] = [
+            {"suite": suite, "backend": backend, "reason_code": MEMORY_EXCEEDED_REASON}
+            for suite, backend in sorted(declared)
+        ]
     return receipt
 
 
@@ -1920,10 +2126,22 @@ def inspect_bundle(
     require(REVISION_RE.fullmatch(revision) is not None, "source revision is not a clean 40-hex commit")
     manifest, manifest_digest = load_manifest(output_directory)
     reused = validate_reused_cells(reused_cells, manifest) if reused_cells is not None else {}
+    backend_ids = [entry["id"] for entry in manifest_backends(manifest)]
+    declared = discover_declarations(output_directory, backend_ids)
     expected_files, artifacts, expected_directories = expected_layout(
-        manifest, scale, include_receipt
+        manifest, scale, include_receipt, declared
     )
     files = scan_output(output_directory, expected_files, expected_directories)
+    declarations = {
+        (suite, backend): validate_declaration(
+            files[f"{TERMINATION_DIRECTORY}/{suite}-{backend}.json"],
+            suite,
+            backend,
+            scale,
+            f"{TERMINATION_DIRECTORY}/{suite}-{backend}.json",
+        )
+        for suite, backend in sorted(declared)
+    }
     if requires_host_preflight(manifest):
         try:
             host_evidence.validate_record(files[host_evidence.FILENAME])
@@ -1939,14 +2157,14 @@ def inspect_bundle(
     )
     images = parse_images(files["images.tsv"], manifest)
     matrices, components, policy_valid = validate_reports(
-        output_directory, manifest, revision, scale, images
+        output_directory, manifest, revision, scale, images, declared, declarations
     )
     validate_external_service_logs(files, manifest, images, matrices)
     watchdog = validate_watchdog_records(
-        files, manifest, scale, components, policy_valid, reused
+        files, manifest, scale, components, policy_valid, reused, declarations
     )
     if semantic:
-        run_semantic_validators(script_directory, output_directory, scale)
+        run_semantic_validators(script_directory, output_directory, scale, declared)
     receipt = build_receipt(
         files,
         artifacts,
@@ -1958,6 +2176,7 @@ def inspect_bundle(
         policy_valid,
         watchdog,
         reused_cells,
+        declared,
     )
     return receipt, files
 

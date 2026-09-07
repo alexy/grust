@@ -482,9 +482,19 @@ host/budget outcome for one cell, not a component report and not a backend
 finding: it asserts nothing that only the dead runner could have known. The
 launcher then runs every remaining cell instead of stopping at the first one,
 so one run shows every cell that fits the budget; no matrix is merged while a
-cell is declared, and nothing from such a run is publishable until the merged
-matrix, `validate-matrix-publication.py` and the site's matrix verifier
-represent a declared cell. An unacknowledged transport/query error follows the same
+cell is declared, and the merged matrix carries the declaration
+in the component report's place.
+
+A matrix with a declared cell is never `complete`: a cell that did not run is
+not a result, and no outcome of its enters `valid`. It is `accounted` instead,
+true when every canonical backend has either a component report or a
+declaration, and `declared_terminations` lists the declarations with their
+evidence. `merge-reports.sh --declaration`, `validate-evidence.sh
+--declaration` and `validate-matrix-publication.py` all take that shape: the
+publication receipt's status becomes `accounted` and names each declared cell,
+the declaration replaces its component in the bundle inventory, and the cell's
+watchdog record must be the very record the declaration was made from. A run
+with a declared cell still exits non-zero. An unacknowledged transport/query error follows the same
 rule: process-owned work is gone, PostgreSQL sessions are probed, and other
 remote services fail closed. READY itself is bounded by
 `worker_ready_timeout_ms`, so a stalled load/connect is a prompt

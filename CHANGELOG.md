@@ -330,6 +330,9 @@ reconstructed from Git history, release commits, and the shipped docs.
   completion record, and declare a cell whose container exceeded its memory
   limit from that evidence instead of stopping the matrix at a missing
   component report.
+  Carry such a declaration through the merged matrix, the evidence validator
+  and the publication receipt: the matrix is accounted for rather than
+  complete, and the receipt names every cell that did not run.
   Export frozen, checksummed native evidence bundles for independent site admission,
   without treating the transport manifest as a publication receipt.
 
