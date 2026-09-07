@@ -7,13 +7,24 @@ selected disposable server. This runner does not issue publication receipts.
 import argparse
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import subprocess
 import sys
 import time
 
-SERVER_IMAGE = 'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d'
+# One tag, one multi-platform index (sha256:dbc377fb9cd8fe8dabc19d3041b197d5ca0ef8bae514cea175b8df265e5b7a76),
+# pinned per platform by the image digest that index names for it. The runner
+# accepts the platform image of the host it runs on; the evidence records the
+# image ID that actually served, so a reader sees which platform it was.
+SERVER_IMAGE_TAG = 'neo4j:2026.07.1-community'
+SERVER_IMAGE_DIGESTS = {
+    'aarch64': 'sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d',
+    'x86_64': 'sha256:a9d46c947a02de4fbaecc9adcca17d197661e32d31df8a944b4294259816a7a9',
+}
+SERVER_IMAGES = {f'{SERVER_IMAGE_TAG}@{digest}' for digest in SERVER_IMAGE_DIGESTS.values()}
+SERVER_IMAGE = f"{SERVER_IMAGE_TAG}@{SERVER_IMAGE_DIGESTS.get(platform.machine(), SERVER_IMAGE_DIGESTS['aarch64'])}"
 MEMORY = 6 * 1024**3
 NANO_CPUS = 8_000_000_000
 
@@ -127,7 +138,7 @@ def main():
     server, image = inspect(args.server), inspect(args.image, image=True)
     if not server['State']['Running'] or server['State']['OOMKilled']:
         parser.error('server is not healthy/running')
-    if server['Config']['Image'] != SERVER_IMAGE or 'NEO4J_AUTH=none' not in server['Config']['Env']:
+    if server['Config']['Image'] not in SERVER_IMAGES or 'NEO4J_AUTH=none' not in server['Config']['Env']:
         parser.error('server must be the pinned disposable unauthenticated image on a private network')
     host = server['HostConfig']
     if host['PortBindings'] or host['Memory'] != MEMORY or host['MemorySwap'] != MEMORY or host['NanoCpus'] != NANO_CPUS:
@@ -174,7 +185,7 @@ def main():
         if sampled:
             command += [str(args.warmups), str(args.runs)]
     save('invocation.json', dict(diagnostic_only=True, command=command, source_revision=args.source_revision,
-                                 client_image_id=image['Id'], client_labels=labels, server_image=SERVER_IMAGE))
+                                 client_image_id=image['Id'], client_labels=labels, server_image=server['Config']['Image']))
     save('server-before.json', snapshot(server))
     save('network-before.json', {key: network_record[key] for key in ('Name', 'Id', 'Internal')})
     # No client exists yet and no dataset has been touched. A startup failure

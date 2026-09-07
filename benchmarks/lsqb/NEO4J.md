@@ -70,8 +70,12 @@ server before import; readiness time is not a query performance sample.
 
 - Neo4j Community 2026.07.1, the current server release identified in
   [Neo4j's release notes](https://neo4j.com/release-notes/) on 2026-09-05 UTC.
-- Linux ARM64 platform image:
-  `neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d`.
+- One multi-platform index, `neo4j:2026.07.1-community@sha256:dbc377fb9cd8fe8dabc19d3041b197d5ca0ef8bae514cea175b8df265e5b7a76`,
+  pinned per platform by the image it names: Linux ARM64
+  `@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d`
+  (the laptop's published runs), Linux AMD64
+  `@sha256:a9d46c947a02de4fbaecc9adcca17d197661e32d31df8a944b4294259816a7a9`
+  (the x86 hosts). A run's evidence records the platform image that served it.
 - Rust driver: `neo4rs = 0.9.0-rc.10`, pinned exactly. This is a prerelease
   from [Neo4j Labs](https://github.com/neo4j-labs/neo4rs); runtime/protocol
   compatibility must be demonstrated, not inferred from the version number.

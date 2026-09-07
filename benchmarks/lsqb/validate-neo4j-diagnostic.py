@@ -40,7 +40,13 @@ CLIENT_PROFILES = {
 SAMPLED_SOURCES = {'4c385e26135547f1771577f20a90234f830488b6', '242b6b842836e64fb76e667f8ad5609e7cb2c115',
                    '4995115ad95e7e12215e86bcc13e60a78ddcea00'}
 ROTATING_SOURCES = {'4995115ad95e7e12215e86bcc13e60a78ddcea00'}
-SERVER_IMAGE = 'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d'
+# The pinned tag's platform images (one multi-platform index, sha256:dbc377fb9cd8fe8dabc19d3041b197d5ca0ef8bae514cea175b8df265e5b7a76):
+# a run's server must be one of them, and its retained image ID must match the
+# one its invocation names.
+SERVER_IMAGES = {
+    'neo4j:2026.07.1-community@sha256:31697c776d8c255152be39430d4b306a414c1409c91dccd093ac5e6baf2cae9d',  # linux/arm64
+    'neo4j:2026.07.1-community@sha256:a9d46c947a02de4fbaecc9adcca17d197661e32d31df8a944b4294259816a7a9',  # linux/amd64
+}
 
 
 def require(condition, message):
@@ -100,7 +106,7 @@ def validate_runtime(directory):
     client_image = CLIENT_PROFILES[revision]
     require(invocation.get('diagnostic_only') is True, 'runtime lane is not diagnostic')
     require(invocation.get('client_image_id') == client_image and
-            invocation.get('server_image') == SERVER_IMAGE, 'runtime source/image identity differs')
+            invocation.get('server_image') in SERVER_IMAGES, 'runtime source/image identity differs')
     labels = invocation.get('client_labels', {})
     require(labels.get('org.opencontainers.image.revision') == revision and
             labels.get('io.adversarial.grust.benchmark-feature') == 'neo4j-native', 'client source labels differ')
@@ -144,7 +150,7 @@ def validate_runtime(directory):
                     watchdog.get('service') == before['labels'].get('com.docker.compose.service'),
                     'watchdog/client ownership differs')
         else:
-            require(before['image_id'] == SERVER_IMAGE.rsplit('@', 1)[1], 'server runtime image differs')
+            require(before['image_id'] == invocation['server_image'].rsplit('@', 1)[1], 'server runtime image differs')
             require(before['state'].get('Running') is True and after['state'].get('Running') is True and
                     before['state'].get('StartedAt') == after['state'].get('StartedAt'), 'server restarted or stopped')
     return True
