@@ -77,8 +77,10 @@ else:
 '''
 
 
-def container(identity: str, name: str, project: str) -> dict[str, object]:
-    return {
+def container(
+    identity: str, name: str, project: str, state: dict[str, object] | None = None
+) -> dict[str, object]:
+    record: dict[str, object] = {
         "Id": identity,
         "Name": f"/{name}",
         "Config": {
@@ -88,6 +90,9 @@ def container(identity: str, name: str, project: str) -> dict[str, object]:
             }
         },
     }
+    if state is not None:
+        record["State"] = state
+    return record
 
 
 class CellWatchdogTests(unittest.TestCase):
@@ -556,6 +561,43 @@ class CellWatchdogTests(unittest.TestCase):
         self.assertFalse(any(action[:2] == ["container", "kill"] for action in actions))
         self.assertIn(["container", "rm", "--force", TARGET_ID], actions)
         self.assertNotIn(["container", "rm", "--force", UNRELATED_ID], actions)
+
+    def test_clean_exit_records_no_container_termination(self) -> None:
+        self.state.write_text(
+            json.dumps(
+                {TARGET_ID: container(TARGET_ID, TARGET_NAME, PROJECT,
+                                      {"ExitCode": 0, "OOMKilled": False})}
+            ),
+            encoding="utf-8",
+        )
+        _, raw_record = self.invoke(1_000, [sys.executable, "-c", "raise SystemExit(0)"])
+        marker = json.loads(raw_record)
+        self.assertEqual(marker["child_exit_status"], 0)
+        self.assertNotIn("container_termination", marker)
+
+    def test_failed_cell_retains_the_container_exit_and_oom_flag(self) -> None:
+        self.state.write_text(
+            json.dumps(
+                {TARGET_ID: container(TARGET_ID, TARGET_NAME, PROJECT,
+                                      {"ExitCode": 137, "OOMKilled": True})}
+            ),
+            encoding="utf-8",
+        )
+        _, raw_record = self.invoke(1_000, [sys.executable, "-c", "raise SystemExit(137)"])
+        marker = json.loads(raw_record)
+        self.assertEqual(marker["child_exit_status"], 137)
+        self.assertEqual(marker["container_termination"],
+                         {"exit_code": 137, "oom_killed": True})
+
+    def test_unreadable_container_state_is_recorded_as_absent_not_guessed(self) -> None:
+        self.state.write_text(
+            json.dumps({TARGET_ID: container(TARGET_ID, TARGET_NAME, PROJECT)}),
+            encoding="utf-8",
+        )
+        _, raw_record = self.invoke(1_000, [sys.executable, "-c", "raise SystemExit(1)"])
+        marker = json.loads(raw_record)
+        self.assertEqual(marker["child_exit_status"], 1)
+        self.assertIsNone(marker["container_termination"])
 
     def test_completed_child_without_observed_identity_fails_closed(self) -> None:
         self.state.write_text("{}", encoding="utf-8")

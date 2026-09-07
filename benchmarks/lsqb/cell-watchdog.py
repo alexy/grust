@@ -272,6 +272,39 @@ def inspect_container(name_or_id: str, name: str, project: str, service: str) ->
     return None if record is None else record["Id"]
 
 
+def container_termination(
+    container_id: str, name: str, project: str, service: str
+) -> dict[str, Any] | None:
+    """The cell container's own exit, read before the watchdog removes it.
+
+    A cell command that exits non-zero says nothing about why: the runner
+    inside the container may have failed, or the kernel may have taken the
+    container away under its memory limit, in which case there is no runner
+    left to report anything. Only Docker knows which, and only until the
+    container is removed, so the state is read here and retained verbatim.
+    Returns ``None`` when the container is gone or cannot be read; the caller
+    records that absence rather than guessing.
+    """
+    try:
+        record = inspect_container_record(container_id, name, project, service)
+    except WatchdogError:
+        return None
+    if record is None:
+        return None
+    state = record.get("State")
+    if not isinstance(state, dict):
+        return None
+    exit_code = state.get("ExitCode")
+    oom_killed = state.get("OOMKilled")
+    if (
+        not isinstance(exit_code, int)
+        or isinstance(exit_code, bool)
+        or not isinstance(oom_killed, bool)
+    ):
+        return None
+    return {"exit_code": exit_code, "oom_killed": oom_killed}
+
+
 def stop_process_group(process: subprocess.Popen[bytes]) -> None:
     failures = []
     try:
@@ -425,8 +458,12 @@ def completion_record(
     container_id: str | None,
     elapsed_wall_ms: int,
     status: str,
+    container_termination: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    """The record the launcher reads. A cell that exited non-zero also carries
+    its container's own exit (or ``null`` when it could not be read); a cell
+    that exited cleanly keeps exactly the fields it always had."""
+    record = {
         "child_exit_status": child_exit_status,
         "container_id": container_id,
         "container_name": arguments.container,
@@ -437,6 +474,9 @@ def completion_record(
         "status": status,
         "timeout_ms": arguments.timeout_ms,
     }
+    if child_exit_status not in (None, 0):
+        record["container_termination"] = container_termination
+    return record
 
 
 def normalized_record(record: dict[str, Any]) -> bytes:
@@ -546,6 +586,17 @@ def run(
                     raise WatchdogError(
                         "cell command exited before its immutable container identity was observed"
                     )
+                # Read the container's own exit before cleanup removes it.
+                termination = (
+                    None
+                    if child_exit_status == 0
+                    else container_termination(
+                        identity.container_id,
+                        arguments.container,
+                        arguments.project,
+                        arguments.service,
+                    )
+                )
                 container_id, cleanup_error = cleanup_owned_cell(
                     arguments,
                     process,
@@ -573,6 +624,7 @@ def run(
                         started_ns, completion_observed_ns
                     ),
                     status="complete",
+                    container_termination=termination,
                 )
                 return child_exit_status, record, None
             if completion_observed_ns >= next_heartbeat_ns:
