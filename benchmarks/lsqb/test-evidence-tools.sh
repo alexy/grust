@@ -1357,4 +1357,95 @@ for dimension in \
     expect_failure "$dimension" "$validate_policy" "$mutation"
 done
 
-echo "evidence tool fixtures passed: baseline, adversarial, and policy"
+progress "validating declared memory-exceeded cells in the merged matrix"
+declaration_directory="$temporary_directory/declarations"
+mkdir -p -- "$declaration_directory"
+declaration="$declaration_directory/baseline-turso.json"
+cat >"$declaration" <<'DECLARATION'
+{
+  "backend": "turso",
+  "cell_timeout_ms": 17799000,
+  "component": "baseline-turso-sfexample.json",
+  "declared_by": "run-grust.sh",
+  "limitation": "The cell container was terminated by its memory limit before the runner wrote a component report; no query in this cell was observed.",
+  "memory_limit_bytes": 6442450944,
+  "publication_qualified": false,
+  "runner_image": "grust-lsqb-matrix-turso:0.13",
+  "runner_image_id": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "scale": "example",
+  "schema": "grust-lsqb-cell-memory-exceeded-v1",
+  "suite": "baseline",
+  "watchdog": {
+    "child_exit_status": 137,
+    "container_id": "275f080d4ca84c74a2c37754ecc1e6cdf76bdce452ca0b56af9afab8f8be0481",
+    "container_name": "grust-lsqb-matrix-1-2-baseline-turso-cell",
+    "container_termination": {"exit_code": 137, "oom_killed": true},
+    "elapsed_wall_ms": 266726,
+    "project": "grust-lsqb-matrix-1-2",
+    "schema": "grust-lsqb-cell-watchdog-completion-v1",
+    "service": "benchmark",
+    "status": "complete",
+    "timeout_ms": 17799000
+  }
+}
+DECLARATION
+
+declared_components=()
+while IFS= read -r backend; do
+    [[ "$backend" == turso ]] && continue
+    setup_outcome=pass
+    [[ "$backend" == cocoindex ]] && setup_outcome=not_applicable
+    component="$declaration_directory/$backend.json"
+    make_component baseline "$backend" "$setup_outcome" "$component"
+    declared_components+=("$component")
+done < <(jq -r '.backends[].id' "$manifest")
+
+declared_matrix="$declaration_directory/matrix.json"
+"$merge" --declaration "$declaration" "$declared_matrix" "${declared_components[@]}" >/dev/null
+# Eleven measured cells and one declared: accounted for, never complete, and
+# the declaration keeps its own evidence in the merged matrix.
+jq -e '
+    .complete == false
+    and .accounted == true
+    and (.backends | length) == 11
+    and ([.backends[].backend.name] | index("turso")) == null
+    and (.declared_terminations | length) == 1
+    and .declared_terminations[0].backend == "turso"
+    and .declared_terminations[0].reason_code == "backend.memory-exceeded"
+    and .declared_terminations[0].watchdog.container_termination.oom_killed == true
+' "$declared_matrix" >/dev/null || {
+    echo "test-evidence-tools.sh: declared cell is not represented in the merged matrix" >&2
+    exit 1
+}
+
+# A matrix with no declaration keeps exactly the shape it always had.
+partial_matrix="$declaration_directory/partial.json"
+"$merge" "$partial_matrix" "${declared_components[@]}" >/dev/null
+jq -e 'has("declared_terminations") == false and has("accounted") == false' \
+    "$partial_matrix" >/dev/null || {
+    echo "test-evidence-tools.sh: undeclared matrix gained declaration fields" >&2
+    exit 1
+}
+
+for dimension in unproven-oom measured-backend other-suite other-scale unknown-backend claims-publication; do
+    mutated="$declaration_directory/mutated-$dimension.json"
+    case "$dimension" in
+        unproven-oom)
+            jq '.watchdog.container_termination.oom_killed = false' "$declaration" >"$mutated" ;;
+        measured-backend)
+            jq '.backend = "memory"' "$declaration" >"$mutated" ;;
+        other-suite)
+            jq '.suite = "adversarial"' "$declaration" >"$mutated" ;;
+        other-scale)
+            jq '.scale = "0.1"' "$declaration" >"$mutated" ;;
+        unknown-backend)
+            jq '.backend = "not-a-backend"' "$declaration" >"$mutated" ;;
+        claims-publication)
+            jq '.publication_qualified = true' "$declaration" >"$mutated" ;;
+    esac
+    expect_failure "declaration $dimension" \
+        "$merge" --declaration "$mutated" "$declaration_directory/refused-$dimension.json" \
+        "${declared_components[@]}"
+done
+
+echo "evidence tool fixtures passed: baseline, adversarial, policy, and declared cells"

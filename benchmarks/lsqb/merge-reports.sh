@@ -3,14 +3,42 @@ set -euo pipefail
 
 usage() {
     cat >&2 <<'USAGE'
-Usage: merge-reports.sh OUTPUT.json REPORT.json [REPORT.json ...]
+Usage: merge-reports.sh [--declaration FILE ...] OUTPUT.json REPORT.json [REPORT.json ...]
 
 Merge schema-v3 one-backend LSQB reports. Reports must describe the same
 suite, environment, dataset, timing protocol, and per-query oracle identity.
 Partial matrices are valid artifacts but carry complete=false until all twelve
 canonical backends exist.
+
+--declaration names a grust-lsqb-cell-memory-exceeded-v1 record for a cell
+whose container was terminated by its memory limit before its runner could
+write a component report. Such a cell has no observations and never becomes
+one: the merged matrix lists it under declared_terminations, keeps
+complete=false, and gains accounted=true when every canonical backend has
+either a component report or a declaration.
 USAGE
 }
+
+declarations=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --declaration)
+            if [[ $# -lt 2 ]]; then
+                usage
+                exit 2
+            fi
+            declarations+=("$2")
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 if [[ $# -lt 2 ]]; then
     usage
@@ -964,6 +992,61 @@ for report in "${reports[@]}"; do
     backend_ids+=("$backend_id")
 done
 
+# Declarations. A declared cell has no observations and asserts nothing that
+# only its dead runner could have known, so it is validated on identity alone:
+# the schema, its own proof of a container memory termination, the suite and
+# scale of this matrix, a canonical backend, and no component report for that
+# backend in the same merge.
+scale_factor=$(jq -er '.dataset.scale_factor' "$first") || {
+    echo "merge-reports.sh: first report has no dataset scale factor: $first" >&2
+    exit 1
+}
+declaration_ids=()
+declaration_records='[]'
+for declaration in "${declarations[@]:-}"; do
+    [[ -n "$declaration" ]] || continue
+    if [[ -L "$declaration" || ! -f "$declaration" ]]; then
+        echo "merge-reports.sh: declaration is not a regular file: $declaration" >&2
+        exit 1
+    fi
+    if ! jq -e \
+        --arg track "$track" --arg scale "$scale_factor" \
+        --argjson backends "$canonical_backends" '
+            .schema == "grust-lsqb-cell-memory-exceeded-v1"
+            and .suite == $track
+            and .scale == $scale
+            and (.backend | type == "string" and (IN($backends[])))
+            and (.publication_qualified == false)
+            and (.memory_limit_bytes | type == "number")
+            and (.watchdog | type == "object")
+            and (.watchdog.status == "complete")
+            and (.watchdog.child_exit_status == 137)
+            and (.watchdog.container_termination | type == "object")
+            and (.watchdog.container_termination.oom_killed == true)
+            and (.watchdog.container_termination.exit_code == 137)
+        ' "$declaration" >/dev/null; then
+        echo "merge-reports.sh: not a declared memory-exceeded cell of this suite and scale: $declaration" >&2
+        exit 1
+    fi
+    declaration_id=$(jq -er '.backend' "$declaration")
+    for seen in "${backend_ids[@]:-}" "${declaration_ids[@]:-}"; do
+        if [[ -n "$seen" && "$seen" == "$declaration_id" ]]; then
+            echo "merge-reports.sh: backend $declaration_id is both measured and declared" >&2
+            exit 1
+        fi
+    done
+    declaration_ids+=("$declaration_id")
+    declaration_records=$(jq -c -s \
+        --argjson existing "$declaration_records" '
+            $existing + [.[0] | {backend, suite, scale,
+                                 reason_code: "backend.memory-exceeded",
+                                 memory_limit_bytes, cell_timeout_ms,
+                                 runner_image, runner_image_id,
+                                 watchdog, limitation}]
+            | sort_by(.backend)
+        ' "$declaration")
+done
+
 output_dir=$(dirname -- "$output")
 output_name=$(basename -- "$output")
 lsqb_ensure_regular_directory "$output_dir" "merged report parent" 1 || exit 1
@@ -986,7 +1069,8 @@ cleanup() {
 trap cleanup EXIT
 
 jq -S -s \
-    --argjson order "$canonical_backends" '
+    --argjson order "$canonical_backends" \
+    --argjson declared "$declaration_records" '
         def neutral:
             . == "unsupported" or . == "unavailable" or . == "not_applicable";
         . as $reports
@@ -1005,6 +1089,14 @@ jq -S -s \
         | .backends = $backends
         | .complete = ($ids == $order)
         | .valid = $valid
+        | if ($declared | length) == 0 then .
+          else
+            # A declared cell was never observed, so it can never make the
+            # matrix complete. It is accounted for: every canonical backend
+            # has either a component report or a declaration.
+            .declared_terminations = $declared
+            | .accounted = ((($ids + [$declared[].backend]) | sort) == ($order | sort))
+          end
     ' "${reports[@]}" >"$temporary_output"
 
 chmod 0644 "$temporary_output"
