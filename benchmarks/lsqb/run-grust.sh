@@ -938,9 +938,12 @@ for suite in "${matrix_suites[@]}"; do
         # or a declaration; the run still fails, because a cell that did not
         # run is not a result.
         if (( ${#merge_declarations[@]} > 0 )); then
-            jq -e '.complete == false and .accounted == true and .valid == true' \
+            # Structure only. A failing cell elsewhere in the matrix is a
+            # finding to record, exactly as it is without declarations; it must
+            # not abort the run before the other suite is merged.
+            jq -e '.complete == false and .accounted == true' \
                 "$matrix" >/dev/null || die \
-                "matrix with declared cell(s) is neither accounted for nor valid: $matrix"
+                "matrix with declared cell(s) is not accounted for: $matrix"
             matrix_failed=1
         elif ! jq -e '.complete == true and .valid == true' "$matrix" >/dev/null; then
             matrix_failed=1
