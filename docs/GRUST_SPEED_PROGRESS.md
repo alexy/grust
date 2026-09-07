@@ -125,12 +125,15 @@ These changes are still in the worktree unless a source commit is named above.
   `MATCH (c:Message {kind: 'Comment'})-[:REPLY_OF]->(m:Message) RETURN
   m.id AS root, count(c) AS replies ORDER BY replies DESC, root LIMIT 20`
   over a 200,000-edge SNB slice (151k comments, about 100k distinct roots)
-  took 1,230 s, while the same shape over 1.5k groups (posts per creator,
-  136k rows) took 66 ms and over 16k groups (tag popularity, 290k rows)
-  400 ms. Turso's row-source pushdown answered the same query in about a
-  second. The harness now gives the oracle the same 120 s budget as the
-  store and records the shape as not comparable; the executor's group
-  lookup is the thing to fix.
+  took 1,230 s, while the same shape over 16k groups (tag popularity, 290k
+  rows) took 400 ms. On a proportional 200k slice `MATCH (m:Message {kind:
+  'Post'})-[:HAS_CREATOR]->(p:Person) RETURN p.id AS person, count(m) AS
+  posts ORDER BY posts DESC, person LIMIT 50` took 107 s over about 39k
+  rows and 1.5k groups, and the reply fan-in 114 s, where every other row
+  query answers in 30–300 ms. Turso's row-source pushdown answered each in
+  about a second. The harness runs the oracle under the bounded read
+  policy's 120 s cooperative deadline and records the shape as not
+  comparable; the executor's grouped aggregation is the thing to fix.
 
 | Area | Verified locally | Still required |
 |---|---|---|
