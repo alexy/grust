@@ -9,6 +9,8 @@ async fn store() -> LanceDbGraphStore {
         uri,
         table_prefix: "test_graph".to_string(),
         batch_size: 2,
+        // Small enough that a sample graph still takes several bulk writes.
+        bulk_batch_size: 3,
     })
     .await
     .expect("connect");

@@ -333,6 +333,11 @@ reconstructed from Git history, release commits, and the shipped docs.
   Carry such a declaration through the merged matrix, the evidence validator
   and the publication receipt: the matrix is accounted for rather than
   complete, and the receipt names every cell that did not run.
+
+- LanceDB adapter: load a whole graph through a bulk path with its own
+  `bulk_batch_size` (50,000 rows by default), open each table once for the
+  load instead of once per batch, and compact every table the load touched.
+  The incremental `batch_size` is unchanged.
   Export frozen, checksummed native evidence bundles for independent site admission,
   without treating the transport manifest as a publication receipt.
 

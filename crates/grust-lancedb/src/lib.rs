@@ -8,13 +8,22 @@ use async_trait::async_trait;
 use futures::TryStreamExt;
 use grust_core::prelude::*;
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::table::{CompactionOptions, OptimizeAction};
 use lancedb::{Connection, Error as LanceError, Table};
 
 #[derive(Clone, Debug)]
 pub struct LanceDbConfig {
     pub uri: String,
     pub table_prefix: String,
+    /// Rows per write on the incremental path.
     pub batch_size: usize,
+    /// Rows per write when a whole graph is loaded at once. Every write is a
+    /// `merge_insert` that leaves new fragments behind, and their manifests and
+    /// metadata stay resident in the process, so a small batch size turns a
+    /// multi-million-edge load into tens of thousands of fragments the process
+    /// must then hold. The bulk path uses this instead of `batch_size` and
+    /// compacts each table it touched afterwards.
+    pub bulk_batch_size: usize,
 }
 
 impl Default for LanceDbConfig {
@@ -23,6 +32,7 @@ impl Default for LanceDbConfig {
             uri: "data/grust-lancedb".to_string(),
             table_prefix: "grust".to_string(),
             batch_size: 500,
+            bulk_batch_size: 50_000,
         }
     }
 }
@@ -71,6 +81,21 @@ impl LanceDbGraphStore {
 
     async fn open_edges(&self) -> Result<Table> {
         self.open_table(&self.edges_table_name()).await
+    }
+
+    /// Merge the small files a load leaves behind. Compaction is bounded work
+    /// on the table's own files; it changes no row and no answer.
+    async fn compact(table: &Table) -> Result<()> {
+        table
+            .optimize(OptimizeAction::Compact {
+                options: CompactionOptions::default(),
+                remap_options: None,
+            })
+            .await
+            .map(|_| ())
+            .map_err(|err| {
+                GrustError::Backend(format!("LanceDB compaction failed: {err}"))
+            })
     }
 
     async fn open_table(&self, name: &str) -> Result<Table> {
@@ -127,6 +152,17 @@ impl LanceDbGraphStore {
             return Ok(());
         }
         let table = self.open_nodes().await?;
+        Self::merge_nodes_into(&table, nodes).await
+    }
+
+    /// Write into a table the caller already opened. A bulk load opens each
+    /// table once instead of once per batch: every open reads the table's
+    /// manifest, and a load of tens of thousands of batches otherwise pays
+    /// that, and keeps what it read, tens of thousands of times.
+    async fn merge_nodes_into(table: &Table, nodes: &[Node]) -> Result<()> {
+        if nodes.is_empty() {
+            return Ok(());
+        }
         let data = node_batch_reader(nodes)?;
         let mut merge = table.merge_insert(&["id"]);
         merge
@@ -142,8 +178,15 @@ impl LanceDbGraphStore {
         if edges.is_empty() {
             return Ok(());
         }
-        let data = edge_batch_reader(edges)?;
         let table = self.open_edges().await?;
+        Self::merge_edges_into(&table, edges).await
+    }
+
+    async fn merge_edges_into(table: &Table, edges: &[Edge]) -> Result<()> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let data = edge_batch_reader(edges)?;
         let mut merge = table.merge_insert(&["key"]);
         merge
             .when_matched_update_all(None)
@@ -237,17 +280,50 @@ impl GraphStore for LanceDbGraphStore {
         for edge in &graph.edges {
             validate_edge_key_components(edge)?;
         }
-        let batch_size = self.config.batch_size.max(1);
+        // The bulk path: larger writes, each table opened once, and the small
+        // files the load leaves behind merged afterwards.
+        let batch_size = self.config.bulk_batch_size.max(1);
         let mut report = LoadReport::default();
-        for chunk in graph.nodes.chunks(batch_size) {
-            self.put_nodes_batch(chunk).await?;
-            self.put_typed_nodes_batch(chunk).await?;
-            report.nodes += chunk.len();
+        let mut touched: Vec<Table> = Vec::new();
+
+        if !graph.nodes.is_empty() {
+            let nodes_table = self.open_nodes().await?;
+            let typed = self.open_typed_node_tables().await?;
+            for chunk in graph.nodes.chunks(batch_size) {
+                Self::merge_nodes_into(&nodes_table, chunk).await?;
+                for (node_type, table) in &typed {
+                    let typed_nodes = chunk
+                        .iter()
+                        .filter(|node| node.label == node_type.label)
+                        .collect::<Vec<_>>();
+                    Self::merge_typed_nodes_into(table, node_type, &typed_nodes).await?;
+                }
+                report.nodes += chunk.len();
+            }
+            touched.push(nodes_table);
+            touched.extend(typed.into_iter().map(|(_, table)| table));
         }
-        for chunk in graph.edges.chunks(batch_size) {
-            self.put_edges_batch(chunk).await?;
-            self.put_typed_edges_batch(chunk).await?;
-            report.edges += chunk.len();
+
+        if !graph.edges.is_empty() {
+            let edges_table = self.open_edges().await?;
+            let typed = self.open_typed_edge_tables().await?;
+            for chunk in graph.edges.chunks(batch_size) {
+                Self::merge_edges_into(&edges_table, chunk).await?;
+                for (edge_type, table) in &typed {
+                    let typed_edges = chunk
+                        .iter()
+                        .filter(|edge| edge.label == edge_type.label)
+                        .collect::<Vec<_>>();
+                    Self::merge_typed_edges_into(table, edge_type, &typed_edges).await?;
+                }
+                report.edges += chunk.len();
+            }
+            touched.push(edges_table);
+            touched.extend(typed.into_iter().map(|(_, table)| table));
+        }
+
+        for table in &touched {
+            Self::compact(table).await?;
         }
         Ok(report)
     }
@@ -438,6 +514,89 @@ impl LanceDbGraphStore {
         validate_physical_identifier_claims("LanceDB", claims)
     }
 
+    /// Every typed node table this store's schema declares, opened once.
+    async fn open_typed_node_tables(&self) -> Result<Vec<(NodeType, Table)>> {
+        let schema = self
+            .schema
+            .read()
+            .expect("LanceDB schema lock poisoned")
+            .clone();
+        let Some(schema) = schema else {
+            return Ok(Vec::new());
+        };
+        let mut tables = Vec::with_capacity(schema.nodes.len());
+        for node_type in &schema.nodes {
+            let table = self
+                .open_table(&self.typed_node_table_name(node_type.label.as_str())?)
+                .await?;
+            tables.push((node_type.clone(), table));
+        }
+        Ok(tables)
+    }
+
+    async fn open_typed_edge_tables(&self) -> Result<Vec<(EdgeType, Table)>> {
+        let schema = self
+            .schema
+            .read()
+            .expect("LanceDB schema lock poisoned")
+            .clone();
+        let Some(schema) = schema else {
+            return Ok(Vec::new());
+        };
+        let mut tables = Vec::with_capacity(schema.edges.len());
+        for edge_type in &schema.edges {
+            let table = self
+                .open_table(&self.typed_edge_table_name(edge_type.label.as_str())?)
+                .await?;
+            tables.push((edge_type.clone(), table));
+        }
+        Ok(tables)
+    }
+
+    async fn merge_typed_nodes_into(
+        table: &Table,
+        node_type: &NodeType,
+        nodes: &[&Node],
+    ) -> Result<()> {
+        if nodes.is_empty() {
+            return Ok(());
+        }
+        let data = typed_node_batch_reader(node_type, nodes)?;
+        let mut merge = table.merge_insert(&["id"]);
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        merge.execute(data).await.map_err(|err| {
+            GrustError::Backend(format!(
+                "LanceDB typed node merge_insert failed for {}: {err}",
+                node_type.label.as_str()
+            ))
+        })?;
+        Ok(())
+    }
+
+    async fn merge_typed_edges_into(
+        table: &Table,
+        edge_type: &EdgeType,
+        edges: &[&Edge],
+    ) -> Result<()> {
+        if edges.is_empty() {
+            return Ok(());
+        }
+        let data = typed_edge_batch_reader(edge_type, edges)?;
+        let mut merge = table.merge_insert(&["key"]);
+        merge
+            .when_matched_update_all(None)
+            .when_not_matched_insert_all();
+        merge.execute(data).await.map_err(|err| {
+            GrustError::Backend(format!(
+                "LanceDB typed edge merge_insert failed for {}: {err}",
+                edge_type.label.as_str()
+            ))
+        })?;
+        Ok(())
+    }
+
     async fn put_typed_nodes_batch(&self, nodes: &[Node]) -> Result<()> {
         let schema = self
             .schema
@@ -459,17 +618,7 @@ impl LanceDbGraphStore {
             let table = self
                 .open_table(&self.typed_node_table_name(node_type.label.as_str())?)
                 .await?;
-            let data = typed_node_batch_reader(node_type, &typed_nodes)?;
-            let mut merge = table.merge_insert(&["id"]);
-            merge
-                .when_matched_update_all(None)
-                .when_not_matched_insert_all();
-            merge.execute(data).await.map_err(|err| {
-                GrustError::Backend(format!(
-                    "LanceDB typed node merge_insert failed for {}: {err}",
-                    node_type.label.as_str()
-                ))
-            })?;
+            Self::merge_typed_nodes_into(&table, node_type, &typed_nodes).await?;
         }
         Ok(())
     }
@@ -495,17 +644,7 @@ impl LanceDbGraphStore {
             let table = self
                 .open_table(&self.typed_edge_table_name(edge_type.label.as_str())?)
                 .await?;
-            let data = typed_edge_batch_reader(edge_type, &typed_edges)?;
-            let mut merge = table.merge_insert(&["key"]);
-            merge
-                .when_matched_update_all(None)
-                .when_not_matched_insert_all();
-            merge.execute(data).await.map_err(|err| {
-                GrustError::Backend(format!(
-                    "LanceDB typed edge merge_insert failed for {}: {err}",
-                    edge_type.label.as_str()
-                ))
-            })?;
+            Self::merge_typed_edges_into(&table, edge_type, &typed_edges).await?;
         }
         Ok(())
     }
