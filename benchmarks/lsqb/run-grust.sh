@@ -23,6 +23,10 @@ query_recovery_timeout_ms=${QUERY_RECOVERY_TIMEOUT_MS:-10000}
 cell_timeout_ms=${CELL_TIMEOUT_MS:-}
 smoke=${SMOKE:-0}
 discovery=${DISCOVERY:-0}
+# A diagnostic that runs only the named cells, to measure what a plan needs
+# rather than to compare backends. It forces discovery mode, so no publication
+# receipt is written and the source revision carries the discovery marker.
+diagnostic_backends=${DIAGNOSTIC_BACKENDS:-}
 resume_from=${RESUME_FROM:-}
 resume_receipt_sha256=
 resume_manifest=
@@ -147,6 +151,9 @@ export GRUST_SOURCE_REVISION
 GRUST_SOURCE_REVISION=$source_revision
 if [[ "$source_is_dirty" == 1 ]]; then
     GRUST_SOURCE_REVISION="${GRUST_SOURCE_REVISION}-dirty"
+fi
+if [[ -n "${DIAGNOSTIC_BACKENDS:-}" ]]; then
+    discovery=1
 fi
 if [[ "$discovery" == 1 ]]; then
     # This independently rejected marker prevents a discovery result produced
@@ -419,6 +426,24 @@ if [[ "$smoke" == 1 ]]; then
     matrix_suites=(baseline)
     runs=1
     warmups=0
+fi
+
+if [[ -n "$diagnostic_backends" ]]; then
+    # Only the named cells run. This is never a matrix and never a comparison:
+    # DISCOVERY is already forced above, so no receipt is issued and the
+    # revision is marked, and the merged report says complete=false.
+    selected=()
+    IFS=, read -ra selected <<<"$diagnostic_backends"
+    (( ${#selected[@]} > 0 )) || die "DIAGNOSTIC_BACKENDS is empty"
+    for candidate in "${selected[@]}"; do
+        found=0
+        for backend in "${canonical_backends[@]}"; do
+            [[ "$candidate" == "$backend" ]] && found=1
+        done
+        (( found == 1 )) || die "DIAGNOSTIC_BACKENDS names an unknown backend: $candidate"
+    done
+    canonical_backends=("${selected[@]}")
+    echo "run-grust.sh: diagnostic run of ${canonical_backends[*]} only; not a matrix and not publishable" >&2
 fi
 
 project="grust-lsqb-matrix-$$-${RANDOM}${RANDOM}"
@@ -892,7 +917,12 @@ for suite in "${matrix_suites[@]}"; do
         jq -e '.schema_version == 3 and .complete == false and .valid == true and (.backends | length == 1)' \
             "$matrix" >/dev/null || die "smoke matrix validation failed: $matrix"
     elif [[ "$discovery" == 1 ]]; then
-        jq -e '.schema_version == 3 and .complete == true and (.backends | length == 12)' \
+        expected_cells=${#canonical_backends[@]}
+        if [[ -n "$diagnostic_backends" ]]; then
+            expected_cells=$(( expected_cells - ${#merge_declarations[@]} / 2 ))
+        fi
+        jq -e --argjson cells "$expected_cells" \
+            '.schema_version == 3 and (.backends | length == $cells)' \
             "$matrix" >/dev/null || die "discovery matrix validation failed: $matrix"
         if ! jq -e '.valid == true' "$matrix" >/dev/null; then
             matrix_failed=1

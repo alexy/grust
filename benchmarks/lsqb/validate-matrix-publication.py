@@ -92,7 +92,7 @@ REUSED_CELL_FIELDS = frozenset(
 # could write a component report. The launcher declares it from the watchdog's
 # retained container state; nothing about the backend's behaviour is claimed.
 TERMINATION_SCHEMA = "grust-lsqb-cell-memory-exceeded-v1"
-MEMORY_EXCEEDED_REASON = "backend.memory-exceeded"
+MEMORY_EXCEEDED_REASON = "cell.memory-exceeded"
 CONTAINER_OOM_EXIT_STATUS = 137
 TERMINATION_FIELDS = frozenset(
     {

@@ -1411,7 +1411,7 @@ jq -e '
     and ([.backends[].backend.name] | index("turso")) == null
     and (.declared_terminations | length) == 1
     and .declared_terminations[0].backend == "turso"
-    and .declared_terminations[0].reason_code == "backend.memory-exceeded"
+    and .declared_terminations[0].reason_code == "cell.memory-exceeded"
     and .declared_terminations[0].watchdog.container_termination.oom_killed == true
 ' "$declared_matrix" >/dev/null || {
     echo "test-evidence-tools.sh: declared cell is not represented in the merged matrix" >&2

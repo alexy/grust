@@ -26,8 +26,11 @@ WATCHDOG_SCHEMA = "grust-lsqb-cell-watchdog-completion-v1"
 OOM_EXIT_STATUS = 137
 UNPROVEN_EXIT = 3
 LIMITATION = (
-    "The cell container was terminated by its memory limit before the runner "
-    "wrote a component report; no query in this cell was observed."
+    "The cell container -- the harness runner, not the backend's own service, "
+    "which runs under its own separate limit when it has one -- was terminated "
+    "by its memory limit before it wrote a component report; no query in this "
+    "cell was observed. This is the harness's envelope for this plan at this "
+    "scale, not a memory demand measured of the backend."
 )
 
 

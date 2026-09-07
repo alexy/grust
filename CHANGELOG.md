@@ -333,6 +333,11 @@ reconstructed from Git history, release commits, and the shipped docs.
   Carry such a declaration through the merged matrix, the evidence validator
   and the publication receipt: the matrix is accounted for rather than
   complete, and the receipt names every cell that did not run.
+  Name that outcome `cell.memory-exceeded`: the container the kernel takes away
+  holds the harness runner, and a configured service runs under its own
+  separate limit, so the declaration is about the harness's envelope for a plan
+  and not about the backend's memory demand. `measure-cell-budget.sh` measures
+  what such a cell needs to finish.
 
 - LanceDB adapter: load a whole graph through a bulk path with its own
   `bulk_batch_size` (50,000 rows by default), open each table once for the

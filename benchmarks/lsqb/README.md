@@ -485,6 +485,21 @@ so one run shows every cell that fits the budget; no matrix is merged while a
 cell is declared, and the merged matrix carries the declaration
 in the component report's place.
 
+The reason code is `cell.memory-exceeded`, and it names the cell, not the
+backend, because that is what the evidence supports: the container that the
+kernel takes away holds the harness's runner, and a backend with a configured
+service runs that service in its own container under its own separate limit.
+A declared PostgreSQL cell says the harness's plan did not fit the cell budget
+at that scale; it says nothing about PostgreSQL's own memory demand, which was
+never the thing that was measured.
+
+`measure-cell-budget.sh BACKEND[,BACKEND...] SCALE [GiB ...]` answers the
+question a declaration raises: what would this cell need to finish? It runs one
+diagnostic cell per backend per budget, smallest first, and stops at the first
+budget where the cell completes. Every run is a DISCOVERY run, so none of it is
+publishable and none of it is a comparison between backends; the output is a
+per-backend envelope for one plan at one scale.
+
 A matrix with a declared cell is never `complete`: a cell that did not run is
 not a result, and no outcome of its enters `valid`. It is `accounted` instead,
 true when every canonical backend has either a component report or a

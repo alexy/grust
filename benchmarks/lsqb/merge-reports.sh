@@ -1039,7 +1039,7 @@ for declaration in "${declarations[@]:-}"; do
     declaration_records=$(jq -c -s \
         --argjson existing "$declaration_records" '
             $existing + [.[0] | {backend, suite, scale,
-                                 reason_code: "backend.memory-exceeded",
+                                 reason_code: "cell.memory-exceeded",
                                  memory_limit_bytes, cell_timeout_ms,
                                  runner_image, runner_image_id,
                                  watchdog, limitation}]
