@@ -751,6 +751,7 @@ for backend in "${canonical_backends[@]}"; do
         fi
         benchmark_command+=(benchmark)
         cell_status=0
+        cell_declared=0
         python3 "${root}/cell-watchdog.py" \
             --timeout-ms "$cell_timeout_ms" \
             --heartbeat-ms 30000 \
@@ -818,12 +819,17 @@ for backend in "${canonical_backends[@]}"; do
                 declared_terminations+=("${suite}/${backend}")
                 echo "run-grust.sh: ${suite}/${backend} cell container exceeded its ${BENCHMARK_MEMORY_LIMIT_BYTES}-byte memory limit; declared in ${termination_record}" >&2
                 matrix_failed=1
-                continue
+                # Not `continue`: a declared cell still ran a container, so its
+                # service log, its service teardown and its images.tsv row are
+                # part of the evidence exactly as any other cell's are. Only
+                # the checks that read a component report are skipped.
+                cell_declared=1
             elif (( declaration_status != 3 )); then
                 die "cannot declare the memory-exceeded cell $backend/$suite"
             fi
             die "backend produced no regular non-symlink component report: $backend/$suite"
         fi
+        if (( cell_declared == 0 )); then
         jq -e --arg backend "$backend" \
             '.schema_version == 3 and .backends[0].backend.name == $backend' \
             "$component" >/dev/null || die "invalid component report: $component"
@@ -847,7 +853,8 @@ for backend in "${canonical_backends[@]}"; do
             matrix_failed=1
         fi
 
-        if [[ "$external_enabled" == 1 ]]; then
+        fi
+        if [[ "$external_enabled" == 1 && cell_declared -eq 0 ]]; then
             external_attestation=$(grust_external_attest_container \
                 "$backend" "$external_container" "$service_image" \
                 "$configured_service_image_id" \
