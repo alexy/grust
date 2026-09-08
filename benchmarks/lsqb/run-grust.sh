@@ -916,6 +916,11 @@ for suite in "${matrix_suites[@]}"; do
             reports+=("$component")
         fi
     done
+    # Every cell of this suite was declared, so there is nothing measured to
+    # merge. That is not a matrix, and the merge helper would only report its
+    # own usage.
+    (( ${#reports[@]} > 0 )) || die \
+        "every ${suite} cell was declared memory-exceeded; no matrix can be merged from zero component reports"
     matrix="${BENCHMARK_OUTPUT_ROOT}/matrix-${suite}-sf${scale}.json"
     lsqb_reject_existing_output "$matrix" "merged matrix report" || die \
         "matrix output already exists"
