@@ -109,6 +109,7 @@ async fn both_put_graph_paths_preflight_later_chunks_before_transport() {
 
     let http = HelixHttpGraphStore::connect(HelixHttpConfig {
         query_url: "http://user:password@127.0.0.1:1/v1/query?token=secret".to_string(),
+        bulk_batch_size: 1,
         batch_size: 1,
         labels: Vec::new(),
     })
@@ -144,6 +145,7 @@ async fn both_put_graph_paths_preflight_decoder_metadata_before_transport() {
 
     let http = HelixHttpGraphStore::connect(HelixHttpConfig {
         query_url: "http://user:password@127.0.0.1:1/v1/query?token=secret".to_string(),
+        bulk_batch_size: 1,
         batch_size: 1,
         labels: Vec::new(),
     })
