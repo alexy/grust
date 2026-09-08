@@ -827,7 +827,13 @@ for backend in "${canonical_backends[@]}"; do
             elif (( declaration_status != 3 )); then
                 die "cannot declare the memory-exceeded cell $backend/$suite"
             fi
-            die "backend produced no regular non-symlink component report: $backend/$suite"
+            # Only a cell with no component report *and* no declaration is
+            # fatal. Replacing the branch's `continue` with a flag left this
+            # unconditional, so a declared cell killed the run it was meant to
+            # let continue.
+            if (( cell_declared == 0 )); then
+                die "backend produced no regular non-symlink component report: $backend/$suite"
+            fi
         fi
         if (( cell_declared == 0 )); then
         jq -e --arg backend "$backend" \
