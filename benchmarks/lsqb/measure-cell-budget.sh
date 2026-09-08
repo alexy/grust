@@ -29,7 +29,12 @@ for backend in "${selected[@]}"; do
     smallest=
     for gib in "${budgets[@]}"; do
         out="benchmarks/lsqb/out/budget-${backend}-sf${scale}-${gib}gib"
+        attempt=0
+        while true; do
         rm -rf -- "$out" "$out.log"
+        # The launcher requires a quiet host, and the previous attempt's own
+        # teardown can still be running. Settle before sampling.
+        sleep 30
         started=$(date +%s)
         BENCHMARK_MEMORY_LIMIT_BYTES=$(( gib * 1024 * 1024 * 1024 )) \
         HOST_PREFLIGHT_TOTAL_CPU_LIMIT=400 DIAGNOSTIC_BACKENDS="$backend" \
@@ -41,13 +46,28 @@ for backend in "${selected[@]}"; do
         if [[ -s "$out/components/baseline-${backend}-sf${scale}.json" ]]; then
             printf '%s\t%s\tfinished\t%s\t%s\n' "$backend" "$gib" "$elapsed" "$(stamp)"
             smallest=$gib
-            break
+            break 2
         elif [[ -s "$out/terminations/baseline-${backend}.json" ]]; then
             printf '%s\t%s\tcell.memory-exceeded\t%s\t%s\n' "$backend" "$gib" "$elapsed" "$(stamp)"
+        elif grep -q "host CPU preflight failed" "$out.log" 2>/dev/null; then
+            # A busy host is a reason to wait, not a measurement. Retry the
+            # same budget rather than abandoning the backend.
+            attempt=$(( attempt + 1 ))
+            if (( attempt <= 5 )); then
+                printf '%s\t%s\tpreflight-busy\t%s\tretry %s in 3 min\n' \
+                    "$backend" "$gib" "$elapsed" "$attempt"
+                sleep 180
+                continue
+            fi
+            printf '%s\t%s\tpreflight-busy\t%s\tgave up after %s attempts\n' \
+                "$backend" "$gib" "$elapsed" "$attempt"
+            break 2
         else
             printf '%s\t%s\tno-cell\t%s\tsee %s\n' "$backend" "$gib" "$elapsed" "$out.log"
-            break
+            break 2
         fi
+        break
+        done
     done
     if [[ -n "$smallest" ]]; then
         printf '## %s finishes at %s GiB (of the budgets offered)\n' "$backend" "$smallest"
