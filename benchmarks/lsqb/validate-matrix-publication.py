@@ -534,6 +534,7 @@ def validate_declaration(
 def expected_layout(
     manifest: dict[str, Any], scale: str, include_receipt: bool,
     declared: set[tuple[str, str]] | None = None,
+    output_directory: Path | None = None,
 ) -> tuple[set[str], list[str], set[str]]:
     datasets = manifest.get("datasets")
     require(isinstance(datasets, dict) and scale in datasets, f"unsupported scale: {scale}")
@@ -585,7 +586,10 @@ def expected_layout(
     if include_receipt:
         files.add(RECEIPT_NAME)
     directories = {"components", "logs", "watchdogs"}
-    if declared:
+    if declared or (output_directory is not None and (output_directory / TERMINATION_DIRECTORY).is_dir()):
+        # The launcher provides the directory for every run and populates it
+        # only when a cell is declared; an empty one is a run in which every
+        # cell wrote its component report.
         directories.add(TERMINATION_DIRECTORY)
     return files, sorted(artifacts), directories
 
@@ -2147,7 +2151,7 @@ def inspect_bundle(
     backend_ids = [entry["id"] for entry in manifest_backends(manifest)]
     declared = discover_declarations(output_directory, backend_ids)
     expected_files, artifacts, expected_directories = expected_layout(
-        manifest, scale, include_receipt, declared
+        manifest, scale, include_receipt, declared, output_directory
     )
     files = scan_output(output_directory, expected_files, expected_directories)
     declarations = {
