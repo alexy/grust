@@ -1708,8 +1708,26 @@ def validate_watchdog_records(
         declaration = None
         if cell != "policy":
             declaration = (declarations or {}).get(tuple(cell.split("-", 1)))
+        # The watchdog retains the container's own exit for every cell that
+        # exited non-zero, not only for a declared one: a cell can fail for
+        # reasons that have nothing to do with memory, and the field says so
+        # (`oom_killed: false`). A cell that exited cleanly never carries it.
+        failed = record.get("child_exit_status") != 0
         if declaration is None:
-            require(set(record) == WATCHDOG_FIELDS, f"{label} has unexpected fields")
+            require(
+                set(record) == (WATCHDOG_FIELDS | {"container_termination"} if failed
+                                and "container_termination" in record else WATCHDOG_FIELDS),
+                f"{label} has unexpected fields",
+            )
+            termination = record.get("container_termination")
+            require(
+                termination is None
+                or (isinstance(termination, dict)
+                    and set(termination) == CONTAINER_TERMINATION_FIELDS
+                    and isinstance(termination.get("oom_killed"), bool)
+                    and nonnegative_integer(termination.get("exit_code"))),
+                f"{label} has an invalid container termination",
+            )
         else:
             # A declared cell's container was taken by its memory limit; the
             # record carries the container's own exit and must be the very

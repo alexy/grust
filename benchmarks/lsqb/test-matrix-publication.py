@@ -750,6 +750,35 @@ class MatrixPublicationTests(unittest.TestCase):
                 self.assertIn(f"logs/{suite}-{backend}-service.log", inventory)
                 self.assertIn(f"watchdogs/{suite}-{backend}.json", inventory)
 
+    def test_a_failed_undeclared_cell_may_carry_the_containers_own_exit(self) -> None:
+        # FalkorDB's declared quiescence termination exits non-zero for a
+        # reason that is not memory, so its watchdog record carries
+        # `oom_killed: false`. That must be admitted, not refused as an
+        # unexpected field, and it must not become a memory declaration.
+        fresh = self.root / "undeclared-failure-root"
+        fresh.mkdir()
+        clone = make_bundle(fresh, self.revision)
+        path = clone / "watchdogs" / "adversarial-falkor.json"
+        record = read_jsonl(path)[0]
+        record["child_exit_status"] = 1
+        record["container_termination"] = {"exit_code": 1, "oom_killed": False}
+        write_jsonl(path, [record])
+        component_path = clone / "components/adversarial-falkor-sfexample.json"
+        component = json.loads(component_path.read_text())
+        component["valid"] = False
+        write_json(component_path, component)
+        matrix_path = clone / "matrix-adversarial-sfexample.json"
+        matrix = json.loads(matrix_path.read_text())
+        matrix["valid"] = False
+        write_json(matrix_path, matrix)
+        arguments = argparse.Namespace(revision=self.revision, repository=self.repository,
+                                       output_dir=clone, scale="example")
+        with mock.patch.object(PUBLICATION, "run_semantic_validators"):
+            PUBLICATION.issue_receipt(arguments, SCRIPT_DIRECTORY)
+        receipt = json.loads((clone / PUBLICATION.RECEIPT_NAME).read_text())
+        self.assertNotIn("declared_terminations", receipt)
+        self.assertEqual(receipt["status"], "complete")
+
     def test_isolated_semantic_validator_copies_merge_dependencies(self) -> None:
         def assert_tools_are_complete(command: list[str], _label: str) -> None:
             tools_directory = Path(command[0]).parent
