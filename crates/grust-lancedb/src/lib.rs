@@ -42,6 +42,11 @@ pub struct LanceDbGraphStore {
     config: LanceDbConfig,
     db: Connection,
     schema: Arc<RwLock<Option<GraphSchema>>>,
+    /// Open handles for the nodes and edges tables. Every read used to reopen
+    /// its table, and an open reads the table's manifest; the handles are
+    /// kept here and dropped whenever the set of tables can change, so a
+    /// query pays the open once per store rather than once per call.
+    handles: Arc<RwLock<Option<(Table, Table)>>>,
 }
 
 impl LanceDbGraphStore {
@@ -60,6 +65,7 @@ impl LanceDbGraphStore {
             config,
             db,
             schema: Arc::new(RwLock::new(None)),
+            handles: Arc::new(RwLock::new(None)),
         })
     }
 
@@ -76,11 +82,31 @@ impl LanceDbGraphStore {
     }
 
     async fn open_nodes(&self) -> Result<Table> {
-        self.open_table(&self.nodes_table_name()).await
+        Ok(self.cached_handles().await?.0)
     }
 
     async fn open_edges(&self) -> Result<Table> {
-        self.open_table(&self.edges_table_name()).await
+        Ok(self.cached_handles().await?.1)
+    }
+
+    /// The nodes and edges handles, opened once and reused. `Table` is a
+    /// cheap clone over a shared inner; a stale handle is impossible here
+    /// because every path that creates, drops or replaces a table calls
+    /// `forget_handles` first.
+    async fn cached_handles(&self) -> Result<(Table, Table)> {
+        if let Some(pair) = self.handles.read().expect("LanceDB handle lock poisoned").clone() {
+            return Ok(pair);
+        }
+        let pair = (
+            self.open_table(&self.nodes_table_name()).await?,
+            self.open_table(&self.edges_table_name()).await?,
+        );
+        *self.handles.write().expect("LanceDB handle lock poisoned") = Some(pair.clone());
+        Ok(pair)
+    }
+
+    fn forget_handles(&self) {
+        *self.handles.write().expect("LanceDB handle lock poisoned") = None;
     }
 
     /// Merge the small files a load leaves behind. Compaction is bounded work
@@ -406,6 +432,7 @@ impl GraphStore for LanceDbGraphStore {
 #[async_trait]
 impl GraphAdminStore for LanceDbGraphStore {
     async fn bootstrap(&self) -> Result<()> {
+        self.forget_handles();
         let nodes = self.nodes_table_name();
         if !self.table_exists(&nodes).await? {
             self.db
@@ -432,6 +459,7 @@ impl GraphAdminStore for LanceDbGraphStore {
     }
 
     async fn clear(&self) -> Result<()> {
+        self.forget_handles();
         self.drop_table_if_exists(&self.edges_table_name()).await?;
         self.drop_table_if_exists(&self.nodes_table_name()).await?;
         self.bootstrap().await

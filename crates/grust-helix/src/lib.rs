@@ -18,6 +18,9 @@ pub struct HelixHttpConfig {
     pub query_url: String,
     pub batch_size: usize,
     pub labels: Vec<String>,
+    /// Rows per request when a whole graph is loaded at once; the incremental
+    /// path keeps `batch_size`. One HTTP round trip per batch is the cost.
+    pub bulk_batch_size: usize,
 }
 
 impl Default for HelixHttpConfig {
@@ -25,6 +28,7 @@ impl Default for HelixHttpConfig {
         Self {
             query_url: "http://127.0.0.1:8080/v1/query".to_string(),
             batch_size: 100,
+            bulk_batch_size: 2_000,
             labels: Vec::new(),
         }
     }
@@ -131,11 +135,11 @@ impl GraphStore for HelixHttpGraphStore {
             helix_http_edge_properties(edge)?;
         }
         let mut report = LoadReport::default();
-        for chunk in graph.nodes.chunks(self.config.batch_size.max(1)) {
+        for chunk in graph.nodes.chunks(self.config.bulk_batch_size.max(1)) {
             self.post(&helix_add_nodes_request(chunk)?).await?;
             report.nodes += chunk.len();
         }
-        for chunk in graph.edges.chunks(self.config.batch_size.max(1)) {
+        for chunk in graph.edges.chunks(self.config.bulk_batch_size.max(1)) {
             self.post(&helix_add_edges_request(chunk)?).await?;
             report.edges += chunk.len();
         }
