@@ -1020,10 +1020,9 @@ for declaration in "${declarations[@]:-}"; do
             and (.memory_limit_bytes | type == "number")
             and (.watchdog | type == "object")
             and (.watchdog.status == "complete")
-            and (.watchdog.child_exit_status == 137)
+            and (.watchdog.child_exit_status | type == "number" and . != 0)
             and (.watchdog.container_termination | type == "object")
             and (.watchdog.container_termination.oom_killed == true)
-            and (.watchdog.container_termination.exit_code == 137)
         ' "$declaration" >/dev/null; then
         echo "merge-reports.sh: not a declared memory-exceeded cell of this suite and scale: $declaration" >&2
         exit 1

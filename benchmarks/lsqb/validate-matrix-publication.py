@@ -518,12 +518,14 @@ def validate_declaration(
     record = declaration["watchdog"]
     require(isinstance(record, dict), f"declaration has no watchdog record: {relative}")
     termination = record.get("container_termination")
+    child_exit = record.get("child_exit_status")
     require(
         isinstance(termination, dict)
         and set(termination) == CONTAINER_TERMINATION_FIELDS
         and termination["oom_killed"] is True
-        and termination["exit_code"] == CONTAINER_OOM_EXIT_STATUS
-        and record.get("child_exit_status") == CONTAINER_OOM_EXIT_STATUS,
+        and isinstance(child_exit, int)
+        and not isinstance(child_exit, bool)
+        and child_exit != 0,
         f"declaration does not prove a container memory termination: {relative}",
     )
     return declaration
@@ -1735,13 +1737,11 @@ def validate_watchdog_records(
             and 0 <= elapsed_wall_ms <= timeout_ms,
             f"{label} has an invalid elapsed wall time",
         )
-        allowed_exit_statuses = (
-            (CONTAINER_OOM_EXIT_STATUS,) if declaration is not None else (0, 1)
-        )
         require(
             isinstance(child_exit_status, int)
             and not isinstance(child_exit_status, bool)
-            and child_exit_status in allowed_exit_statuses,
+            and (child_exit_status != 0 if declaration is not None
+                 else child_exit_status in (0, 1)),
             f"{label} has an invalid child exit status",
         )
         project = record["project"]
@@ -1769,7 +1769,7 @@ def validate_watchdog_records(
                 timeout_ms == declaration["cell_timeout_ms"],
                 f"{label} timeout does not match the declaration",
             )
-            expected_child_exit_status = CONTAINER_OOM_EXIT_STATUS
+            expected_child_exit_status = child_exit_status
         elif cell != "policy":
             suite, backend = cell.split("-", 1)
             component = components[suite][backend]

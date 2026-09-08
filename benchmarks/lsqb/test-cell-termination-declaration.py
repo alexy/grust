@@ -59,6 +59,17 @@ class DeclarationTests(unittest.TestCase):
         self.assertIs(value['publication_qualified'], False)
         self.assertEqual(value['watchdog'], WATCHDOG)
 
+    def test_a_worker_oom_leaves_the_main_process_to_exit_nonzero(self):
+        # A cgroup OOM that takes a worker rather than the container's main
+        # process: Docker still reports OOMKilled, the exit status is 1, and
+        # the cell is as gone as it would be at 137.
+        record = copy.deepcopy(WATCHDOG)
+        record['child_exit_status'] = 1
+        record['container_termination'] = {'exit_code': 1, 'oom_killed': True}
+        status, output = self.run_declaration(record)
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(output.read_text())['watchdog']['child_exit_status'], 1)
+
     def test_a_cell_that_only_exited_137_is_not_declared(self):
         record = copy.deepcopy(WATCHDOG)
         record.pop('container_termination')
@@ -67,8 +78,7 @@ class DeclarationTests(unittest.TestCase):
     def test_mutations_that_do_not_prove_a_memory_termination_fail_closed(self):
         for name, mutate in [
             ('not oom killed', lambda r: r['container_termination'].update(oom_killed=False)),
-            ('container exit differs', lambda r: r['container_termination'].update(exit_code=1)),
-            ('child exit differs', lambda r: r.update(child_exit_status=1)),
+            ('clean child exit', lambda r: r.update(child_exit_status=0)),
             ('unread container state', lambda r: r.update(container_termination=None)),
             ('extra termination field', lambda r: r['container_termination'].update(signal='KILL')),
             ('incomplete watchdog', lambda r: r.update(status='error')),

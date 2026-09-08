@@ -35,18 +35,28 @@ LIMITATION = (
 
 
 def memory_termination_proof(record: object) -> dict[str, object] | None:
-    """The container's retained exit, when it proves a memory termination."""
+    """The container's retained exit, when it proves a memory termination.
+
+    Docker's `OOMKilled` is the proof, not the exit status. When the kernel
+    takes the container's main process the status is 137, but a cgroup OOM
+    that kills a worker leaves the main process to exit on its own -- exit 1,
+    with `OOMKilled` still true -- and that is the same outcome for the cell:
+    its runner is gone and no component report exists. The exit status is
+    recorded rather than required, and a clean exit is never a termination.
+    """
     if not isinstance(record, dict):
         return None
     termination = record.get("container_termination")
+    child_exit = record.get("child_exit_status")
     if (
         record.get("schema") != WATCHDOG_SCHEMA
         or record.get("status") != "complete"
-        or record.get("child_exit_status") != OOM_EXIT_STATUS
+        or not isinstance(child_exit, int)
+        or isinstance(child_exit, bool)
+        or child_exit == 0
         or not isinstance(termination, dict)
         or set(termination) != {"exit_code", "oom_killed"}
         or termination.get("oom_killed") is not True
-        or termination.get("exit_code") != OOM_EXIT_STATUS
     ):
         return None
     return record
